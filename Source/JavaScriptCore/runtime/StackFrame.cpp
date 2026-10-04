@@ -250,6 +250,8 @@ LineColumn StackFrame::computeLineAndColumn() const
         if (!jsFrame->codeBlock)
             return { };
         auto lineColumn = jsFrame->codeBlock->lineColumnForBytecodeIndex(jsFrame->bytecodeIndex);
+        if (auto position = jsFrame->codeBlock->callSitePositionForBytecodeIndex(jsFrame->bytecodeIndex, jsFrame->m_isAsyncFrame))
+            lineColumn = jsFrame->codeBlock->source().provider()->documentLineColumnForOffset(*position);
 
         ScriptExecutable* executable = jsFrame->codeBlock->ownerExecutable();
         if (std::optional<int> overrideLineNumber = executable->overrideLineNumber(jsFrame->codeBlock->vm()))

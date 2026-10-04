@@ -1,0 +1,504 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index e6e2a21a..1288eaaf 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,8 @@
+ 
+ ## Unreleased
+ 
++- Preserve built-in error constructor syntax and returning arrow frames, and use JSC syntax-selected call and property-read stack positions. Continues the source-position fixes from [oven-sh/bun#35179](https://github.com/oven-sh/bun/pull/35179), [oven-sh/bun#37396](https://github.com/oven-sh/bun/pull/37396), and [oven-sh/bun#41580](https://github.com/oven-sh/bun/pull/41580). Thanks @robobun!
++
+ - Align WebKit and VM source-position assertions with Node's constructor locations and select these regressions for native stack-formatting changes in both fork CI lanes.
+ 
+ - Preserve the native-context count in the fast `v8.getHeapStatistics()` adapter and avoid appending a second strict code-generation flag to inherited worker arguments.
+diff --git a/docs/runtime/nodejs-compat.mdx b/docs/runtime/nodejs-compat.mdx
+index 0274c5b4..106fbfc5 100644
+--- a/docs/runtime/nodejs-compat.mdx
++++ b/docs/runtime/nodejs-compat.mdx
+@@ -19,7 +19,7 @@ The OpenClaw fork reports missing runtime imports without downloading npm packag
+ 
+ `Error.prepareStackTrace` supports deletion, descriptor restoration, and accessor replacement. Nested stack formatting and throwing formatters leave later captures usable.
+ 
+-`CallSite.getLineNumber()` and `getColumnNumber()` return one-based positions, or `null` when a frame has no source position. Stack strings include column 1 and use the same constructor positions as CallSites, pointing to the `new` keyword, including across line breaks and in `node:vm` scripts. Some expression positions still differ from Node.js because JavaScriptCore and Bun's transpiler select different syntax locations.
++`CallSite.getLineNumber()` and `getColumnNumber()` return one-based positions, or `null` when a frame has no source position. Stack strings include column 1 and use the same constructor positions as CallSites, pointing to the `new` keyword, including across line breaks and in `node:vm` scripts. The matching OpenClaw engine supplies syntax-selected positions for calls, constructors, property reads, and async continuations. Built-in error constructors retain `new`, including in returning arrows. File-name and eval-origin formatting still follow Bun's existing conventions.
+ 
+ ### [`node:assert`](https://nodejs.org/api/assert.html)
+ 
+diff --git a/src/ast/known_global.rs b/src/ast/known_global.rs
+index 15c439d7..a69b7697 100644
+--- a/src/ast/known_global.rs
++++ b/src/ast/known_global.rs
+@@ -103,7 +103,7 @@ impl KnownGlobal {
+         let constructor = lookup(original_name)?;
+ 
+         match constructor {
+-            // Error constructors can be called without 'new' with identical behavior
++            // Removing `new` changes stack positions and makes returned errors eligible for tail calls.
+             KnownGlobal::Error
+             | KnownGlobal::TypeError
+             | KnownGlobal::SyntaxError
+@@ -111,10 +111,7 @@ impl KnownGlobal {
+             | KnownGlobal::ReferenceError
+             | KnownGlobal::EvalError
+             | KnownGlobal::URIError
+-            | KnownGlobal::AggregateError => {
+-                // Convert `new Error(...)` to `Error(...)` to save bytes
+-                Some(Self::call_from_new(e, loc))
+-            }
++            | KnownGlobal::AggregateError => None,
+ 
+             KnownGlobal::Object => {
+                 let n = e.args.len_u32();
+diff --git a/src/jsc/RuntimeTranspilerCache.rs b/src/jsc/RuntimeTranspilerCache.rs
+index 1142ca3b..c7e0fa20 100644
+--- a/src/jsc/RuntimeTranspilerCache.rs
++++ b/src/jsc/RuntimeTranspilerCache.rs
+@@ -66,7 +66,8 @@ bun_core::declare_scope!(cache, visible);
+ /// Version 34: Discard output containing a previous runtime plugin's resolved import paths.
+ /// Version 35: Preserve inferred names and inline type-only runtime evaluation edges.
+ /// Version 36: Runtime plugin imports retain their original specifiers and resolve when executed.
+-const EXPECTED_VERSION: u32 = 36;
++/// Version 37: Preserve builtin error constructors and their stack positions and frames.
++const EXPECTED_VERSION: u32 = 37;
+ 
+ /// Source files smaller than this are not written to / read from the on-disk
+ /// transpiler cache. Originally 50 KiB, which excluded almost every file in a
+diff --git a/src/jsc/bindings/ErrorStackFrame.cpp b/src/jsc/bindings/ErrorStackFrame.cpp
+index 14ec9fd8..9f8c3616 100644
+--- a/src/jsc/bindings/ErrorStackFrame.cpp
++++ b/src/jsc/bindings/ErrorStackFrame.cpp
+@@ -22,12 +22,13 @@ static bool isConstruct(JSC::CodeBlock* code, JSC::BytecodeIndex bc)
+     }
+ }
+ 
+-ZigStackFramePosition getAdjustedPositionForBytecode(JSC::CodeBlock* code, JSC::BytecodeIndex bc)
++ZigStackFramePosition getAdjustedPositionForBytecode(JSC::CodeBlock* code, JSC::BytecodeIndex bc, bool isAsync)
+ {
+     auto expr = code->expressionInfoForBytecodeIndex(bc);
+-    auto offset = expr.divot;
+-    // Constructors point to `new`; other calls retain JSC's syntax location.
+-    if (isConstruct(code, bc))
++    auto callSitePosition = code->callSitePositionForBytecodeIndex(bc, isAsync);
++    auto offset = callSitePosition.value_or(expr.divot);
++    // Older or implicit bytecode can lack a syntax-selected stack position.
++    if (!callSitePosition && isConstruct(code, bc))
+         offset -= std::min(offset, expr.startOffset);
+ 
+     auto lineColumn = code->source().provider()->documentLineColumnForOffset(offset);
+@@ -38,16 +39,18 @@ ZigStackFramePosition getAdjustedPositionForBytecode(JSC::CodeBlock* code, JSC::
+     };
+ }
+ 
+-ZigStackFramePosition getAdjustedLineColumnForBytecode(JSC::CodeBlock* code, JSC::BytecodeIndex bc)
++ZigStackFramePosition getAdjustedLineColumnForBytecode(JSC::CodeBlock* code, JSC::BytecodeIndex bc, bool isAsync)
+ {
+     if (isConstruct(code, bc)) {
+-        auto position = getAdjustedPositionForBytecode(code, bc);
++        auto position = getAdjustedPositionForBytecode(code, bc, isAsync);
+         position.byte_position = -1;
+         return position;
+     }
+ 
+-    // Keep JSC's cached lookup for frames that do not need an expression-range adjustment.
+-    auto lineColumn = code->lineColumnForBytecodeIndex(bc);
++    auto callSitePosition = code->callSitePositionForBytecodeIndex(bc, isAsync);
++    auto lineColumn = callSitePosition
++        ? code->source().provider()->documentLineColumnForOffset(*callSitePosition)
++        : code->lineColumnForBytecodeIndex(bc);
+     return {
+         .line_zero_based = OrdinalNumber::fromOneBasedInt(lineColumn.line).zeroBasedInt(),
+         .column_zero_based = OrdinalNumber::fromOneBasedInt(lineColumn.column).zeroBasedInt(),
+diff --git a/src/jsc/bindings/ErrorStackFrame.h b/src/jsc/bindings/ErrorStackFrame.h
+index a1c31678..367670b5 100644
+--- a/src/jsc/bindings/ErrorStackFrame.h
++++ b/src/jsc/bindings/ErrorStackFrame.h
+@@ -4,8 +4,8 @@
+ 
+ namespace Bun {
+ 
+-ZigStackFramePosition getAdjustedPositionForBytecode(JSC::CodeBlock* code, JSC::BytecodeIndex bc);
++ZigStackFramePosition getAdjustedPositionForBytecode(JSC::CodeBlock* code, JSC::BytecodeIndex bc, bool isAsync = false);
+ 
+-ZigStackFramePosition getAdjustedLineColumnForBytecode(JSC::CodeBlock* code, JSC::BytecodeIndex bc);
++ZigStackFramePosition getAdjustedLineColumnForBytecode(JSC::CodeBlock* code, JSC::BytecodeIndex bc, bool isAsync = false);
+ 
+ } // namespace Bun
+diff --git a/src/jsc/bindings/ErrorStackTrace.cpp b/src/jsc/bindings/ErrorStackTrace.cpp
+index 3550bb52..866d011c 100644
+--- a/src/jsc/bindings/ErrorStackTrace.cpp
++++ b/src/jsc/bindings/ErrorStackTrace.cpp
+@@ -341,7 +341,7 @@ bool JSCStackFrame::calculateSourcePositions()
+         return false;
+     }
+ 
+-    auto location = Bun::getAdjustedLineColumnForBytecode(m_codeBlock, m_bytecodeIndex);
++    auto location = Bun::getAdjustedLineColumnForBytecode(m_codeBlock, m_bytecodeIndex, isAsync());
+     m_sourcePositions.line = location.line();
+     m_sourcePositions.column = location.column();
+ 
+diff --git a/src/jsc/bindings/FormatStackTraceForJS.cpp b/src/jsc/bindings/FormatStackTraceForJS.cpp
+index 60aca2e7..403bf131 100644
+--- a/src/jsc/bindings/FormatStackTraceForJS.cpp
++++ b/src/jsc/bindings/FormatStackTraceForJS.cpp
+@@ -321,7 +321,7 @@ WTF::String formatStackTrace(
+         if (!frame.hasLineAndColumnInfo()) continue;
+ 
+         if (frame.codeBlock() && frame.hasBytecodeIndex()) {
+-            auto position = Bun::getAdjustedLineColumnForBytecode(frame.codeBlock(), frame.bytecodeIndex());
++            auto position = Bun::getAdjustedLineColumnForBytecode(frame.codeBlock(), frame.bytecodeIndex(), frame.isAsyncFrame());
+             originalLineColumns[i] = { static_cast<unsigned>(position.line().oneBasedInt()), static_cast<unsigned>(position.column().oneBasedInt()) };
+             if (auto overrideLine = frame.codeBlock()->ownerExecutable()->overrideLineNumber(vm))
+                 originalLineColumns[i].line = *overrideLine;
+diff --git a/src/jsc/bindings/ZigException.cpp b/src/jsc/bindings/ZigException.cpp
+index cfd1059c..b7442cb3 100644
+--- a/src/jsc/bindings/ZigException.cpp
++++ b/src/jsc/bindings/ZigException.cpp
+@@ -143,7 +143,7 @@ static void populateStackFramePosition(const JSC::StackFrame& stackFrame, BunStr
+         return;
+     }
+ 
+-    auto location = Bun::getAdjustedPositionForBytecode(code, stackFrame.bytecodeIndex());
++    auto location = Bun::getAdjustedPositionForBytecode(code, stackFrame.bytecodeIndex(), stackFrame.isAsyncFrame());
+     memcpy(&position, &location, sizeof(ZigStackFramePosition));
+     if (flags == PopulateStackTraceFlags::OnlyPosition)
+         return;
+diff --git a/test/bundler/bundler_minify.test.ts b/test/bundler/bundler_minify.test.ts
+index 052aa492..0d629bee 100644
+--- a/test/bundler/bundler_minify.test.ts
++++ b/test/bundler/bundler_minify.test.ts
+@@ -1229,7 +1229,7 @@ describe("bundler", () => {
+     },
+   });
+ 
+-  itBundled("minify/ErrorConstructorOptimization", {
++  itBundled("minify/ErrorConstructorPositions", {
+     files: {
+       "/entry.js": /* js */ `
+         // Test all Error constructors
+@@ -1272,25 +1272,25 @@ describe("bundler", () => {
+       `,
+     },
+     capture: [
+-      "Error()",
+-      'Error("message")',
+-      'Error("message", { cause: "cause" })',
+-      "TypeError()",
+-      'TypeError("type error")',
+-      "SyntaxError()",
+-      'SyntaxError("syntax error")',
+-      "RangeError()",
+-      'RangeError("range error")',
+-      "ReferenceError()",
+-      'ReferenceError("ref error")',
+-      "EvalError()",
+-      'EvalError("eval error")',
+-      "URIError()",
+-      'URIError("uri error")',
+-      'AggregateError([], "aggregate error")',
+-      'AggregateError([Error("e1")], "multiple")',
+-      "Error(msg)",
+-      "TypeError(getErrorMessage())",
++      "new Error",
++      'new Error("message")',
++      'new Error("message", { cause: "cause" })',
++      "new TypeError",
++      'new TypeError("type error")',
++      "new SyntaxError",
++      'new SyntaxError("syntax error")',
++      "new RangeError",
++      'new RangeError("range error")',
++      "new ReferenceError",
++      'new ReferenceError("ref error")',
++      "new EvalError",
++      'new EvalError("eval error")',
++      "new URIError",
++      'new URIError("uri error")',
++      'new AggregateError([], "aggregate error")',
++      'new AggregateError([new Error("e1")], "multiple")',
++      "new Error(msg)",
++      "new TypeError(getErrorMessage())",
+       "/* @__PURE__ */ new Date",
+       "/* @__PURE__ */ new Map",
+       "/* @__PURE__ */ new Set",
+diff --git a/test/js/node/v8/callsite-async-position-fixture.mjs b/test/js/node/v8/callsite-async-position-fixture.mjs
+new file mode 100644
+index 00000000..84cfc6db
+--- /dev/null
++++ b/test/js/node/v8/callsite-async-position-fixture.mjs
+@@ -0,0 +1,12 @@
++async function leaf() {
++await Promise.resolve();
++return new Error().stack;
++}
++async function parent() {
++return await leaf();
++}
++const trace = await parent();
++const parentFrame = trace.split("\n").find(line => /\bparent(?:\s|@|\()/.test(line));
++const position = /:(\d+):(\d+)\)?$/.exec(parentFrame);
++if (!position || +position[1] !== 6 || +position[2] !== 8)
++    throw new Error(JSON.stringify({ expected: [6, 8], trace }));
+diff --git a/test/js/node/v8/callsite-syntax-positions-fixture.js b/test/js/node/v8/callsite-syntax-positions-fixture.js
+new file mode 100644
+index 00000000..32eed3ee
+--- /dev/null
++++ b/test/js/node/v8/callsite-syntax-positions-fixture.js
+@@ -0,0 +1,116 @@
++// Keep call positions independent of exception-expression divots.
++let trace;
++function capture() { const stack = new Error().stack; trace = stack; return stack; }
++function Capture() { this.stack = new Error().stack; trace = this.stack; }
++function factory() { return capture; }
++const object = { capture };
++const name = "capture";
++const cases = [
++    [function () {
++capture()
++    }, 10, 1, "capture()"],
++    [function () {
++capture /* comment */ ()
++    }, 13, 1, "capture /* comment */ ()"],
++    [function () {
++capture
++()
++    }, 16, 1, "capture\n()"],
++    [function () {
++factory()()
++    }, 20, 10, "factory()()"],
++    [function () {
++factory()
++()
++    }, 24, 1, "factory()\n()"],
++    [function () {
++factory() /* comment */ ()
++    }, 27, 25, "factory() /* comment */ ()"],
++    [function () {
++object.capture()
++    }, 30, 8, "object.capture()"],
++    [function () {
++object
++.capture()
++    }, 34, 2, "object\n.capture()"],
++    [function () {
++object . capture()
++    }, 37, 10, "object . capture()"],
++    [function () {
++object. /* comment */ capture()
++    }, 40, 23, "object. /* comment */ capture()"],
++    [function () {
++object.\u0063apture()
++    }, 43, 8, "object.\\u0063apture()"],
++    [function () {
++object[name]()
++    }, 46, 13, "object[name]()"],
++    [function () {
++object["capture"]()
++    }, 49, 18, "object[\"capture\"]()"],
++    [function () {
++object[
++name
++]
++()
++    }, 55, 1, "object[\nname\n]\n()"],
++    [function () {
++(capture)()
++    }, 58, 10, "(capture)()"],
++    [function () {
++((capture))()
++    }, 61, 12, "((capture))()"],
++    [function () {
++(object.capture)()
++    }, 64, 17, "(object.capture)()"],
++    [function () {
++(object[name])()
++    }, 67, 15, "(object[name])()"],
++    [function () {
++(0, capture)()
++    }, 70, 13, "(0, capture)()"],
++    [function () {
++capture?.()
++    }, 73, 10, "capture?.()"],
++    [function () {
++object?.capture()
++    }, 76, 9, "object?.capture()"],
++    [function () {
++object.capture?.()
++    }, 79, 17, "object.capture?.()"],
++    [function () {
++object?.capture?.()
++    }, 82, 18, "object?.capture?.()"],
++    [function () {
++this()
++    }, 85, 5, "this()"],
++    [function () {
++capture`text`
++    }, 88, 8, "capture`text`"],
++    [function () {
++Reflect.apply(capture, null, [])
++    }, 91, 9, "Reflect.apply(capture, null, [])"],
++    [function () {
++new Capture().stack
++    }, 94, 1, "new Capture().stack"],
++    [function () {
++new
++Capture().stack
++    }, 97, 1, "new\nCapture().stack"],
++    [function () {
++new (Capture)().stack
++    }, 101, 1, "new (Capture)().stack"],
++    [function () {
++Reflect.construct(Capture, []).stack
++    }, 104, 9, "Reflect.construct(Capture, []).stack"],
++];
++for (let iteration = 0; iteration < Math.min(typeof testLoopCount === "number" ? testLoopCount : 20, 100); ++iteration) {
++    for (const [fn, line, column, body] of cases) {
++        trace = "";
++        fn.call(capture);
++        const frames = trace.split("\n").filter(line => /:(\d+):(\d+)\)?$/.test(line));
++        const position = /:(\d+):(\d+)\)?$/.exec(frames[1]);
++        if (!position || +position[1] !== line || +position[2] !== column)
++            throw new Error(JSON.stringify({ body, expected: [line, column], trace }));
++    }
++}
+diff --git a/test/js/node/v8/capture-stack-trace.test.js b/test/js/node/v8/capture-stack-trace.test.js
+index ac527424..247d355e 100644
+--- a/test/js/node/v8/capture-stack-trace.test.js
++++ b/test/js/node/v8/capture-stack-trace.test.js
+@@ -2456,3 +2456,27 @@ test.skipIf(totalmem() < 10 * 1024 ** 3)(
+   },
+   30_000,
+ );
++
++test("syntax positions preserve built-in constructors, arrow frames, and property reads", async () => {
++  await using proc = Bun.spawn({
++    cmd: [bunExe(), import.meta.dir + "/stack-position-regressions-fixture.js"],
++    env: bunEnv,
++    stdout: "pipe",
++    stderr: "pipe",
++  });
++  const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
++  expect({ stdout, stderr, exitCode }).toEqual({ stdout: "", stderr: "", exitCode: 0 });
++});
++
++for (const fixture of ["callsite-syntax-positions-fixture.js", "callsite-async-position-fixture.mjs"]) {
++  test(`syntax-selected stack positions: ${fixture}`, async () => {
++    await using proc = Bun.spawn({
++      cmd: [bunExe(), import.meta.dir + "/" + fixture],
++      env: bunEnv,
++      stdout: "pipe",
++      stderr: "pipe",
++    });
++    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
++    expect({ stdout, stderr, exitCode }).toEqual({ stdout: "", stderr: "", exitCode: 0 });
++  });
++}
+diff --git a/test/js/node/v8/stack-position-regressions-fixture.js b/test/js/node/v8/stack-position-regressions-fixture.js
+new file mode 100644
+index 00000000..fe71747d
+--- /dev/null
++++ b/test/js/node/v8/stack-position-regressions-fixture.js
+@@ -0,0 +1,104 @@
++"use strict";
++const name = "x";
++const cases = [
++    ['Error', function () {
++const error = new Error("test"); return error;
++    }, 5, 15],
++    ['TypeError', function () {
++const error = new TypeError("test"); return error;
++    }, 8, 15],
++    ['SyntaxError', function () {
++const error = new SyntaxError("test"); return error;
++    }, 11, 15],
++    ['RangeError', function () {
++const error = new RangeError("test"); return error;
++    }, 14, 15],
++    ['ReferenceError', function () {
++const error = new ReferenceError("test"); return error;
++    }, 17, 15],
++    ['EvalError', function () {
++const error = new EvalError("test"); return error;
++    }, 20, 15],
++    ['URIError', function () {
++const error = new URIError("test"); return error;
++    }, 23, 15],
++    ['AggregateError', function () {
++const error = new AggregateError([], "test"); return error;
++    }, 26, 15],
++    ['arrow-new', () => new Error("arrow"), 28, 25],
++    ['arrow-type', () => new TypeError("arrow"), 29, 26],
++    ['arrow-alias', () => new globalThis.Error("arrow"), 30, 27],
++    ['multiline-new', function () {
++const error = new
++    Error("multiline"); return error;
++    }, 32, 15],
++    ['constructor-comment', function () {
++const error = new /* comment */ Error("comment"); return error;
++    }, 36, 15],
++    ['null-dot', function () {
++try { null.x; } catch (error) { return error; }
++    }, 39, 12],
++    ['undefined-dot', function () {
++try { undefined.x; } catch (error) { return error; }
++    }, 42, 17],
++    ['null-length', function () {
++try { null.length; } catch (error) { return error; }
++    }, 45, 12],
++    ['null-comment', function () {
++try { null . /* comment */ x; } catch (error) { return error; }
++    }, 48, 28],
++    ['null-escape', function () {
++try { null.\u0078; } catch (error) { return error; }
++    }, 51, 12],
++    ['null-multiline', function () {
++try { null
++    .x; } catch (error) { return error; }
++    }, 55, 6],
++    ['null-bracket', function () {
++try { null["x"]; } catch (error) { return error; }
++    }, 58, 11],
++    ['null-number', function () {
++try { null[1]; } catch (error) { return error; }
++    }, 61, 11],
++    ['null-computed', function () {
++try { null[name]; } catch (error) { return error; }
++    }, 64, 11],
++    ['null-call', function () {
++try { null.x(); } catch (error) { return error; }
++    }, 67, 12],
++    ['null-parenthesized-call', function () {
++try { (null.x)(); } catch (error) { return error; }
++    }, 70, 13],
++    ['null-bracket-call', function () {
++try { null["x"](); } catch (error) { return error; }
++    }, 73, 11],
++    ['null-call-method', function () {
++try { null.call(); } catch (error) { return error; }
++    }, 76, 12],
++    ['null-apply-method', function () {
++try { null.apply(null, []); } catch (error) { return error; }
++    }, 79, 12],
++    ['null-has-own', function () {
++try { null.hasOwnProperty(name); } catch (error) { return error; }
++    }, 82, 12],
++ ];
++function checkPosition(error, line, column, shape, structured) {
++    const frames = structured ? error.stack : error.stack.split("\n").filter(frame => /:(\d+):(\d+)\)?$/.test(frame));
++    const actual = structured ? [frames[0].getLineNumber(), frames[0].getColumnNumber()] : /:(\d+):(\d+)\)?$/.exec(frames[0])?.slice(1).map(Number);
++    if (!actual || actual[0] !== line || actual[1] !== column)
++        throw new Error(JSON.stringify({ shape, structured, expected: [line, column], actual, trace: structured ? frames.map(String) : error.stack }));
++}
++for (let iteration = 0; iteration < Math.min(typeof testLoopCount === "number" ? testLoopCount : 20, 100); ++iteration) {
++    for (const [shape, create, line, column] of cases) {
++        checkPosition(create(), line, column, shape, false);
++        if (typeof process !== "undefined") {
++            const previous = Error.prepareStackTrace;
++            try {
++                Error.prepareStackTrace = (_, frames) => frames;
++                checkPosition(create(), line, column, shape, true);
++            } finally {
++                Error.prepareStackTrace = previous;
++            }
++        }
++    }
++}
