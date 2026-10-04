@@ -27,6 +27,11 @@ def assemble(inputs,out,source):
     gate=json.loads(gate_path.read_text())
     if gate.get('passed') is not True or gate['source']!=source or gate['bun_commit']!=config['bun_commit']:
         raise ValueError('missing or mismatched qualification gate')
+    sync=gate.get('upstream_sync',{})
+    engine=gate.get('engine',{})
+    if (sync.get('passed') is not True or any(sync.get(k)!=config['upstream_sync'][k] for k in ('base_commit','prepared_tree'))
+        or engine.get('passed') is not True or engine.get('source')!=source):
+        raise ValueError('missing or mismatched upstream-sync/engine qualification')
     artifacts={}; lanes=[]
     for lane in config['lanes']:
         label=lane['label']; name=label+'.tar.gz'; directory=inputs/label
@@ -75,7 +80,7 @@ def authorize(source,run_id):
     if not api('-H','Cache-Control: max-age=0',f'repos/{REPO}/immutable-releases')['enabled']:
         raise ValueError('immutable releases must be enabled')
     run=api('-H','Cache-Control: max-age=0',f'repos/{REPO}/actions/runs/{run_id}')
-    if (run['head_sha']!=source or run['head_branch'] not in ('openclaw/main','openclaw/batch-1')
+    if (run['head_sha']!=source or run['head_branch'] not in ('openclaw/main','openclaw/batch-1','openclaw/release-5718a6ec')
         or run['event']!='workflow_dispatch' or run['path'].split('@',1)[0]!='.github/workflows/openclaw-artifacts.yml'):
         raise ValueError('publication run does not match the reviewed source/workflow')
     jobs=api('-H','Cache-Control: max-age=0',f'repos/{REPO}/actions/runs/{run_id}/jobs?filter=latest&per_page=100')
@@ -106,11 +111,11 @@ def validate_authorization(source):
 def publish(directory,source):
     manifest=verify(directory,source);tag=manifest['tag']
     validate_authorization(source)
-    if os.environ.get('GITHUB_REF') not in ('refs/heads/openclaw/main','refs/heads/openclaw/batch-1') or os.environ.get('GITHUB_SHA')!=source:
+    if os.environ.get('GITHUB_REF') not in ('refs/heads/openclaw/main','refs/heads/openclaw/batch-1','refs/heads/openclaw/release-5718a6ec') or os.environ.get('GITHUB_SHA')!=source:
         raise ValueError('publishing requires reviewed source on an explicitly permitted owned branch')
     # Tag creation fails atomically if the name exists. Neither existing drafts nor releases are resumed.
     api('-X','POST',f'repos/{REPO}/git/refs','-f','ref=refs/tags/'+tag,'-f','sha='+source)
-    body=f'OpenClaw-built WebKit at `{source}`. All selected lanes and Linux qualification passed.\n\nBatch 1: Segmenter surrogate boundaries; opt-in Proxy global prototypes; module-loader AsyncLocalStorage propagation; per-VM worker heap and stack budgets. Thanks @steipete and @robobun for the source changes and upstream work.\n\nSource and licenses: LICENSE-SOURCES.txt. Checksums: SHA256SUMS and manifest.json. Full build and test provenance: provenance.tar.gz.\n\nRollback by restoring the prior Bun manifest and WebKit pin together; prior releases remain available.\n'
+    body=f'OpenClaw-built WebKit at `{source}`. All nine lanes and Linux qualification passed.\n\n'+(ROOT/'.github/openclaw/release-notes.md').read_text()
     draft=api('-X','POST',f'repos/{REPO}/releases','-f','tag_name='+tag,'-f','name='+tag,'-f','body='+body,'-F','draft=true')
     release_id=draft['id']
     execute('gh','release','upload',tag,'-R',REPO,*[str(p) for p in sorted(directory.iterdir())])

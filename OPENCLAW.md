@@ -1,7 +1,7 @@
 # OpenClaw WebKit artifacts
 
 This fork owns the WebKit artifacts consumed by `openclaw/bun`. The engine base is
-`1600131e46b5af48bbda3559af8d8a3327230b6e`; each engine change is a separate
+`5718a6ec579b98362ea7276a426deedcc6281ef5`; each engine change is a separate
 commit. Upstream `.github/scripts/lanes.mjs`, Dockerfiles, ICU inputs and macOS
 cross tools remain unchanged. No workflow publishes toolchain images.
 
@@ -33,7 +33,7 @@ base, then review the whole batch. Changing the upstream recipe requires a
 separate qualification and an explicit base/recipe update.
 
 Dispatch **OpenClaw WebKit artifacts** from `openclaw/main` (or the protected
-`openclaw/batch-1` publication branch) with its full current
+`openclaw/batch-1` or `openclaw/release-5718a6ec` publication branch) with its full current
 commit SHA and `publish: false`. It builds the selected lanes on Linux x64 with
 Docker Buildx, at most two lanes at once. Each lane records the exact source,
 commit patches, recipe hashes, locally built toolchain image ID, BuildKit
@@ -51,7 +51,7 @@ this gate does not claim native runtime qualification on every architecture.
 ## Publish and verify
 
 Batch 1 is published from `openclaw/batch-1` so concurrently reviewed batch-2
-engine changes can land on `openclaw/main` without entering this release. Both
+engine changes can land on `openclaw/main` without entering this release. All publication
 branches require the same protected environment and full-SHA/green-job checks.
 
 After a green build/test dispatch, dispatch the same full SHA with `publish:
@@ -130,3 +130,40 @@ entrypoint.
 
 - Add real byte-based JSC heap allocation sampling with weighted allocating-stack profiles and independent major/minor collection inclusion.
 - Check allocation sampling across interpreter and JIT tiers before merging engine pull requests.
+
+## Rebased release qualification
+
+- Rebase the four batch-1 engine patches and the landed namespace and allocation-sampling patches onto oven-sh/WebKit `5718a6ec579b98362ea7276a426deedcc6281ef5` (upstream #768). Thanks @Jarred-Sumner for idle compiler-thread and Atomics.wait memory release.
+- Retain the published batch-1 release. Publish this separately qualified batch only through the protected `openclaw/release-5718a6ec` environment policy; updating the Bun main manifest is a separate integration task.
+
+The existing qualification baseline remains upstream `1600131e46b5af48bbda3559af8d8a3327230b6e` with its committed archive checksums. The source/provenance base advances to `5718a6ec579b98362ea7276a426deedcc6281ef5`; the Docker and lane recipes are unchanged. Unlanded engine work is not included in this rebase.
+
+
+The rebased release is frozen on `openclaw/release-5718a6ec`; only patches merged
+into engine main and explicitly included before the freeze enter this batch.
+Later main changes require a new source commit and qualification. The published
+release notes come from `.github/openclaw/release-notes.md`.
+
+The original W113 comparison retains its pinned Bun source and 44 selected files
+plus two dependency checks. Its candidate additionally takes the upstream
+mimalloc bump needed by `mi_on_thread_idle`. This is a matched engine/allocator
+comparison, not an engine-only performance measurement.
+
+A separate qualification build reproduces W150's prepared upstream-sync tree
+`d9ec052fccc81afbf43a5344e52bc980f439d587` exactly from Bun
+`d2d2a26ef973cdd97b37953f5dba58052acad74f` before applying recorded qualification
+adapters and replacing the local checksum manifest. The production manifest
+resolver stays intact, using its SHA-256 prefetch cache. No Bun branch is pushed.
+This build runs the union of the original 56-file sync selection and the current
+engine/nightly selection, requires every result to pass, and explicitly executes
+the unchanged Atomics purge, notification-race and idle Wasm RSS tests without
+skips. Runtime source/engine identities, adapter bytes and results are retained
+in provenance. Release assembly requires this gate in addition to W113.
+
+The shared test job also checks the namespace and Segmenter stress cases,
+promise/microtask stress and complete module manifest, allocation sampling in
+four execution tiers, seven worker heap counters, fourteen worker cases, the
+ALS hook/continuous-GC matrices, realm/retention probes, and Bun inspector tests.
+The upstream delta changes only waiting/compiler-thread allocator release and
+its bridge; module-loader, namespace, managed-heap and inspector patches remain
+patch-identical on the new base.

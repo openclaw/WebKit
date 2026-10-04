@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'openclaw/WebKit' && (github.ref == 'refs/heads/openclaw/main' || github.ref == 'refs/heads/openclaw/batch-1')
+    if: github.repository == 'openclaw/WebKit' && (github.ref == 'refs/heads/openclaw/main' || github.ref == 'refs/heads/openclaw/batch-1' || github.ref == 'refs/heads/openclaw/release-5718a6ec')
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 10
     outputs:
@@ -93,7 +93,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          sparse-checkout: .github
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.github/
+            /Tools/
+            /JSTests/stress/
+            /JSTests/modules/
+            /JSTests/*.yaml
+            /JSTests/BUN-TEST-DIFFERENCES.md
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '26.3.0'
@@ -109,7 +116,7 @@ jobs:
           curl -fsSL --retry 5 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
           echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cmake ninja-build nasm ccache golang-go clang-23 lld-23 llvm-23 unzip
+          sudo apt-get install -y --no-install-recommends cmake ninja-build nasm ccache golang-go clang-23 lld-23 llvm-23 unzip ruby ruby-highline libjson-pp-perl
           rustup toolchain install nightly-2026-09-15 --profile minimal --component rust-src
           echo 'RUSTUP_TOOLCHAIN=nightly-2026-09-15' >> "$GITHUB_ENV"
           echo '/usr/lib/llvm-23/bin' >> "$GITHUB_PATH"
@@ -120,7 +127,10 @@ jobs:
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/linux-artifact
           QUALIFICATION_DIR: ${{ runner.temp }}/qualification
-        run: bash .github/openclaw/qualify.sh
+        run: |
+          bash .github/openclaw/qualify-engine.sh
+          bash .github/openclaw/qualify.sh
+          bash .github/openclaw/qualify-sync.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
@@ -134,6 +144,9 @@ jobs:
             ${{ runner.temp }}/qualification/baseline/*.log
             ${{ runner.temp }}/qualification/candidate/*.json
             ${{ runner.temp }}/qualification/candidate/*.log
+            ${{ runner.temp }}/qualification/sync/*.json
+            ${{ runner.temp }}/qualification/sync/*.log
+            ${{ runner.temp }}/qualification/jsc-*/results
           if-no-files-found: error
           retention-days: 7
   assemble:
@@ -164,7 +177,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
   publish:
-    if: inputs.publish == true && (github.ref == 'refs/heads/openclaw/main' || github.ref == 'refs/heads/openclaw/batch-1')
+    if: inputs.publish == true && (github.ref == 'refs/heads/openclaw/main' || github.ref == 'refs/heads/openclaw/batch-1' || github.ref == 'refs/heads/openclaw/release-5718a6ec')
     needs: [build, test, assemble]
     environment: openclaw-artifacts
     permissions:

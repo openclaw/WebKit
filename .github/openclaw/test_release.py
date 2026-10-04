@@ -17,7 +17,7 @@ class ReleaseIntegrity(unittest.TestCase):
         self.root=Path(self.temp.name);self.inputs=self.root/'inputs';self.inputs.mkdir()
         self.out=self.root/'release'
         config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())
-        q=self.inputs/'qualification';q.mkdir();(q/'gate.json').write_text(json.dumps({'passed':True,'source':SOURCE,'bun_commit':config['bun_commit']}))
+        q=self.inputs/'qualification';q.mkdir();(q/'gate.json').write_text(json.dumps({'passed':True,'source':SOURCE,'bun_commit':config['bun_commit'],'upstream_sync':{'passed':True,**config['upstream_sync']},'engine':{'passed':True,'source':SOURCE}}))
         for lane in config['lanes']:
             label=lane['label'];d=self.inputs/label;d.mkdir();(d/'provenance').mkdir()
             f=d/(label+'.tar.gz');f.write_bytes(label.encode())
@@ -87,6 +87,24 @@ class ReleaseIntegrity(unittest.TestCase):
 
     def test_authorization_accepts_protected_batch_branch(self):
         run={'head_sha':SOURCE,'head_branch':'openclaw/batch-1','event':'workflow_dispatch','path':'.github/workflows/openclaw-artifacts.yml@openclaw/batch-1','run_attempt':1}
+        config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())
+        names=['preflight','test','assemble']+['build ('+l['label']+')' for l in config['lanes']]
+        jobs={'jobs':[{'name':n,'conclusion':'success','run_attempt':1} for n in names]}
+        pending=[{'environment':{'name':'openclaw-artifacts','id':99},'current_user_can_approve':True}]
+        with patch.object(release,'api',side_effect=[{'enabled':True},run,jobs,pending,{}]),patch.object(release,'execute') as execute:
+            release.authorize(SOURCE,42)
+            self.assertEqual(execute.call_count,1)
+    def test_missing_upstream_sync_gate_rejected(self):
+        p=self.inputs/'qualification/gate.json';m=json.loads(p.read_text());del m['upstream_sync'];p.write_text(json.dumps(m))
+        with self.assertRaisesRegex(ValueError,'upstream-sync'):self.assemble()
+    def test_wrong_sync_tree_rejected(self):
+        p=self.inputs/'qualification/gate.json';m=json.loads(p.read_text());m['upstream_sync']['prepared_tree']='b'*40;p.write_text(json.dumps(m))
+        with self.assertRaisesRegex(ValueError,'upstream-sync'):self.assemble()
+    def test_wrong_engine_gate_source_rejected(self):
+        p=self.inputs/'qualification/gate.json';m=json.loads(p.read_text());m['engine']['source']='b'*40;p.write_text(json.dumps(m))
+        with self.assertRaisesRegex(ValueError,'upstream-sync'):self.assemble()
+    def test_authorization_accepts_rebased_release_branch(self):
+        run={'head_sha':SOURCE,'head_branch':'openclaw/release-5718a6ec','event':'workflow_dispatch','path':'.github/workflows/openclaw-artifacts.yml','run_attempt':1}
         config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())
         names=['preflight','test','assemble']+['build ('+l['label']+')' for l in config['lanes']]
         jobs={'jobs':[{'name':n,'conclusion':'success','run_attempt':1} for n in names]}
