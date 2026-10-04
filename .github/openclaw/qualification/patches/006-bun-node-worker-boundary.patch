@@ -1,0 +1,149 @@
+From 458e039deb4a14d3dcad15d77fda535fbe4746c3 Mon Sep 17 00:00:00 2001
+From: Peter Steinberger <steipete@gmail.com>
+Date: Sat, 3 Oct 2026 09:03:40 -0700
+Subject: [PATCH] fix(worker): limit resource configuration to Node workers
+
+---
+ packages/bun-types/bun.d.ts           | 19 +---------
+ src/js/node/worker_threads.ts         |  1 +
+ src/jsc/bindings/webcore/JSWorker.cpp | 54 ++++++++++++++-------------
+ src/jsc/bindings/webcore/Worker.cpp   |  2 +-
+ 4 files changed, 31 insertions(+), 45 deletions(-)
+
+diff --git a/packages/bun-types/bun.d.ts b/packages/bun-types/bun.d.ts
+index 48beeef..1769d75 100644
+--- a/packages/bun-types/bun.d.ts
++++ b/packages/bun-types/bun.d.ts
+@@ -704,17 +704,7 @@ declare module "bun" {
+      * @default true
+      */
+     // trackUnmanagedFds?: boolean;
+-
+-    /**
+-     * Resource limits for the worker's JS engine, in megabytes, with the same
+-     * shape as Node.js. `maxOldGenerationSizeMb` caps the worker's heap: a
+-     * worker whose heap is still above it after a full garbage collection is
+-     * terminated and emits an `ERR_WORKER_OUT_OF_MEMORY` error event. The
+-     * young-generation option sizes the nursery. `stackSizeMb` sets the JS
+-     * stack capacity. `codeRangeSizeMb` is reported without a per-worker
+-     * executable-memory reservation. These limits apply to Node workers.
+-     */
+-    resourceLimits?: import("node:worker_threads").ResourceLimits;
++    // resourceLimits?: import("worker_threads").ResourceLimits;
+ 
+     /**
+      * An array of module specifiers to preload in the worker.
+@@ -785,13 +775,6 @@ declare module "bun" {
+      * This value is unique for each `Worker` instance inside a single process.
+      */
+     threadId: number;
+-
+-    /**
+-     * The JS engine resource constraints this worker was created with, or
+-     * an empty object once the worker has stopped. Inside the worker thread,
+-     * it is available as `require('node:worker_threads').resourceLimits`.
+-     */
+-    readonly resourceLimits: import("node:worker_threads").ResourceLimits;
+   }
+ 
+   interface Env {
+diff --git a/src/js/node/worker_threads.ts b/src/js/node/worker_threads.ts
+index 1d5e152..e6b321c 100644
+--- a/src/js/node/worker_threads.ts
++++ b/src/js/node/worker_threads.ts
+@@ -3,6 +3,7 @@ declare const self: Omit<typeof globalThis, "onmessage"> & {
+   onmessageerror: ((this: typeof globalThis, ev: MessageEvent) => unknown) | null;
+ };
+ type WebWorker = InstanceType<typeof globalThis.Worker> & {
++  readonly resourceLimits: Record<string, number>;
+   getHeapSnapshot(options: unknown): Promise<string>;
+   getHeapStatistics(): Promise<Record<string, number | boolean>>;
+   startCpuProfileInternal(): Promise<void>;
+diff --git a/src/jsc/bindings/webcore/JSWorker.cpp b/src/jsc/bindings/webcore/JSWorker.cpp
+index 83aae76..6e3775a 100644
+--- a/src/jsc/bindings/webcore/JSWorker.cpp
++++ b/src/jsc/bindings/webcore/JSWorker.cpp
+@@ -481,31 +481,33 @@ template<> __attribute__((minsize)) JSC::EncodedJSValue JSC_HOST_CALL_ATTRIBUTES
+             RETURN_IF_EXCEPTION(throwScope, {});
+         }
+ 
+-        JSValue resourceLimitsValue = optionsObject->getIfPropertyExists(lexicalGlobalObject, Identifier::fromString(vm, "resourceLimits"_s));
+-        RETURN_IF_EXCEPTION(throwScope, {});
+-        // As in Node's parseResourceLimits: non-objects, functions and non-number fields are ignored.
+-        if (resourceLimitsValue && resourceLimitsValue.isObject() && !resourceLimitsValue.isCallable()) {
+-            auto* limitsObject = asObject(resourceLimitsValue);
+-            WorkerResourceLimits limits;
+-            auto readLimit = [&](ASCIILiteral key, double& out, std::optional<double> floor = std::nullopt) -> bool {
+-                JSValue value = limitsObject->getIfPropertyExists(lexicalGlobalObject, Identifier::fromString(vm, key));
+-                if (throwScope.exception())
+-                    return false;
+-                if (value && value.isNumber())
+-                    out = floor ? std::max(value.asNumber(), *floor) : value.asNumber();
+-                return true;
+-            };
+-            if (!readLimit("maxYoungGenerationSizeMb"_s, limits.maxYoungGenerationSizeMb)) return {};
+-            // Node floors this one at 2 MB (MathMax(value, 2)).
+-            if (!readLimit("maxOldGenerationSizeMb"_s, limits.maxOldGenerationSizeMb, 2.0)) return {};
+-            if (!readLimit("codeRangeSizeMb"_s, limits.codeRangeSizeMb)) return {};
+-            if (!readLimit("stackSizeMb"_s, limits.stackSizeMb)) return {};
+-            // Node replaces a non-positive stack size with its 4 MB default.
+-            if (!(limits.stackSizeMb > 0))
+-                limits.stackSizeMb = 4;
+-            else
+-                limits.stackSizeMb = std::max(limits.stackSizeMb, 192.0 / 1024.0);
+-            options.resourceLimits = limits;
++        if (options.kind == WorkerOptions::Kind::Node) {
++            JSValue resourceLimitsValue = optionsObject->getIfPropertyExists(lexicalGlobalObject, Identifier::fromString(vm, "resourceLimits"_s));
++            RETURN_IF_EXCEPTION(throwScope, {});
++            // As in Node's parseResourceLimits: non-objects, functions and non-number fields are ignored.
++            if (resourceLimitsValue && resourceLimitsValue.isObject() && !resourceLimitsValue.isCallable()) {
++                auto* limitsObject = asObject(resourceLimitsValue);
++                WorkerResourceLimits limits;
++                auto readLimit = [&](ASCIILiteral key, double& out, std::optional<double> floor = std::nullopt) -> bool {
++                    JSValue value = limitsObject->getIfPropertyExists(lexicalGlobalObject, Identifier::fromString(vm, key));
++                    if (throwScope.exception())
++                        return false;
++                    if (value && value.isNumber())
++                        out = floor ? std::max(value.asNumber(), *floor) : value.asNumber();
++                    return true;
++                };
++                if (!readLimit("maxYoungGenerationSizeMb"_s, limits.maxYoungGenerationSizeMb)) return {};
++                // Node floors this one at 2 MB (MathMax(value, 2)).
++                if (!readLimit("maxOldGenerationSizeMb"_s, limits.maxOldGenerationSizeMb, 2.0)) return {};
++                if (!readLimit("codeRangeSizeMb"_s, limits.codeRangeSizeMb)) return {};
++                if (!readLimit("stackSizeMb"_s, limits.stackSizeMb)) return {};
++                // Node replaces a non-positive stack size with its 4 MB default.
++                if (!(limits.stackSizeMb > 0))
++                    limits.stackSizeMb = 4;
++                else
++                    limits.stackSizeMb = std::max(limits.stackSizeMb, 192.0 / 1024.0);
++                options.resourceLimits = limits;
++            }
+         }
+ 
+         JSValue execArgvValue = optionsObject->getIfPropertyExists(lexicalGlobalObject, Identifier::fromString(vm, "execArgv"_s));
+@@ -643,7 +645,7 @@ JSC_DEFINE_CUSTOM_GETTER(jsWorker_resourceLimitsGetter, (JSGlobalObject * lexica
+ 
+     auto& worker = castedThis->wrapped();
+     // Node reports {} once the thread has exited (the proxy is already Closing inside the OOM 'error' handler).
+-    if (worker.hasExited())
++    if (worker.hasExited() || worker.contextProxy().options().kind != WorkerOptions::Kind::Node)
+         return JSValue::encode(constructEmptyObject(lexicalGlobalObject));
+     auto limits = worker.contextProxy().options().resourceLimits;
+     return JSValue::encode(createResourceLimitsObject(lexicalGlobalObject, worker.contextProxy().resourceLimitsReady() ? limits.resolved() : limits));
+diff --git a/src/jsc/bindings/webcore/Worker.cpp b/src/jsc/bindings/webcore/Worker.cpp
+index c1e6b69..cd49e10 100644
+--- a/src/jsc/bindings/webcore/Worker.cpp
++++ b/src/jsc/bindings/webcore/Worker.cpp
+@@ -434,7 +434,7 @@ JSValue createNodeWorkerThreadsBinding(Zig::GlobalObject* globalObject)
+     RETURN_IF_EXCEPTION(scope, {});
+     array->putDirectIndex(globalObject, 18, JSFunction::create(vm, globalObject, 1, "workerEventLoopUtilization"_s, jsFunctionWorkerEventLoopUtilization, ImplementationVisibility::Public, NoIntrinsic));
+     RETURN_IF_EXCEPTION(scope, {});
+-    JSObject* resourceLimits = proxy ? createResourceLimitsObject(globalObject, proxy->options().resourceLimits.resolved()) : constructEmptyObject(globalObject);
++    JSObject* resourceLimits = isNodeWorker ? createResourceLimitsObject(globalObject, proxy->options().resourceLimits.resolved()) : constructEmptyObject(globalObject);
+     RETURN_IF_EXCEPTION(scope, {});
+     array->putDirectIndex(globalObject, 19, resourceLimits);
+     RETURN_IF_EXCEPTION(scope, {});
+-- 
+2.54.0 (Apple Git-157)
+
