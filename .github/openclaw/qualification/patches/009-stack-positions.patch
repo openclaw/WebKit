@@ -1,18 +1,18 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index e6e2a21a..1288eaaf 100644
+index e6e2a21a..5a296061 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
 @@ -2,6 +2,8 @@
  
  ## Unreleased
  
-+- Preserve built-in error constructor syntax and returning arrow frames, and use JSC syntax-selected call and property-read stack positions. Continues the source-position fixes from [oven-sh/bun#35179](https://github.com/oven-sh/bun/pull/35179), [oven-sh/bun#37396](https://github.com/oven-sh/bun/pull/37396), and [oven-sh/bun#41580](https://github.com/oven-sh/bun/pull/41580). Thanks @robobun!
++- Preserve built-in error constructor syntax and returning arrow frames, and use JSC syntax-selected call and property-read stack positions. Retain runtime callee parentheses and computed access, and map call, bracket, and template delimiters back to their original source. Continues the source-position fixes from [oven-sh/bun#35179](https://github.com/oven-sh/bun/pull/35179), [oven-sh/bun#37396](https://github.com/oven-sh/bun/pull/37396), and [oven-sh/bun#41580](https://github.com/oven-sh/bun/pull/41580). Thanks @robobun!
 +
  - Align WebKit and VM source-position assertions with Node's constructor locations and select these regressions for native stack-formatting changes in both fork CI lanes.
  
  - Preserve the native-context count in the fast `v8.getHeapStatistics()` adapter and avoid appending a second strict code-generation flag to inherited worker arguments.
 diff --git a/docs/runtime/nodejs-compat.mdx b/docs/runtime/nodejs-compat.mdx
-index 0274c5b4..106fbfc5 100644
+index 0274c5b4..e94321aa 100644
 --- a/docs/runtime/nodejs-compat.mdx
 +++ b/docs/runtime/nodejs-compat.mdx
 @@ -19,7 +19,7 @@ The OpenClaw fork reports missing runtime imports without downloading npm packag
@@ -20,10 +20,100 @@ index 0274c5b4..106fbfc5 100644
  `Error.prepareStackTrace` supports deletion, descriptor restoration, and accessor replacement. Nested stack formatting and throwing formatters leave later captures usable.
  
 -`CallSite.getLineNumber()` and `getColumnNumber()` return one-based positions, or `null` when a frame has no source position. Stack strings include column 1 and use the same constructor positions as CallSites, pointing to the `new` keyword, including across line breaks and in `node:vm` scripts. Some expression positions still differ from Node.js because JavaScriptCore and Bun's transpiler select different syntax locations.
-+`CallSite.getLineNumber()` and `getColumnNumber()` return one-based positions, or `null` when a frame has no source position. Stack strings include column 1 and use the same constructor positions as CallSites, pointing to the `new` keyword, including across line breaks and in `node:vm` scripts. The matching OpenClaw engine supplies syntax-selected positions for calls, constructors, property reads, and async continuations. Built-in error constructors retain `new`, including in returning arrows. File-name and eval-origin formatting still follow Bun's existing conventions.
++`CallSite.getLineNumber()` and `getColumnNumber()` return one-based positions, or `null` when a frame has no source position. Stack strings include column 1 and use the same constructor positions as CallSites, pointing to the `new` keyword, including across line breaks and in `node:vm` scripts. The matching OpenClaw engine supplies syntax-selected positions for calls, constructors, property reads, and async continuations. Built-in error constructors retain `new`, including in returning arrows. Runtime transpilation retains callee parentheses and computed access and maps opening call, bracket, and template delimiters to the original source. File-name and eval-origin formatting still follow Bun's existing conventions.
  
  ### [`node:assert`](https://nodejs.org/api/assert.html)
  
+diff --git a/src/ast/e.rs b/src/ast/e.rs
+index 520c12f6..6db08699 100644
+--- a/src/ast/e.rs
++++ b/src/ast/e.rs
+@@ -259,7 +259,9 @@ pub struct Call {
+     pub args: ExprNodeList,
+     pub optional_chain: Option<OptionalChain>,
+     pub is_direct_eval: bool,
++    pub open_paren_loc: crate::Loc,
+     pub close_paren_loc: crate::Loc,
++    pub preserve_parenthesized_target: bool,
+ 
+     /// True if there is a comment containing "@__PURE__" or "#__PURE__" preceding
+     /// this call expression. This is an annotation used for tree shaking, and
+@@ -281,7 +283,9 @@ impl Default for Call {
+             args: bun_alloc::AstAlloc::vec(),
+             optional_chain: None,
+             is_direct_eval: false,
++            open_paren_loc: crate::Loc::EMPTY,
+             close_paren_loc: crate::Loc::EMPTY,
++            preserve_parenthesized_target: false,
+             can_be_unwrapped_if_unused: CallUnwrap::Never,
+             was_jsx_element: false,
+         }
+@@ -334,6 +338,7 @@ impl Default for Dot {
+     }
+ }
+ pub struct Index {
++    pub open_bracket_loc: crate::Loc,
+     pub index: ExprNodeIndex,
+     pub target: ExprNodeIndex,
+     pub optional_chain: Option<OptionalChain>,
+@@ -2114,6 +2119,7 @@ pub struct TemplatePart {
+ }
+ 
+ pub struct Template {
++    pub head_loc: crate::Loc,
+     pub tag: Option<ExprNodeIndex>,
+     /// Arena-owned mutable slice. Stored as a
+     /// `StoreSlice` so writers (`substitute_single_use_symbol_in_expr`, the
+@@ -2335,6 +2341,7 @@ impl Template {
+         // provenance for downstream mutators.
+         Expr::init(
+             Template {
++                head_loc: crate::Loc::EMPTY,
+                 tag: None,
+                 parts: crate::StoreSlice::from_bump(parts),
+                 head: TemplateContents::Cooked(
+diff --git a/src/ast/expr.rs b/src/ast/expr.rs
+index cfedeb4f..f24c2239 100644
+--- a/src/ast/expr.rs
++++ b/src/ast/expr.rs
+@@ -2000,7 +2000,9 @@ impl Data {
+                         .try_deep_clone_with(|e| e.deep_clone_no_detach(bump))?,
+                     optional_chain: el.optional_chain,
+                     is_direct_eval: el.is_direct_eval,
++                    open_paren_loc: el.open_paren_loc,
+                     close_paren_loc: el.close_paren_loc,
++                    preserve_parenthesized_target: el.preserve_parenthesized_target,
+                     can_be_unwrapped_if_unused: el.can_be_unwrapped_if_unused,
+                     was_jsx_element: el.was_jsx_element,
+                 });
+@@ -2020,6 +2022,7 @@ impl Data {
+             }
+             Data::EIndex(el) => {
+                 let item = bump.alloc(E::Index {
++                    open_bracket_loc: el.open_bracket_loc,
+                     target: el.target.deep_clone_no_detach(bump)?,
+                     index: el.index.deep_clone_no_detach(bump)?,
+                     optional_chain: el.optional_chain,
+@@ -2080,6 +2083,7 @@ impl Data {
+             }
+             Data::ETemplate(el) => {
+                 let item = bump.alloc(E::Template {
++                    head_loc: el.head_loc,
+                     tag: match &el.tag {
+                         Some(tag) => Some(tag.deep_clone_no_detach(bump)?),
+                         None => None,
+diff --git a/src/ast/fold_string_addition.rs b/src/ast/fold_string_addition.rs
+index e096e0a3..85fb1615 100644
+--- a/src/ast/fold_string_addition.rs
++++ b/src/ast/fold_string_addition.rs
+@@ -93,6 +93,7 @@ pub fn fold_string_addition(
+                         if right.head.is_utf8() {
+                             return Some(Expr::init(
+                                 E::Template {
++                                    head_loc: crate::Loc::EMPTY,
+                                     tag: None,
+                                     parts: right.parts,
+                                     head: e::TemplateContents::Cooked(join_strings(
 diff --git a/src/ast/known_global.rs b/src/ast/known_global.rs
 index 15c439d7..a69b7697 100644
 --- a/src/ast/known_global.rs
@@ -49,17 +139,486 @@ index 15c439d7..a69b7697 100644
  
              KnownGlobal::Object => {
                  let n = e.args.len_u32();
+diff --git a/src/bundler/linker_context/generateCodeForLazyExport.rs b/src/bundler/linker_context/generateCodeForLazyExport.rs
+index 44c9a361..ff5d0edf 100644
+--- a/src/bundler/linker_context/generateCodeForLazyExport.rs
++++ b/src/bundler/linker_context/generateCodeForLazyExport.rs
+@@ -344,6 +344,7 @@ pub(crate) fn generate_code_for_lazy_export(
+                         bun_ast::StoreSlice::new_mut(arena.alloc_slice_fill_iter(template_parts));
+                     value = Expr::init(
+                         E::Template {
++                            head_loc: bun_ast::Loc::EMPTY,
+                             tag: None,
+                             parts: parts_slice,
+                             head: E::TemplateContents::Cooked(E::String::init(b"")),
+diff --git a/src/js_parser/lower/lower_decorators.rs b/src/js_parser/lower/lower_decorators.rs
+index c285fbfb..dff0909c 100644
+--- a/src/js_parser/lower/lower_decorators.rs
++++ b/src/js_parser/lower/lower_decorators.rs
+@@ -1142,6 +1142,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+                 let this = p.new_expr(E::This {}, loc);
+                 let member = p.new_expr(
+                     E::Index {
++                        open_bracket_loc: bun_ast::Loc::EMPTY,
+                         target: this,
+                         index: key,
+                         optional_chain: None,
+@@ -1438,6 +1439,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+                 );
+                 self.new_expr(
+                     E::Index {
++                        open_bracket_loc: bun_ast::Loc::EMPTY,
+                         target: object,
+                         index: key,
+                         optional_chain: None,
+diff --git a/src/js_parser/p.rs b/src/js_parser/p.rs
+index 7da4223f..ae67d9a1 100644
+--- a/src/js_parser/p.rs
++++ b/src/js_parser/p.rs
+@@ -178,6 +178,8 @@ pub(crate) struct ParserSnapshot<'a> {
+     should_fold_typescript_constant_expressions: bool,
+     fn_or_arrow_data_parse: FnOrArrowDataParse,
+     latest_arrow_arg_loc: bun_ast::Loc,
++    parenthesized_target_loc: bun_ast::Loc,
++    parenthesized_suffix_loc: bun_ast::Loc,
+     forbid_suffix_after_as_loc: bun_ast::Loc,
+     after_arrow_body_loc: bun_ast::Loc,
+     esm_import_keyword: bun_ast::Range,
+@@ -271,6 +273,8 @@ pub struct P<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> {
+     // allocated_names: ListManaged(string) = ListManaged(string).init(bun.default_allocator),
+     // allocated_names_pool: ?*AllocatedNamesPool.Node = null,
+     pub(crate) latest_arrow_arg_loc: bun_ast::Loc,
++    pub(crate) parenthesized_target_loc: bun_ast::Loc,
++    pub(crate) parenthesized_suffix_loc: bun_ast::Loc,
+     pub(crate) forbid_suffix_after_as_loc: bun_ast::Loc,
+     pub(crate) current_scope: js_ast::StoreRef<js_ast::Scope>,
+     pub(crate) scopes_for_current_part: List<'a, *mut js_ast::Scope>,
+@@ -5486,7 +5490,16 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+         });
+     }
+ 
++    pub(crate) fn preserve_parenthesized_call_target(&self, expr: Expr) -> bool {
++        self.options.features.dont_bundle_twice
++            && self.parenthesized_target_loc.eql(expr.loc)
++            && self.parenthesized_suffix_loc.eql(self.lexer.loc())
++    }
++
+     pub(crate) fn mark_expr_as_parenthesized(&mut self, expr: &mut Expr) {
++        // Runtime loads retain the callee parentheses that select JSC's call position.
++        self.parenthesized_target_loc = expr.loc;
++        self.parenthesized_suffix_loc = self.lexer.loc();
+         match &mut expr.data {
+             js_ast::ExprData::EArray(ex) => ex.is_parenthesized = true,
+             js_ast::ExprData::EObject(ex) => ex.is_parenthesized = true,
+@@ -7564,6 +7577,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+                             }
+                             _ => self.new_expr(
+                                 E::Index {
++                                    open_bracket_loc: bun_ast::Loc::EMPTY,
+                                     target,
+                                     index: key,
+                                     optional_chain: None,
+@@ -8351,6 +8365,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+                 .should_fold_typescript_constant_expressions,
+             fn_or_arrow_data_parse: self.fn_or_arrow_data_parse.clone(),
+             latest_arrow_arg_loc: self.latest_arrow_arg_loc,
++            parenthesized_target_loc: self.parenthesized_target_loc,
++            parenthesized_suffix_loc: self.parenthesized_suffix_loc,
+             forbid_suffix_after_as_loc: self.forbid_suffix_after_as_loc,
+             after_arrow_body_loc: self.after_arrow_body_loc,
+             esm_import_keyword: self.esm_import_keyword,
+@@ -8385,6 +8401,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+             snapshot.should_fold_typescript_constant_expressions;
+         self.fn_or_arrow_data_parse = snapshot.fn_or_arrow_data_parse;
+         self.latest_arrow_arg_loc = snapshot.latest_arrow_arg_loc;
++        self.parenthesized_target_loc = snapshot.parenthesized_target_loc;
++        self.parenthesized_suffix_loc = snapshot.parenthesized_suffix_loc;
+         self.forbid_suffix_after_as_loc = snapshot.forbid_suffix_after_as_loc;
+         self.after_arrow_body_loc = snapshot.after_arrow_body_loc;
+         self.esm_import_keyword = snapshot.esm_import_keyword;
+@@ -9841,6 +9859,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+             fn_only_data_visit: FnOnlyDataVisit::default(),
+             allocated_names: BumpVec::new_in(arena),
+             latest_arrow_arg_loc: bun_ast::Loc::EMPTY,
++            parenthesized_target_loc: bun_ast::Loc::EMPTY,
++            parenthesized_suffix_loc: bun_ast::Loc::EMPTY,
+             forbid_suffix_after_as_loc: bun_ast::Loc::EMPTY,
+             scopes_for_current_part: BumpVec::new_in(arena),
+             symbols: BumpVec::with_capacity_in(estimated_symbol_count, arena),
+diff --git a/src/js_parser/parse/parse_prefix.rs b/src/js_parser/parse/parse_prefix.rs
+index 5c4d54f7..2ff66c10 100644
+--- a/src/js_parser/parse/parse_prefix.rs
++++ b/src/js_parser/parse/parse_prefix.rs
+@@ -54,8 +54,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+             p.allow_in = true;
+ 
+             let mut value = p.parse_expr(Level::Lowest)?;
+-            p.mark_expr_as_parenthesized(&mut value);
+             p.lexer.expect(T::TCloseParen)?;
++            p.mark_expr_as_parenthesized(&mut value);
+ 
+             p.allow_in = old_allow_in;
+             return Ok(value);
+@@ -295,6 +295,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+ 
+         Ok(p.new_expr(
+             E::Template {
++                head_loc: loc,
+                 tag: None,
+                 head: E::TemplateContents::Cooked(head),
+                 parts,
+diff --git a/src/js_parser/parse/parse_suffix.rs b/src/js_parser/parse/parse_suffix.rs
+index d6b6bd15..856d7d13 100644
+--- a/src/js_parser/parse/parse_suffix.rs
++++ b/src/js_parser/parse/parse_suffix.rs
+@@ -83,6 +83,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+             let index = p.new_expr(E::PrivateIdentifier { ref_ }, name_loc);
+             *left = p.new_expr(
+                 E::Index {
++                    open_bracket_loc: bun_ast::Loc::EMPTY,
+                     target,
+                     index,
+                     optional_chain: old_optional_chain,
+@@ -140,6 +141,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+         match p.lexer.token {
+             T::TOpenBracket => {
+                 // "a?.[b]"
++                let open_bracket_loc = p.lexer.loc();
+                 p.lexer.next()?;
+ 
+                 // allow "in" inside the brackets;
+@@ -155,6 +157,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+                 let target = *left;
+                 *left = p.new_expr(
+                     E::Index {
++                        open_bracket_loc,
+                         target,
+                         index,
+                         optional_chain: optional_start,
+@@ -170,6 +173,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+                     return Ok(Continuation::Done);
+                 }
+ 
++                let open_paren_loc = p.lexer.loc();
++                let preserve_parenthesized_target = p.preserve_parenthesized_call_target(*left);
+                 let list_loc = p.parse_call_args()?;
+                 let loc = left.loc;
+                 let target = *left;
+@@ -177,7 +182,9 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+                     E::Call {
+                         target,
+                         args: list_loc.list,
++                        open_paren_loc,
+                         close_paren_loc: list_loc.loc,
++                        preserve_parenthesized_target,
+                         optional_chain: optional_start,
+                         ..Default::default()
+                     },
+@@ -200,6 +207,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+                     return Ok(Continuation::Done);
+                 }
+ 
++                let open_paren_loc = p.lexer.loc();
++                let preserve_parenthesized_target = p.preserve_parenthesized_call_target(*left);
+                 let list_loc = p.parse_call_args()?;
+                 let loc = left.loc;
+                 let target = *left;
+@@ -207,7 +216,9 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+                     E::Call {
+                         target,
+                         args: list_loc.list,
++                        open_paren_loc,
+                         close_paren_loc: list_loc.loc,
++                        preserve_parenthesized_target,
+                         optional_chain: optional_start,
+                         ..Default::default()
+                     },
+@@ -226,6 +237,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+                     let index = p.new_expr(E::PrivateIdentifier { ref_ }, name_loc);
+                     *left = p.new_expr(
+                         E::Index {
++                            open_bracket_loc: bun_ast::Loc::EMPTY,
+                             target,
+                             index,
+                             optional_chain: optional_start,
+@@ -281,6 +293,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+             );
+         }
+         // p.markSyntaxFeature(compat.TemplateLiteral, p.lexer.Range());
++        let head_loc = p.lexer.loc();
+         let head = E::Str::new(p.lexer.raw_template_contents());
+         p.lexer.next()?;
+ 
+@@ -288,6 +301,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+         let tag = *left;
+         *left = p.new_expr(
+             E::Template {
++                head_loc,
+                 tag: Some(tag),
+                 head: E::TemplateContents::Raw(head),
+                 parts: E::Template::empty_parts(),
+@@ -312,12 +326,14 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+             );
+         }
+         // p.markSyntaxFeature(compat.TemplateLiteral, p.lexer.Range());
++        let head_loc = p.lexer.loc();
+         let head = E::Str::new(p.lexer.raw_template_contents());
+         let (parts, _tail_loc) = p.parse_template_parts(true)?;
+         let tag = *left;
+         let loc = left.loc;
+         *left = p.new_expr(
+             E::Template {
++                head_loc,
+                 tag: Some(tag),
+                 head: E::TemplateContents::Raw(head),
+                 parts,
+@@ -346,6 +362,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+             return Ok(Continuation::Done);
+         }
+ 
++        let open_bracket_loc = p.lexer.loc();
+         p.lexer.next()?;
+ 
+         // Allow "in" inside the brackets
+@@ -362,6 +379,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+         let target = *left;
+         *left = p.new_expr(
+             E::Index {
++                open_bracket_loc,
+                 target,
+                 index,
+                 optional_chain: old_optional_chain,
+@@ -384,6 +402,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+             return Ok(Continuation::Done);
+         }
+ 
++        let open_paren_loc = p.lexer.loc();
++        let preserve_parenthesized_target = p.preserve_parenthesized_call_target(*left);
+         let list_loc = p.parse_call_args()?;
+         let loc = left.loc;
+         let target = *left;
+@@ -391,7 +411,9 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+             E::Call {
+                 target,
+                 args: list_loc.list,
++                open_paren_loc,
+                 close_paren_loc: list_loc.loc,
++                preserve_parenthesized_target,
+                 optional_chain: old_optional_chain,
+                 ..Default::default()
+             },
+@@ -486,6 +508,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+         p: &mut Self,
+         optional_chain: &mut Option<OptionalChain>,
+         old_optional_chain: Option<OptionalChain>,
++        left: &Expr,
+     ) -> CResult {
+         // Skip over TypeScript non-null assertions
+         if p.lexer.has_newline_before {
+@@ -497,7 +520,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+             return Err(crate::Error::SyntaxError);
+         }
+ 
++        let parenthesized = p.preserve_parenthesized_call_target(*left);
+         p.lexer.next()?;
++        if parenthesized {
++            p.parenthesized_suffix_loc = p.lexer.loc();
++        }
+         *optional_chain = old_optional_chain;
+ 
+         Ok(Continuation::Next)
+@@ -878,8 +905,12 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+         // TypeScript allows type arguments to be specified with angle brackets
+         // inside an expression. Unlike in other languages, this unfortunately
+         // appears to require backtracking to parse.
++        let parenthesized = p.preserve_parenthesized_call_target(*left);
+         if Self::IS_TYPESCRIPT_ENABLED && p.try_skip_type_script_type_arguments_with_backtracking()
+         {
++            if parenthesized {
++                p.parenthesized_suffix_loc = p.lexer.loc();
++            }
+             *optional_chain = old_optional_chain;
+             return Ok(Continuation::Next);
+         }
+@@ -969,8 +1000,12 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+         // TypeScript allows type arguments to be specified with angle brackets
+         // inside an expression. Unlike in other languages, this unfortunately
+         // appears to require backtracking to parse.
++        let parenthesized = p.preserve_parenthesized_call_target(*left);
+         if Self::IS_TYPESCRIPT_ENABLED && p.try_skip_type_script_type_arguments_with_backtracking()
+         {
++            if parenthesized {
++                p.parenthesized_suffix_loc = p.lexer.loc();
++            }
+             *optional_chain = old_optional_chain;
+             return Ok(Continuation::Next);
+         }
+@@ -1555,7 +1590,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+                 T::TSlash => Self::sfx_t_slash(p, level, left),
+                 T::TSlashEquals => Self::sfx_t_slash_equals(p, level, left),
+                 T::TExclamation => {
+-                    Self::sfx_t_exclamation(p, &mut optional_chain, old_optional_chain)
++                    Self::sfx_t_exclamation(p, &mut optional_chain, old_optional_chain, left)
+                 }
+                 T::TBarBar => Self::sfx_t_bar_bar(p, level, left, flags),
+                 T::TAmpersandAmpersand => Self::sfx_t_ampersand_ampersand(p, level, left, flags),
+diff --git a/src/js_parser/parse/parse_typescript.rs b/src/js_parser/parse/parse_typescript.rs
+index eb4d49f9..7acac3ed 100644
+--- a/src/js_parser/parse/parse_typescript.rs
++++ b/src/js_parser/parse/parse_typescript.rs
+@@ -136,6 +136,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+                         let index = p.new_expr(E::PrivateIdentifier { ref_ }, name_loc);
+                         expr = p.new_expr(
+                             E::Index {
++                                open_bracket_loc: bun_ast::Loc::EMPTY,
+                                 target: expr,
+                                 index,
+                                 optional_chain: None,
+diff --git a/src/js_parser/visit/mod.rs b/src/js_parser/visit/mod.rs
+index e12fd145..ae13f46c 100644
+--- a/src/js_parser/visit/mod.rs
++++ b/src/js_parser/visit/mod.rs
+@@ -1350,6 +1350,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+                                 }
+                                 _ => self.new_expr(
+                                     E::Index {
++                                        open_bracket_loc: bun_ast::Loc::EMPTY,
+                                         target: this_target,
+                                         index: key,
+                                         optional_chain: None,
+diff --git a/src/js_parser/visit/visit_expr.rs b/src/js_parser/visit/visit_expr.rs
+index 23c08903..c5e0d61a 100644
+--- a/src/js_parser/visit/visit_expr.rs
++++ b/src/js_parser/visit/visit_expr.rs
+@@ -855,8 +855,8 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+         let is_template_tag = matches!(p.template_tag, Data::EIndex(tag) if core::ptr::eq(&raw const *e_, &raw const *tag));
+         let is_delete_target = matches!(p.delete_target, Data::EIndex(dt) if core::ptr::eq(&raw const *e_, &raw const *dt));
+ 
+-        // "a['b']" => "a.b"
+-        if p.options.features.minify_syntax {
++        // Runtime stack positions distinguish computed access from dot access.
++        if p.options.features.minify_syntax && !p.options.features.dont_bundle_twice {
+             if let Some(mut s) = e_.index.data.e_string() {
+                 if !s.is_utf16 && s.is_identifier(p.arena) {
+                     let dot = p.new_expr(
+@@ -985,7 +985,10 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+ 
+                         // "a['b' + '']" => "a.b"
+                         // "enum A { B = 'b' }; a[A.B]" => "a.b"
+-                        if p.options.features.minify_syntax && s.is_identifier(p.arena) {
++                        if p.options.features.minify_syntax
++                            && !p.options.features.dont_bundle_twice
++                            && s.is_identifier(p.arena)
++                        {
+                             let dot = p.new_expr(
+                                 E::Dot {
+                                     name: s.data,
+diff --git a/src/js_parser/visit/visit_stmt.rs b/src/js_parser/visit/visit_stmt.rs
+index f3995507..33a4cca1 100644
+--- a/src/js_parser/visit/visit_stmt.rs
++++ b/src/js_parser/visit/visit_stmt.rs
+@@ -2332,6 +2332,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+                 Expr::assign(
+                     p.new_expr(
+                         E::Index {
++                            open_bracket_loc: bun_ast::Loc::EMPTY,
+                             target: Expr::init_identifier(data.arg, value.loc),
+                             index: name_as_e_string.unwrap(),
+                             optional_chain: None,
+@@ -2353,6 +2354,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
+                 value_exprs.push(Expr::assign(
+                     p.new_expr(
+                         E::Index {
++                            open_bracket_loc: bun_ast::Loc::EMPTY,
+                             target: Expr::init_identifier(data.arg, value.loc),
+                             index: assign_target,
+                             optional_chain: None,
+diff --git a/src/js_printer/lib.rs b/src/js_printer/lib.rs
+index 40408623..764a2900 100644
+--- a/src/js_printer/lib.rs
++++ b/src/js_printer/lib.rs
+@@ -3502,6 +3502,9 @@ pub(crate) mod __gated_printer {
+                         && self.is_unbound_eval_identifier(e.target)
+                         && e.optional_chain.is_none();
+ 
++                    if e.preserve_parenthesized_target {
++                        self.print(b"(");
++                    }
+                     if is_unbound_eval {
+                         self.print(b"(0,");
+                         self.print_space();
+@@ -3513,9 +3516,15 @@ pub(crate) mod __gated_printer {
+                         self.print_expr(e.target, Level::Postfix, target_flags);
+                     }
+ 
++                    if e.preserve_parenthesized_target {
++                        self.print(b")");
++                    }
+                     if e.optional_chain == Some(js_ast::OptionalChain::Start) {
+                         self.print(b"?.");
+                     }
++                    if !e.open_paren_loc.is_empty() {
++                        self.add_source_mapping(e.open_paren_loc);
++                    }
+                     self.print(b"(");
+                     let args = e.args.slice();
+ 
+@@ -3765,6 +3774,9 @@ pub(crate) mod __gated_printer {
+                             self.print_symbol(priv_.ref_);
+                         }
+                         _ => {
++                            if !e.open_bracket_loc.is_empty() {
++                                self.add_source_mapping(e.open_bracket_loc);
++                            }
+                             self.print(b"[");
+                             self.add_source_mapping(e.index.loc);
+                             self.print_expr(e.index, Level::Lowest, ExprFlag::none());
+@@ -4063,6 +4075,7 @@ pub(crate) mod __gated_printer {
+                     // would be a cross-thread data race. Re-prints recompute
+                     // the identical fold, so emitted output is unchanged.
+                     let mut e = E::Template {
++                        head_loc: e.head_loc,
+                         tag: e.tag,
+                         parts: e.parts,
+                         head: match &e.head {
+@@ -4128,6 +4141,7 @@ pub(crate) mod __gated_printer {
+                             // parts slice stays valid past this block.
+                             let parts_slice = js_ast::StoreSlice::from_bump(replaced);
+                             let mut copy = E::Template {
++                                head_loc: e.head_loc,
+                                 tag: e.tag,
+                                 parts: parts_slice,
+                                 head: match &e.head {
+@@ -4157,6 +4171,7 @@ pub(crate) mod __gated_printer {
+                                     // fields out is safe even though `t` itself may
+                                     // point at `copy`.
+                                     e = E::Template {
++                                        head_loc: t.head_loc,
+                                         tag: t.tag,
+                                         parts: t.parts,
+                                         head: match &t.head {
+@@ -4204,6 +4219,9 @@ pub(crate) mod __gated_printer {
+                         self.add_source_mapping(expr.loc);
+                     }
+ 
++                    if !e.head_loc.is_empty() {
++                        self.add_source_mapping(e.head_loc);
++                    }
+                     self.print(b"`");
+                     match &e.head {
+                         E::TemplateContents::Raw(raw) => self.print_raw_template_literal(raw),
 diff --git a/src/jsc/RuntimeTranspilerCache.rs b/src/jsc/RuntimeTranspilerCache.rs
-index 1142ca3b..c7e0fa20 100644
+index 1142ca3b..c857749a 100644
 --- a/src/jsc/RuntimeTranspilerCache.rs
 +++ b/src/jsc/RuntimeTranspilerCache.rs
-@@ -66,7 +66,8 @@ bun_core::declare_scope!(cache, visible);
+@@ -66,7 +66,9 @@ bun_core::declare_scope!(cache, visible);
  /// Version 34: Discard output containing a previous runtime plugin's resolved import paths.
  /// Version 35: Preserve inferred names and inline type-only runtime evaluation edges.
  /// Version 36: Runtime plugin imports retain their original specifiers and resolve when executed.
 -const EXPECTED_VERSION: u32 = 36;
 +/// Version 37: Preserve builtin error constructors and their stack positions and frames.
-+const EXPECTED_VERSION: u32 = 37;
++/// Version 38: Retain runtime call syntax and map opening call/property delimiters.
++const EXPECTED_VERSION: u32 = 38;
  
  /// Source files smaller than this are not written to / read from the on-disk
  /// transpiler cache. Originally 50 KiB, which excluded almost every file in a
@@ -162,6 +721,74 @@ index cfd1059c..b7442cb3 100644
      memcpy(&position, &location, sizeof(ZigStackFramePosition));
      if (flags == PopulateStackTraceFlags::OnlyPosition)
          return;
+diff --git a/src/react_compiler/codegen.rs b/src/react_compiler/codegen.rs
+index 473b14c9..5b3f1704 100644
+--- a/src/react_compiler/codegen.rs
++++ b/src/react_compiler/codegen.rs
+@@ -669,6 +669,7 @@ fn codegen_reactive_scope(
+     let cache_slot = |index: u32| {
+         Expr::init(
+             E::Index {
++                open_bracket_loc: bun_ast::Loc::EMPTY,
+                 target: cache_ident(),
+                 index: Expr::init(E::Number::new(index as f64), loc),
+                 optional_chain: None,
+@@ -2005,6 +2006,7 @@ fn codegen_base_instruction_value(
+             let prop = codegen_place_to_expression(cx, property)?;
+             Ok(Expr::init(
+                 E::Index {
++                    open_bracket_loc: bun_ast::Loc::EMPTY,
+                     target: obj,
+                     index: prop,
+                     optional_chain: None,
+@@ -2027,6 +2029,7 @@ fn codegen_base_instruction_value(
+                     op: OpCode::BinAssign,
+                     left: Expr::init(
+                         E::Index {
++                            open_bracket_loc: bun_ast::Loc::EMPTY,
+                             target: obj,
+                             index: prop,
+                             optional_chain: None,
+@@ -2049,6 +2052,7 @@ fn codegen_base_instruction_value(
+                     op: OpCode::UnDelete,
+                     value: Expr::init(
+                         E::Index {
++                            open_bracket_loc: bun_ast::Loc::EMPTY,
+                             target: obj,
+                             index: prop,
+                             optional_chain: None,
+@@ -2179,6 +2183,7 @@ fn codegen_base_instruction_value(
+             let tag_expr = codegen_place_to_expression(cx, tag)?;
+             Ok(Expr::init(
+                 E::Template {
++                    head_loc: bun_ast::Loc::EMPTY,
+                     tag: Some(tag_expr),
+                     head: E::TemplateContents::Raw(value.raw),
+                     parts: StoreSlice::EMPTY,
+@@ -2204,6 +2209,7 @@ fn codegen_base_instruction_value(
+             }
+             Ok(Expr::init(
+                 E::Template {
++                    head_loc: bun_ast::Loc::EMPTY,
+                     tag: None,
+                     head,
+                     parts: StoreSlice::new_mut(parts.leak()),
+@@ -2369,6 +2375,7 @@ fn codegen_function_expression(
+         });
+         let wrapped = Expr::init(
+             E::Index {
++                open_bracket_loc: bun_ast::Loc::EMPTY,
+                 target: Expr::init(
+                     E::Object {
+                         properties: props,
+@@ -3311,6 +3318,7 @@ fn property_access_expr(
+         ),
+         PropertyLiteral::Number(n) => Expr::init(
+             E::Index {
++                open_bracket_loc: bun_ast::Loc::EMPTY,
+                 target,
+                 index: Expr::init(E::Number::new(n.value()), loc),
+                 optional_chain,
 diff --git a/test/bundler/bundler_minify.test.ts b/test/bundler/bundler_minify.test.ts
 index 052aa492..0d629bee 100644
 --- a/test/bundler/bundler_minify.test.ts
@@ -220,6 +847,65 @@ index 052aa492..0d629bee 100644
        "/* @__PURE__ */ new Date",
        "/* @__PURE__ */ new Map",
        "/* @__PURE__ */ new Set",
+diff --git a/test/js/bun/jsc/webkit-upgrade-7b485a76e9.test.ts b/test/js/bun/jsc/webkit-upgrade-7b485a76e9.test.ts
+index 27805cb4..42f6196b 100644
+--- a/test/js/bun/jsc/webkit-upgrade-7b485a76e9.test.ts
++++ b/test/js/bun/jsc/webkit-upgrade-7b485a76e9.test.ts
+@@ -150,8 +150,8 @@ describe("WebKit 7b485a76e9 upgrade", () => {
+     const frames = [...stack.matchAll(/positions\.js:(\d+):(\d+)/g)].map(m => [Number(m[1]), Number(m[2])]);
+     expect(frames).toEqual([
+       [6, 28],
+-      [4, 15],
+-      [7, 6],
++      [4, 10],
++      [7, 1],
+     ]);
+ 
+     // lineOffset and columnOffset move the first line. columnOffset does not move later lines.
+diff --git a/test/js/bun/sourcemap/internal-sourcemap.test.ts b/test/js/bun/sourcemap/internal-sourcemap.test.ts
+index b8efdae7..63c78056 100644
+--- a/test/js/bun/sourcemap/internal-sourcemap.test.ts
++++ b/test/js/bun/sourcemap/internal-sourcemap.test.ts
+@@ -76,9 +76,9 @@ describe("InternalSourceMap", () => {
+ 
+     const positions = extractPositions(stdout);
+     expect(positions).toEqual([
+-      "6:13", // throw new Error("boom")
++      "6:9", // throw new Error("boom")
+       "24:3", // gamma() at top level
+-      "31:17", // new Error("here").stack
++      "31:13", // new Error("here").stack
+       "34:13", // captureViaCaptureStackTrace()
+     ]);
+ 
+@@ -103,10 +103,12 @@ describe("InternalSourceMap", () => {
+     const { stdout, stderr, exited } = await run({ "index.ts": lines.join("\n") + "\n" });
+ 
+     expect(stderr).toBe("");
+-    // Each frame must point at its line's `Error` in 1-based UTF-16 columns,
++    // Each frame must point at its line's `new` keyword in 1-based UTF-16 columns,
+     // `a1` being the all-ASCII control.
+     const frames = [...stdout.matchAll(/at ([a-d]1) \(.*index\.ts:(\d+):(\d+)\)/g)].map(m => `${m[1]} ${m[2]}:${m[3]}`);
+-    expect(frames).toEqual(["a1", "b1", "c1", "d1"].map((fn, i) => `${fn} ${i + 1}:${lines[i].indexOf("Error(") + 1}`));
++    expect(frames).toEqual(
++      ["a1", "b1", "c1", "d1"].map((fn, i) => `${fn} ${i + 1}:${lines[i].indexOf("new Error(") + 1}`),
++    );
+     expect(exited).toBe(0);
+   });
+ 
+diff --git a/test/js/node/module/node-module-module.test.js b/test/js/node/module/node-module-module.test.js
+index a5bc03c0..2bee38b3 100644
+--- a/test/js/node/module/node-module-module.test.js
++++ b/test/js/node/module/node-module-module.test.js
+@@ -1781,7 +1781,7 @@ console.log("survived", require("./late.js"));`,
+       expect(stderr).toMatchInlineSnapshot(`
+         "1 | require("module").runMain = () => {
+         2 |   throw new RangeError("from the override");
+-                        ^
++                    ^
+         RangeError: from the override
+             at <anonymous> (file:NN:NN)
+ 
 diff --git a/test/js/node/v8/callsite-async-position-fixture.mjs b/test/js/node/v8/callsite-async-position-fixture.mjs
 new file mode 100644
 index 00000000..84cfc6db
@@ -360,11 +1046,80 @@ index 00000000..32eed3ee
 +            throw new Error(JSON.stringify({ body, expected: [line, column], trace }));
 +    }
 +}
+diff --git a/test/js/node/v8/callsite-typescript-positions-fixture.ts b/test/js/node/v8/callsite-typescript-positions-fixture.ts
+new file mode 100644
+index 00000000..1bc876b8
+--- /dev/null
++++ b/test/js/node/v8/callsite-typescript-positions-fixture.ts
+@@ -0,0 +1,63 @@
++import assert from "node:assert/strict";
++let frame: NodeJS.CallSite;
++function capture<T>(..._args: unknown[]) {
++  const target: { stack?: NodeJS.CallSite[] } = {};
++  const previous = Error.prepareStackTrace;
++  try {
++    Error.prepareStackTrace = (_, frames) => frames;
++    Error.captureStackTrace(target, capture);
++    frame = target.stack![0];
++  } finally {
++    Error.prepareStackTrace = previous;
++  }
++}
++const object = { capture };
++const cases = [
++  [function () {
++(object).capture<number>();
++  }, 17, 10, "receiver-parentheses"],
++  [function () {
++(object.capture)<number>();
++  }, 20, 25, "callee-parentheses"],
++  [function () {
++((capture))<number>();
++  }, 23, 20, "nested-parentheses"],
++  [function () {
++(capture as typeof capture)<number>();
++  }, 26, 36, "asserted-callee"],
++  [function () {
++object["capture"]<number>();
++  }, 29, 26, "computed-callee"],
++  [function () {
++object?.["capture"]<number>();
++  }, 32, 28, "optional-computed-callee"],
++  [function () {
++const marker = "🎉"; (capture)<number>();
++  }, 35, 39, "astral-prefix"],
++  [function () {
++(capture); object.capture<number>();
++  }, 38, 19, "prior-parenthesized-expression"],
++  [function () {
++(capture)<<T>() => T>();
++  }, 41, 22, "generic-function-type"],
++  [function () {
++(capture)!();
++  }, 44, 11, "non-null-callee"],
++  [function () {
++(capture)!<number>();
++  }, 47, 19, "generic-non-null-callee"],
++  [function () {
++(capture)!!();
++  }, 50, 12, "repeated-non-null-callee"],
++  [function () {
++(object)!.capture<number>();
++  }, 53, 11, "non-null-receiver"],
++  [function () {
++capture<number>`text`;
++  }, 56, 16, "tagged-template"],
++ ] as const;
++for (const [fn, line, column, label] of cases) {
++  fn();
++  assert.deepEqual([frame!.getLineNumber(), frame!.getColumnNumber()], [line, column], label);
++  assert.deepEqual(/:(\d+):(\d+)\)?$/.exec(frame!.toString())!.slice(1).map(Number), [line, column], label);
++}
 diff --git a/test/js/node/v8/capture-stack-trace.test.js b/test/js/node/v8/capture-stack-trace.test.js
-index ac527424..247d355e 100644
+index ac527424..32302fc2 100644
 --- a/test/js/node/v8/capture-stack-trace.test.js
 +++ b/test/js/node/v8/capture-stack-trace.test.js
-@@ -2456,3 +2456,27 @@ test.skipIf(totalmem() < 10 * 1024 ** 3)(
+@@ -2456,3 +2456,31 @@ test.skipIf(totalmem() < 10 * 1024 ** 3)(
    },
    30_000,
  );
@@ -380,7 +1135,11 @@ index ac527424..247d355e 100644
 +  expect({ stdout, stderr, exitCode }).toEqual({ stdout: "", stderr: "", exitCode: 0 });
 +});
 +
-+for (const fixture of ["callsite-syntax-positions-fixture.js", "callsite-async-position-fixture.mjs"]) {
++for (const fixture of [
++  "callsite-syntax-positions-fixture.js",
++  "callsite-async-position-fixture.mjs",
++  "callsite-typescript-positions-fixture.ts",
++]) {
 +  test(`syntax-selected stack positions: ${fixture}`, async () => {
 +    await using proc = Bun.spawn({
 +      cmd: [bunExe(), import.meta.dir + "/" + fixture],
@@ -502,3 +1261,25 @@ index 00000000..fe71747d
 +        }
 +    }
 +}
+diff --git a/test/js/node/vm/__snapshots__/vm-sourceUrl.test.ts.snap b/test/js/node/vm/__snapshots__/vm-sourceUrl.test.ts.snap
+index bbc85154..43f86730 100644
+--- a/test/js/node/vm/__snapshots__/vm-sourceUrl.test.ts.snap
++++ b/test/js/node/vm/__snapshots__/vm-sourceUrl.test.ts.snap
+@@ -16,7 +16,7 @@ exports[`can get sourceURL inside node:vm 1`] = `
+                            ^
+ error: hello
+       at hello (hellohello.js:4:24)
+-      at hellohello.js:7:6
++      at hellohello.js:7:1
+       at <anonymous> (<this-url>:21:15)
+ "
+ `;
+@@ -26,7 +26,7 @@ exports[`eval sourceURL is correct 1`] = `
+                            ^
+ error: hello
+       at hello (hellohello.js:4:24)
+-      at eval (hellohello.js:7:6)
++      at eval (hellohello.js:7:1)
+       at <anonymous> (<this-url>:39:15)
+ "
+ `;

@@ -614,9 +614,18 @@ namespace JSC {
             n->emitBytecodeInConditionContext(*this, trueTarget, falseTarget, fallThroughMode);
         }
 
+        bool shouldEmitStackPositions() const
+        {
+#if !ASSERT_ENABLED
+            return !isPrivateBuiltinFunction();
+#else
+            return true;
+#endif
+        }
+
         void emitCallSitePosition(std::optional<unsigned> position)
         {
-            if (!position)
+            if (!position || !shouldEmitStackPositions())
                 return;
             unsigned sourceOffset = m_scopeNode->source().startOffset();
             ASSERT(*position >= sourceOffset);

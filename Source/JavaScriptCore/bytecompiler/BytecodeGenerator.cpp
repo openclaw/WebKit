@@ -5494,7 +5494,7 @@ void BytecodeGenerator::emitYieldPoint(RegisterID* argument, JSAsyncGenerator::A
     m_tryContextStack.swap(savedTryContextStack);
 
 
-    if (awaitPosition)
+    if (awaitPosition && shouldEmitStackPositions())
         m_codeBlock->addAsyncResumePosition(instructions().size(), *awaitPosition - m_scopeNode->source().startOffset());
     OpYield::emit(this, yieldPointIndex, argument);
 
