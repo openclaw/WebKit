@@ -325,6 +325,11 @@ void SlotVisitor::noteLiveAuxiliaryCell(HeapCell* cell)
 
     size_t cellSize = container.cellSize();
     noteBytesMarked(container.vm().heap, cellSize);
+#if USE(BUN_JSC_ADDITIONS)
+    JSC::Heap& heap = container.vm().heap;
+    if (cell->subspace() == &heap.typedArrayAuxiliarySpace)
+        heap.reportArrayBufferMemoryVisited(cellSize, 0);
+#endif
     m_nonCellVisitCount += cellSize;
 }
 

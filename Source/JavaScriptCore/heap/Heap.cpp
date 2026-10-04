@@ -61,6 +61,7 @@
 #include "JITStubRoutineSet.h"
 #include "JITWorklistInlines.h"
 #include "JSAsyncFunctionGenerator.h"
+#include "JSArrayBufferView.h"
 #include "JSAsyncGenerator.h"
 #include "JSFinalizationRegistry.h"
 #include "JSFunctionInlines.h"
@@ -377,6 +378,9 @@ Heap::Heap(VM& vm, HeapType heapType)
 
     // Subspaces
     , primitiveGigacageAuxiliarySpace("Primitive Gigacage Auxiliary"_s, *this, auxiliaryHeapCellType, primitiveGigacageAllocator.get()) // Hash:0x3e7cd762
+#if USE(BUN_JSC_ADDITIONS)
+    , typedArrayAuxiliarySpace("Typed Array Auxiliary"_s, *this, auxiliaryHeapCellType, primitiveGigacageAllocator.get())
+#endif
     , auxiliarySpace("Auxiliary"_s, *this, auxiliaryHeapCellType, fastMallocAllocator.get()) // Hash:0x96255ba1
     , immutableButterflyAuxiliarySpace("ImmutableButterfly JSCellWithIndexingHeader"_s, *this, immutableButterflyHeapCellType, fastMallocAllocator.get()) // Hash:0xaadcb3c1
     , cellSpace("JSCell"_s, *this, cellHeapCellType, fastMallocAllocator.get()) // Hash:0xadfb5a79
@@ -526,7 +530,7 @@ void Heap::releaseDelayedReleasedObjects()
 #endif
 }
 
-void Heap::reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(const JSCell* cell, size_t size)
+bool Heap::reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(const JSCell* cell, size_t size)
 {
     ASSERT(cell);
 
@@ -539,7 +543,7 @@ void Heap::reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(const JSCell*
         // not black. But we can't know for sure until we fire off a fence.
         WTF::storeLoadFence();
         if (cell->cellState() != CellState::PossiblyBlack)
-            return;
+            return false;
 
         WTF::loadLoadFence();
         if (!isMarked(cell)) {
@@ -549,7 +553,7 @@ void Heap::reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(const JSCell*
             // path. So, we don't have to remember this object. We could return here. But we go
             // further and attempt to re-white the object.
             ASSERT(m_collectionScope && m_collectionScope.value() == CollectionScope::Full);
-            return;
+            return false;
         }
     } else
         ASSERT(isMarked(cell));
@@ -560,7 +564,23 @@ void Heap::reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(const JSCell*
     // get scanned again. If we lose then someone else will barrier the object again. That would
     // be unfortunate but not the end of the world.
     reportExtraMemoryVisited(size);
+    return true;
 }
+
+#if USE(BUN_JSC_ADDITIONS)
+void Heap::reportArrayBufferMemoryAllocated(size_t bytes, const JSCell* cell)
+{
+    if (bytes <= minExtraMemory)
+        return;
+    didAllocateArrayBufferMemory(bytes);
+    didAllocate(bytes);
+    if (cell && isWithinThreshold(cell->cellState(), barrierThreshold())) {
+        if (reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(cell, bytes))
+            reportArrayBufferMemoryVisited(0, bytes);
+    }
+    collectIfNecessaryOrDefer();
+}
+#endif
 
 void Heap::reportExtraMemoryAllocatedSlowCase(GCDeferralContext* deferralContext, const JSCell* cell, size_t size)
 {
@@ -576,6 +596,9 @@ void Heap::reportExtraMemoryAllocatedSlowCase(GCDeferralContext* deferralContext
     if constexpr (validateDFGDoesGC)
         vm().verifyCanGC();
 
+#if USE(BUN_JSC_ADDITIONS)
+    m_nonArrayBufferBytesAllocated += size;
+#endif
     m_extraMemoryBytesSinceLastCollectionCheck += size;
     bool shouldCheckForCollection = m_extraMemoryBytesSinceLastCollectionCheck >= MarkedBlock::blockSize;
     if (shouldCheckForCollection) {
@@ -674,10 +697,17 @@ bool Heap::unprotect(JSValue k)
 void Heap::addReference(JSCell* cell, ArrayBuffer* buffer, size_t bytesAlreadyReported)
 {
     ASSERT(cell->heap() == this);
+#if USE(BUN_JSC_ADDITIONS)
+    buffer->accountMemory(m_arrayBufferMemoryAccount);
+#endif
     if (m_arrayBuffers.addReference(cell, buffer)) {
         size_t size = buffer->gcSizeEstimateInBytes();
         ASSERT(bytesAlreadyReported <= size);
+#if USE(BUN_JSC_ADDITIONS)
+        reportArrayBufferMemoryAllocated(size - std::min(size, bytesAlreadyReported), nullptr);
+#else
         reportExtraMemoryAllocatedSlowCase(nullptr, nullptr, size - std::min(size, bytesAlreadyReported));
+#endif
     }
 }
 
@@ -993,6 +1023,21 @@ void Heap::prepareForAllocation()
     m_objectSpace.prepareForAllocation();
     updateAllocationLimits();
 
+#if USE(BUN_JSC_ADDITIONS)
+    size_t extraBuffers = m_arrayBuffers.size() + m_externalArrayBufferBytesVisited.load(std::memory_order_relaxed);
+    size_t extra = extraMemorySize();
+    m_nonArrayBufferExtraMemoryAfterLastCollection = extra - std::min(extra, extraBuffers);
+    m_nativeExternalMemoryAfterLastCollection = m_nonArrayBufferExtraMemoryAfterLastCollection;
+#if ENABLE(RESOURCE_USAGE)
+    m_nativeExternalMemoryAfterLastCollection += externalMemorySize();
+#endif
+    size_t buffers = arrayBufferGCMemorySize();
+    m_jsHeapSizeAfterLastCollection = m_sizeAfterLastCollect - std::min(m_sizeAfterLastCollect, buffers);
+    m_bytesAllocatedAtLastReportingCollection = totalBytesAllocated();
+    m_arrayBufferBytesAllocatedAtLastCollection = m_arrayBufferBytesAllocated;
+    m_nonArrayBufferBytesAllocatedAtLastCollection = m_nonArrayBufferBytesAllocated;
+#endif
+
     if (m_verifier) [[unlikely]] {
         m_verifier->trimDeadCells();
         m_verifier->verify(HeapVerifier::Phase::AfterGC);
@@ -1006,14 +1051,67 @@ size_t Heap::objectCount()
 
 size_t Heap::arrayBufferSize()
 {
+#if USE(BUN_JSC_ADDITIONS)
+    return allocatedArrayBufferSize() + m_unmaterializedArrayBufferBytes;
+#else
     return m_arrayBuffers.size();
+#endif
 }
+
+#if USE(BUN_JSC_ADDITIONS)
+void Heap::addUnmaterializedArrayBufferView(JSArrayBufferView* view)
+{
+    ASSERT(!view->hasArrayBuffer());
+    view->setNextUnmaterializedView(m_unmaterializedArrayBufferViews);
+    m_unmaterializedArrayBufferViews = view;
+    m_unmaterializedArrayBufferBytes += view->byteLengthRaw();
+}
+
+void Heap::didAllocateArrayBufferAuxiliaryMemory(Subspace* subspace, size_t bytes)
+{
+    if (subspace == &typedArrayAuxiliarySpace)
+        didAllocateArrayBufferMemory(bytes);
+}
+
+void Heap::addArrayBufferAuxiliaryCapacity(Subspace* subspace, size_t bytes)
+{
+    if (subspace == &typedArrayAuxiliarySpace)
+        m_arrayBufferAuxiliaryCapacity.fetch_add(bytes, std::memory_order_relaxed);
+}
+
+void Heap::removeArrayBufferAuxiliaryCapacity(Subspace* subspace, size_t bytes)
+{
+    if (subspace == &typedArrayAuxiliarySpace)
+        m_arrayBufferAuxiliaryCapacity.fetch_sub(bytes, std::memory_order_relaxed);
+}
+
+size_t Heap::externalMemorySizeForReporting()
+{
+    return m_nativeExternalMemoryAfterLastCollection
+        + (m_nonArrayBufferBytesAllocated - m_nonArrayBufferBytesAllocatedAtLastCollection)
+        + heldArrayBufferSize() + m_unmaterializedArrayBufferBytes + arrayBufferObjectSize();
+}
+
+size_t Heap::jsHeapSizeForReporting()
+{
+    uint64_t allocated = totalBytesAllocated() - m_bytesAllocatedAtLastReportingCollection;
+    uint64_t buffers = m_arrayBufferBytesAllocated - m_arrayBufferBytesAllocatedAtLastCollection;
+    return m_jsHeapSizeAfterLastCollection + allocated - std::min(allocated, buffers);
+}
+
+size_t Heap::jsHeapCapacityForReporting()
+{
+    size_t buffers = m_arrayBufferAuxiliaryCapacity.load(std::memory_order_relaxed);
+    size_t total = m_objectSpace.capacity();
+    return std::max(total - std::min(total, buffers) + m_nonArrayBufferExtraMemoryAfterLastCollection, jsHeapSizeForReporting());
+}
+#endif
 
 size_t Heap::extraMemorySize()
 {
     // FIXME: Change this to use SaturatingArithmetic when available.
     // https://bugs.webkit.org/show_bug.cgi?id=170411
-    CheckedSize checkedTotal = m_extraMemorySize;
+    CheckedSize checkedTotal = m_extraMemorySize.loadRelaxed();
     checkedTotal += m_deprecatedExtraMemorySize;
     checkedTotal += m_arrayBuffers.size();
     size_t total = std::numeric_limits<size_t>::max();
@@ -2339,14 +2437,14 @@ void Heap::willStartCollection(CollectionScope scope)
         m_shouldDoFullCollection = false;
         dataLogIf(Options::logGC(), "FullCollection, ");
         m_sizeBeforeLastFullCollect = m_sizeAfterLastCollect + totalBytesAllocatedThisCycle();
-        m_extraMemorySize = 0;
+        m_extraMemorySize.storeRelaxed(0);
         m_deprecatedExtraMemorySize = 0;
 #if USE(BUN_JSC_ADDITIONS)
-        if (m_embedderMaxHeapSize)
-            m_workerTypedArrayBytesVisited.store(0);
+        m_fastArrayBufferBytesVisited.store(0, std::memory_order_relaxed);
+        m_externalArrayBufferBytesVisited.store(0, std::memory_order_relaxed);
 #endif
 #if ENABLE(RESOURCE_USAGE)
-        m_externalMemorySize = 0;
+        m_externalMemorySize.storeRelaxed(0);
 #endif
         m_shouldDoOpportunisticFullCollection = false;
         if (m_fullActivityCallback)
@@ -2407,6 +2505,26 @@ void Heap::reconcileWeakGCHashTables()
 void Heap::sweepArrayBuffers()
 {
     m_arrayBuffers.sweep(vm(), collectionScope().value_or(CollectionScope::Full));
+#if USE(BUN_JSC_ADDITIONS)
+    JSArrayBufferView* previous = nullptr;
+    // Surviving views are old after each sweep. Eden cannot reclaim that suffix.
+    auto* end = collectionScope() == CollectionScope::Full ? nullptr : m_oldUnmaterializedArrayBufferViews;
+    auto* view = m_unmaterializedArrayBufferViews;
+    while (view != end) {
+        auto* next = view->nextUnmaterializedView();
+        if (view->hasArrayBuffer() || !isMarked(view)) {
+            if (!view->hasArrayBuffer())
+                m_unmaterializedArrayBufferBytes -= view->byteLengthRaw();
+            if (previous)
+                previous->setNextUnmaterializedView(next);
+            else
+                m_unmaterializedArrayBufferViews = next;
+        } else
+            previous = view;
+        view = next;
+    }
+    m_oldUnmaterializedArrayBufferViews = m_unmaterializedArrayBufferViews;
+#endif
 }
 
 void Heap::snapshotUnswept()
@@ -2422,6 +2540,11 @@ void Heap::pruneUnusedSourceProviderCaches()
 }
 
 #if USE(BUN_JSC_ADDITIONS)
+size_t Heap::arrayBufferGCMemorySize() const
+{
+    return m_arrayBuffers.size() + m_fastArrayBufferBytesVisited.load(std::memory_order_relaxed) + m_externalArrayBufferBytesVisited.load(std::memory_order_relaxed);
+}
+
 void Heap::setWorkerHeapLimits(size_t heapBytes, size_t edenBytes)
 {
     m_embedderMaxHeapSize = heapBytes;
@@ -2528,8 +2651,7 @@ void Heap::updateAllocationLimits()
     m_sizeAfterLastCollect = currentHeapSize;
 #if USE(BUN_JSC_ADDITIONS)
     if (m_embedderMaxHeapSize && m_collectionScope == CollectionScope::Full) {
-        // Count vectors during tracing, including allocations emitted inline by the JIT.
-        size_t buffers = arrayBufferSize() + m_workerTypedArrayBytesVisited.load();
+        size_t buffers = arrayBufferGCMemorySize();
         m_sizeAfterLastFullCollectExcludingArrayBuffers = currentHeapSize > buffers ? currentHeapSize - buffers : 0;
         m_heapLimitExceeded = m_embedderMaxHeapSize && m_sizeAfterLastFullCollectExcludingArrayBuffers > m_embedderMaxHeapSize;
     }
@@ -2831,10 +2953,9 @@ bool Heap::currentThreadIsDoingGCWork()
 
 void Heap::reportExtraMemoryVisited(size_t size)
 {
-    size_t* counter = &m_extraMemorySize;
-    
+    // These byte totals do not publish objects; GC phase transitions provide ordering.
     for (;;) {
-        size_t oldSize = *counter;
+        size_t oldSize = m_extraMemorySize.loadRelaxed();
         // FIXME: Change this to use SaturatingArithmetic when available.
         // https://bugs.webkit.org/show_bug.cgi?id=170411
         CheckedSize checkedNewSize = oldSize;
@@ -2842,7 +2963,7 @@ void Heap::reportExtraMemoryVisited(size_t size)
         size_t newSize = std::numeric_limits<size_t>::max();
         if (!checkedNewSize.hasOverflowed()) [[likely]]
             newSize = checkedNewSize.value();
-        if (WTF::atomicCompareExchangeWeakRelaxed(counter, oldSize, newSize))
+        if (m_extraMemorySize.compareExchangeWeakRelaxed(oldSize, newSize))
             return;
     }
 }
@@ -2850,11 +2971,9 @@ void Heap::reportExtraMemoryVisited(size_t size)
 #if ENABLE(RESOURCE_USAGE)
 void Heap::reportExternalMemoryVisited(size_t size)
 {
-    size_t* counter = &m_externalMemorySize;
-
     for (;;) {
-        size_t oldSize = *counter;
-        if (WTF::atomicCompareExchangeWeakRelaxed(counter, oldSize, oldSize + size))
+        size_t oldSize = m_externalMemorySize.loadRelaxed();
+        if (m_externalMemorySize.compareExchangeWeakRelaxed(oldSize, oldSize + size))
             return;
     }
 }

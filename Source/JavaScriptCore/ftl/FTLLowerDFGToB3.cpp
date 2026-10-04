@@ -11381,7 +11381,7 @@ IGNORE_CLANG_WARNINGS_END
                 m_out.constIntPtr(~static_cast<intptr_t>(7)));
         }
 
-        LValue allocator = allocatorForSize(vm().primitiveGigacageAuxiliarySpace(), byteSize, slowCase);
+        LValue allocator = allocatorForSize(vm().typedArrayAuxiliarySpace(), byteSize, slowCase);
         LValue storage = allocateHeapCell(allocator, slowCase);
 
         LValue zeroFillEnd = nullptr;
@@ -11420,7 +11420,17 @@ IGNORE_CLANG_WARNINGS_END
         m_out.store32(m_out.castToInt32(size64Bits), fastResultValue, m_heaps.JSArrayBufferView_length);
         m_out.store32(m_out.int32Zero, fastResultValue, m_heaps.JSArrayBufferView_byteOffset);
 #endif
+#if USE(BUN_JSC_ADDITIONS)
+        auto listAddress = m_out.absolute(vm().heap.addressOfUnmaterializedArrayBufferViews());
+        auto bytesAddress = m_out.absolute(vm().heap.addressOfUnmaterializedArrayBufferBytes());
+        auto modeAndNext = m_out.bitOr(m_out.loadPtr(listAddress), m_out.constInt64(JSArrayBufferView::fastModeBits()));
+        // The packed store initializes mode too, so mode loads must alias it.
+        m_out.storePtr(modeAndNext, m_out.address(m_heaps.JSArrayBufferView_mode, fastResultValue, JSArrayBufferView::offsetOfModeAndNext()));
+        m_out.storePtr(fastResultValue, listAddress);
+        m_out.storePtr(m_out.add(m_out.loadPtr(bytesAddress), byteSizeWithoutAdjustment), bytesAddress);
+#else
         m_out.store32As8(m_out.constInt32(FastTypedArray), fastResultValue, m_heaps.JSArrayBufferView_mode);
+#endif
 
         mutatorFence();
         ValueFromBlock fastResult = m_out.anchor(fastResultValue);
@@ -15628,7 +15638,7 @@ IGNORE_CLANG_WARNINGS_END
                     m_out.constInt32(LastTypedArrayType - FirstTypedArrayType));
                 m_out.branch(isView, usually(modeCase), rarely(slowCase));
 
-                // Only a JSArrayBufferView has m_mode; loading it from a smaller cell (JSArrayBuffer,
+                // Only a JSArrayBufferView has the mode word; loading it from a smaller cell (JSArrayBuffer,
                 // JSString, JSBigInt, ...) reads past the cell and can fault off the end of its MarkedBlock.
                 m_out.appendTo(modeCase, vectorCase);
                 LValue mode = m_out.load8ZeroExt32(value, m_heaps.JSArrayBufferView_mode);

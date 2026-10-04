@@ -201,10 +201,10 @@ inline void SlotVisitor::reportExternalMemoryVisited(size_t size)
 #endif
 
 #if USE(BUN_JSC_ADDITIONS)
-inline void SlotVisitor::reportWorkerTypedArrayBytesVisited(size_t bytes)
+inline void SlotVisitor::reportArrayBufferMemoryVisited(size_t size)
 {
-    if (m_isFirstVisit && m_currentCell->heap()->hasEmbedderHeapLimit() && m_currentCell->heap()->collectionScope() == CollectionScope::Full)
-        m_currentCell->heap()->reportWorkerTypedArrayBytesVisited(bytes);
+    if (m_isFirstVisit)
+        m_currentCell->heap()->reportArrayBufferMemoryVisited(0, size);
 }
 #endif
 
