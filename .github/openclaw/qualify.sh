@@ -23,6 +23,7 @@ bootstrap=$(command -v bun)
 python3 "$inputs/stage-local-artifact.py" "$ARTIFACT_DIR/bun-webkit-linux-amd64.tar.gz" --version "$SOURCE_SHA" --output "$QUALIFICATION_DIR/candidate-input"
 for arm in baseline candidate; do
   if test "$arm" = candidate; then
+    git apply "$inputs/patches/002-upstream-mimalloc.patch"
     for patch in "$inputs/patches/001-proxy.patch" "$inputs"/patches/00[3-7]-*.patch; do
       git apply --exclude=CHANGELOG.md --exclude='docs/*' --exclude='test/js/node/worker_threads/*' "$patch"
     done
