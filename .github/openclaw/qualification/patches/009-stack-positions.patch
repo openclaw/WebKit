@@ -862,6 +862,19 @@ index 27805cb4..42f6196b 100644
      ]);
  
      // lineOffset and columnOffset move the first line. columnOffset does not move later lines.
+diff --git a/test/js/bun/sourcemap/internal-sourcemap-roundtrip.test.ts b/test/js/bun/sourcemap/internal-sourcemap-roundtrip.test.ts
+index ba26e511..e5d1ebd8 100644
+--- a/test/js/bun/sourcemap/internal-sourcemap-roundtrip.test.ts
++++ b/test/js/bun/sourcemap/internal-sourcemap-roundtrip.test.ts
+@@ -486,7 +486,7 @@ describe.concurrent("sourcemap of a source with a truncated trailing UTF-8 seque
+     const map = await Bun.file(path.join(String(dir), "out", "in.js.map")).json();
+     expect(map).toMatchObject({
+       sources: ["../in.js"],
+-      mappings: ";AAAA,QAAQ,IAAI,CAAC;",
++      mappings: ";AAAA,QAAQ,GAAG,CAAC,CAAC;",
+     });
+   });
+ });
 diff --git a/test/js/bun/sourcemap/internal-sourcemap.test.ts b/test/js/bun/sourcemap/internal-sourcemap.test.ts
 index b8efdae7..63c78056 100644
 --- a/test/js/bun/sourcemap/internal-sourcemap.test.ts
