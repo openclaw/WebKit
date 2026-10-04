@@ -1,0 +1,173 @@
+{
+  "version": "1600131e46b5af48bbda3559af8d8a3327230b6e",
+  "artifacts": {
+    "bun-webkit-freebsd-amd64-debug.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-freebsd-amd64-debug.tar.gz",
+      "sha256": "d7500dd58ba14be31e24346af6b40880e14b0b834fc788da66c9779f65a0c6b4"
+    },
+    "bun-webkit-freebsd-amd64-lto.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-freebsd-amd64-lto.tar.gz",
+      "sha256": "5a5183a3e8e08321c05df5cbf6811cfa8f64be8096bd7767f132623d88ad64b2"
+    },
+    "bun-webkit-freebsd-amd64.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-freebsd-amd64.tar.gz",
+      "sha256": "1a63633b67e48073a33e2a90aa2d39a1a3abdb18774e31a5c277fc4891367205"
+    },
+    "bun-webkit-freebsd-arm64-debug.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-freebsd-arm64-debug.tar.gz",
+      "sha256": "150005639bde9f9a2b9604b4f3df343781c7447caac78d13ae2587e6883726b9"
+    },
+    "bun-webkit-freebsd-arm64-lto.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-freebsd-arm64-lto.tar.gz",
+      "sha256": "027fea2d2cb393ae0bb2ba8d171de34efdecc8f1814973cd8ba1865480a689d2"
+    },
+    "bun-webkit-freebsd-arm64.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-freebsd-arm64.tar.gz",
+      "sha256": "9108a5b62485a32cdbe2dddb1c73eb2a1f05fdb9d05e756ff639000f18036e45"
+    },
+    "bun-webkit-linux-amd64-android-debug.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-amd64-android-debug.tar.gz",
+      "sha256": "eeb4544ced5b5154a3ebf0b9647a1e3fe281ac4d2a9674203780ab4b7b580221"
+    },
+    "bun-webkit-linux-amd64-android-lto.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-amd64-android-lto.tar.gz",
+      "sha256": "3ca2749cc24e5e7345a13df7af524a91bd115324d05447995f72dcd3dcdfa753"
+    },
+    "bun-webkit-linux-amd64-android.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-amd64-android.tar.gz",
+      "sha256": "35fb8236665bbdb3b29856326b6e76b98b13253895ce9eac1f769183b274e4d5"
+    },
+    "bun-webkit-linux-amd64-asan.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-amd64-asan.tar.gz",
+      "sha256": "47b897c98be6bef4bbc1d2d8f161690034cf96427ea80b8023bbc8e90944b725"
+    },
+    "bun-webkit-linux-amd64-debug-asan.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-amd64-debug-asan.tar.gz",
+      "sha256": "a6f2d94276ca03950e10c197c432d5d9ead952ec6ea17e6c804a6424fe26196c"
+    },
+    "bun-webkit-linux-amd64-debug.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-amd64-debug.tar.gz",
+      "sha256": "6be78f7676a2ffa54bbb4ed17e70af6bc9c1e83bbefc5f154fb9eb36bc321b46"
+    },
+    "bun-webkit-linux-amd64-lto.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-amd64-lto.tar.gz",
+      "sha256": "4f05e212538c76654b07fc264c69adf4307baf0e35a6a30479c30b4e4d6c2d34"
+    },
+    "bun-webkit-linux-amd64-musl-debug.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-amd64-musl-debug.tar.gz",
+      "sha256": "b2a6b0b485e3049d3e707b3b5e3ddd537e46006b48f16e0c43bfbf988d8a8b73"
+    },
+    "bun-webkit-linux-amd64-musl-lto.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-amd64-musl-lto.tar.gz",
+      "sha256": "a915cf6892912e1287902501a4ef7e4d31af9f997fe5c87bd34268540ee7c9d2"
+    },
+    "bun-webkit-linux-amd64-musl.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-amd64-musl.tar.gz",
+      "sha256": "aff06ccb5e97123f3e0fd5ba1e8d0a08ac5c7cf6ce6c0caff9fef23ca520d5cb"
+    },
+    "bun-webkit-linux-amd64.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-amd64.tar.gz",
+      "sha256": "afd61497dca231d73d712b6496bf700d331ffb7aa2062ea606127ce6c9d81be0"
+    },
+    "bun-webkit-linux-arm64-android-debug.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-arm64-android-debug.tar.gz",
+      "sha256": "318e6f1451627d41299ba9e4e5ae3fe3263c65e2749fb6b21e0061fc156d19c6"
+    },
+    "bun-webkit-linux-arm64-android-lto.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-arm64-android-lto.tar.gz",
+      "sha256": "8feed910f4a7f9b017a6e8bd8ff9e6ab813a95373d66a4d8129c7bd91c64ef57"
+    },
+    "bun-webkit-linux-arm64-android.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-arm64-android.tar.gz",
+      "sha256": "3eb8705074910082b24dc9349a05f78ed89ee8dc0e65fc5a8f01f57435acee48"
+    },
+    "bun-webkit-linux-arm64-asan.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-arm64-asan.tar.gz",
+      "sha256": "0e4c6fcca7c786af232acac19339700587b2641603a3d36f9d9351bd9a7d3121"
+    },
+    "bun-webkit-linux-arm64-debug-asan.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-arm64-debug-asan.tar.gz",
+      "sha256": "b4175f9b0bbc1bc4f897afdf6eef30c1691a580df44977d566a0818a21bd3267"
+    },
+    "bun-webkit-linux-arm64-debug.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-arm64-debug.tar.gz",
+      "sha256": "d93182aa87e9c70bb4c4a6982e502b2281c48b0692ca83bd8b291c6dbfd60004"
+    },
+    "bun-webkit-linux-arm64-lto.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-arm64-lto.tar.gz",
+      "sha256": "f35d9c4ded56b9cbc29f3b871541850bf6dd76e19160bfe972f7a86e448c4360"
+    },
+    "bun-webkit-linux-arm64-musl-debug.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-arm64-musl-debug.tar.gz",
+      "sha256": "320fc966ed8e9da0adc70dcfe2b932e31530577366afd975dcd75faea4a3f3a9"
+    },
+    "bun-webkit-linux-arm64-musl-lto.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-arm64-musl-lto.tar.gz",
+      "sha256": "f19ce5d2242b20fd02ff7ec383b56cca7d05a5d796acaad8fb5d54635cf09975"
+    },
+    "bun-webkit-linux-arm64-musl.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-arm64-musl.tar.gz",
+      "sha256": "5a6d5ed9f6bdb7ed875a641d4d5adab57f66e8cab57dcf80da37f0b077bef4c9"
+    },
+    "bun-webkit-linux-arm64.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-linux-arm64.tar.gz",
+      "sha256": "f2333bd2e534ce5ac0f1ec29cddfc1262e9b3921143ba4ef2f58a48d9e09e925"
+    },
+    "bun-webkit-macos-amd64-debug.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-macos-amd64-debug.tar.gz",
+      "sha256": "c59b0dd68a9c9ce83641f9cde4411ad202c49c546791dafd0b006db710b7e9f6"
+    },
+    "bun-webkit-macos-amd64-lto.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-macos-amd64-lto.tar.gz",
+      "sha256": "519539459157aaa83b6e065f7a222302b817fef5ab1f95c57b6897fa48b27c78"
+    },
+    "bun-webkit-macos-amd64.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-macos-amd64.tar.gz",
+      "sha256": "8eb444f0f889bba51f94393c4ff6907aa2b3319633ec00ea67c0bc6a56588bb3"
+    },
+    "bun-webkit-macos-arm64-asan.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-macos-arm64-asan.tar.gz",
+      "sha256": "e7c4197796158f9c9527d9e0e00f5a3c3585de847e6320745a16ebc44ed7b143"
+    },
+    "bun-webkit-macos-arm64-debug-asan.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-macos-arm64-debug-asan.tar.gz",
+      "sha256": "062ed9c1608a780f16cb71b20b3a731d821240a24ca638a4f15d8ea05b7a3205"
+    },
+    "bun-webkit-macos-arm64-debug.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-macos-arm64-debug.tar.gz",
+      "sha256": "8752c913fe69e460a642884f0c914bc419727ede0a4f6bd7cb2d675df3c782a0"
+    },
+    "bun-webkit-macos-arm64-lto.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-macos-arm64-lto.tar.gz",
+      "sha256": "cbf77b8aa26748696a10fa093087fa3c22a8d172eddef63edd4cc00cf27cf14a"
+    },
+    "bun-webkit-macos-arm64.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-macos-arm64.tar.gz",
+      "sha256": "12f17b6f8cb8b503edc2791fd22ac2a4273a3dfaba67c9931e6cdd3e194babf2"
+    },
+    "bun-webkit-windows-amd64-asan.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-windows-amd64-asan.tar.gz",
+      "sha256": "6f7e2880591505c50e0e34a314874afc72b7213314feceed68a18259abd00866"
+    },
+    "bun-webkit-windows-amd64-debug.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-windows-amd64-debug.tar.gz",
+      "sha256": "d67b3b155836e371ed4a640d20f6f77cf92776d073133c40c29ad731246ab366"
+    },
+    "bun-webkit-windows-amd64-lto.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-windows-amd64-lto.tar.gz",
+      "sha256": "031cd72ffd47021861a75ed9e8f0220ffe6167cfcf5da568f978ec8ffca0ab38"
+    },
+    "bun-webkit-windows-amd64.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-windows-amd64.tar.gz",
+      "sha256": "e2d7c7a70cba21e51e6f360676d363142f8fa490467889c2fd496dd3a136fafc"
+    },
+    "bun-webkit-windows-arm64-debug.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-windows-arm64-debug.tar.gz",
+      "sha256": "bd3593e18db6b7882504a990e55db44605aee95370656bf439e755b55010ad6a"
+    },
+    "bun-webkit-windows-arm64.tar.gz": {
+      "url": "https://github.com/oven-sh/WebKit/releases/download/autobuild-1600131e46b5af48bbda3559af8d8a3327230b6e/bun-webkit-windows-arm64.tar.gz",
+      "sha256": "d19b9ba8fcf2c5d5aff802cc520d81b088dbfac96214af83437496560b8506db"
+    }
+  }
+}
