@@ -59,7 +59,7 @@ index d4ea37ea..92299d62 100644
    this.exports = moduleExports ?? namespace;
  }
 diff --git a/src/jsc/bindings/JSCommonJSModule.cpp b/src/jsc/bindings/JSCommonJSModule.cpp
-index a043ef3c..4a11ee7c 100644
+index a043ef3c..a3d89187 100644
 --- a/src/jsc/bindings/JSCommonJSModule.cpp
 +++ b/src/jsc/bindings/JSCommonJSModule.cpp
 @@ -1188,7 +1188,8 @@ void populateESMExports(
@@ -68,7 +68,7 @@ index a043ef3c..4a11ee7c 100644
          bool hasESModuleMarker = false;
 -        if (!ignoreESModuleAnnotation) {
 +        // A native namespace forwarded by CJS keeps its default binding inside that namespace.
-+        if (!ignoreESModuleAnnotation && !jsDynamicCast<JSModuleNamespaceObject*>(exports)) {
++        if (!ignoreESModuleAnnotation && !dynamicDowncast<JSModuleNamespaceObject>(exports)) {
              PropertySlot slot(exports, PropertySlot::InternalMethodType::VMInquiry, &vm);
              auto has = exports->getPropertySlot(globalObject, esModuleMarker, slot);
              RETURN_IF_EXCEPTION(scope, );
