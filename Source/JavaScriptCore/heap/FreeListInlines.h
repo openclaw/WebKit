@@ -55,9 +55,9 @@ ALWAYS_INLINE HeapCell* FreeList::allocateWithCellSize(const Invocable<void()> a
 
 void FreeList::forEachInterval(const Invocable<void(char*, char*)> auto& func) const
 {
-    FreeCell* cell = nextInterval();
+    FreeCell* cell = m_sampleStart ? m_sampleNext : nextInterval();
     char* intervalStart = m_intervalStart;
-    char* intervalEnd = m_intervalEnd;
+    char* intervalEnd = m_sampleStart ? m_sampleEnd : m_intervalEnd;
     // An interval never spans more than one MarkedBlock payload. blockSize is
     // 16 KB on most platforms, but 64 KB where CeilingOnPageSize is 64 KB
     // (e.g. Linux ARM64) — a hardcoded 16 KB bound fires spuriously there.

@@ -101,3 +101,32 @@ use an old Bun executable with headers/libraries from another engine ABI.
 Pull requests run the read-only Linux engine check. It builds the unchanged native lane, verifies the JSC namespace stress results, and builds Bun with the matching qualification adapters before running the fork selection and namespace regressions. It has no publication job.
 
 The namespace adapter in `.github/openclaw/qualification/patches/008-namespace.patch` accompanies the engine facade API. Keep it in sync with the matching Bun integration until that integration becomes the qualification baseline. The native engine change and Bun consumer must be rebuilt together; a new engine release alone does not remove Bun's old namespace prototype.
+
+## Allocation sampling
+
+The allocation sampler is owned by each VM's `HeapProfiler`. Embedders call
+`startAllocationSampling(interval, includeMajorGC, includeMinorGC)`,
+`allocationSamplingProfile()`, and `stopAllocationSampling()` with the VM API
+lock held. The returned JSON has a `head` allocation-site tree with weighted
+`selfSize` estimates and `samples` carrying node IDs, byte estimates, and unique
+ordinals. Stack frames identify function definitions and are limited to 128.
+The exponential byte-sampling model follows V8's sampling heap profiler.
+
+The sampler observes GC cells, newly reported string backing storage, and auxiliary storage, including generated
+free-list allocations, precise allocations, and growth. Other native allocations and external buffer
+storage are outside this measurement. Sampling records do not strongly retain
+objects or executable code. Collection reconciles addresses before sweeping;
+the major/minor flags select whether dead samples remain as cumulative records.
+The existing free-list allocation fast paths are unchanged when sampling is disabled.
+Bun's inspector adapter requires a joint rebuild against this engine.
+
+The read-only **OpenClaw engine checks** job also exercises the sampler with
+default tiers, the interpreter, baseline JIT, and eager FTL, using the same Linux
+artifact as namespace qualification. It does not invoke artifact publication.
+The separate artifact workflow remains the coordinator's build/test/publish
+entrypoint.
+
+## Unreleased
+
+- Add real byte-based JSC heap allocation sampling with weighted allocating-stack profiles and independent major/minor collection inclusion.
+- Check allocation sampling across interpreter and JIT tiers before merging engine pull requests.

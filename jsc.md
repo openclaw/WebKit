@@ -5,6 +5,8 @@
 - Fix `Intl.Segmenter` containing lookups around surrogate pairs so segment boundaries and word status agree with iteration.
 - Expose the require(esm) `__esModule` marker as an own enumerable namespace property while preserving unmarked imports and live bindings. Adapts [oven-sh/WebKit#279](https://github.com/oven-sh/WebKit/pull/279). Thanks @robobun!
 
+- Add per-VM byte-based heap allocation sampling including string backing storage, with weighted JavaScript stack trees, weak sampled-cell tracking, and separate major/minor collection inclusion. C++ and generated free-list allocation fast paths remain unchanged when disabled.
+
 This changelog covers updates to JavaScriptCore in Bun's WebKit fork, from `9a2cc42ae1bf` to `7bc2f97e2835`.
 
 ## Performance
