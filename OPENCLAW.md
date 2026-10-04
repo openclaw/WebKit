@@ -128,5 +128,13 @@ entrypoint.
 
 ## Unreleased
 
+- Keep syntax-selected stack positions separate from exception ranges for calls, constructors, property reads, and async continuations. Preserve the positions across bytecode rewriting, optimization, and cache replay.
+
 - Add real byte-based JSC heap allocation sampling with weighted allocating-stack profiles and independent major/minor collection inclusion.
 - Check allocation sampling across interpreter and JIT tiers before merging engine pull requests.
+
+## Stack positions
+
+`CodeBlock::callSitePositionForBytecodeIndex` returns an optional absolute source offset for an exact instruction or async resume label. Stack readers use this position while exception expression ranges and debugger line tables retain their existing divots. RareData owns the two sparse vectors, including decoded cache entries; the bytecode cache revision prevents older layouts from being reused.
+
+Bun must be rebuilt with its matching stack-reader adapter. It must also preserve built-in error constructor syntax: rewriting `new Error()` as `Error()` changes the position and allows a returning arrow to become a proper tail call. The engine's proper-tail-call behavior is unchanged. The integration continues @robobun’s upstream Bun source-position work in [#35179](https://github.com/oven-sh/bun/pull/35179), [#37396](https://github.com/oven-sh/bun/pull/37396), and [#41580](https://github.com/oven-sh/bun/pull/41580).

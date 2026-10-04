@@ -81,6 +81,8 @@ bool UnlinkedCodeBlockGenerator::finalize(std::unique_ptr<JSInstructionStream> i
                 || !m_unlinkedStringSwitchJumpTables.isEmpty()
                 || !m_typeProfilerInfoMap.isEmpty()
                 || !m_opProfileControlFlowBytecodeOffsets.isEmpty()
+                || !m_callSitePositions.isEmpty()
+                || !m_asyncResumePositions.isEmpty()
                 || !m_bitVectors.isEmpty()
                 || !m_constantIdentifierSets.isEmpty())
                 m_codeBlock->createRareDataIfNecessary(locker);
@@ -92,6 +94,8 @@ bool UnlinkedCodeBlockGenerator::finalize(std::unique_ptr<JSInstructionStream> i
             m_codeBlock->m_rareData->m_unlinkedStringSwitchJumpTables = WTF::move(m_unlinkedStringSwitchJumpTables);
             m_codeBlock->m_rareData->m_typeProfilerInfoMap = WTF::move(m_typeProfilerInfoMap);
             m_codeBlock->m_rareData->m_opProfileControlFlowBytecodeOffsets = WTF::move(m_opProfileControlFlowBytecodeOffsets);
+            m_codeBlock->m_rareData->m_callSitePositions = WTF::move(m_callSitePositions);
+            m_codeBlock->m_rareData->m_asyncResumePositions = WTF::move(m_asyncResumePositions);
             m_codeBlock->m_rareData->m_bitVectors = WTF::move(m_bitVectors);
             m_codeBlock->m_rareData->m_constantIdentifierSets = WTF::move(m_constantIdentifierSets);
         }
@@ -137,6 +141,18 @@ void UnlinkedCodeBlockGenerator::applyModification(BytecodeRewriter& rewriter)
             adjustedTypeProfilerInfoMap.set(rewriter.adjustAbsoluteOffset(entry.key), entry.value);
         m_typeProfilerInfoMap.swap(adjustedTypeProfilerInfoMap);
     }
+
+    m_callSitePositions.removeAllMatching([&](auto& position) {
+        auto offset = rewriter.adjustInstructionOffset(position.first);
+        if (!offset)
+            return true;
+        position.first = *offset;
+        return false;
+    });
+
+    // Async stack frames use the state switch's resume label, including injected restore instructions.
+    for (auto& position : m_asyncResumePositions)
+        position.first = rewriter.adjustAbsoluteOffset(position.first);
 
     Vector<unsigned> bytecodeOffsetAdjustments;
     rewriter.forEachLabelPoint([&] (int32_t bytecodeOffset) {
