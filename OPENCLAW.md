@@ -54,6 +54,11 @@ Batch 1 is published from `openclaw/batch-1` so concurrently reviewed batch-2
 engine changes can land on `openclaw/main` without entering this release. Both
 branches require the same protected environment and full-SHA/green-job checks.
 
+Pull requests run **OpenClaw engine checks**, a read-only Linux build using the same
+lane recipe and Bun qualification gate. It also runs the ArrayBuffer accounting
+and confirmed parked-waiter inspection regression with LLInt, DFG, FTL and
+concurrent GC. This workflow provides the pre-merge check; it cannot publish.
+
 After a green build/test dispatch, dispatch the same full SHA with `publish:
 true`. This repeats the build and qualification, then waits at the protected
 `openclaw-artifacts` environment. Only the publication job has repository write
@@ -126,12 +131,25 @@ artifact as namespace qualification. It does not invoke artifact publication.
 The separate artifact workflow remains the coordinator's build/test/publish
 entrypoint.
 
+## ArrayBuffer ownership and worker snapshots
+
+The accounting adapter in `.github/openclaw/qualification/patches/010-arraybuffer-accounting.patch`
+uses the engine's allocation-origin and holder accounts for process, V8 and worker
+statistics. The qualification gate exercises its Node-compatible ownership cases
+and worker inspections in addition to the existing fork selection. Keep the adapter
+in sync with the Bun integration until that integration becomes the qualification
+baseline. Engine and Bun headers and libraries must be rebuilt together.
+
 ## Unreleased
 
 - Keep syntax-selected stack positions separate from exception ranges for calls, constructors, property reads, and async continuations. Preserve the positions across bytecode rewriting, optimization, and cache replay.
 
 - Add real byte-based JSC heap allocation sampling with weighted allocating-stack profiles and independent major/minor collection inclusion.
 - Check allocation sampling across interpreter and JIT tiers before merging engine pull requests.
+- Preserve ArrayBuffer allocator attribution across worker transfers, report fresh holder external bytes, and exclude backing storage from JS heap statistics and worker limits; builds on oven-sh/WebKit#303, thanks @robobun.
+- Inspect worker memory on its owning VM thread during JavaScript execution and atomic waits; the matching Bun reporting adapter must ship with this engine.
+- Synchronize the parallel-helper activity assertion with task claims and completion; fixes a race exposed by ThreadSanitizer during accounting qualification.
+- Use atomic loads and resets for visited extra/external-memory totals updated by parallel markers.
 
 ## Stack positions
 

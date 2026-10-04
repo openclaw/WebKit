@@ -93,6 +93,7 @@
 #include "VMInlines.h"
 #include "VMManager.h"
 #include "VMTrapsInlines.h"
+#include "WaiterListManager.h"
 #include "WasmCapabilities.h"
 #include "WasmDebugServer.h"
 #include "WasmFaultSignalHandler.h"
@@ -530,6 +531,10 @@ static JSC_DECLARE_HOST_FUNCTION(functionIdleFullGC);
 static JSC_DECLARE_HOST_FUNCTION(functionEdenGC);
 static JSC_DECLARE_HOST_FUNCTION(functionHeapSize);
 static JSC_DECLARE_HOST_FUNCTION(functionMemoryUsageStatistics);
+#if USE(BUN_JSC_ADDITIONS)
+static JSC_DECLARE_HOST_FUNCTION(functionArrayBufferMemoryUsage);
+static JSC_DECLARE_HOST_FUNCTION(functionTestArrayBufferInspectionWhileWaiting);
+#endif
 static JSC_DECLARE_HOST_FUNCTION(functionCreateMemoryFootprint);
 static JSC_DECLARE_HOST_FUNCTION(functionResetMemoryPeak);
 static JSC_DECLARE_HOST_FUNCTION(functionAddressOf);
@@ -919,6 +924,10 @@ private:
         addFunction(vm, "edenGC"_s, functionEdenGC, 0);
         addFunction(vm, "gcHeapSize"_s, functionHeapSize, 0);
         addFunction(vm, "memoryUsageStatistics"_s, functionMemoryUsageStatistics, 0);
+#if USE(BUN_JSC_ADDITIONS)
+        addFunction(vm, "arrayBufferMemoryUsage"_s, functionArrayBufferMemoryUsage, 0);
+        addFunction(vm, "testArrayBufferInspectionWhileWaiting"_s, functionTestArrayBufferInspectionWhileWaiting, 0);
+#endif
         addFunction(vm, "MemoryFootprint"_s, functionCreateMemoryFootprint, 0);
         addFunction(vm, "resetMemoryPeak"_s, functionResetMemoryPeak, 0);
         addFunction(vm, "addressOf"_s, functionAddressOf, 1);
@@ -2626,6 +2635,61 @@ JSC_DEFINE_HOST_FUNCTION(functionMemoryUsageStatistics, (JSGlobalObject* globalO
     auto contextRef = toRef(globalObject);
     return JSValue::encode(toJS(JSGetMemoryUsageStatistics(contextRef)));
 }
+
+#if USE(BUN_JSC_ADDITIONS)
+JSC_DEFINE_HOST_FUNCTION(functionArrayBufferMemoryUsage, (JSGlobalObject* globalObject, CallFrame*))
+{
+    auto& vm = globalObject->vm();
+    size_t buffers = vm.heap.arrayBufferSize();
+    size_t external = vm.heap.externalMemorySizeForReporting();
+    size_t used = vm.heap.jsHeapSizeForReporting();
+    size_t capacity = vm.heap.jsHeapCapacityForReporting();
+    size_t objects = vm.heap.arrayBufferObjectSize();
+    size_t payload = vm.heap.arrayBufferPayloadSize();
+    auto* result = constructEmptyObject(globalObject);
+    result->putDirect(vm, Identifier::fromString(vm, "arrayBuffers"_s), jsNumber(buffers));
+    result->putDirect(vm, Identifier::fromString(vm, "external"_s), jsNumber(external));
+    result->putDirect(vm, Identifier::fromString(vm, "heapUsed"_s), jsNumber(used));
+    result->putDirect(vm, Identifier::fromString(vm, "heapTotal"_s), jsNumber(capacity));
+    result->putDirect(vm, Identifier::fromString(vm, "arrayBufferObjects"_s), jsNumber(objects));
+    result->putDirect(vm, Identifier::fromString(vm, "arrayBufferPayload"_s), jsNumber(payload));
+    return JSValue::encode(result);
+}
+
+JSC_DEFINE_HOST_FUNCTION(functionTestArrayBufferInspectionWhileWaiting, (JSGlobalObject* globalObject, CallFrame*))
+{
+    auto& vm = globalObject->vm();
+    struct InspectionState {
+        std::atomic<bool> finished { false };
+        std::atomic<bool> inspected { false };
+        size_t bytes { 0 };
+    };
+    auto state = Box<InspectionState>::create();
+    size_t expected = vm.heap.arrayBufferSize();
+    int32_t gate = 0;
+    auto thread = Thread::create("JSC Inspection Test"_s, [&vm, &gate, state] {
+        auto deadline = MonotonicTime::now() + 2_s;
+        auto& manager = WaiterListManager::singleton();
+        while (!manager.waiterListSize(&gate)) {
+            if (state->finished.load(std::memory_order_acquire) || MonotonicTime::now() >= deadline)
+                return;
+            Thread::yield();
+        }
+        vm.traps().requestVMInspection([state](VM& inspectedVM) {
+            state->bytes = inspectedVM.heap.arrayBufferSize();
+            state->inspected.store(true, std::memory_order_release);
+        });
+        while (!state->inspected.load(std::memory_order_acquire) && MonotonicTime::now() < deadline)
+            Thread::yield();
+        manager.notifyWaiter(&gate, 1);
+    });
+    auto result = WaiterListManager::singleton().waitSync(vm, &gate, 0, 2_s);
+    state->finished.store(true, std::memory_order_release);
+    thread->waitForCompletion();
+    return JSValue::encode(jsBoolean(result == WaiterListManager::WaitSyncResult::OK
+        && state->inspected.load(std::memory_order_acquire) && state->bytes == expected));
+}
+#endif
 
 JSC_DEFINE_HOST_FUNCTION(functionCreateMemoryFootprint, (JSGlobalObject* globalObject, CallFrame*))
 {

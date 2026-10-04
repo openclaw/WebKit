@@ -120,6 +120,9 @@ MarkedBlock::Handle* BlockDirectory::tryAllocateBlock(JSC::Heap& heap)
 
 void BlockDirectory::addBlock(MarkedBlock::Handle* block)
 {
+#if USE(BUN_JSC_ADDITIONS)
+    markedSpace().heap().addArrayBufferAuxiliaryCapacity(subspace(), MarkedBlock::blockSize);
+#endif
     Locker locker { m_bitvectorLock };
     unsigned index;
     if (m_freeBlockIndices.isEmpty()) {
@@ -162,6 +165,9 @@ void BlockDirectory::removeBlock(MarkedBlock::Handle* block, WillDeleteBlock wil
     ASSERT(isInUse(block));
     
     subspace()->didRemoveBlock(block->index());
+#if USE(BUN_JSC_ADDITIONS)
+    markedSpace().heap().removeArrayBufferAuxiliaryCapacity(subspace(), MarkedBlock::blockSize);
+#endif
     
     m_blocks[block->index()] = { nullptr, nullptr };
     m_freeBlockIndices.append(block->index());

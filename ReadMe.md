@@ -20,6 +20,50 @@ The changes to WebKit are as follows:
 
 Still need to figure out how to get the remote inspector to work.
 
+### ArrayBuffer accounting in Bun builds
+
+`Heap::arrayBufferSize()` reports payload bytes allocated for fixed-length
+ArrayBuffers and typed-array vectors by this VM. The allocation charge travels
+with `ArrayBufferContents` through transfer and is released when the backing store
+is destroyed, even if that happens after the allocating VM exits. Shared fixed
+storage is charged once, to the first VM exposing the allocation. Resizable and
+growable storage, WebAssembly memory, and externally supplied native storage do
+not use the ArrayBuffer allocator and receive no allocation-origin charge.
+
+`externalMemorySizeForReporting()` tracks unshared backing storage in the VM that
+currently holds it, including resized payload lengths. Shared storage has no
+holder-external charge. Native storage supplied through `createFromBytes` receives
+only a holder charge; `createAdopted` transfers ownership of a typed-array vector.
+Native adopters select `ArrayBufferAllocationMode::RuntimeOwned` for new buffer
+allocations whose ownership passes to JavaScript. The default `External` mode
+keeps foreign/N-API backing storage out of the allocation-origin counter.
+Non-buffer native memory adds reported allocations since the last completed
+collection to that collection's estimate.
+The actual C++ `ArrayBuffer` object storage contributes separately to external
+memory while it is attached to a VM. It is never counted as backing payload in
+`arrayBuffers`, and a detached or shared buffer retains only this native object
+charge. Reattaching a native buffer after its GC references are gone moves its
+holder charge without changing allocation origin.
+
+Unshared WebAssembly memory charges its memory handle, before `.buffer` is
+exposed and as pages grow. Its ArrayBuffer wrappers do not add another charge.
+The handle retains that charge while a buffer outlives its memory wrapper;
+shared WebAssembly memory contributes to neither payload counter.
+
+`jsHeapSizeForReporting()` and `jsHeapCapacityForReporting()` exclude backing
+storage using the same allocation and collection epochs as the GC's totals.
+Fast typed arrays have a distinct auxiliary subspace, and their inline DFG/FTL
+allocations register in a weak list pruned before sweeping. Materialization
+replaces the vector charge with a backing-store charge; finalizers do not retire
+the charge a second time.
+
+These statistics are read on the VM's owning thread. Embedders may register a
+non-JavaScript inspection with `VMTraps::requestVMInspection()` while protecting
+the VM's lifetime, and also schedule `runVMInspections()` on their event loop for
+idle VMs. Traps and event-loop delivery drain the same queue exactly once. VM
+teardown drops unrun callbacks; the embedder owns request cancellation and promise
+settlement. Inspections must not run JavaScript or initiate a collection.
+
 _NOTE_: If you make a change to this repo make sure to update the commit hash in `cmake/tools/SetupWebKit.cmake` in Bun.
 
 ---

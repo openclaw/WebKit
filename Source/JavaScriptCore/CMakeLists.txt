@@ -1159,6 +1159,7 @@ set(JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS
     runtime/ArgumentsMode.h
     runtime/ArityCheckMode.h
     runtime/ArrayBuffer.h
+    runtime/ArrayBufferMemoryAccounting.h
     runtime/ArrayBufferSharingMode.h
     runtime/ArrayBufferView.h
     runtime/ArrayConstructor.h

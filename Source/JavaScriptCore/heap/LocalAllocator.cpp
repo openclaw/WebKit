@@ -190,6 +190,9 @@ void* LocalAllocator::allocateSlowCaseWithoutSampling(JSC::Heap& heap, size_t ce
 
     ASSERT(!m_directory->markedSpace().isIterating());
     heap.didAllocateInBlock(m_freeList.originalSize(), *m_directory);
+#if USE(BUN_JSC_ADDITIONS)
+    heap.didAllocateArrayBufferAuxiliaryMemory(m_directory->subspace(), m_freeList.originalSize());
+#endif
     
     didConsumeFreeList();
 

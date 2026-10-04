@@ -1314,7 +1314,7 @@ macro loadTypedArrayVector(base, index, typeLimit, setLargeTypedArray, vector, s
     subi FirstTypedArrayType, t2
     biaeq t2, typeLimit, slowPath
 
-    btbnz JSArrayBufferView::m_mode[base], (constexpr isResizableOrGrowableSharedMode), slowPath
+    btbnz (constexpr (JSArrayBufferView::offsetOfMode()))[base], (constexpr isResizableOrGrowableSharedMode), slowPath
     if LARGE_TYPED_ARRAYS
         bqaeq index, JSArrayBufferView::m_length[base], slowPath
         bqbeq index, SmallTypedArrayMaxLength, .smallTypedArray
