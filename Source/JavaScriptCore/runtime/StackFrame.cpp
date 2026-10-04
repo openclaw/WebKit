@@ -367,7 +367,12 @@ LineColumn StackFrame::computeLineAndColumn() const
                 lineColumn = function.lineColumnFor(jsFrame->bytecodeIndex);
         } else
 #endif
-            lineColumn = jsFrame->codeBlock->lineColumnForBytecodeIndex(jsFrame->bytecodeIndex);
+        {
+            auto position = jsFrame->codeBlock->callSitePositionForBytecodeIndex(jsFrame->bytecodeIndex, jsFrame->m_isAsyncFrame);
+            lineColumn = position
+                ? jsFrame->codeBlock->source().provider()->documentLineColumnForOffset(*position)
+                : jsFrame->codeBlock->lineColumnForBytecodeIndex(jsFrame->bytecodeIndex);
+        }
 
         if (std::optional<int> overrideLineNumber = executable->overrideLineNumber(executable->vm()))
             lineColumn.line = overrideLineNumber.value();

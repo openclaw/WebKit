@@ -5570,6 +5570,7 @@ template <class TreeBuilder> TreeExpression Parser<LexerType>::parseMemberExpres
                 TreeExpression property = parseExpression(context);
                 failIfFalse(property, "Cannot parse subscript expression");
                 base = context.createBracketAccess(location, base, property, initialAssignments != m_parserState.assignmentCount, expressionStart, expressionDivot, tokenEndPosition());
+                context.setPropertyAccessPosition(base, expressionDivot.offset);
 
                 if (baseIsSuper && currentScope()->isArrowFunction()) [[unlikely]]
                     currentFunctionScope()->setInnerArrowFunctionUsesSuperProperty();
@@ -5592,6 +5593,7 @@ template <class TreeBuilder> TreeExpression Parser<LexerType>::parseMemberExpres
                 } else {
                     size_t usedVariablesSize = currentScope()->currentUsedVariablesSize();
                     JSTextPosition expressionEnd = lastTokenEndPosition();
+                    unsigned argumentsStart = tokenStartPosition().offset;
                     std::optional<CallOrApplyDepthScope> callOrApplyDepthScope;
                     recordCallOrApplyDepth<TreeBuilder>(this, m_vm, callOrApplyDepthScope, base);
 
@@ -5618,8 +5620,10 @@ template <class TreeBuilder> TreeExpression Parser<LexerType>::parseMemberExpres
                     }
 
                     isOptionalCall = optionalChainLocation.endOffset == static_cast<unsigned>(expressionEnd.offset);
+                    unsigned callSitePosition = context.callSitePosition(base, argumentsStart, isOptionalCall);
                     base = context.makeFunctionCallNode(location, base, previousBaseWasSuper, arguments, expressionStart,
                         expressionEnd, lastTokenEndPosition(), callOrApplyDepthScope ? callOrApplyDepthScope->distanceToInnermostChild() : 0, isOptionalCall);
+                    context.setCallSitePosition(base, callSitePosition);
                 }
                 break;
             }
@@ -5643,6 +5647,8 @@ template <class TreeBuilder> TreeExpression Parser<LexerType>::parseMemberExpres
                 matchOrFail(IDENT, "Expected a property name after ", optionalChainBase ? "'?.'" : "'.'");
                 base = context.createDotAccess(location, base, ident, type, expressionStart, expressionDivot, tokenEndPosition());
                 context.setTypeTag(base, m_token.m_typeTag);
+                context.setCallSitePosition(base, tokenStartPosition().offset);
+                context.setPropertyAccessPosition(base, tokenStartPosition().offset);
                 if (baseIsSuper && currentScope()->isArrowFunction()) [[unlikely]]
                     currentFunctionScope()->setInnerArrowFunctionUsesSuperProperty();
                 next();
@@ -5656,6 +5662,7 @@ template <class TreeBuilder> TreeExpression Parser<LexerType>::parseMemberExpres
                 typename TreeBuilder::TemplateLiteral templateLiteral = parseTemplateLiteral(context, LexerType::RawStringsBuildMode::BuildRawStrings);
                 failIfFalse(templateLiteral, "Cannot parse template literal");
                 base = context.createTaggedTemplate(location, base, templateLiteral, expressionStart, expressionDivot, lastTokenEndPosition());
+                context.setCallSitePosition(base, expressionDivot.offset);
                 m_seenTaggedTemplateInNonReparsingFunctionMode = true;
                 break;
             }

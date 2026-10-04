@@ -711,11 +711,18 @@ LineColumn StackVisitor::Frame::computeLineAndColumn() const
         return { };
 
     ScriptExecutable* executable = ownerExecutable();
+    LineColumn lineColumn;
 #if ENABLE(AOT)
-    auto lineColumn = m_aotFunction ? m_aotFunction.lineColumnFor(bytecodeIndex()) : m_codeBlock->lineColumnForBytecodeIndex(bytecodeIndex());
-#else
-    auto lineColumn = m_codeBlock->lineColumnForBytecodeIndex(bytecodeIndex());
+    if (m_aotFunction)
+        lineColumn = m_aotFunction.lineColumnFor(bytecodeIndex());
+    else
 #endif
+    {
+        auto position = m_codeBlock->callSitePositionForBytecodeIndex(bytecodeIndex());
+        lineColumn = position
+            ? m_codeBlock->source().provider()->documentLineColumnForOffset(*position)
+            : m_codeBlock->lineColumnForBytecodeIndex(bytecodeIndex());
+    }
 
     if (std::optional<int> overrideLineNumber = executable->overrideLineNumber(executable->vm()))
         lineColumn.line = overrideLineNumber.value();

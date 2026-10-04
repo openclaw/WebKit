@@ -2147,6 +2147,18 @@ void BytecodeOptimizerAccess::emit()
         return newOffsetForOld(probe);
     });
 
+    for (auto* positions : { &m_codeBlock->m_callSitePositions, &m_codeBlock->m_asyncResumePositions }) {
+        positions->removeAllMatching([&](auto& position) {
+            if (position.first >= m_offsetToIndex.size())
+                return true;
+            unsigned index = m_offsetToIndex[position.first];
+            if (index == UINT_MAX || !m_insns[index].live)
+                return true;
+            position.first = m_insns[index].newOffset;
+            return false;
+        });
+    }
+
     // All jumps were sized to fit; nothing is out of line anymore.
     m_codeBlock->replaceOutOfLineJumpTargets();
 

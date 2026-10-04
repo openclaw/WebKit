@@ -194,6 +194,28 @@ public:
     }
     ExpressionNode* createImportMetaExpr(const JSTokenLocation& location, ExpressionNode* expr) { return new (m_parserArena) ImportMetaNode(location, expr); }
     void setIsParenthesized(ExpressionNode* expr) { expr->setIsParenthesized(); }
+
+    unsigned callSitePosition(ExpressionNode* expr, unsigned argumentsStart, bool optionalCall)
+    {
+        if (optionalCall || expr->isParenthesized())
+            return argumentsStart;
+        if (expr->isOptionalChain())
+            return callSitePosition(static_cast<OptionalChainNode*>(expr)->expr(), argumentsStart, false);
+        if (expr->isResolveNode())
+            return expr->position().offset;
+        if (expr->isDotAccessorNode())
+            return expr->callSitePosition().value_or(argumentsStart);
+        return argumentsStart;
+    }
+
+    void setCallSitePosition(ExpressionNode* expr, unsigned position)
+    {
+        if (expr->isOptionalChain())
+            setCallSitePosition(static_cast<OptionalChainNode*>(expr)->expr(), position);
+        else
+            expr->setCallSitePosition(position);
+    }
+    void setPropertyAccessPosition(ExpressionNode* expr, unsigned position) { expr->setPropertyAccessPosition(position); }
     bool isMetaProperty(ExpressionNode* node) { return node->isMetaProperty(); }
     bool isNewTarget(ExpressionNode* node) { return node->isNewTarget(); }
     bool isImportMeta(ExpressionNode* node) { return node->isImportMeta(); }
@@ -366,6 +388,7 @@ public:
     {
         NewExprNode* node = new (m_parserArena) NewExprNode(location, expr, arguments);
         setExceptionLocation(node, start, divot, end);
+        node->setCallSitePosition(start.offset);
         return node;
     }
 
@@ -373,6 +396,7 @@ public:
     {
         NewExprNode* node = new (m_parserArena) NewExprNode(location, expr);
         setExceptionLocation(node, start, divot, end);
+        node->setCallSitePosition(start.offset);
         return node;
     }
 
@@ -1539,6 +1563,7 @@ ExpressionNode* ASTBuilder::makeFunctionCallNode(const JSTokenLocation& location
         BracketAccessorNode* bracket = static_cast<BracketAccessorNode*>(func);
         FunctionCallBracketNode* node = new (m_parserArena) FunctionCallBracketNode(location, bracket->base(), bracket->subscript(), bracket->subscriptHasAssignments(), args, divot, divotStart, divotEnd, isOptionalCall);
         node->setSubexpressionInfo(bracket->divot(), bracket->divotEnd().offset);
+        node->setPropertyAccessPosition(bracket->propertyAccessPosition());
         return node;
     }
     ASSERT(func->isDotAccessorNode());
@@ -1574,6 +1599,7 @@ ExpressionNode* ASTBuilder::makeFunctionCallNode(const JSTokenLocation& location
         node = new (m_parserArena) FunctionCallDotNode(location, dot->base(), dot->identifier(), dot->type(), args, divot, divotStart, divotEnd, isOptionalCall);
     node->setSubexpressionInfo(dot->divot(), dot->divotEnd().offset);
     node->setTypeTag(dot->typeTag());
+    node->setPropertyAccessPosition(dot->propertyAccessPosition());
     return node;
 }
 

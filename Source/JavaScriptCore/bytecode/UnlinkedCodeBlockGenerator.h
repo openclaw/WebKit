@@ -76,6 +76,16 @@ public:
 
     UnlinkedMetadataTable& metadata() { return m_codeBlock->metadata(); }
     void addExpressionInfo(unsigned instructionOffset, unsigned divot, unsigned startOffset, unsigned endOffset);
+    void addCallSitePosition(unsigned instructionOffset, unsigned sourceOffset)
+    {
+        ASSERT(m_callSitePositions.isEmpty() || m_callSitePositions.last().first < instructionOffset);
+        m_callSitePositions.append({ instructionOffset, sourceOffset });
+    }
+    void addAsyncResumePosition(unsigned instructionOffset, unsigned sourceOffset)
+    {
+        ASSERT(m_asyncResumePositions.isEmpty() || m_asyncResumePositions.last().first < instructionOffset);
+        m_asyncResumePositions.append({ instructionOffset, sourceOffset });
+    }
     void addTypeProfilerExpressionInfo(unsigned instructionOffset, unsigned startDivot, unsigned endDivot);
     void addOpProfileControlFlowBytecodeOffset(JSInstructionStream::Offset offset)
     {
@@ -213,6 +223,8 @@ private:
     Vector<UnlinkedStringJumpTable> m_unlinkedStringSwitchJumpTables;
     UncheckedKeyHashMap<unsigned, UnlinkedCodeBlock::RareData::TypeProfilerExpressionRange> m_typeProfilerInfoMap;
     Vector<JSInstructionStream::Offset> m_opProfileControlFlowBytecodeOffsets;
+    Vector<UnlinkedCodeBlock::CallSitePosition> m_callSitePositions;
+    Vector<UnlinkedCodeBlock::CallSitePosition> m_asyncResumePositions;
     Vector<BitVector> m_bitVectors;
     Vector<IdentifierSet> m_constantIdentifierSets;
     unsigned m_numBinaryArithProfiles { 0 };

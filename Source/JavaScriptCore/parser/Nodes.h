@@ -230,6 +230,11 @@ namespace JSC {
 
         uint32_t typeTag() const { return m_typeTag; }
         void setTypeTag(uint32_t tag) { m_typeTag = tag; }
+        std::optional<unsigned> callSitePosition() const { return m_callSitePosition; }
+        void setCallSitePosition(unsigned position) { m_callSitePosition = position; }
+
+        std::optional<unsigned> propertyAccessPosition() const { return m_propertyAccessPosition; }
+        void setPropertyAccessPosition(std::optional<unsigned> position) { m_propertyAccessPosition = position; }
 
         bool isOptionalChainBase() const { return m_isOptionalChainBase; }
         void setIsOptionalChainBase() { m_isOptionalChainBase = true; }
@@ -242,6 +247,8 @@ namespace JSC {
     private:
         ResultType m_resultType;
         uint32_t m_typeTag { 0 };
+        std::optional<unsigned> m_callSitePosition;
+        std::optional<unsigned> m_propertyAccessPosition;
         bool m_isOptionalChainBase { false };
         bool m_isParenthesized { false };
     };
