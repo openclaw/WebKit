@@ -198,6 +198,9 @@ public:
     virtual void markAuxiliary(const void* base) = 0;
 
     virtual void reportExtraMemoryVisited(size_t) = 0;
+#if USE(BUN_JSC_ADDITIONS)
+    virtual void reportWorkerTypedArrayBytesVisited(size_t) = 0;
+#endif
 #if ENABLE(RESOURCE_USAGE)
     virtual void reportExternalMemoryVisited(size_t) = 0;
 #endif

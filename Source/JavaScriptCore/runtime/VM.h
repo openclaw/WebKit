@@ -929,6 +929,9 @@ public:
     
     void* stackPointerAtVMEntry() const { return m_stackPointerAtVMEntry; }
     void setStackPointerAtVMEntry(void*);
+#if USE(BUN_JSC_ADDITIONS)
+    JS_EXPORT_PRIVATE void setWorkerStackUsage(size_t bytes);
+#endif
 
     size_t softReservedZoneSize() const { return m_currentSoftReservedZoneSize; }
     size_t updateSoftReservedZoneSize(size_t softReservedZoneSize);
@@ -1429,6 +1432,9 @@ private:
     void* m_stackPointerAtVMEntry { nullptr };
     size_t m_currentSoftReservedZoneSize;
     void* m_stackLimit { nullptr };
+#if USE(BUN_JSC_ADDITIONS)
+    size_t m_workerStackUsage { 0 };
+#endif
     void* m_lastStackTop { nullptr };
 
 #if ENABLE(EXCEPTION_SCOPE_VERIFICATION)

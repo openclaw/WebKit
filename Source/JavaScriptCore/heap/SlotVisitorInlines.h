@@ -194,6 +194,14 @@ inline void SlotVisitor::reportExternalMemoryVisited(size_t size)
 }
 #endif
 
+#if USE(BUN_JSC_ADDITIONS)
+inline void SlotVisitor::reportWorkerTypedArrayBytesVisited(size_t bytes)
+{
+    if (m_isFirstVisit && heap()->hasEmbedderHeapLimit() && heap()->collectionScope() == CollectionScope::Full)
+        heap()->reportWorkerTypedArrayBytesVisited(bytes);
+}
+#endif
+
 template<typename Func>
 IterationStatus SlotVisitor::forEachMarkStack(NOESCAPE const Func& func)
 {

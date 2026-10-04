@@ -527,6 +527,14 @@ public:
     size_t sizeAfterLastEdenCollection() const { return m_sizeAfterLastEdenCollect; }
     size_t sizeBeforeLastFullCollection() const { return m_sizeBeforeLastFullCollect; }
     size_t sizeAfterLastFullCollection() const { return m_sizeAfterLastFullCollect; }
+#if USE(BUN_JSC_ADDITIONS)
+    // The embedder must terminate only its owning VM when this limit is exceeded.
+    JS_EXPORT_PRIVATE void setWorkerHeapLimits(size_t heapBytes, size_t edenBytes);
+    bool heapLimitExceeded() const { return m_heapLimitExceeded; }
+    bool hasEmbedderHeapLimit() const { return m_embedderMaxHeapSize; }
+    void reportWorkerTypedArrayBytesVisited(size_t bytes) { m_workerTypedArrayBytesVisited.exchangeAdd(bytes); }
+    size_t sizeAfterLastFullCollectionExcludingArrayBuffers() const { return m_sizeAfterLastFullCollectExcludingArrayBuffers; }
+#endif
 
     void deleteAllCodeBlocks(DeleteAllCodeEffort, bool keepWhatNeedsParsing = false);
     void deleteAllUnlinkedCodeBlocks(DeleteAllCodeEffort, OptionSet<UnlinkedCodeToDelete> = UnlinkedCodeToDelete::Generated);
@@ -928,6 +936,14 @@ private:
     size_t m_maxEdenSize;
     size_t m_maxEdenSizeWhenCritical;
     size_t m_maxHeapSize;
+#if USE(BUN_JSC_ADDITIONS)
+    void applyWorkerAllocationLimits(size_t currentHeapSize);
+    size_t m_embedderMaxHeapSize { 0 };
+    Atomic<size_t> m_workerTypedArrayBytesVisited { 0 };
+    size_t m_embedderMaxEdenSize { 0 };
+    size_t m_sizeAfterLastFullCollectExcludingArrayBuffers { 0 };
+    bool m_heapLimitExceeded { false };
+#endif
     size_t m_totalBytesVisitedAfterLastFullCollect { 0 };
     size_t m_totalBytesVisited { 0 };
     size_t m_totalBytesVisitedThisCycle { 0 };

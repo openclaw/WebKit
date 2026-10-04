@@ -1411,6 +1411,14 @@ static void preCommitStackMemory(void* stackLimit)
 }
 #endif
 
+#if USE(BUN_JSC_ADDITIONS)
+void VM::setWorkerStackUsage(size_t bytes)
+{
+    m_workerStackUsage = bytes;
+    updateStackLimits();
+}
+#endif
+
 void VM::updateStackLimits()
 {
     void* lastSoftStackLimit = traps().softStackLimit();
@@ -1426,8 +1434,13 @@ void VM::updateStackLimits()
     void* newSoftStackLimit = 0;
     if (m_stackPointerAtVMEntry) {
         char* startOfStack = reinterpret_cast<char*>(m_stackPointerAtVMEntry);
-        newSoftStackLimit = stack.recursionLimit(startOfStack, Options::maxPerThreadStackUsage(), m_currentSoftReservedZoneSize);
-        m_stackLimit = stack.recursionLimit(startOfStack, Options::maxPerThreadStackUsage(), reservedZoneSize);
+        size_t maxStackUsage = Options::maxPerThreadStackUsage();
+#if USE(BUN_JSC_ADDITIONS)
+        if (m_workerStackUsage)
+            maxStackUsage = m_workerStackUsage;
+#endif
+        newSoftStackLimit = stack.recursionLimit(startOfStack, maxStackUsage, m_currentSoftReservedZoneSize);
+        m_stackLimit = stack.recursionLimit(startOfStack, maxStackUsage, reservedZoneSize);
     } else {
         newSoftStackLimit = stack.recursionLimit(m_currentSoftReservedZoneSize);
         m_stackLimit = stack.recursionLimit(reservedZoneSize);
