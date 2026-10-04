@@ -486,6 +486,9 @@ private:
 public:
     using OutOfLineJumpTargets = UncheckedKeyHashMap<JSInstructionStream::Offset, int>;
 
+    using CallSitePosition = std::pair<unsigned, unsigned>;
+    std::optional<unsigned> callSitePositionForBytecodeIndex(BytecodeIndex, bool isAsync) const;
+
     struct RareData {
         WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED_WITH_HEAP_IDENTIFIER(RareData, UnlinkedCodeBlock_RareData);
 
@@ -504,6 +507,8 @@ public:
         };
         UncheckedKeyHashMap<unsigned, TypeProfilerExpressionRange> m_typeProfilerInfoMap;
         FixedVector<JSInstructionStream::Offset> m_opProfileControlFlowBytecodeOffsets;
+        FixedVector<CallSitePosition> m_callSitePositions;
+        FixedVector<CallSitePosition> m_asyncResumePositions;
         FixedVector<BitVector> m_bitVectors;
         FixedVector<IdentifierSet> m_constantIdentifierSets;
 
