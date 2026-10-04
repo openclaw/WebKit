@@ -467,14 +467,15 @@ public:
     // after the rope string is completely resolved.
     void reportExtraMemoryAllocated(const JSCell* cell, size_t size)
     {
-        if (size > minExtraMemory)
+        if (size > m_extraMemoryReportThreshold)
             reportExtraMemoryAllocatedSlowCase(nullptr, cell, size);
     }
     void reportExtraMemoryAllocated(GCDeferralContext* deferralContext, const JSCell* cell, size_t size)
     {
-        if (size > minExtraMemory)
+        if (size > m_extraMemoryReportThreshold)
             reportExtraMemoryAllocatedSlowCase(deferralContext, cell, size);
     }
+    void setExtraMemoryAllocationSampling(bool enabled) { m_extraMemoryReportThreshold = enabled ? 0 : minExtraMemory; }
     JS_EXPORT_PRIVATE void reportExtraMemoryVisited(size_t);
 
 #if ENABLE(RESOURCE_USAGE)
@@ -995,6 +996,7 @@ private:
     MarkedSpace m_objectSpace;
     GCIncomingRefCountedSet<ArrayBuffer> m_arrayBuffers;
     size_t m_extraMemorySize { 0 };
+    size_t m_extraMemoryReportThreshold { minExtraMemory };
     size_t m_deprecatedExtraMemorySize { 0 };
 
     ProtectCountSet m_protectedValues;
