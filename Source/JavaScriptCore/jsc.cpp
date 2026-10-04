@@ -43,6 +43,7 @@
 #include "Fuzzilli.h"
 #include "GlobalObjectMethodTable.h"
 #include "HeapSnapshotBuilder.h"
+#include "HeapProfiler.h"
 #include "InitializeThreading.h"
 #include "Interpreter.h"
 #include "IteratorOperations.h"
@@ -500,6 +501,9 @@ static JSC_DECLARE_HOST_FUNCTION(functionJSCStack);
 static JSC_DECLARE_HOST_FUNCTION(functionStreamingJSONParse);
 #endif
 static JSC_DECLARE_HOST_FUNCTION(functionGCAndSweep);
+static JSC_DECLARE_HOST_FUNCTION(functionStartHeapAllocationSampling);
+static JSC_DECLARE_HOST_FUNCTION(functionGetHeapAllocationProfile);
+static JSC_DECLARE_HOST_FUNCTION(functionStopHeapAllocationSampling);
 static JSC_DECLARE_HOST_FUNCTION(functionFullGC);
 #if USE(BUN_JSC_ADDITIONS)
 static JSC_DECLARE_HOST_FUNCTION(functionIdleFullGC);
@@ -869,6 +873,9 @@ private:
         addFunction(vm, "streamingJSONParse"_s, functionStreamingJSONParse, 1);
 #endif
         addFunction(vm, "gc"_s, functionGCAndSweep, 0);
+        addFunction(vm, "startHeapAllocationSampling"_s, functionStartHeapAllocationSampling, 3);
+        addFunction(vm, "getHeapAllocationProfile"_s, functionGetHeapAllocationProfile, 0);
+        addFunction(vm, "stopHeapAllocationSampling"_s, functionStopHeapAllocationSampling, 0);
         addFunction(vm, "fullGC"_s, functionFullGC, 0);
 #if USE(BUN_JSC_ADDITIONS)
         addFunction(vm, "idleFullGC"_s, functionIdleFullGC, 0);
@@ -2411,6 +2418,33 @@ JSC_DEFINE_HOST_FUNCTION(functionGCAndSweep, (JSGlobalObject* globalObject, Call
     JSLockHolder lock(vm);
     vm.heap.collectNow(Sync, CollectionScope::Full);
     return JSValue::encode(jsNumber(vm.heap.sizeAfterLastFullCollection()));
+}
+
+JSC_DEFINE_HOST_FUNCTION(functionStartHeapAllocationSampling, (JSGlobalObject* globalObject, CallFrame* callFrame))
+{
+    auto& vm = globalObject->vm();
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    auto value = callFrame->argument(0);
+    if (!value.isNumber() || !std::isfinite(value.asNumber()) || value.asNumber() < 1)
+        return throwVMRangeError(globalObject, scope, "Invalid sampling interval"_s);
+    vm.ensureHeapProfiler().startAllocationSampling(value.asNumber(), callFrame->argument(1).toBoolean(globalObject), callFrame->argument(2).toBoolean(globalObject));
+    return JSValue::encode(jsUndefined());
+}
+
+JSC_DEFINE_HOST_FUNCTION(functionGetHeapAllocationProfile, (JSGlobalObject* globalObject, CallFrame*))
+{
+    auto& vm = globalObject->vm();
+    auto* profiler = vm.heapProfiler();
+    if (!profiler || !profiler->isSamplingAllocations())
+        return JSValue::encode(jsNull());
+    return JSValue::encode(jsString(vm, profiler->allocationSamplingProfile()));
+}
+
+JSC_DEFINE_HOST_FUNCTION(functionStopHeapAllocationSampling, (JSGlobalObject* globalObject, CallFrame*))
+{
+    if (auto* profiler = globalObject->vm().heapProfiler())
+        profiler->stopAllocationSampling();
+    return JSValue::encode(jsUndefined());
 }
 
 JSC_DEFINE_HOST_FUNCTION(functionFullGC, (JSGlobalObject* globalObject, CallFrame*))
