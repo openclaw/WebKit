@@ -1,5 +1,5 @@
 //@ requireOptions("--useAsyncStackTrace=1")
-
+// Stack columns name syntax tokens, not call parentheses.
 const source = "async-stack-trace-promise-race-basic.js";
 
 function nop() {}
@@ -70,12 +70,12 @@ function shouldThrowAsync(run, errorType, message, stackFunctions) {
       async function test() {
         await run();
       }, Error, 'error', [
-        ["thrower", "65:59"],
-        ["async run", "66:44"],
-        ["async test", "71:18"],
+        ["thrower", "65:50"],
+        ["async run", "66:26"],
+        ["async test", "71:9"],
         ["drainMicrotasks", "[native code]"],
-        ["shouldThrowAsync", "19:20"],
-        ["global code", "69:21"]
+        ["shouldThrowAsync", "19:5"],
+        ["global code", "69:5"]
       ] 
     );
     drainMicrotasks();
@@ -104,12 +104,12 @@ function shouldThrowAsync(run, errorType, message, stackFunctions) {
       async function test() {
         await run();
       }, Error, 'error from task1' , [
-        ["task1", "90:20"],
-        ["async run", "100:44"],
-        ["async test", "105:18"],
+        ["task1", "90:11"],
+        ["async run", "100:26"],
+        ["async test", "105:9"],
         ["drainMicrotasks", "[native code]"],
-        ["shouldThrowAsync", "19:20"],
-        ["global code", "103:21"]
+        ["shouldThrowAsync", "19:5"],
+        ["global code", "103:5"]
       ]
     );
     drainMicrotasks();
