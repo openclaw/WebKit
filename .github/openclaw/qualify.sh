@@ -38,9 +38,9 @@ for arm in baseline candidate; do
     revision="$BASE"
   fi
   export BUN_BUILD_CACHE_DIR="$QUALIFICATION_DIR/cache-$arm"
-  "$bootstrap" run build:release --lto=off --webkit-version="$revision" --buildDir="$QUALIFICATION_DIR/bun/build/qualify-$arm" --timings > "$QUALIFICATION_DIR/build-$arm.log" 2>&1
+  env -u GITHUB_SHA -u BUILDKITE_COMMIT -u GIT_SHA "$bootstrap" run build:release --lto=off --webkit-version="$revision" --buildDir="$QUALIFICATION_DIR/bun/build/qualify-$arm" --timings > "$QUALIFICATION_DIR/build-$arm.log" 2>&1
   candidate="$QUALIFICATION_DIR/bun/build/qualify-$arm/bun"
-  "$candidate" -e 'if(process.versions.webkit!==process.argv[1]) throw new Error("wrong engine");' "$revision"
+  "$candidate" -e 'if(process.versions.webkit!==process.argv[1] || Bun.revision!==process.argv[2]) throw new Error("wrong engine or Bun source revision");' "$revision" "$BUN_COMMIT"
   sha256sum "$candidate" > "$QUALIFICATION_DIR/bun-$arm.sha256"
   results="$QUALIFICATION_DIR/$arm"
   mkdir -p "$results" "$results/home" "$results/tmp" "$results/bin"
