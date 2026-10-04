@@ -511,7 +511,10 @@ LineColumn StackVisitor::Frame::computeLineAndColumn() const
     if (!codeBlock)
         return { };
 
-    auto lineColumn = codeBlock->lineColumnForBytecodeIndex(bytecodeIndex());
+    auto position = codeBlock->callSitePositionForBytecodeIndex(bytecodeIndex());
+    auto lineColumn = position
+        ? codeBlock->source().provider()->documentLineColumnForOffset(*position)
+        : codeBlock->lineColumnForBytecodeIndex(bytecodeIndex());
 
     if (std::optional<int> overrideLineNumber = codeBlock->ownerExecutable()->overrideLineNumber(codeBlock->vm()))
         lineColumn.line = overrideLineNumber.value();

@@ -35,6 +35,7 @@
 #include "ArgList.h"
 #include "BatchedTransitionOptimizer.h"
 #include "BuiltinNames.h"
+#include "BytecodeStructs.h"
 #include "Bytecodes.h"
 #include "CallLinkInfo.h"
 #include "CheckpointOSRExitSideState.h"
@@ -552,8 +553,15 @@ void Interpreter::getAsyncStackTrace(JSCell* owner, Vector<StackFrame>& results,
                 size_t lastTableIndex = numberOfJumpTables - 1;
                 const UnlinkedSimpleJumpTable& jumpTable = codeBlock->unlinkedSwitchJumpTable(lastTableIndex);
                 int32_t offset = jumpTable.offsetForValue(state);
-                if (offset)
-                    bytecodeIndex = BytecodeIndex(offset);
+                if (offset) {
+                    // Switch-table targets are relative to their switch instruction.
+                    for (const auto& instruction : codeBlock->instructions()) {
+                        if (instruction->opcodeID() == op_switch_imm && instruction->as<OpSwitchImm>().m_tableIndex == lastTableIndex) {
+                            bytecodeIndex = BytecodeIndex(instruction.offset() + offset);
+                            break;
+                        }
+                    }
+                }
             }
         }
         return bytecodeIndex;

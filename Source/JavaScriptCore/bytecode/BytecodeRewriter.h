@@ -206,6 +206,17 @@ public:
         return adjustJumpTarget(InsertionPoint(0, Position::Entrypoint), InsertionPoint(absoluteOffset, Position::LabelPoint));
     }
 
+    std::optional<unsigned> adjustInstructionOffset(JSInstructionStream::Offset offset)
+    {
+        for (const auto& insertion : m_insertions) {
+            if (insertion.type == Insertion::Type::Remove
+                && offset >= static_cast<unsigned>(insertion.index.bytecodeOffset)
+                && offset - insertion.index.bytecodeOffset < insertion.removeLength)
+                return std::nullopt;
+        }
+        return adjustJumpTarget(InsertionPoint(0, Position::Entrypoint), InsertionPoint(offset, Position::OriginalBytecodePoint));
+    }
+
     int32_t adjustJumpTarget(JSInstructionStream::Offset originalBytecodeOffset, int32_t originalJumpTarget)
     {
         return adjustJumpTarget(InsertionPoint(originalBytecodeOffset, Position::LabelPoint), InsertionPoint(originalJumpTarget, Position::LabelPoint));
