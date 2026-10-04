@@ -1,5 +1,5 @@
 //@ requireOptions("--useAsyncStackTrace=1")
-
+// Stack columns name syntax tokens, not call parentheses.
 const source = "async-stack-trace-promise-all-basic.js";
 
 function nop() {}
@@ -71,12 +71,12 @@ function shouldThrowAsync(run, errorType, message, stackFunctions) {
                await run();
            }, Error, "error",
            [
-               ["thrower", "65:59"],
-               ["async run", "66:43"],
-               ["async test", "71:25"],
+               ["thrower", "65:50"],
+               ["async run", "66:26"],
+               ["async test", "71:16"],
                ["drainMicrotasks", "[native code]"],
-               ["shouldThrowAsync", "19:20"],
-               ["global code", "69:24"]
+               ["shouldThrowAsync", "19:5"],
+               ["global code", "69:8"]
            ],
        );
        drainMicrotasks();
@@ -101,12 +101,12 @@ function shouldThrowAsync(run, errorType, message, stackFunctions) {
                await runner();
            }, Error, "task2 error",
            [
-               ["task2", "93:20"],
-               ["async runner", "96:46"],
-               ["async test", "101:28"],
+               ["task2", "93:11"],
+               ["async runner", "96:29"],
+               ["async test", "101:16"],
                ["drainMicrotasks", "[native code]"],
-               ["shouldThrowAsync", "19:20"],
-               ["global code", "99:24"]
+               ["shouldThrowAsync", "19:5"],
+               ["global code", "99:8"]
            ],
        );
        drainMicrotasks();
@@ -140,15 +140,15 @@ function shouldThrowAsync(run, errorType, message, stackFunctions) {
                await runner();
            }, Error, "task2 error",
            [
-               ["baz", "131:20"],
-               ["async bar", "127:22"],
-               ["async foo", "123:14"],
-               ["async task2", "120:14"],
-               ["async runner", "135:46"],
-               ["async test", "140:28"],
+               ["baz", "131:11"],
+               ["async bar", "127:5"],
+               ["async foo", "123:5"],
+               ["async task2", "120:5"],
+               ["async runner", "135:29"],
+               ["async test", "140:16"],
                ["drainMicrotasks", "[native code]"],
-               ["shouldThrowAsync", "19:20"],
-               ["global code", "138:24"]
+               ["shouldThrowAsync", "19:5"],
+               ["global code", "138:8"]
            ],
        );
        drainMicrotasks();
