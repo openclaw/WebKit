@@ -3031,6 +3031,10 @@ void Heap::willStartCollection()
         m_sizeBeforeLastFullCollect = m_sizeAfterLastCollect + totalBytesAllocatedThisCycle();
         m_extraMemorySize = 0;
         m_deprecatedExtraMemorySize = 0;
+#if USE(BUN_JSC_ADDITIONS)
+        if (m_embedderMaxHeapSize)
+            m_workerTypedArrayBytesVisited.store(0);
+#endif
 #if ENABLE(RESOURCE_USAGE)
         m_externalMemorySize = 0;
 #endif
@@ -3100,6 +3104,34 @@ void Heap::deleteSourceProviderCaches()
     if (m_lastCollectionScope && m_lastCollectionScope.value() == CollectionScope::Full)
         vm().clearSourceProviderCaches();
 }
+
+#if USE(BUN_JSC_ADDITIONS)
+void Heap::setWorkerHeapLimits(size_t heapBytes, size_t edenBytes)
+{
+    m_embedderMaxHeapSize = heapBytes;
+    m_embedderMaxEdenSize = edenBytes;
+    applyWorkerAllocationLimits(m_sizeAfterLastCollect);
+}
+
+void Heap::applyWorkerAllocationLimits(size_t currentHeapSize)
+{
+    if (m_embedderMaxEdenSize)
+        m_maxEdenSize = std::min(m_maxEdenSize, m_embedderMaxEdenSize);
+    if (m_embedderMaxHeapSize) {
+        // Allocation pressure requests a full GC; only the post-full-GC live set may terminate a VM.
+        size_t remaining = m_embedderMaxHeapSize > m_sizeAfterLastFullCollectExcludingArrayBuffers
+            ? m_embedderMaxHeapSize - m_sizeAfterLastFullCollectExcludingArrayBuffers : 1;
+        m_maxEdenSize = std::min(m_maxEdenSize, remaining);
+        m_shouldDoFullCollection = true;
+    }
+    if (m_embedderMaxHeapSize || m_embedderMaxEdenSize) {
+        CheckedSize nextLimit = currentHeapSize;
+        nextLimit += std::max<size_t>(1, m_maxEdenSize);
+        if (!nextLimit.hasOverflowed())
+            m_maxHeapSize = std::min(m_maxHeapSize, nextLimit.value());
+    }
+}
+#endif
 
 void Heap::updateAllocationLimits()
 {
@@ -3179,6 +3211,14 @@ void Heap::updateAllocationLimits()
 
     m_sizeAfterLastCollect = currentHeapSize;
 #if USE(BUN_JSC_ADDITIONS)
+    if (m_embedderMaxHeapSize && m_collectionScope == CollectionScope::Full) {
+        // Count vectors during tracing, including allocations emitted inline by the JIT.
+        size_t buffers = arrayBufferSize() + m_workerTypedArrayBytesVisited.load();
+        m_sizeAfterLastFullCollectExcludingArrayBuffers = currentHeapSize > buffers ? currentHeapSize - buffers : 0;
+        m_heapLimitExceeded = m_embedderMaxHeapSize && m_sizeAfterLastFullCollectExcludingArrayBuffers > m_embedderMaxHeapSize;
+    }
+    if (m_embedderMaxHeapSize || m_embedderMaxEdenSize)
+        applyWorkerAllocationLimits(currentHeapSize);
     if (std::exchange(m_reenableEdenActivityCallback, false) && m_edenActivityCallback)
         m_edenActivityCallback->setEnabled(true);
     if (std::exchange(m_reenableFullActivityCallback, false) && m_fullActivityCallback)
@@ -3589,7 +3629,11 @@ void Heap::collectIfNecessaryOrDefer(GCDeferralContext* deferralContext)
         //  that object is still live and doesn't give us much indication about how much memory we could actually reclaim. That said,
         // if the system is cricital or we have a small heap we want to be very agressive about reclaiming memory to reduce overall
         // pressure on the system.
-        if (!isCritical && m_heapType == HeapType::Large) {
+        if (!isCritical && m_heapType == HeapType::Large
+#if USE(BUN_JSC_ADDITIONS)
+            && !m_embedderMaxHeapSize
+#endif
+        ) {
             if (static_cast<double>(m_lastOversidedAllocationThisCycle) / bytesAllocatedThisCycle > 1.0 / 3.0)
                 return false;
         }
