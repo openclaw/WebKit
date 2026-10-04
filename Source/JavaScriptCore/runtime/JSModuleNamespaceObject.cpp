@@ -172,8 +172,9 @@ bool JSModuleNamespaceObject::getOwnPropertySlotCommon(JSGlobalObject* globalObj
     auto iterator = m_exports.find(propertyName.uid());
     if (iterator == m_exports.end()) {
 #if USE(BUN_JSC_ADDITIONS)
-        if (propertyName == vm.propertyNames->__esModule) {
-            return Base::getOwnPropertySlot(this, globalObject, propertyName, slot);
+        if (m_hasESModuleMarker && propertyName == vm.propertyNames->__esModule) {
+            slot.setValue(this, static_cast<unsigned>(PropertyAttribute::DontDelete), jsBoolean(true));
+            return true;
         }
 #endif
         return false;
@@ -267,8 +268,6 @@ bool JSModuleNamespaceObject::put(JSCell* cell, JSGlobalObject* globalObject, Pr
     auto* thisObject = uncheckedDowncast<JSModuleNamespaceObject>(cell);
     if (thisObject->m_isOverridingValue) {
         return true;
-    } else if (propertyName == vm.propertyNames->__esModule && !thisObject->m_exports.contains(propertyName.uid())) [[unlikely]] {
-        RELEASE_AND_RETURN(scope, Base::put(thisObject, globalObject, propertyName, value, slot));
     }
 #endif
 
@@ -302,6 +301,10 @@ bool JSModuleNamespaceObject::deleteProperty(JSCell* cell, JSGlobalObject* globa
         RETURN_IF_EXCEPTION(scope, false);
     }
 
+#if USE(BUN_JSC_ADDITIONS)
+    if (thisObject->m_hasESModuleMarker && propertyName == vm.propertyNames->__esModule)
+        return false;
+#endif
     return !thisObject->m_exports.contains(propertyName.uid());
 }
 
@@ -328,7 +331,18 @@ void JSModuleNamespaceObject::getOwnPropertyNames(JSObject* cell, JSGlobalObject
         thisObject->ensureDeferredNamespaceEvaluation(globalObject);
         RETURN_IF_EXCEPTION(scope, void());
     }
+#if USE(BUN_JSC_ADDITIONS)
+    const Identifier& esModuleIdent = vm.propertyNames->__esModule;
+    bool needsESModuleMarker = thisObject->m_hasESModuleMarker
+        && propertyNames.includeStringProperties();
+#endif
     for (const auto& name : thisObject->m_exports.keys()) {
+#if USE(BUN_JSC_ADDITIONS)
+        if (needsESModuleMarker && WTF::codePointCompareLessThan(StringView(esModuleIdent.impl()), StringView(name.get()))) {
+            propertyNames.add(esModuleIdent);
+            needsESModuleMarker = false;
+        }
+#endif
         if (mode == DontEnumPropertiesMode::Exclude) {
             // Perform [[GetOwnProperty]] to throw ReferenceError if binding is uninitialized.
             PropertySlot slot(cell, PropertySlot::InternalMethodType::GetOwnProperty);
@@ -339,6 +353,10 @@ void JSModuleNamespaceObject::getOwnPropertyNames(JSObject* cell, JSGlobalObject
         }
         propertyNames.add(name);
     }
+#if USE(BUN_JSC_ADDITIONS)
+    if (needsESModuleMarker)
+        propertyNames.add(esModuleIdent);
+#endif
     if (propertyNames.includeSymbolProperties()) {
         scope.release();
         thisObject->getOwnNonIndexPropertyNames(globalObject, propertyNames, mode);
@@ -366,8 +384,6 @@ bool JSModuleNamespaceObject::defineOwnProperty(JSObject* cell, JSGlobalObject* 
 #if USE(BUN_JSC_ADDITIONS)
     if (thisObject->m_isOverridingValue) {
         return true;
-    } else if (propertyName == vm.propertyNames->__esModule && !thisObject->m_exports.contains(propertyName.uid())) {
-        RELEASE_AND_RETURN(scope, Base::defineOwnProperty(thisObject, globalObject, propertyName, descriptor, shouldThrow));
     }
 #endif
 
@@ -422,6 +438,32 @@ bool JSModuleNamespaceObject::defineOwnProperty(JSObject* cell, JSGlobalObject* 
 }
 
 #if USE(BUN_JSC_ADDITIONS)
+
+JSModuleNamespaceObject* JSModuleNamespaceObject::createNamespaceForRequire(JSGlobalObject* globalObject)
+{
+    VM& vm = globalObject->vm();
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    if (m_isDeferred) [[unlikely]] {
+        ensureDeferredNamespaceEvaluation(globalObject);
+        RETURN_IF_EXCEPTION(scope, nullptr);
+    }
+    if (m_hasESModuleMarker || m_exports.contains(vm.propertyNames->__esModule.impl()) || !m_exports.contains(vm.propertyNames->defaultKeyword.impl()))
+        return this;
+
+    // Node's require(esm) facade adds a marker without changing the imported namespace.
+    // Copy resolutions, not values, so re-exports and uninitialized/live bindings stay live.
+    Vector<std::pair<Identifier, AbstractModuleRecord::Resolution>> resolutions;
+    resolutions.reserveInitialCapacity(m_exports.size());
+    for (const auto& entry : m_exports) {
+        resolutions.append({ Identifier::fromUid(vm, entry.key.get()), {
+            AbstractModuleRecord::Resolution::Type::Resolved, entry.value.moduleRecord.get(), entry.value.localName,
+        } });
+    }
+    auto* result = create(globalObject, globalObject->moduleNamespaceObjectStructure(), m_moduleRecord.get(), WTF::move(resolutions));
+    RETURN_IF_EXCEPTION(scope, nullptr);
+    result->m_hasESModuleMarker = true;
+    return result;
+}
 
 void JSModuleNamespaceObject::overrideExports(JSGlobalObject* globalObject, const WTF::Function<bool(JSGlobalObject* globalObject, const Identifier& exportName, JSC::JSValue& result)>& iter)
 {
