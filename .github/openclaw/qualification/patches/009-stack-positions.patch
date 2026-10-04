@@ -109,7 +109,7 @@ index 14ec9fd8..9f8c3616 100644
          .line_zero_based = OrdinalNumber::fromOneBasedInt(lineColumn.line).zeroBasedInt(),
          .column_zero_based = OrdinalNumber::fromOneBasedInt(lineColumn.column).zeroBasedInt(),
 diff --git a/src/jsc/bindings/ErrorStackFrame.h b/src/jsc/bindings/ErrorStackFrame.h
-index a1c31678..367670b5 100644
+index a1c31678..70f1b2fa 100644
 --- a/src/jsc/bindings/ErrorStackFrame.h
 +++ b/src/jsc/bindings/ErrorStackFrame.h
 @@ -4,8 +4,8 @@
@@ -117,10 +117,10 @@ index a1c31678..367670b5 100644
  namespace Bun {
  
 -ZigStackFramePosition getAdjustedPositionForBytecode(JSC::CodeBlock* code, JSC::BytecodeIndex bc);
-+ZigStackFramePosition getAdjustedPositionForBytecode(JSC::CodeBlock* code, JSC::BytecodeIndex bc, bool isAsync = false);
++ZigStackFramePosition getAdjustedPositionForBytecode(JSC::CodeBlock* code, JSC::BytecodeIndex bc, bool isAsync);
  
 -ZigStackFramePosition getAdjustedLineColumnForBytecode(JSC::CodeBlock* code, JSC::BytecodeIndex bc);
-+ZigStackFramePosition getAdjustedLineColumnForBytecode(JSC::CodeBlock* code, JSC::BytecodeIndex bc, bool isAsync = false);
++ZigStackFramePosition getAdjustedLineColumnForBytecode(JSC::CodeBlock* code, JSC::BytecodeIndex bc, bool isAsync);
  
  } // namespace Bun
 diff --git a/src/jsc/bindings/ErrorStackTrace.cpp b/src/jsc/bindings/ErrorStackTrace.cpp
