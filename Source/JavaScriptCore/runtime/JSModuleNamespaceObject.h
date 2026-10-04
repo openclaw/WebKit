@@ -65,6 +65,7 @@ public:
     DECLARE_EXPORT_INFO;
 
 #if USE(BUN_JSC_ADDITIONS)
+    JS_EXPORT_PRIVATE JSModuleNamespaceObject* createNamespaceForRequire(JSGlobalObject*);
     bool overrideExportValue(JSGlobalObject*, PropertyName, JSValue);
     void overrideExports(JSGlobalObject* globalObject, const WTF::Function<bool(JSGlobalObject* globalObject, const Identifier& exportName, JSC::JSValue &result)>& iter);
 #endif
@@ -73,10 +74,6 @@ public:
     inline static Structure* createStructure(VM&, JSGlobalObject*, JSValue);
 
     AbstractModuleRecord* moduleRecord() LIFETIME_BOUND { return m_moduleRecord.get(); }
-
-#if USE(BUN_JSC_ADDITIONS)
-    WTF::TriState m_hasESModuleMarker = WTF::TriState::Indeterminate;
-#endif
 
 private:
     JS_EXPORT_PRIVATE JSModuleNamespaceObject(VM&, Structure*, AbstractModuleRecord*, Vector<std::pair<Identifier, AbstractModuleRecord::Resolution>>&&, bool isDeferred);
@@ -105,6 +102,7 @@ private:
     const bool m_isDeferred;
 #if USE(BUN_JSC_ADDITIONS)
     bool m_isOverridingValue = false;
+    bool m_hasESModuleMarker = false;
     // m_isDeferred, or the record or one it re-exports from has live exports. A record has them from the time it is created.
     // Where upstream tests m_isDeferred, this is tested instead. So any other namespace object does no more work than upstream's.
     bool m_isDeferredOrLive;

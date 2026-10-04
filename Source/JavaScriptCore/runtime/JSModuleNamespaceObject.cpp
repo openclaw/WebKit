@@ -182,6 +182,10 @@ bool JSModuleNamespaceObject::getOwnPropertySlotCommon(JSGlobalObject* globalObj
     slot.setIsTaintedByOpaqueObject();
 
 #if USE(BUN_JSC_ADDITIONS)
+    if (m_hasESModuleMarker && propertyName == vm.propertyNames->__esModule) {
+        slot.setValue(this, static_cast<unsigned>(PropertyAttribute::DontDelete), jsBoolean(true));
+        return true;
+    }
     if (m_isDeferredOrLive) [[unlikely]] {
         std::optional<bool> result = getOwnPropertySlotIfDeferredOrLive(globalObject, propertyName, slot);
         RETURN_IF_EXCEPTION(scope, false);
@@ -196,14 +200,8 @@ bool JSModuleNamespaceObject::getOwnPropertySlotCommon(JSGlobalObject* globalObj
 #endif
 
     auto iterator = m_exports.find(propertyName.uid());
-    if (iterator == m_exports.end()) {
-#if USE(BUN_JSC_ADDITIONS)
-        if (propertyName == vm.propertyNames->__esModule) {
-            return Base::getOwnPropertySlot(this, globalObject, propertyName, slot);
-        }
-#endif
+    if (iterator == m_exports.end())
         return false;
-    }
 
     ExportEntry& exportEntry = iterator->value;
 
@@ -376,10 +374,8 @@ bool JSModuleNamespaceObject::put(JSCell* cell, JSGlobalObject* globalObject, Pr
     auto* thisObject = uncheckedDowncast<JSModuleNamespaceObject>(cell);
     if (thisObject->m_isOverridingValue) {
         return true;
-    } else if (propertyName == vm.propertyNames->__esModule && !thisObject->m_exports.contains(propertyName.uid())) [[unlikely]] {
-        RELEASE_AND_RETURN(scope, Base::put(thisObject, globalObject, propertyName, value, slot));
     }
-    if (JSObject* source = thisObject->liveExportsSource()) [[unlikely]] {
+    if (JSObject* source = thisObject->liveExportsSource(); source && !(thisObject->m_hasESModuleMarker && propertyName == vm.propertyNames->__esModule)) [[unlikely]] {
         if (!canForwardToLiveExportsSource(globalObject, scope)) [[unlikely]]
             return false;
         if (isThisValueAltered(slot, thisObject)) [[unlikely]]
@@ -432,6 +428,8 @@ bool JSModuleNamespaceObject::deleteProperty(JSCell* cell, JSGlobalObject* globa
     }
 
 #if USE(BUN_JSC_ADDITIONS)
+    if (thisObject->m_hasESModuleMarker && propertyName == vm.propertyNames->__esModule)
+        return false;
     if (JSObject* source = thisObject->liveExportsSource()) [[unlikely]] {
         if (!canForwardToLiveExportsSource(globalObject, scope)) [[unlikely]]
             return false;
@@ -475,14 +473,27 @@ void JSModuleNamespaceObject::getOwnPropertyNames(JSObject* cell, JSGlobalObject
         RETURN_IF_EXCEPTION(scope, void());
     }
 #if USE(BUN_JSC_ADDITIONS)
+    const Identifier& esModuleIdent = vm.propertyNames->__esModule;
+    bool needsESModuleMarker = thisObject->m_hasESModuleMarker && propertyNames.includeStringProperties();
     if (JSObject* source = thisObject->liveExportsSource()) [[unlikely]] {
         if (!canForwardToLiveExportsSource(globalObject, scope)) [[unlikely]]
             return;
         PropertyNameArrayBuilder names(vm, PropertyNameMode::Strings, PrivateSymbolMode::Exclude);
         source->methodTable()->getOwnPropertyNames(source, globalObject, names, DontEnumPropertiesMode::Exclude);
         RETURN_IF_EXCEPTION(scope, void());
-        for (const auto& name : names)
+        for (const auto& name : names) {
+            if (needsESModuleMarker) {
+                if (name == esModuleIdent)
+                    needsESModuleMarker = false;
+                else if (WTF::codePointCompareLessThan(StringView(esModuleIdent.impl()), StringView(name.impl()))) {
+                    propertyNames.add(esModuleIdent);
+                    needsESModuleMarker = false;
+                }
+            }
             propertyNames.add(name);
+        }
+        if (needsESModuleMarker)
+            propertyNames.add(esModuleIdent);
         if (propertyNames.includeSymbolProperties()) {
             scope.release();
             thisObject->getOwnNonIndexPropertyNames(globalObject, propertyNames, mode);
@@ -492,6 +503,10 @@ void JSModuleNamespaceObject::getOwnPropertyNames(JSObject* cell, JSGlobalObject
 #endif
     for (const auto& [name, exportEntry] : thisObject->m_exports) {
 #if USE(BUN_JSC_ADDITIONS)
+        if (needsESModuleMarker && WTF::codePointCompareLessThan(StringView(esModuleIdent.impl()), StringView(name.get()))) {
+            propertyNames.add(esModuleIdent);
+            needsESModuleMarker = false;
+        }
         // A live export is never uninitialized, and reading it can run an accessor of the source.
         if (exportEntry.moduleRecord->hasLiveExports() && exportEntry.localName != vm.propertyNames->starNamespacePrivateName) {
             propertyNames.add(name);
@@ -508,6 +523,10 @@ void JSModuleNamespaceObject::getOwnPropertyNames(JSObject* cell, JSGlobalObject
         }
         propertyNames.add(name);
     }
+#if USE(BUN_JSC_ADDITIONS)
+    if (needsESModuleMarker)
+        propertyNames.add(esModuleIdent);
+#endif
     if (propertyNames.includeSymbolProperties()) {
         scope.release();
         thisObject->getOwnNonIndexPropertyNames(globalObject, propertyNames, mode);
@@ -528,7 +547,7 @@ bool JSModuleNamespaceObject::defineOwnProperty(JSObject* cell, JSGlobalObject* 
         RELEASE_AND_RETURN(scope, Base::defineOwnProperty(thisObject, globalObject, propertyName, descriptor, shouldThrow));
 
 #if USE(BUN_JSC_ADDITIONS)
-    if (JSObject* source = thisObject->liveExportsSource()) [[unlikely]] {
+    if (JSObject* source = thisObject->liveExportsSource(); source && !(thisObject->m_hasESModuleMarker && propertyName == vm.propertyNames->__esModule)) [[unlikely]] {
         if (!canForwardToLiveExportsSource(globalObject, scope)) [[unlikely]]
             return false;
         RELEASE_AND_RETURN(scope, source->methodTable()->defineOwnProperty(source, globalObject, propertyName, descriptor, shouldThrow));
@@ -543,8 +562,6 @@ bool JSModuleNamespaceObject::defineOwnProperty(JSObject* cell, JSGlobalObject* 
 #if USE(BUN_JSC_ADDITIONS)
     if (thisObject->m_isOverridingValue) {
         return true;
-    } else if (propertyName == vm.propertyNames->__esModule && !thisObject->m_exports.contains(propertyName.uid())) {
-        RELEASE_AND_RETURN(scope, Base::defineOwnProperty(thisObject, globalObject, propertyName, descriptor, shouldThrow));
     }
 #endif
 
@@ -599,6 +616,46 @@ bool JSModuleNamespaceObject::defineOwnProperty(JSObject* cell, JSGlobalObject* 
 }
 
 #if USE(BUN_JSC_ADDITIONS)
+
+JSModuleNamespaceObject* JSModuleNamespaceObject::createNamespaceForRequire(JSGlobalObject* globalObject)
+{
+    VM& vm = globalObject->vm();
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    if (m_isDeferred) [[unlikely]] {
+        ensureDeferredNamespaceEvaluation(globalObject);
+        RETURN_IF_EXCEPTION(scope, nullptr);
+    }
+    if (m_hasESModuleMarker)
+        return this;
+    if (m_moduleRecord->hasLiveExports()) {
+        bool hasMarker = m_moduleRecord->hasLiveExport(globalObject, vm.propertyNames->__esModule);
+        RETURN_IF_EXCEPTION(scope, nullptr);
+        if (hasMarker)
+            return this;
+        bool hasDefault = m_moduleRecord->hasLiveExport(globalObject, vm.propertyNames->defaultKeyword);
+        RETURN_IF_EXCEPTION(scope, nullptr);
+        if (!hasDefault)
+            return this;
+    } else if (m_exports.contains(vm.propertyNames->__esModule.impl()) || !m_exports.contains(vm.propertyNames->defaultKeyword.impl()))
+        return this;
+
+    // Node's require(esm) facade adds a marker without changing the imported namespace.
+    // Copy resolutions, not values, so re-exports and uninitialized/live bindings stay live.
+    Vector<std::pair<Identifier, AbstractModuleRecord::Resolution>> resolutions;
+    resolutions.reserveInitialCapacity(m_exports.size());
+    for (const auto& entry : m_exports) {
+        resolutions.append({ Identifier::fromUid(vm, entry.key.get()), {
+            AbstractModuleRecord::Resolution::Type::Resolved, entry.value.moduleRecord.get(), entry.value.localName,
+#if ENABLE(AOT)
+            entry.value.compiledExportIndex,
+#endif
+        } });
+    }
+    auto* result = create(globalObject, globalObject->moduleNamespaceObjectStructure(), m_moduleRecord.get(), WTF::move(resolutions));
+    RETURN_IF_EXCEPTION(scope, nullptr);
+    result->m_hasESModuleMarker = true;
+    return result;
+}
 
 static bool isLiveBindingExport(AbstractModuleRecord* record)
 {
