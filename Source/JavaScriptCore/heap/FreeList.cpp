@@ -37,11 +37,37 @@ FreeList::~FreeList() = default;
 
 void FreeList::clear()
 {
+    clearAllocationSampleLimit();
     m_intervalStart = nullptr;
     m_intervalEnd = nullptr;
     m_nextInterval = std::bit_cast<FreeCell*>(static_cast<uintptr_t>(1));
     m_secret = 0;
     m_originalSize = 0;
+}
+
+void FreeList::setAllocationSampleLimit(uint64_t cells)
+{
+    ASSERT(!m_sampleStart);
+    if (!m_intervalStart)
+        return;
+    m_sampleStart = m_intervalStart;
+    m_sampleEnd = m_intervalEnd;
+    m_sampleNext = m_nextInterval;
+    auto available = static_cast<uint64_t>((m_intervalEnd - m_intervalStart) / m_cellSize);
+    m_intervalEnd = m_intervalStart + std::min(cells, available) * m_cellSize;
+    // Both generated and C++ allocators already enter the slow path at this sentinel.
+    m_nextInterval = std::bit_cast<FreeCell*>(static_cast<uintptr_t>(1));
+}
+
+uint64_t FreeList::clearAllocationSampleLimit()
+{
+    if (!m_sampleStart)
+        return 0;
+    auto consumed = static_cast<uint64_t>((m_intervalStart - m_sampleStart) / m_cellSize);
+    m_intervalEnd = m_sampleEnd;
+    m_nextInterval = m_sampleNext;
+    m_sampleStart = nullptr;
+    return consumed;
 }
 
 void FreeList::initialize(FreeCell* start, uint64_t secret, unsigned bytes)
@@ -62,4 +88,3 @@ void FreeList::dump(PrintStream& out) const
 }
 
 } // namespace JSC
-

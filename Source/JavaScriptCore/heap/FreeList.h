@@ -110,6 +110,9 @@ public:
     JS_EXPORT_PRIVATE void dump(PrintStream&) const;
 
     unsigned cellSize() const { return m_cellSize; }
+
+    void setAllocationSampleLimit(uint64_t cells);
+    uint64_t clearAllocationSampleLimit();
     
 private:
     FreeCell* nextInterval() const { return m_nextInterval; }
@@ -120,6 +123,9 @@ private:
     uint64_t m_secret { 0 };
     unsigned m_originalSize { 0 };
     unsigned m_cellSize { 0 };
+    char* m_sampleStart { nullptr };
+    char* m_sampleEnd { nullptr };
+    FreeCell* m_sampleNext { nullptr };
 };
 
 } // namespace JSC

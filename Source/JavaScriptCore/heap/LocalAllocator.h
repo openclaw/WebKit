@@ -60,11 +60,15 @@ public:
     // Intended for diagnostics only (rdar://157153895)
     bool isFreeListedCell(const void*) const;
 
+    void configureAllocationSampling(bool enabled);
+
 private:
     friend class BlockDirectory;
     
     void reset();
     JS_EXPORT_PRIVATE void* allocateSlowCase(Heap&, size_t, GCDeferralContext*, AllocationFailureMode);
+    void* allocateSlowCaseWithoutSampling(Heap&, size_t, GCDeferralContext*, AllocationFailureMode);
+    void restoreAllocationSampleLimit();
     void didConsumeFreeList();
     void* tryAllocateWithoutCollecting(size_t);
     void* tryAllocateIn(MarkedBlock::Handle*, size_t);
@@ -80,6 +84,8 @@ private:
     // After you do something to a block based on one of these cursors, you clear the bit in the
     // corresponding bitvector and leave the cursor where it was.
     unsigned m_allocationCursor { 0 }; // Points to the next block that is a candidate for allocation.
+    uint64_t m_cellsUntilSample { 0 };
+    bool m_samplingConfigured { false };
 };
 
 inline constexpr ptrdiff_t LocalAllocator::offsetOfFreeList()
@@ -93,4 +99,3 @@ inline constexpr ptrdiff_t LocalAllocator::offsetOfCellSize()
 }
 
 } // namespace JSC
-

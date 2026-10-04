@@ -247,6 +247,14 @@ void BlockDirectory::stopAllocating()
 #endif
 }
 
+void BlockDirectory::configureAllocationSampling(bool enabled)
+{
+    Locker locker { m_localAllocatorsLock };
+    m_localAllocators.forEach([&](LocalAllocator* allocator) {
+        allocator->configureAllocationSampling(enabled);
+    });
+}
+
 void BlockDirectory::prepareForAllocation()
 {
     m_localAllocators.forEach(
@@ -559,4 +567,3 @@ void BlockDirectory::assertWorldIsStopped() const WTF_IGNORES_THREAD_SAFETY_ANAL
 }
 #endif
 } // namespace JSC
-

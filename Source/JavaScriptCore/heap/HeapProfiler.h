@@ -27,6 +27,9 @@
 
 #include <wtf/TZoneMalloc.h>
 #include <wtf/Vector.h>
+#include <wtf/text/WTFString.h>
+#include "CollectionScope.h"
+#include "JSExportMacros.h"
 
 namespace JSC {
 
@@ -49,10 +52,22 @@ public:
     HeapAnalyzer* activeHeapAnalyzer() const { return m_activeAnalyzer; }
     void setActiveHeapAnalyzer(HeapAnalyzer*);
 
+    JS_EXPORT_PRIVATE void startAllocationSampling(double interval, bool includeMajorGC, bool includeMinorGC);
+    JS_EXPORT_PRIVATE void stopAllocationSampling();
+    JS_EXPORT_PRIVATE String allocationSamplingProfile();
+    bool isSamplingAllocations() const { return !!m_allocationSampling; }
+    uint64_t nextAllocationSample(size_t cellSize);
+    void sampleAllocation(void*, size_t);
+    void samplePreciseAllocation(void*, size_t);
+    void reallocateSampledCell(void* oldCell, void* newCell, size_t addedSize);
+    void reconcileSampledAllocations(CollectionScope);
+
 private:
     VM& m_vm;
     Vector<std::unique_ptr<HeapSnapshot>> m_snapshots;
     HeapAnalyzer* m_activeAnalyzer { nullptr };
+    struct AllocationSampling;
+    std::unique_ptr<AllocationSampling> m_allocationSampling;
 };
 
 } // namespace JSC

@@ -24,6 +24,7 @@
  */
 
 #include "config.h"
+#include "HeapProfiler.h"
 #include "CompleteSubspace.h"
 
 #include "AllocatorInlines.h"
@@ -140,6 +141,8 @@ void* CompleteSubspace::tryAllocateSlow(VM& vm, size_t size, GCDeferralContext* 
     
     m_preciseAllocations.append(allocation);
     m_space.registerPreciseAllocation(allocation, /* isNewAllocation */ true);
+    if (auto* profiler = vm.heapProfiler())
+        profiler->samplePreciseAllocation(allocation->cell(), size);
     return allocation->cell();
 }
 
@@ -196,6 +199,8 @@ void* CompleteSubspace::reallocatePreciseAllocationNonVirtual(VM& vm, HeapCell* 
 
     m_preciseAllocations.append(allocation);
 
+    if (auto* profiler = vm.heapProfiler())
+        profiler->reallocateSampledCell(oldCell, allocation->cell(), difference);
     return allocation->cell();
 }
 
@@ -209,4 +214,3 @@ void CompleteSubspace::prepareAllAllocators()
 }
 
 } // namespace JSC
-
