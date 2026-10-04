@@ -513,6 +513,15 @@ void JSPromise::performPromiseThenWithContext(VM& vm, JSGlobalObject* globalObje
 #if USE(BUN_JSC_ADDITIONS)
 void JSPromise::performPromiseThenWithInternalMicrotask(VM& vm, InternalMicrotask task, JSCell* cell, JSValue context, JSValue asyncContext)
 {
+    // Loader reactions need both their result cell and their async context.
+    // Keep the result slot intact; the existing visited tuple owns the snapshot.
+    if (capturesModuleLoaderAsyncContext(task)) {
+        auto* globalObject = realm();
+        JSValue loaderAsyncContext = AsyncContextSwapScope::current(vm, globalObject);
+        // import.defer() has an InternalFieldTuple payload even without ALS.
+        if (!loaderAsyncContext.isUndefined() || AsyncContextSwapScope::isContextTuple(context))
+            context = InternalFieldTuple::create(vm, globalObject->internalFieldTupleStructure(), context, loaderAsyncContext);
+    }
     // Only the tasks that take no cell argument (the await family) capture an
     // async context; it travels in the slots the cell would use.
     bool hasAsyncContext = !asyncContext.isEmpty() && !asyncContext.isUndefined();
