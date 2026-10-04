@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Fix `Intl.Segmenter` containing lookups around surrogate pairs so segment boundaries and word status agree with iteration.
+- Expose the require(esm) `__esModule` marker as an own enumerable namespace property while preserving unmarked imports and live bindings. Adapts [oven-sh/WebKit#279](https://github.com/oven-sh/WebKit/pull/279). Thanks @robobun!
 
 This changelog covers updates to JavaScriptCore in Bun's WebKit fork, from `9a2cc42ae1bf` to `7bc2f97e2835`.
 
