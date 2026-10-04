@@ -100,6 +100,14 @@ enum class InternalMicrotask : uint8_t {
 #if USE(BUN_JSC_ADDITIONS)
 constexpr unsigned maxMicrotaskArguments = 4;
 
+// These reactions use argument 2 for their loader payload. Await resumptions
+// already carry their context separately and must not be wrapped a second time.
+constexpr bool capturesModuleLoaderAsyncContext(InternalMicrotask task)
+{
+    return task >= InternalMicrotask::AsyncModuleExecutionDone
+        && task <= InternalMicrotask::ImportModuleNamespace;
+}
+
 // OR'ed into the payload (a JSPromise::Status) of a PromiseReactionJob whose
 // fourth argument is the async context captured by performPromiseThen (see
 // AsyncContextSwapScope) rather than an embedder handler context.

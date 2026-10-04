@@ -1866,9 +1866,9 @@ static void asyncGeneratorDriverResume(VM& vm, JSValue context, JSValue resoluti
 }
 
 #if USE(BUN_JSC_ADDITIONS)
-void runInternalMicrotask(JSGlobalObject* globalObject, VM& vm, InternalMicrotask task, uint8_t payload, JSValue argument0, JSValue argument1, JSValue argument2, JSValue argument3, MicrotaskCallCache* microtaskCallCache)
+static void runInternalMicrotaskImpl(JSGlobalObject* globalObject, VM& vm, InternalMicrotask task, uint8_t payload, JSValue argument0, JSValue argument1, JSValue argument2, JSValue argument3, MicrotaskCallCache* microtaskCallCache)
 #else
-void runInternalMicrotask(JSGlobalObject* globalObject, VM& vm, InternalMicrotask task, uint8_t payload, JSValue argument0, JSValue argument1, JSValue argument2, MicrotaskCallCache* microtaskCallCache)
+static void runInternalMicrotaskImpl(JSGlobalObject* globalObject, VM& vm, InternalMicrotask task, uint8_t payload, JSValue argument0, JSValue argument1, JSValue argument2, MicrotaskCallCache* microtaskCallCache)
 #endif
 {
     auto scope = DECLARE_THROW_SCOPE(vm);
@@ -2430,6 +2430,24 @@ void runInternalMicrotask(JSGlobalObject* globalObject, VM& vm, InternalMicrotas
     }
     }
 }
+
+#if USE(BUN_JSC_ADDITIONS)
+void runInternalMicrotask(JSGlobalObject* globalObject, VM& vm, InternalMicrotask task, uint8_t payload, JSValue argument0, JSValue argument1, JSValue argument2, JSValue argument3, MicrotaskCallCache* microtaskCallCache)
+{
+    if (capturesModuleLoaderAsyncContext(task)
+        && (vm.isAsyncContextTrackingEnabled() || AsyncContextSwapScope::isContextTuple(argument2))) {
+        AsyncContextSwapScope asyncContextScope(vm, globalObject, AsyncContextSwapScope::unwrapContextTuple(argument2));
+        runInternalMicrotaskImpl(globalObject, vm, task, payload, argument0, argument1, argument2, argument3, microtaskCallCache);
+        return;
+    }
+    runInternalMicrotaskImpl(globalObject, vm, task, payload, argument0, argument1, argument2, argument3, microtaskCallCache);
+}
+#else
+void runInternalMicrotask(JSGlobalObject* globalObject, VM& vm, InternalMicrotask task, uint8_t payload, JSValue argument0, JSValue argument1, JSValue argument2, MicrotaskCallCache* microtaskCallCache)
+{
+    runInternalMicrotaskImpl(globalObject, vm, task, payload, argument0, argument1, argument2, microtaskCallCache);
+}
+#endif
 
 } // namespace JSC
 
