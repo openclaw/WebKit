@@ -4288,6 +4288,18 @@ JSC_DEFINE_HOST_FUNCTION(functionGlobalObjectForObject, (JSGlobalObject*, CallFr
 }
 
 #if USE(BUN_JSC_ADDITIONS)
+JSC_DEFINE_HOST_FUNCTION(functionModuleNamespaceForRequire, (JSGlobalObject* globalObject, CallFrame* callFrame))
+{
+    DollarVMAssertScope assertScope;
+    auto scope = DECLARE_THROW_SCOPE(globalObject->vm());
+    auto* namespaceObject = dynamicDowncast<JSModuleNamespaceObject>(callFrame->argument(0));
+    if (!namespaceObject)
+        return throwVMTypeError(globalObject, scope, "expected a module namespace"_s);
+    auto* result = namespaceObject->createNamespaceForRequire(globalObject);
+    RETURN_IF_EXCEPTION(scope, { });
+    return JSValue::encode(result);
+}
+
 // The embedder's AsyncLocalStorage frame slot (JSGlobalObject::m_asyncContextData
 // field 0), which promise reactions and async continuations capture and restore.
 JSC_DEFINE_HOST_FUNCTION(functionAsyncContext, (JSGlobalObject* globalObject, CallFrame*))
@@ -6034,6 +6046,7 @@ void JSDollarVM::finishCreation(VM& vm)
     addFunction(vm, alwaysAllow, "decommittedMarkedBlockPagePoison"_s, functionDecommittedMarkedBlockPagePoison, 0);
 #if USE(BUN_JSC_ADDITIONS)
     addFunction(vm, alwaysAllow, "evacuateAuxiliaryBlocks"_s, functionEvacuateAuxiliaryBlocks, 2);
+    addFunction(vm, allowIfNotFuzz, "moduleNamespaceForRequire"_s, functionModuleNamespaceForRequire, 1);
 #endif
 
     addFunction(vm, allowIfNotFuzz, "globalObjectCount"_s, functionGlobalObjectCount, 0);
