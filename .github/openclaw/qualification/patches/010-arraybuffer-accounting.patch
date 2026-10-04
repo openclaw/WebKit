@@ -264,7 +264,7 @@ index d56add18..915a1de9 100644
  }
  
 diff --git a/src/jsc/bindings/BunClientData.h b/src/jsc/bindings/BunClientData.h
-index fd9e452e..1e9a0dc6 100644
+index fd9e452ecd4fa6176785ab2a9618f4ae96f34cb5..abc88abf4ee0afed212312506f2c58b4d24d1806 100644
 --- a/src/jsc/bindings/BunClientData.h
 +++ b/src/jsc/bindings/BunClientData.h
 @@ -76,7 +76,6 @@ class DOMWrapperWorld;
@@ -331,14 +331,15 @@ index fd9e452e..1e9a0dc6 100644
  
      // The VM's default (first) Zig::GlobalObject: what defaultGlobalObject(JSC::VM&) returns on threads whose thread-local
      // default is not this VM's, e.g. the collector thread running a collection's end phase. gcProtect'ed for the VM's life.
-@@ -351,7 +308,6 @@ public:
+@@ -351,8 +308,6 @@ public:
      Bun::NodeVMCompilationCache nodeVMCompilationCache;
  
  private:
 -    Bun::HeapUsage m_heapUsage;
- 
+-
      SentinelLinkedList<JSVMClientDataClient, BasicRawSentinelNode<JSVMClientDataClient>> m_clients;
      bool m_isWorkerVM { false };
+     bool m_isNodeWorkerVM { false };
 diff --git a/src/jsc/bindings/BunProcess.cpp b/src/jsc/bindings/BunProcess.cpp
 index 3dec12b1..0faab265 100644
 --- a/src/jsc/bindings/BunProcess.cpp
@@ -719,7 +720,7 @@ index 4a9e48b8..56138416 100644
      return arrayBuffer;
  }
 diff --git a/src/jsc/bindings/webcore/SerializedScriptValue.h b/src/jsc/bindings/webcore/SerializedScriptValue.h
-index 7f3665aa..eeaedcf3 100644
+index 7f3665aa3d96c3c7da437006d0539a14bc8fffac..38a38b9cc6c2eb2f9fa4234a16cd17761207c920 100644
 --- a/src/jsc/bindings/webcore/SerializedScriptValue.h
 +++ b/src/jsc/bindings/webcore/SerializedScriptValue.h
 @@ -139,7 +139,7 @@ public:
@@ -727,7 +728,7 @@ index 7f3665aa..eeaedcf3 100644
      JSC::JSValue deserialize(JSC::JSGlobalObject&, JSC::JSGlobalObject*, const Vector<RefPtr<MessagePort>>&, const Vector<String>& blobURLs, const Vector<String>& blobFilePaths, SerializationErrorMode = SerializationErrorMode::Throwing, bool* didFail = nullptr);
  
 -    WEBCORE_EXPORT Ref<JSC::ArrayBuffer> toArrayBuffer();
-+    WEBCORE_EXPORT Ref<JSC::ArrayBuffer> toArrayBuffer(JSC::ArrayBufferSharingMode = JSC::ArrayBufferSharingMode::Shared, std::span<const uint8_t> prefix = { });
++    WEBCORE_EXPORT Ref<JSC::ArrayBuffer> toArrayBuffer(JSC::ArrayBufferSharingMode = JSC::ArrayBufferSharingMode::Shared, std::span<const uint8_t> prefix = {});
      static JSC::JSValue fromArrayBuffer(JSC::JSGlobalObject&, JSC::JSGlobalObject*, JSC::ArrayBuffer* arrayBuffer, size_t byteOffset = 0, size_t maxByteLength = 0, SerializationErrorMode = SerializationErrorMode::Throwing, bool* didFail = nullptr);
  
      static Ref<SerializedScriptValue> createFromWireBytes(Vector<uint8_t>&& data)

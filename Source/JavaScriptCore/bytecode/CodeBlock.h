@@ -289,6 +289,7 @@ public:
     // For a thread that runs beside the mutator. It keeps nothing, so it decodes the expression info on every call.
     LineColumn lineColumnForBytecodeIndexConcurrently(BytecodeIndex) const;
     ExpressionInfo::Entry expressionInfoForBytecodeIndex(BytecodeIndex) const;
+    JS_EXPORT_PRIVATE std::optional<unsigned> callSitePositionForBytecodeIndex(BytecodeIndex, bool isAsync = false) const;
 
     std::optional<BytecodeIndex> bytecodeIndexFromCallSiteIndex(CallSiteIndex);
 
