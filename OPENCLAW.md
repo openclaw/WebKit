@@ -1,7 +1,7 @@
 # OpenClaw WebKit artifacts
 
 This fork owns the WebKit artifacts consumed by `openclaw/bun`. The engine base is
-`1600131e46b5af48bbda3559af8d8a3327230b6e`; each engine change is a separate
+`5718a6ec579b98362ea7276a426deedcc6281ef5`; each engine change is a separate
 commit. Upstream `.github/scripts/lanes.mjs`, Dockerfiles, ICU inputs and macOS
 cross tools remain unchanged. No workflow publishes toolchain images.
 
@@ -130,3 +130,10 @@ entrypoint.
 
 - Add real byte-based JSC heap allocation sampling with weighted allocating-stack profiles and independent major/minor collection inclusion.
 - Check allocation sampling across interpreter and JIT tiers before merging engine pull requests.
+
+## Upstream rebase (unpublished)
+
+- Rebase the four batch-1 engine patches and the landed namespace and allocation-sampling patches onto oven-sh/WebKit `5718a6ec579b98362ea7276a426deedcc6281ef5` (upstream #768). Thanks @Jarred-Sumner for idle compiler-thread and Atomics.wait memory release.
+- Retain the published batch-1 OpenClaw release and Bun's checksum manifest until this engine has separate qualification and publication. This branch does not publish artifacts.
+
+The existing qualification baseline remains upstream `1600131e46b5af48bbda3559af8d8a3327230b6e` with its committed archive checksums. The source/provenance base advances to `5718a6ec579b98362ea7276a426deedcc6281ef5`; the Docker and lane recipes are unchanged. Unlanded engine work is not included in this rebase.

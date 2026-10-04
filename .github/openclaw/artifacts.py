@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 
-BASE = '1600131e46b5af48bbda3559af8d8a3327230b6e'
+BASE = '5718a6ec579b98362ea7276a426deedcc6281ef5'
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = json.loads((ROOT / '.github/openclaw/variants.json').read_text())
 RECIPE = ['.github/scripts/lanes.mjs', 'Dockerfile', 'Dockerfile.musl', 'Dockerfile.macos', 'Dockerfile.windows', 'icu', 'macos-cross']

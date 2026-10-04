@@ -1,7 +1,7 @@
 {
   "bun_repository": "openclaw/bun",
   "bun_commit": "b83b544ef744b6ab0dc1feadb59652261d64291d",
-  "base": "1600131e46b5af48bbda3559af8d8a3327230b6e",
+  "base": "5718a6ec579b98362ea7276a426deedcc6281ef5",
   "lanes": [
     {"label":"bun-webkit-linux-amd64","consumer":"openclaw-build-test.yml linux-x64: build:release --lto=off"},
     {"label":"bun-webkit-macos-arm64","consumer":"openclaw-build-test.yml darwin-arm64: build:release --lto=off"},
