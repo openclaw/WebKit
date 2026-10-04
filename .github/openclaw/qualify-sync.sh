@@ -23,7 +23,7 @@ test "$(git write-tree)" = "$SYNC_TREE"
 for patch in "$inputs"/patches/00[3-7]-*.patch; do
   git apply --index --exclude=CHANGELOG.md --exclude='docs/*' --exclude='test/js/node/worker_threads/*' "$patch"
 done
-for patch in 008-namespace.patch 009-allocation-sampling.patch 010-als-regressions.patch; do
+for patch in 008-namespace.patch 009-allocation-sampling.patch 010-als-regressions.patch 009-stack-positions.patch; do
   git apply --index --exclude=CHANGELOG.md --exclude='docs/*' "$inputs/patches/$patch"
 done
 cp "$inputs/worker-resource-limits.test.ts" test/js/node/worker_threads/openclaw-resource-limits.test.ts
@@ -53,6 +53,9 @@ cp build/openclaw-ci/selected.json "$results/selected.json"
 cp build/openclaw-ci/results.json "$results/results.json"
 # Run these unchanged upstream tests explicitly as well, so skips cannot satisfy the gate.
 "$candidate" test test/js/web/atomics.test.ts test/js/bun/wasm/compile-rss.test.ts -t 'Atomics.wait lets mimalloc|a notify that arrives while Atomics.wait|WebAssembly.compile does not retain' > "$results/memory-release.log" 2>&1
+"$candidate" test --expose-internals test/js/node/v8/capture-stack-trace.test.js test/js/node/util/util.test.js test/js/bun/sourcemap > "$results/stack-positions.log" 2>&1
+"$candidate" test test/bundler/bundler_minify.test.ts > "$results/stack-minifier.log" 2>&1
+python3 "$inputs/stack/check-runtime-cache.py" --baseline "$QUALIFICATION_DIR/bun/build/qualify-baseline/bun" --candidate "$candidate" --fixture "$inputs/stack/observe-regressions.js" --output "$results/runtime-cache" --expected-version 38 > "$results/stack-cache.json"
 "$candidate" "$inputs/segmenter.js" > "$results/segmenter.log" 2>&1
 "$candidate" test test/js/node/vm/vm.test.ts -t 'a Proxy in the prototype chain' > "$results/proxy.log" 2>&1
 "$candidate" test test/js/node/worker_threads/openclaw-resource-limits.test.ts -t resourceLimits > "$results/resource-limits.log" 2>&1

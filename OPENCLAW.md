@@ -128,12 +128,18 @@ entrypoint.
 
 ## Unreleased
 
+No changes yet.
+
+## Rebased engine batch
+
+- Keep syntax-selected stack positions separate from exception ranges for calls, constructors, property reads, and async continuations. Preserve the positions across bytecode rewriting, optimization, and cache replay.
+
 - Add real byte-based JSC heap allocation sampling with weighted allocating-stack profiles and independent major/minor collection inclusion.
 - Check allocation sampling across interpreter and JIT tiers before merging engine pull requests.
 
 ## Rebased release qualification
 
-- Rebase the four batch-1 engine patches and the landed namespace and allocation-sampling patches onto oven-sh/WebKit `5718a6ec579b98362ea7276a426deedcc6281ef5` (upstream #768). Thanks @Jarred-Sumner for idle compiler-thread and Atomics.wait memory release.
+- Rebase the four batch-1 engine patches and the landed namespace, allocation-sampling and stack-position patches onto oven-sh/WebKit `5718a6ec579b98362ea7276a426deedcc6281ef5` (upstream #768). Thanks @Jarred-Sumner for idle compiler-thread and Atomics.wait memory release.
 - Retain the published batch-1 release. Publish this separately qualified batch only through the protected `openclaw/release-5718a6ec` environment policy; updating the Bun main manifest is a separate integration task.
 
 The existing qualification baseline remains upstream `1600131e46b5af48bbda3559af8d8a3327230b6e` with its committed archive checksums. The source/provenance base advances to `5718a6ec579b98362ea7276a426deedcc6281ef5`; the Docker and lane recipes are unchanged. Unlanded engine work is not included in this rebase.
@@ -167,3 +173,18 @@ ALS hook/continuous-GC matrices, realm/retention probes, and Bun inspector tests
 The upstream delta changes only waiting/compiler-thread allocator release and
 its bridge; module-loader, namespace, managed-heap and inspector patches remain
 patch-identical on the new base.
+## Stack positions
+
+`CodeBlock::callSitePositionForBytecodeIndex` returns an optional absolute source offset for an exact instruction or async resume label. Stack readers use this position while exception expression ranges and debugger line tables retain their existing divots. RareData owns the two sparse vectors, including decoded cache entries; the bytecode cache revision prevents older layouts from being reused.
+
+Bun must be rebuilt with its matching stack-reader adapter. It must also preserve built-in error constructor syntax: rewriting `new Error()` as `Error()` changes the position and allows a returning arrow to become a proper tail call. The engine's proper-tail-call behavior is unchanged. The integration continues @robobun’s upstream Bun source-position work in [#35179](https://github.com/oven-sh/bun/pull/35179), [#37396](https://github.com/oven-sh/bun/pull/37396), and [#41580](https://github.com/oven-sh/bun/pull/41580).
+
+The release gate includes the landed stack-position adapter, the complete CallSite/util/source-map and minifier regressions, live stack visitor, async positions, and owned/persistent JSC cache replay.
+
+
+The compatibility arm builds that same exact W150 tree with **only**
+`scripts/build/deps/webkit-artifacts.json` changed. Its index must remain equal
+to the prepared tree before and after compilation, and its only tracked worktree
+change must be the manifest. Startup and all three unchanged memory-release
+tests must pass. A separate build applies the feature adapters for the full
+regression selection. Both gates are mandatory for assembly and publication.

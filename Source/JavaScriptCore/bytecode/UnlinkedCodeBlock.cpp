@@ -153,6 +153,19 @@ size_t UnlinkedCodeBlock::estimatedSize(JSCell* cell, VM& vm)
     return Base::estimatedSize(cell, vm) + extraSize;
 }
 
+std::optional<unsigned> UnlinkedCodeBlock::callSitePositionForBytecodeIndex(BytecodeIndex index, bool isAsync) const
+{
+    if (!m_rareData)
+        return std::nullopt;
+    const auto& positions = isAsync ? m_rareData->m_asyncResumePositions : m_rareData->m_callSitePositions;
+    auto it = std::lower_bound(positions.begin(), positions.end(), index.offset(), [](const auto& position, unsigned offset) {
+        return position.first < offset;
+    });
+    if (it == positions.end() || it->first != index.offset())
+        return std::nullopt;
+    return it->second;
+}
+
 size_t UnlinkedCodeBlock::RareData::sizeInBytes(const AbstractLocker&) const
 {
     size_t size = sizeof(RareData);
@@ -162,6 +175,8 @@ size_t UnlinkedCodeBlock::RareData::sizeInBytes(const AbstractLocker&) const
     size += m_unlinkedStringSwitchJumpTables.byteSize();
     size += m_typeProfilerInfoMap.capacity() * sizeof(decltype(m_typeProfilerInfoMap)::KeyValuePairType);
     size += m_opProfileControlFlowBytecodeOffsets.byteSize();
+    size += m_callSitePositions.byteSize();
+    size += m_asyncResumePositions.byteSize();
     size += m_bitVectors.byteSize();
     // FIXME: account for each bit vector.
     size += m_constantIdentifierSets.byteSize();

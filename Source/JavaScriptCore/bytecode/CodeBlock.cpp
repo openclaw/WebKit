@@ -2592,6 +2592,14 @@ ExpressionInfo::Entry CodeBlock::expressionInfoForBytecodeIndex(BytecodeIndex by
     return entry;
 }
 
+std::optional<unsigned> CodeBlock::callSitePositionForBytecodeIndex(BytecodeIndex index, bool isAsync) const
+{
+    auto offset = m_unlinkedCode->callSitePositionForBytecodeIndex(index, isAsync);
+    if (!offset)
+        return std::nullopt;
+    return *offset + sourceOffset();
+}
+
 bool CodeBlock::hasOpDebugForLineAndColumn(unsigned line, std::optional<unsigned> column)
 {
     const auto& instructionStream = instructions();

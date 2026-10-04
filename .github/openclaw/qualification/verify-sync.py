@@ -10,7 +10,7 @@ assert set(selected)<={r['testPath'] for r in rows}
 assert rows and all(r['ok'] for r in rows),'sync CI failures'
 assert {'test/js/web/atomics.test.ts','test/js/bun/wasm/compile-rss.test.ts'}<=set(selected)
 counts={}
-for name,minimum in [('memory-release',3),('proxy',4),('resource-limits',14),('namespace',41),('inspector',78),('als-suites',223)]:
+for name,minimum in [('memory-release',3),('proxy',4),('resource-limits',14),('namespace',41),('inspector',78),('als-suites',223),('stack-positions',343),('stack-minifier',68)]:
     text=(out/(name+'.log')).read_text()
     passes=re.findall(r'(\d+) pass',text)
     assert passes and int(passes[-1])>=minimum,name+' incomplete'
@@ -21,12 +21,19 @@ for name in ['als-plugin','als-native','als-gc']:
     matrix=json.loads((out/(name+'.json')).read_text())['results']
     assert len(matrix)==14 and all(r['exitCode']==0 for r in matrix),name
 assert json.loads((out/'als-retention.json').read_text())['passed'] is True
+cache=json.loads((out/'stack-cache.json').read_text())
+assert len(cache)==4 and all(r['matches']==r['total']==56 for r in cache if r['arm']=='candidate')
+assert cache[-1]['arm']=='candidate' and cache[-1]['repeat']=='warm' and cache[-1]['cache_hit_proven'] is True
 assert len((out/'engine-limits.log').read_text().splitlines())==7
 engine=json.loads((root/'engine-gate.json').read_text())
 assert engine['passed'] and engine['source']==sys.argv[2]
+compatibility=json.loads((root/'compatibility-gate.json').read_text())
+assert compatibility['passed'] and compatibility['source']==sys.argv[2]
+assert compatibility['base_commit']==sys.argv[3] and compatibility['prepared_tree']==sys.argv[4]
+assert compatibility['only_manifest_changed'] and compatibility['memory_tests']==3 and compatibility['startup'] is True
 record={'passed':True,'base_commit':sys.argv[3],'prepared_tree':sys.argv[4],
         'selected_files':len(selected),'result_rows':len(rows),'regressions':0,'tests':counts,
         'adapter_sha256':hashlib.sha256((root/'bun-sync-adapters.patch').read_bytes()).hexdigest()}
 (root/'sync-gate.json').write_text(json.dumps(record,indent=2)+'\n')
-gate=json.loads((root/'gate.json').read_text());gate['upstream_sync']=record;gate['engine']=engine
+gate=json.loads((root/'gate.json').read_text());gate['upstream_sync']=record;gate['engine']=engine;gate['compatibility']=compatibility
 (root/'gate.json').write_text(json.dumps(gate,indent=2)+'\n')
