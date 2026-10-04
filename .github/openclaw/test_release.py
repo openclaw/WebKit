@@ -85,4 +85,19 @@ class ReleaseIntegrity(unittest.TestCase):
             self.assertEqual(execute.call_count,1)
             self.assertIn('state=approved',api.call_args.args)
 
+    def test_authorization_accepts_protected_batch_branch(self):
+        run={'head_sha':SOURCE,'head_branch':'openclaw/batch-1','event':'workflow_dispatch','path':'.github/workflows/openclaw-artifacts.yml@openclaw/batch-1','run_attempt':1}
+        config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())
+        names=['preflight','test','assemble']+['build ('+l['label']+')' for l in config['lanes']]
+        jobs={'jobs':[{'name':n,'conclusion':'success','run_attempt':1} for n in names]}
+        pending=[{'environment':{'name':'openclaw-artifacts','id':99},'current_user_can_approve':True}]
+        with patch.object(release,'api',side_effect=[{'enabled':True},run,jobs,pending,{}]),patch.object(release,'execute') as execute:
+            release.authorize(SOURCE,42)
+            self.assertEqual(execute.call_count,1)
+    def test_authorization_rejects_other_branch(self):
+        run={'head_sha':SOURCE,'head_branch':'feature/unreviewed','event':'workflow_dispatch','path':'.github/workflows/openclaw-artifacts.yml','run_attempt':1}
+        with patch.object(release,'api',side_effect=[{'enabled':True},run]),patch.object(release,'execute') as execute:
+            with self.assertRaisesRegex(ValueError,'reviewed source'):release.authorize(SOURCE,42)
+            execute.assert_not_called()
+
 if __name__=='__main__':unittest.main()
