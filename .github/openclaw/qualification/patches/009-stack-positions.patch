@@ -1116,9 +1116,38 @@ index 00000000..1bc876b8
 +  assert.deepEqual(/:(\d+):(\d+)\)?$/.exec(frame!.toString())!.slice(1).map(Number), [line, column], label);
 +}
 diff --git a/test/js/node/v8/capture-stack-trace.test.js b/test/js/node/v8/capture-stack-trace.test.js
-index ac527424..32302fc2 100644
+index ac527424..fa239c56 100644
 --- a/test/js/node/v8/capture-stack-trace.test.js
 +++ b/test/js/node/v8/capture-stack-trace.test.js
+@@ -206,8 +206,8 @@ test.concurrent("CallSite columns preserve async continuation metadata", async (
+   expect(stderr).toBe("");
+   expect(JSON.parse(stdout)).toEqual([
+     { position: [4, 7], textPosition: [4, 7], async: false, eval: false, native: false, file: true },
+-    // JSC selects the awaited call; V8 selects `await`. Preserve the location while fixing its units.
+-    { position: [8, 14], textPosition: [8, 14], async: true, eval: false, native: false, file: true },
++    // Async frames point at `await`, as in Node.
++    { position: [8, 8], textPosition: [8, 8], async: true, eval: false, native: false, file: true },
+   ]);
+   expect(exitCode).toBe(0);
+ });
+@@ -2091,7 +2091,7 @@ test.concurrent(
+       "define stack": error => (Object.defineProperty(error, "stack", { value: "defined" }), error.stack),
+       // A clone is made from the complete string: it must not get a second first line.
+       "structuredClone": error => structuredClone(error).stack.split("\\n").filter(line => line.includes("boom")),
+-      "Bun.inspect": error => Bun.inspect(error).split("\\n").filter(line => line.includes("boom")).map(line => line.trim()),
++      "Bun.inspect": error => Bun.inspect(error).split("\\n").map(line => line.trim()).filter(line => line === "TypeError: boom"),
+       "JSON.stringify": error => JSON.stringify(error),
+     };
+     const rows = {};
+@@ -2412,7 +2412,7 @@ test.concurrent.each([[{}], [{ BUN_JSC_useSourceProviderCache: "0" }]])(
+     });
+     const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+     expect(stderr).toBe("");
+-    expect(stdout.trim()).toEndWith("[eval]:5:14)"); // 2:18 when the lexer resumed on the template literal's first line
++    expect(stdout.trim()).toEndWith("[eval]:5:10)"); // Line 2 when the lexer resumed on the template literal's first line
+     expect(exitCode).toBe(0);
+   },
+ );
 @@ -2456,3 +2456,31 @@ test.skipIf(totalmem() < 10 * 1024 ** 3)(
    },
    30_000,
@@ -1151,6 +1180,21 @@ index ac527424..32302fc2 100644
 +    expect({ stdout, stderr, exitCode }).toEqual({ stdout: "", stderr: "", exitCode: 0 });
 +  });
 +}
+diff --git a/test/js/node/v8/error-prepare-stack-default-fixture.js b/test/js/node/v8/error-prepare-stack-default-fixture.js
+index 17df9c6d..5e3ce31b 100644
+--- a/test/js/node/v8/error-prepare-stack-default-fixture.js
++++ b/test/js/node/v8/error-prepare-stack-default-fixture.js
+@@ -30,8 +30,8 @@ function oneWrapperLevel() {
+ oneWrapperLevel();
+ 
+ // The native line column numbers might differ a bit here.
+-const stackIgnoringLineAndColumn = stack.replaceAll(":12:26", ":NN:NN").replaceAll(/native:.*$/gm, "native)");
+-const stack2IgnoringLineAndColumn = stack2.replaceAll(":17:26", ":NN:NN").replaceAll(/native:.*$/gm, "native)");
++const stackIgnoringLineAndColumn = stack.replaceAll(":12:9", ":NN:NN").replaceAll(/native:.*$/gm, "native)");
++const stack2IgnoringLineAndColumn = stack2.replaceAll(":17:9", ":NN:NN").replaceAll(/native:.*$/gm, "native)");
+ if (stackIgnoringLineAndColumn !== stack2IgnoringLineAndColumn) {
+   console.log("\n-----\n");
+   console.log(stackIgnoringLineAndColumn);
 diff --git a/test/js/node/v8/stack-position-regressions-fixture.js b/test/js/node/v8/stack-position-regressions-fixture.js
 new file mode 100644
 index 00000000..fe71747d

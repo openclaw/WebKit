@@ -68,6 +68,7 @@ jobs:
           jsc="$RUNNER_TEMP/jsc-artifact/bun-webkit/bin/jsc"
           Tools/Scripts/run-jsc-stress-tests JSTests/stress --jsc "$jsc" --child-processes 16 --filter 'callsite-syntax-positions|stack-position-regressions' --output-dir "$RUNNER_TEMP/stack-results" --no-retry
           python3 .github/openclaw/verify-jsc-results.py "$RUNNER_TEMP/stack-results" --require callsite-syntax-positions.js --require stack-position-regressions.js
+          python3 .github/openclaw/check-stack-visitor.py "$jsc"
           "$jsc" -m JSTests/stress/callsite-async-position.mjs
           "$jsc" --useJIT=false -m JSTests/stress/callsite-async-position.mjs
           "$jsc" --useBytecodeOptimizer=true -m JSTests/stress/callsite-async-position.mjs
