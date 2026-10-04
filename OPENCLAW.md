@@ -32,7 +32,8 @@ this document's changelog. Check that the recipe is unchanged relative to the
 base, then review the whole batch. Changing the upstream recipe requires a
 separate qualification and an explicit base/recipe update.
 
-Dispatch **OpenClaw WebKit artifacts** from `openclaw/main` with its full current
+Dispatch **OpenClaw WebKit artifacts** from `openclaw/main` (or the protected
+`openclaw/batch-1` publication branch) with its full current
 commit SHA and `publish: false`. It builds the selected lanes on Linux x64 with
 Docker Buildx, at most two lanes at once. Each lane records the exact source,
 commit patches, recipe hashes, locally built toolchain image ID, BuildKit
@@ -48,6 +49,10 @@ modes and at least 14 worker resource-limit cases. Other platforms are built;
 this gate does not claim native runtime qualification on every architecture.
 
 ## Publish and verify
+
+Batch 1 is published from `openclaw/batch-1` so concurrently reviewed batch-2
+engine changes can land on `openclaw/main` without entering this release. Both
+branches require the same protected environment and full-SHA/green-job checks.
 
 After a green build/test dispatch, dispatch the same full SHA with `publish:
 true`. This repeats the build and qualification, then waits at the protected
