@@ -45,8 +45,8 @@ def preflight():
     sha = source()
     if sha != os.environ['INPUT_SHA'] or sha != os.environ['GITHUB_SHA']:
         raise ValueError('dispatch must use the same reviewed branch head and full input SHA')
-    if os.environ['GITHUB_REF'] != 'refs/heads/openclaw/main':
-        raise ValueError('only openclaw/main may run this workflow')
+    if os.environ['GITHUB_REF'] not in ('refs/heads/openclaw/main', 'refs/heads/openclaw/batch-1'):
+        raise ValueError('only an explicitly permitted owned branch may run this workflow')
     upstream = {l['label'] for l in lane_definitions()}
     wanted = [l['label'] for l in CONFIG['lanes']]
     if len(set(wanted)) != len(wanted) or not set(wanted) <= upstream:
