@@ -1,0 +1,84 @@
+name: OpenClaw engine checks
+on:
+  pull_request:
+    branches: [openclaw/main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: openclaw-engine-checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux-native:
+    if: github.repository == 'openclaw/WebKit'
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 16
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/LayoutTests/
+            !/JSTests/*
+            !/PerformanceTests/
+            !/Websites/
+            !/ManualTests/
+            !/WebDriverTests/
+            /JSTests/stress/
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.3.0'
+      - name: Verify pipeline integrity and runner support
+        run: |
+          python3 .github/openclaw/test_release.py
+          bash .github/openclaw/preflight.sh
+      - name: Build native Linux engine with the unchanged lane
+        env:
+          BUILDX_METADATA_PROVENANCE: max
+        run: python3 .github/openclaw/artifacts.py build --lane bun-webkit-linux-amd64 --output "$RUNNER_TEMP/linux-artifact"
+      - name: Install pinned Bun and JSC test tools
+        run: |
+          curl -fsSL --retry 5 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake ninja-build nasm ccache golang-go clang-23 lld-23 llvm-23 unzip ruby ruby-highline libjson-pp-perl
+          rustup toolchain install nightly-2026-09-15 --profile minimal --component rust-src
+          echo 'RUSTUP_TOOLCHAIN=nightly-2026-09-15' >> "$GITHUB_ENV"
+          echo '/usr/lib/llvm-23/bin' >> "$GITHUB_PATH"
+          curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o "$RUNNER_TEMP/bun.zip"
+          unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bootstrap"
+          echo "$RUNNER_TEMP/bootstrap/bun-linux-x64" >> "$GITHUB_PATH"
+      - name: Exercise module namespace engine regressions
+        run: |
+          mkdir "$RUNNER_TEMP/jsc-artifact"
+          tar -xzf "$RUNNER_TEMP/linux-artifact/bun-webkit-linux-amd64.tar.gz" -C "$RUNNER_TEMP/jsc-artifact"
+          # $vm is a JavaScript identifier.
+          # shellcheck disable=SC2016
+          "$RUNNER_TEMP/jsc-artifact/bun-webkit/bin/jsc" --useDollarVM=1 -e 'if (typeof $vm.moduleNamespaceForRequire !== "function") throw new Error("namespace test hook is missing");'
+          Tools/Scripts/run-jsc-stress-tests JSTests/stress --jsc "$RUNNER_TEMP/jsc-artifact/bun-webkit/bin/jsc" --child-processes 16 --filter 'module-namespace|module-loader-security-thenable-namespace' --output-dir "$RUNNER_TEMP/jsc-results" --no-retry
+          python3 .github/openclaw/verify-jsc-results.py "$RUNNER_TEMP/jsc-results"
+      - name: Qualify the paired Bun adapter and fork selection
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/linux-artifact
+          QUALIFICATION_DIR: ${{ runner.temp }}/qualification
+        run: bash .github/openclaw/qualify.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: linux-native-proof
+          path: |
+            ${{ runner.temp }}/qualification/*.json
+            ${{ runner.temp }}/qualification/*.log
+            ${{ runner.temp }}/qualification/*.sha256
+            ${{ runner.temp }}/qualification/*.patch
+            ${{ runner.temp }}/qualification/baseline/*.json
+            ${{ runner.temp }}/qualification/baseline/*.log
+            ${{ runner.temp }}/qualification/candidate/*.json
+            ${{ runner.temp }}/qualification/candidate/*.log
+            ${{ runner.temp }}/jsc-results/results
+            ${{ runner.temp }}/jsc-results/*.log
+          if-no-files-found: error
+          retention-days: 7

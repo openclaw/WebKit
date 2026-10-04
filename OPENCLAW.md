@@ -90,3 +90,9 @@ use an old Bun executable with headers/libraries from another engine ABI.
 - Preserve module-loader async context through resolution and evaluation.
 - Add opt-in per-VM worker managed-heap and stack budgets.
 - Add checksum-pinned, immutable OpenClaw artifact publication with a Linux regression gate.
+
+## Namespace interop qualification
+
+Pull requests run the read-only Linux engine check. It builds the unchanged native lane, verifies the JSC namespace stress results, and builds Bun with the matching qualification adapters before running the fork selection and namespace regressions. It has no publication job.
+
+The namespace adapter in `.github/openclaw/qualification/patches/008-namespace.patch` accompanies the engine facade API. Keep it in sync with the matching Bun integration until that integration becomes the qualification baseline. The native engine change and Bun consumer must be rebuilt together; a new engine release alone does not remove Bun's old namespace prototype.
