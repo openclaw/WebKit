@@ -1804,7 +1804,7 @@ static void asyncGeneratorDriverResume(VM& vm, JSValue context, JSValue resoluti
     asyncModuleExecutionResume(module->realm(), vm, module, resolution, status);
 }
 
-void runInternalMicrotask(JSGlobalObject* globalObject, VM& vm, InternalMicrotask task, uint8_t payload, std::span<const JSValue, maxMicrotaskArguments> arguments, MicrotaskCallCache* microtaskCallCache)
+static void runInternalMicrotaskImpl(JSGlobalObject* globalObject, VM& vm, InternalMicrotask task, uint8_t payload, std::span<const JSValue, maxMicrotaskArguments> arguments, MicrotaskCallCache* microtaskCallCache)
 {
     auto scope = DECLARE_THROW_SCOPE(vm);
 
@@ -2353,6 +2353,22 @@ void runInternalMicrotask(JSGlobalObject* globalObject, VM& vm, InternalMicrotas
         return;
     }
     }
+}
+
+void runInternalMicrotask(JSGlobalObject* globalObject, VM& vm, InternalMicrotask task, uint8_t payload, std::span<const JSValue, maxMicrotaskArguments> arguments, MicrotaskCallCache* microtaskCallCache)
+{
+#if USE(BUN_JSC_ADDITIONS)
+    if (capturesModuleLoaderAsyncContext(task)
+        && (vm.isAsyncContextTrackingEnabled() || AsyncContextSwapScope::isContextTuple(arguments[2]))) {
+        JSValue context = arguments[2];
+        JSValue asyncContext = AsyncContextSwapScope::unwrapContextTuple(context);
+        AsyncContextSwapScope asyncContextScope(vm, globalObject, asyncContext);
+        const std::array<JSValue, maxMicrotaskArguments> unwrapped { arguments[0], arguments[1], context, arguments[3] };
+        runInternalMicrotaskImpl(globalObject, vm, task, payload, unwrapped, microtaskCallCache);
+        return;
+    }
+#endif
+    runInternalMicrotaskImpl(globalObject, vm, task, payload, arguments, microtaskCallCache);
 }
 
 } // namespace JSC
