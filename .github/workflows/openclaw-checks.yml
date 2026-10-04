@@ -83,6 +83,14 @@ jobs:
           "$jsc" "${common[@]}" --useJIT=false "$fixture"
           "$jsc" "${common[@]}" --useDFGJIT=false --useFTLJIT=false "$fixture"
           "$jsc" "${common[@]}" --useConcurrentJIT=false --thresholdForOptimizeAfterWarmUp=10 --thresholdForFTLOptimizeAfterWarmUp=20 "$fixture"
+      - name: Exercise incremental bytecode snapshots across execution tiers
+        shell: bash
+        run: |
+          set -euo pipefail
+          jsc="$RUNNER_TEMP/jsc-artifact/bun-webkit/bin/jsc"
+          "$jsc" -e 'if (typeof evalFromIncrementalBytecodeCache !== "function") throw new Error("incremental cache test hook is missing");'
+          Tools/Scripts/run-jsc-stress-tests JSTests/stress --jsc "$jsc" --child-processes 16 --filter 'incremental-bytecode-cache' --output-dir "$RUNNER_TEMP/incremental-results" --no-retry
+          python3 .github/openclaw/verify-jsc-results.py "$RUNNER_TEMP/incremental-results" --require incremental-bytecode-cache.js
       - name: Qualify the paired Bun adapter and fork selection
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/linux-artifact
@@ -103,6 +111,8 @@ jobs:
             ${{ runner.temp }}/qualification/candidate/*.log
             ${{ runner.temp }}/jsc-results/results
             ${{ runner.temp }}/jsc-results/*.log
+            ${{ runner.temp }}/incremental-results/results
+            ${{ runner.temp }}/incremental-results/*.log
             ${{ runner.temp }}/stack-results/results
             ${{ runner.temp }}/stack-results/*.log
           if-no-files-found: error

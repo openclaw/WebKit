@@ -340,6 +340,41 @@ void CachedBytecode::addGlobalUpdate(Ref<CachedBytecode> bytecode)
     m_updates.append(CacheUpdate::GlobalUpdate { WTF::move(bytecode->m_payload) });
 }
 
+static ptrdiff_t functionSlotOffset(ptrdiff_t executableOffset, CodeSpecializationKind kind)
+{
+    return executableOffset + (kind == CodeSpecializationKind::CodeForCall ? CachedFunctionExecutableOffsets::codeBlockForCallOffset() : CachedFunctionExecutableOffsets::codeBlockForConstructOffset()) + CachedWriteBarrierOffsets::ptrOffset() + CachedPtrOffsets::offsetOffset();
+}
+
+bool CachedBytecode::hasFunctionCodeBlock(ptrdiff_t executableOffset, CodeSpecializationKind kind) const
+{
+    auto offset = functionSlotOffset(executableOffset, kind);
+    RELEASE_ASSERT(offset >= 0 && static_cast<size_t>(offset) + sizeof(int32_t) <= size());
+    int32_t value;
+    memcpy(&value, span().data() + offset, sizeof(value));
+    return value != static_cast<int32_t>(VariableLengthObjectBase::emptySentinel);
+}
+
+RefPtr<CachedBytecode> CachedBytecode::copyWithFunctionUpdate(ptrdiff_t executableOffset, const UnlinkedFunctionExecutable& executable, CodeSpecializationKind kind, const CachedBytecode& function) const
+{
+    ASSERT(!hasUpdates() && !function.hasUpdates());
+    if (hasFunctionCodeBlock(executableOffset, kind) || function.size() > static_cast<size_t>(INT32_MAX) || size() > static_cast<size_t>(INT32_MAX) - function.size())
+        return nullptr;
+    auto buffer = MallocSpan<uint8_t, VMMalloc>::malloc(size() + function.size());
+    memcpySpan(buffer.mutableSpan().first(size()), span());
+    memcpySpan(buffer.mutableSpan().subspan(size()), function.span());
+    auto slot = functionSlotOffset(executableOffset, kind);
+    int32_t relativeOffset = safeCast<int32_t>(static_cast<ptrdiff_t>(size() + function.rootOffset()) - slot);
+    memcpy(buffer.mutableSpan().data() + slot, &relativeOffset, sizeof(relativeOffset));
+    CachedFunctionExecutableMetadata metadata { executable.features(), executable.lexicallyScopedFeatures(), executable.hasCapturedVariables() };
+    memcpy(buffer.mutableSpan().data() + executableOffset + CachedFunctionExecutableOffsets::metadataOffset(), &metadata, sizeof(metadata));
+    LeafExecutableMap leaves;
+    for (const auto& leaf : function.m_leafExecutables)
+        leaves.add(leaf.key, leaf.value + size());
+    auto result = CachedBytecode::create(WTF::move(buffer), WTF::move(leaves));
+    result->setRootOffset(rootOffset());
+    return result;
+}
+
 void CachedBytecode::addFunctionUpdate(const UnlinkedFunctionExecutable* executable, CodeSpecializationKind kind, Ref<CachedBytecode> bytecode)
 {
     auto it = m_leafExecutables.find(executable);

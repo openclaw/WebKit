@@ -56,6 +56,12 @@ class CachedBytecode : public RefCounted<CachedBytecode> {
     WTF_MAKE_NONCOPYABLE(CachedBytecode);
 
 public:
+    ~CachedBytecode()
+    {
+        if (m_destructionCallback)
+            m_destructionCallback();
+    }
+
     static Ref<CachedBytecode> create()
     {
         return adoptRef(*new CachedBytecode(CachePayload::makeEmptyPayload()));
@@ -77,6 +83,13 @@ public:
     }
 
     LeafExecutableMap& leafExecutables() LIFETIME_BOUND { return m_leafExecutables; }
+
+    // Private, VM-local cache identity. It carries no ownership of a decoder or executable.
+    uint64_t incrementalCacheID() const { return m_incrementalCacheID; }
+    void setIncrementalCacheID(uint64_t id) { m_incrementalCacheID = id; }
+    void setDestructionCallback(Function<void()>&& callback) { m_destructionCallback = WTF::move(callback); }
+    JS_EXPORT_PRIVATE bool hasFunctionCodeBlock(ptrdiff_t executableOffset, CodeSpecializationKind) const;
+    JS_EXPORT_PRIVATE RefPtr<CachedBytecode> copyWithFunctionUpdate(ptrdiff_t executableOffset, const UnlinkedFunctionExecutable&, CodeSpecializationKind, const CachedBytecode&) const;
 
     JS_EXPORT_PRIVATE void addGlobalUpdate(Ref<CachedBytecode>);
     JS_EXPORT_PRIVATE void addFunctionUpdate(const UnlinkedFunctionExecutable*, CodeSpecializationKind, Ref<CachedBytecode>);
@@ -119,6 +132,8 @@ private:
 #endif
     LeafExecutableMap m_leafExecutables;
     Vector<CacheUpdate> m_updates;
+    uint64_t m_incrementalCacheID { 0 };
+    Function<void()> m_destructionCallback;
 };
 
 #if USE(BUN_JSC_ADDITIONS)

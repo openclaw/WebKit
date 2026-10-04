@@ -84,6 +84,8 @@ static UnlinkedFunctionCodeBlock* generateUnlinkedFunctionCodeBlock(
     if (error.isValid())
         return nullptr;
     vm.codeCache()->updateCache(executable, source, kind, result);
+    if (codeGenerationMode.isEmpty() && vm.clientData)
+        vm.clientData->didGenerateUnlinkedFunctionCodeBlock(vm, executable, kind, result);
     return result;
 }
 

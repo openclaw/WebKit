@@ -1520,8 +1520,10 @@ void Decoder::setHandleForTDZEnvironment(CompactTDZEnvironment* environment, con
 
 void Decoder::addLeafExecutable(const UnlinkedFunctionExecutable* executable, ptrdiff_t offset)
 {
+    if (auto id = m_cachedBytecode->incrementalCacheID(); id && m_vm.clientData)
+        m_vm.clientData->didDecodeCachedFunction(m_vm, id, const_cast<UnlinkedFunctionExecutable*>(executable), offset);
 #if USE(BUN_JSC_ADDITIONS)
-    // Only CachedBytecode::addFunctionUpdate reads this map, and Bun never calls it.
+    // Private caches register weak identities with the embedder instead of growing this map.
     UNUSED_PARAM(executable);
     UNUSED_PARAM(offset);
 #else

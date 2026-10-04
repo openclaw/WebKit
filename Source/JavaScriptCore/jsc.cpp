@@ -487,6 +487,7 @@ static JSC_DECLARE_HOST_FUNCTION(functionBytecodeCacheFor);
 static JSC_DECLARE_HOST_FUNCTION(functionBuiltinFromBytecodeCache);
 #if USE(BUN_JSC_ADDITIONS)
 static JSC_DECLARE_HOST_FUNCTION(functionEvalTwiceFromTransientBytecodeCache);
+static JSC_DECLARE_HOST_FUNCTION(functionEvalFromIncrementalBytecodeCache);
 #endif
 static JSC_DECLARE_HOST_FUNCTION(functionBuiltinBytecodeSize);
 static JSC_DECLARE_HOST_FUNCTION(functionBytecodeCachePageTouch);
@@ -860,6 +861,7 @@ private:
         addFunction(vm, "builtinFromBytecodeCache"_s, functionBuiltinFromBytecodeCache, 3);
 #if USE(BUN_JSC_ADDITIONS)
         addFunction(vm, "evalTwiceFromTransientBytecodeCache"_s, functionEvalTwiceFromTransientBytecodeCache, 1);
+        addFunction(vm, "evalFromIncrementalBytecodeCache"_s, functionEvalFromIncrementalBytecodeCache, 2);
 #endif
         addFunction(vm, "builtinBytecodeSize"_s, functionBuiltinBytecodeSize, 2);
         addFunction(vm, "bytecodeCachePageTouch"_s, functionBytecodeCachePageTouch, 4);
@@ -2114,6 +2116,92 @@ JSC_DEFINE_HOST_FUNCTION(functionBuiltinFromBytecodeCache, (JSGlobalObject* glob
 }
 
 #if USE(BUN_JSC_ADDITIONS)
+JSC_DEFINE_HOST_FUNCTION(functionEvalFromIncrementalBytecodeCache, (JSGlobalObject* globalObject, CallFrame* callFrame))
+{
+    VM& vm = globalObject->vm();
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    String text = callFrame->argument(0).toWTFString(globalObject);
+    RETURN_IF_EXCEPTION(scope, { });
+    auto exercise = callFrame->argument(1);
+    auto callData = getCallData(exercise);
+    if (callData.type == CallData::Type::None)
+        return throwVMError(globalObject, scope, "exercise must be callable"_s);
+    auto source = makeSource(text, SourceOrigin { URL { "file:///incremental-cache.js"_s } }, SourceTaintedOrigin::Untainted, "incremental-cache.js"_s);
+    ParserError error;
+    auto* block = recursivelyGenerateUnlinkedCodeBlockForProgram(vm, source, NoLexicallyScopedFeatures, JSParserScriptMode::Classic, { }, error, EvalContextType::None, 0);
+    if (!block || error.isValid())
+        return throwVMError(globalObject, scope, "parse failed"_s);
+    Strong<UnlinkedProgramCodeBlock> protectedBlock(vm, block);
+    auto key = sourceCodeKeyForSerializedProgram(vm, source);
+    auto bytes = encodeCodeBlock(vm, key, block);
+    if (!bytes)
+        return throwVMError(globalObject, scope, "encode failed"_s);
+    Ref<CachedBytecode> original = *bytes;
+    Vector<uint8_t> originalContents(original->span());
+    NakedPtr<Exception> exception;
+    JSValue value = evaluate(globalObject, source, block, JSValue(), exception);
+    if (exception) {
+        scope.throwException(globalObject, exception);
+        return { };
+    }
+    MarkedArgumentBuffer args;
+    args.append(value);
+    call(globalObject, exercise, callData, jsUndefined(), args);
+    RETURN_IF_EXCEPTION(scope, { });
+    unsigned updates = 0;
+    {
+        DeferGC deferGC(vm);
+        LeafExecutableMap leaves = WTF::move(bytes->leafExecutables());
+        while (!leaves.isEmpty()) {
+            LeafExecutableMap children;
+            for (auto& leaf : leaves) {
+                auto* executable = const_cast<UnlinkedFunctionExecutable*>(leaf.key);
+                auto [forCall, forConstruct] = executable->codeBlocksDecodingCached(vm);
+                auto append = [&](UnlinkedFunctionCodeBlock* code, CodeSpecializationKind kind) {
+                    if (!code || bytes->hasFunctionCodeBlock(leaf.value.base(), kind))
+                        return;
+                    BytecodeCacheError cacheError;
+                    auto function = encodeFunctionCodeBlock(vm, code, cacheError);
+                    RELEASE_ASSERT(function && !cacheError.isValid());
+                    auto next = bytes->copyWithFunctionUpdate(leaf.value.base(), *executable, kind, *function);
+                    RELEASE_ASSERT(next && next->hasFunctionCodeBlock(leaf.value.base(), kind));
+                    for (auto& child : next->leafExecutables())
+                        children.set(child.key, child.value);
+                    next->leafExecutables().clear();
+                    bytes = WTF::move(next);
+                    ++updates;
+                };
+                append(forCall, CodeSpecializationKind::CodeForCall);
+                append(forConstruct, CodeSpecializationKind::CodeForConstruct);
+            }
+            leaves = WTF::move(children);
+        }
+    }
+    RELEASE_ASSERT(equalSpans(originalContents.span(), original->span()));
+    auto* decoded = decodeCodeBlock<UnlinkedProgramCodeBlock>(vm, key, *bytes);
+    if (!decoded)
+        return throwVMError(globalObject, scope, "decode failed"_s);
+    Strong<UnlinkedProgramCodeBlock> protectedDecoded(vm, decoded);
+    GlobalObject* realm = GlobalObject::create(vm, GlobalObject::createStructure(vm, jsNull()), Vector<String>());
+    JSValue result = evaluate(realm, source, decoded, JSValue(), exception);
+    if (exception) {
+        scope.throwException(globalObject, exception);
+        return { };
+    }
+    args.append(result);
+    JSArray* array = constructEmptyArray(globalObject, nullptr);
+    RETURN_IF_EXCEPTION(scope, { });
+    array->putDirectIndex(globalObject, 0, result);
+    RETURN_IF_EXCEPTION(scope, { });
+    array->putDirectIndex(globalObject, 1, jsNumber(updates));
+    RETURN_IF_EXCEPTION(scope, { });
+    array->putDirectIndex(globalObject, 2, jsNumber(original->size()));
+    RETURN_IF_EXCEPTION(scope, { });
+    array->putDirectIndex(globalObject, 3, jsNumber(bytes->size()));
+    RETURN_IF_EXCEPTION(scope, { });
+    return JSValue::encode(array);
+}
+
 // evalTwiceFromTransientBytecodeCache(sourceText) — what an embedder handing JSC a caller-owned buffer does (a bare span:
 // no destructor, not persistent; e.g. node:vm's cachedData): encode sourceText as a program, decode its code block from a
 // copy of the bytes JSC merely borrows, evaluate it, then scribble over and free the copy and evaluate the same decoded

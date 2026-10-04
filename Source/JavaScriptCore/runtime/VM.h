@@ -157,6 +157,8 @@ class SamplingProfiler;
 class ShadowChicken;
 class SharedJITStubSet;
 class SourceProvider;
+class UnlinkedFunctionExecutable;
+class UnlinkedFunctionCodeBlock;
 class SourceProviderCache;
 enum class SourceTaintedOrigin : uint8_t;
 class StackFrame;
@@ -274,6 +276,8 @@ public:
 
         virtual bool isWebCoreJSClientData() const { return false; }
         virtual DecoderStringTable* decoderStringTable() { return nullptr; }
+        virtual void didDecodeCachedFunction(VM&, uint64_t, UnlinkedFunctionExecutable*, ptrdiff_t) { }
+        virtual void didGenerateUnlinkedFunctionCodeBlock(VM&, const UnlinkedFunctionExecutable*, CodeSpecializationKind, const UnlinkedFunctionCodeBlock*) { }
     };
 
     bool usingAPI() { return vmType != VMType::Default; }
