@@ -1,0 +1,17 @@
+{
+  "bun_repository": "openclaw/bun",
+  "bun_commit": "b83b544ef744b6ab0dc1feadb59652261d64291d",
+  "base": "1600131e46b5af48bbda3559af8d8a3327230b6e",
+  "lanes": [
+    {"label":"bun-webkit-linux-amd64","consumer":"openclaw-build-test.yml linux-x64: build:release --lto=off"},
+    {"label":"bun-webkit-macos-arm64","consumer":"openclaw-build-test.yml darwin-arm64: build:release --lto=off"},
+    {"label":"bun-webkit-linux-amd64-lto","consumer":"openclaw-release.yml default linux-x64"},
+    {"label":"bun-webkit-linux-arm64-lto","consumer":"openclaw-release.yml default linux-arm64"},
+    {"label":"bun-webkit-macos-arm64-lto","consumer":"openclaw-release.yml default darwin-arm64"},
+    {"label":"bun-webkit-macos-amd64-lto","consumer":"openclaw-release.yml default darwin-x64"},
+    {"label":"bun-webkit-linux-amd64-musl-lto","consumer":"openclaw-release.yml optional linux-x64-musl"},
+    {"label":"bun-webkit-linux-arm64-musl-lto","consumer":"openclaw-release.yml optional linux-arm64-musl"},
+    {"label":"bun-webkit-windows-amd64-lto","consumer":"openclaw-release.yml optional windows-x64"}
+  ],
+  "excluded": "Windows arm64, Android, FreeBSD, debug and ASAN are not selected by the fork's active OpenClaw workflows. There is no separate x64 baseline WebKit archive."
+}
