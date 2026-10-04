@@ -27,6 +27,9 @@
 
 #include "MemoryMode.h"
 #include "PageCount.h"
+#if USE(BUN_JSC_ADDITIONS)
+#include "ArrayBufferMemoryAccounting.h"
+#endif
 
 #include <atomic>
 
@@ -162,8 +165,30 @@ public:
 
     void updateSize(size_t size, std::memory_order order = std::memory_order_seq_cst)
     {
+#if USE(BUN_JSC_ADDITIONS)
+        if (m_wasmMemoryAccount) {
+            size_t oldSize = m_size.load(std::memory_order_relaxed);
+            if (size > oldSize)
+                m_wasmMemoryAccount->acquire(size - oldSize);
+            else
+                m_wasmMemoryAccount->release(oldSize - size);
+        }
+#endif
         m_size.store(size, order);
     }
+
+#if USE(BUN_JSC_ADDITIONS)
+    void accountWasmMemory(ArrayBufferMemoryAccount& account)
+    {
+        if (m_sharingMode == MemorySharingMode::Shared)
+            return;
+        ASSERT(!m_wasmMemoryAccount || m_wasmMemoryAccount.get() == &account);
+        if (!m_wasmMemoryAccount) {
+            m_wasmMemoryAccount = &account;
+            account.acquire(size());
+        }
+    }
+#endif
 
     static size_t NODELETE fastMappedRedzoneBytes();
     static size_t NODELETE fastMappedBytes();
@@ -187,6 +212,9 @@ private:
     size_t m_mappedCapacity { 0 };
     PageCount m_initial;
     PageCount m_maximum;
+#if USE(BUN_JSC_ADDITIONS)
+    RefPtr<ArrayBufferMemoryAccount> m_wasmMemoryAccount;
+#endif
 #if ENABLE(WEBASSEMBLY)
     ThreadSafeWeakHashSet<Wasm::InstanceAnchor> m_anchors;
 #endif

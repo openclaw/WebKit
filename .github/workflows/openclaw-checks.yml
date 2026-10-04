@@ -71,6 +71,17 @@ jobs:
           "$jsc" "${common[@]}" --useJIT=false "$fixture"
           "$jsc" "${common[@]}" --useDFGJIT=false --useFTLJIT=false "$fixture"
           "$jsc" "${common[@]}" --useConcurrentJIT=false --thresholdForOptimizeAfterWarmUp=10 --thresholdForFTLOptimizeAfterWarmUp=20 "$fixture"
+      - name: Exercise ArrayBuffer accounting and VM inspection across execution tiers
+        shell: bash
+        run: |
+          set -euo pipefail
+          jsc="$RUNNER_TEMP/jsc-artifact/bun-webkit/bin/jsc"
+          fixture=JSTests/stress/array-buffer-accounting.js
+          common=(--useGenerationalGC=true --forceMiniVMMode=false)
+          "$jsc" "${common[@]}" --useJIT=false "$fixture"
+          "$jsc" "${common[@]}" --useFTLJIT=false --useConcurrentJIT=false "$fixture"
+          "$jsc" "${common[@]}" --useConcurrentJIT=false --thresholdForJITAfterWarmUp=10 --thresholdForOptimizeAfterWarmUp=20 --thresholdForFTLOptimizeAfterWarmUp=20 "$fixture"
+          "$jsc" "${common[@]}" --gcAtEnd=true --useConcurrentGC=true "$fixture"
       - name: Qualify the paired Bun adapter and fork selection
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/linux-artifact

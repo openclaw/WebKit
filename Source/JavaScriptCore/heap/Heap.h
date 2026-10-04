@@ -64,6 +64,7 @@
 #include <wtf/Threading.h>
 
 #if USE(BUN_JSC_ADDITIONS)
+#include "ArrayBufferMemoryAccounting.h"
 #include "WeakSet.h"
 #endif
 
@@ -89,6 +90,7 @@ class IncrementalSweeper;
 class JITStubRoutine;
 class JITStubRoutineSet;
 class JSCell;
+class JSArrayBufferView;
 class JSCellButterfly;
 class JSRopeString;
 class JSString;
@@ -481,7 +483,7 @@ public:
 #if ENABLE(RESOURCE_USAGE)
     // Use this API to report the subset of extra memory that lives outside this process.
     JS_EXPORT_PRIVATE void reportExternalMemoryVisited(size_t);
-    size_t externalMemorySize() { return m_externalMemorySize; }
+    size_t externalMemorySize() { return m_externalMemorySize.loadRelaxed(); }
 #endif
 
     // Use this API to report non-GC memory if you can't use the better API above.
@@ -530,8 +532,6 @@ public:
     // The embedder must terminate only its owning VM when this limit is exceeded.
     JS_EXPORT_PRIVATE void setWorkerHeapLimits(size_t heapBytes, size_t edenBytes);
     bool heapLimitExceeded() const { return m_heapLimitExceeded; }
-    bool hasEmbedderHeapLimit() const { return m_embedderMaxHeapSize; }
-    void reportWorkerTypedArrayBytesVisited(size_t bytes) { m_workerTypedArrayBytesVisited.exchangeAdd(bytes); }
     size_t sizeAfterLastFullCollectionExcludingArrayBuffers() const { return m_sizeAfterLastFullCollectExcludingArrayBuffers; }
 #endif
 
@@ -583,6 +583,31 @@ public:
     // buffer adopted storage that reportExtraMemoryAllocated() had reported. The first reference counts only the rest
     // as allocated. The size of the heap (extraMemorySize()) gets the whole buffer either way.
     void addReference(JSCell*, ArrayBuffer*, size_t bytesAlreadyReported = 0);
+
+#if USE(BUN_JSC_ADDITIONS)
+    size_t allocatedArrayBufferSize() const { return m_arrayBufferMemoryAccount->allocatedBytes(); }
+    size_t heldArrayBufferSize() const { return m_arrayBufferMemoryAccount->externalBytes(); }
+    size_t arrayBufferPayloadSize() const { return heldArrayBufferSize() + m_unmaterializedArrayBufferBytes; }
+    size_t arrayBufferObjectSize() const { return m_arrayBufferMemoryAccount->objectBytes(); }
+    JS_EXPORT_PRIVATE void addUnmaterializedArrayBufferView(JSArrayBufferView*);
+    void materializeArrayBufferView(size_t bytes) { m_unmaterializedArrayBufferBytes -= bytes; }
+    JSArrayBufferView** addressOfUnmaterializedArrayBufferViews() { return &m_unmaterializedArrayBufferViews; }
+    size_t* addressOfUnmaterializedArrayBufferBytes() { return &m_unmaterializedArrayBufferBytes; }
+    void didAllocateArrayBufferMemory(size_t bytes) { m_arrayBufferBytesAllocated += bytes; }
+    void reportArrayBufferMemoryAllocated(size_t, const JSCell* = nullptr);
+    ArrayBufferMemoryAccount& arrayBufferMemoryAccount() { return m_arrayBufferMemoryAccount.get(); }
+    void didAllocateArrayBufferAuxiliaryMemory(Subspace*, size_t);
+    void addArrayBufferAuxiliaryCapacity(Subspace*, size_t);
+    void removeArrayBufferAuxiliaryCapacity(Subspace*, size_t);
+    void reportArrayBufferMemoryVisited(size_t fast, size_t external)
+    {
+        m_fastArrayBufferBytesVisited.fetch_add(fast, std::memory_order_relaxed);
+        m_externalArrayBufferBytesVisited.fetch_add(external, std::memory_order_relaxed);
+    }
+    JS_EXPORT_PRIVATE size_t externalMemorySizeForReporting();
+    JS_EXPORT_PRIVATE size_t jsHeapSizeForReporting();
+    JS_EXPORT_PRIVATE size_t jsHeapCapacityForReporting();
+#endif
     
     bool isDeferred() const { return !!m_deferralDepth; }
 
@@ -776,7 +801,7 @@ private:
 
     Lock& lock() LIFETIME_BOUND { return m_lock; }
 
-    void reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(const JSCell*, size_t);
+    bool reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(const JSCell*, size_t);
     JS_EXPORT_PRIVATE void reportExtraMemoryAllocatedSlowCase(GCDeferralContext*, const JSCell*, size_t);
     JS_EXPORT_PRIVATE void deprecatedReportExtraMemorySlowCase(size_t);
     
@@ -971,8 +996,8 @@ private:
     size_t m_maxHeapSize;
 #if USE(BUN_JSC_ADDITIONS)
     void applyWorkerAllocationLimits(size_t currentHeapSize);
+    size_t arrayBufferGCMemorySize() const;
     size_t m_embedderMaxHeapSize { 0 };
-    Atomic<size_t> m_workerTypedArrayBytesVisited { 0 };
     size_t m_embedderMaxEdenSize { 0 };
     size_t m_sizeAfterLastFullCollectExcludingArrayBuffers { 0 };
     bool m_heapLimitExceeded { false };
@@ -995,7 +1020,24 @@ private:
 
     MarkedSpace m_objectSpace;
     GCIncomingRefCountedSet<ArrayBuffer> m_arrayBuffers;
-    size_t m_extraMemorySize { 0 };
+#if USE(BUN_JSC_ADDITIONS)
+    Ref<ArrayBufferMemoryAccount> m_arrayBufferMemoryAccount { ArrayBufferMemoryAccount::create() };
+    JSArrayBufferView* m_unmaterializedArrayBufferViews { nullptr };
+    JSArrayBufferView* m_oldUnmaterializedArrayBufferViews { nullptr };
+    size_t m_unmaterializedArrayBufferBytes { 0 };
+    uint64_t m_arrayBufferBytesAllocated { 0 };
+    uint64_t m_arrayBufferBytesAllocatedAtLastCollection { 0 };
+    uint64_t m_bytesAllocatedAtLastReportingCollection { 0 };
+    size_t m_jsHeapSizeAfterLastCollection { 0 };
+    size_t m_nonArrayBufferExtraMemoryAfterLastCollection { 0 };
+    size_t m_nativeExternalMemoryAfterLastCollection { 0 };
+    uint64_t m_nonArrayBufferBytesAllocated { 0 };
+    uint64_t m_nonArrayBufferBytesAllocatedAtLastCollection { 0 };
+    std::atomic<size_t> m_fastArrayBufferBytesVisited { 0 };
+    std::atomic<size_t> m_externalArrayBufferBytesVisited { 0 };
+    std::atomic<size_t> m_arrayBufferAuxiliaryCapacity { 0 };
+#endif
+    Atomic<size_t> m_extraMemorySize { 0 };
     size_t m_extraMemoryReportThreshold { minExtraMemory };
     size_t m_deprecatedExtraMemorySize { 0 };
 
@@ -1109,7 +1151,7 @@ private:
 
 #if ENABLE(RESOURCE_USAGE)
     size_t m_blockBytesAllocated { 0 };
-    size_t m_externalMemorySize { 0 };
+    Atomic<size_t> m_externalMemorySize { 0 };
 #endif
     
     std::unique_ptr<MutatorScheduler> m_scheduler;
@@ -1245,6 +1287,9 @@ public:
 
     // Subspaces
     CompleteSubspace primitiveGigacageAuxiliarySpace; // Typed arrays, strings, bitvectors, etc go here.
+#if USE(BUN_JSC_ADDITIONS)
+    CompleteSubspace typedArrayAuxiliarySpace;
+#endif
     CompleteSubspace auxiliarySpace; // Butterflies, arrays of JSValues, etc go here.
     CompleteSubspace immutableButterflyAuxiliarySpace; // JSCellButterfly goes here.
 
