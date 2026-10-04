@@ -225,11 +225,18 @@ void ArrayBufferContents::tryAllocate(size_t numElements, unsigned elementByteSi
     m_maxByteLength = m_sizeInBytes;
     m_hasMaxByteLength = false;
     m_destructor = ArrayBuffer::primitiveGigacageDestructor();
+#if USE(BUN_JSC_ADDITIONS)
+    m_usesArrayBufferAllocator = true;
+#endif
 }
 
 void ArrayBufferContents::makeShared()
 {
     m_shared = SharedArrayBufferContents::create(mutableSpan(), maxByteLength(), m_memoryHandle, WTF::move(m_destructor), SharedArrayBufferContents::Mode::Default);
+#if USE(BUN_JSC_ADDITIONS)
+    m_shared->setAllocationAccounting(m_usesArrayBufferAllocator, WTF::move(m_allocation));
+    m_usesArrayBufferAllocator = false;
+#endif
     m_destructor = nullptr;
 }
 
@@ -302,7 +309,11 @@ Ref<ArrayBuffer> ArrayBuffer::create(ArrayBufferContents&& contents)
 Ref<ArrayBuffer> ArrayBuffer::createAdopted(std::span<const uint8_t> data)
 {
     ASSERT(!Gigacage::isEnabled() || (Gigacage::contains(data.data()) && Gigacage::contains(data.data() + data.size() - 1)));
-    return createFromBytes(data, ArrayBuffer::primitiveGigacageDestructor());
+    auto buffer = createFromBytes(data, ArrayBuffer::primitiveGigacageDestructor());
+#if USE(BUN_JSC_ADDITIONS)
+    buffer->m_contents.m_usesArrayBufferAllocator = true;
+#endif
+    return buffer;
 }
 
 // FIXME: We cannot use this except if the memory comes from the cage.
@@ -311,12 +322,19 @@ Ref<ArrayBuffer> ArrayBuffer::createAdopted(std::span<const uint8_t> data)
 //   longer caged, or we could introduce a new set of typed array types that are uncaged and get accessed
 //   differently.
 // - WebAssembly. Wasm should allocate from the cage.
-Ref<ArrayBuffer> ArrayBuffer::createFromBytes(std::span<const uint8_t> data, ArrayBufferDestructorFunction&& destructor)
+Ref<ArrayBuffer> ArrayBuffer::createFromBytes(std::span<const uint8_t> data, ArrayBufferDestructorFunction&& destructor
+#if USE(BUN_JSC_ADDITIONS)
+    , ArrayBufferAllocationMode allocationMode
+#endif
+)
 {
     if (data.data() && !Gigacage::isCaged(Gigacage::Primitive, data.data()))
         Gigacage::disablePrimitiveGigacage();
     
     ArrayBufferContents contents(data, std::nullopt, WTF::move(destructor));
+#if USE(BUN_JSC_ADDITIONS)
+    contents.m_usesArrayBufferAllocator = allocationMode == ArrayBufferAllocationMode::RuntimeOwned;
+#endif
     return create(WTF::move(contents));
 }
 
@@ -445,6 +463,9 @@ RefPtr<ArrayBuffer> ArrayBuffer::sliceWithClampedIndex(size_t begin, size_t end)
 void ArrayBuffer::makeShared()
 {
     m_contents.makeShared();
+#if USE(BUN_JSC_ADDITIONS)
+    updateExternalMemoryAccounting(0);
+#endif
     pinAndLock();
     ASSERT(!isDetached());
 }
@@ -530,6 +551,9 @@ void ArrayBuffer::detach(VM& vm)
 
 void ArrayBuffer::notifyDetaching(VM& vm)
 {
+#if USE(BUN_JSC_ADDITIONS)
+    updateExternalMemoryAccounting(0);
+#endif
     for (size_t i = numberOfIncomingReferences(); i--;) {
         JSCell* cell = incomingReferenceAt(i);
         if (JSArrayBufferView* view = dynamicDowncast<JSArrayBufferView>(cell))
@@ -547,8 +571,13 @@ std::expected<int64_t, GrowFailReason> ArrayBuffer::grow(VM& vm, size_t newByteL
         return makeUnexpected(GrowFailReason::GrowSharedUnavailable);
     const bool requirePageMultiple = isWasmMemory();
     auto result = shared->grow(vm, newByteLength, requirePageMultiple);
-    if (result && result.value() > 0)
+    if (result && result.value() > 0) {
+#if USE(BUN_JSC_ADDITIONS)
+        vm.heap.reportArrayBufferMemoryAllocated(result.value());
+#else
         vm.heap.reportExtraMemoryAllocated(static_cast<JSCell*>(nullptr), result.value());
+#endif
+    }
     return result;
 }
 
@@ -634,8 +663,17 @@ std::expected<int64_t, GrowFailReason> ArrayBuffer::resize(VM& vm, size_t newByt
 
     m_contents.m_sizeInBytes = newByteLength;
 
-    if (deltaByteLength > 0)
+#if USE(BUN_JSC_ADDITIONS)
+    updateExternalMemoryAccounting(newByteLength);
+#endif
+
+    if (deltaByteLength > 0) {
+#if USE(BUN_JSC_ADDITIONS)
+        vm.heap.reportArrayBufferMemoryAllocated(deltaByteLength);
+#else
         vm.heap.reportExtraMemoryAllocated(static_cast<JSCell*>(nullptr), deltaByteLength);
+#endif
+    }
 
     return deltaByteLength;
 }
@@ -655,7 +693,48 @@ RefPtr<ArrayBuffer> ArrayBuffer::tryCreateShared(VM& vm, size_t numElements, uns
     return createShared(SharedArrayBufferContents::create({ memory, sizeInBytes.value() }, maxByteLength, WTF::move(handle), nullptr, SharedArrayBufferContents::Mode::Default));
 }
 
-ArrayBuffer::~ArrayBuffer() { }
+ArrayBuffer::~ArrayBuffer()
+{
+#if USE(BUN_JSC_ADDITIONS)
+    updateExternalMemoryAccounting(0);
+    if (m_holderAccount)
+        m_holderAccount->deallocateObject(sizeof(ArrayBuffer));
+#endif
+}
+
+#if USE(BUN_JSC_ADDITIONS)
+void ArrayBuffer::accountMemory(ArrayBufferMemoryAccount& account)
+{
+    if (m_holderAccount.get() != &account) {
+        ASSERT(!numberOfIncomingReferences());
+        updateExternalMemoryAccounting(0);
+        if (m_holderAccount)
+            m_holderAccount->deallocateObject(sizeof(ArrayBuffer));
+        m_holderAccount = &account;
+        m_holderAccount->allocateObject(sizeof(ArrayBuffer));
+    }
+    if (isWasmMemory())
+        return;
+    if (m_contents.m_shared)
+        m_contents.m_shared->accountAllocation(account);
+    else {
+        if (m_contents.m_usesArrayBufferAllocator && !m_contents.m_allocation)
+            m_contents.m_allocation = ArrayBufferAllocation::create(account, byteLength());
+        updateExternalMemoryAccounting(byteLength());
+    }
+}
+
+void ArrayBuffer::updateExternalMemoryAccounting(size_t bytes)
+{
+    if (!m_holderAccount)
+        return;
+    if (bytes > m_externalBytes)
+        m_holderAccount->acquire(bytes - m_externalBytes);
+    else
+        m_holderAccount->release(m_externalBytes - bytes);
+    m_externalBytes = bytes;
+}
+#endif
 
 std::expected<int64_t, GrowFailReason> SharedArrayBufferContents::grow(VM& vm, size_t newByteLength, bool requirePageMultiple)
 {

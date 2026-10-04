@@ -499,6 +499,14 @@ public:
 #endif
     
     ALWAYS_INLINE CompleteSubspace& primitiveGigacageAuxiliarySpace() { return heap.primitiveGigacageAuxiliarySpace; }
+    ALWAYS_INLINE CompleteSubspace& typedArrayAuxiliarySpace()
+    {
+#if USE(BUN_JSC_ADDITIONS)
+        return heap.typedArrayAuxiliarySpace;
+#else
+        return heap.primitiveGigacageAuxiliarySpace;
+#endif
+    }
     ALWAYS_INLINE CompleteSubspace& auxiliarySpace() { return heap.auxiliarySpace; }
     ALWAYS_INLINE CompleteSubspace& immutableButterflyAuxiliarySpace() { return heap.immutableButterflyAuxiliarySpace; }
     ALWAYS_INLINE CompleteSubspace& gigacageAuxiliarySpace(Gigacage::Kind kind) { return heap.gigacageAuxiliarySpace(kind); }

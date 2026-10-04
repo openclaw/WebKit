@@ -743,9 +743,9 @@ size_t JSGenericTypedArrayView<Adaptor>::estimatedSize(JSCell* cell, VM& vm)
 {
     JSGenericTypedArrayView* thisObject = uncheckedDowncast<JSGenericTypedArrayView>(cell);
 
-    if (thisObject->m_mode == OversizeTypedArray)
+    if (thisObject->mode() == OversizeTypedArray)
         return Base::estimatedSize(thisObject, vm) + thisObject->byteLengthRaw();
-    if (thisObject->m_mode == FastTypedArray && thisObject->hasVector())
+    if (thisObject->mode() == FastTypedArray && thisObject->hasVector())
         return Base::estimatedSize(thisObject, vm) + thisObject->byteLengthRaw();
 
     return Base::estimatedSize(thisObject, vm);
@@ -765,7 +765,7 @@ void JSGenericTypedArrayView<Adaptor>::visitChildrenImpl(JSCell* cell, Visitor& 
 
     {
         Locker locker { thisObject->cellLock() };
-        mode = thisObject->m_mode;
+        mode = thisObject->mode();
         vector = thisObject->vector();
         byteSize = thisObject->byteLengthRaw();
     }
@@ -774,16 +774,13 @@ void JSGenericTypedArrayView<Adaptor>::visitChildrenImpl(JSCell* cell, Visitor& 
     case FastTypedArray: {
         if (vector)
             visitor.markAuxiliary(vector);
-#if USE(BUN_JSC_ADDITIONS)
-        visitor.reportWorkerTypedArrayBytesVisited(byteSize);
-#endif
         break;
     }
 
     case OversizeTypedArray: {
         visitor.reportExtraMemoryVisited(byteSize);
 #if USE(BUN_JSC_ADDITIONS)
-        visitor.reportWorkerTypedArrayBytesVisited(byteSize);
+        visitor.reportArrayBufferMemoryVisited(byteSize);
 #endif
         break;
     }

@@ -27,6 +27,7 @@
 
 #include "AuxiliaryBarrier.h"
 #include "JSObject.h"
+#include <wtf/CompactPointerTuple.h>
 #include <wtf/TaggedArrayStoragePtr.h>
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
@@ -61,7 +62,7 @@ enum TypedArrayMode : uint8_t {
     // Legend:
     // B: JSArrayBufferView::m_butterfly pointer
     // V: JSArrayBufferView::m_vector pointer
-    // M: JSArrayBufferView::m_mode
+    // M: JSArrayBufferView::mode()
 
     // Small and fast typed array. B is unused, V points to a vector
     // allocated in the primitive Gigacage, and M = FastTypedArray. V's
@@ -256,7 +257,14 @@ protected:
     JS_EXPORT_PRIVATE void finishCreation(VM&);
     
 public:
-    TypedArrayMode mode() const { return m_mode; }
+    TypedArrayMode mode() const
+    {
+#if USE(BUN_JSC_ADDITIONS)
+        return m_modeAndNext.type();
+#else
+        return m_mode;
+#endif
+    }
     bool hasArrayBuffer() const { return JSC::hasArrayBuffer(mode()); }
     
     inline bool isShared();
@@ -267,15 +275,15 @@ public:
     inline RefPtr<ArrayBufferView> unsharedImpl();
     JS_EXPORT_PRIVATE RefPtr<ArrayBufferView> possiblySharedImpl();
     bool isDetached() const { return hasArrayBuffer() && !hasVector(); }
-    bool isResizableOrGrowableShared() const { return JSC::isResizableOrGrowableShared(m_mode); }
-    bool isGrowableShared() const { return JSC::isGrowableShared(m_mode); };
-    bool isResizableNonShared() const { return JSC::isResizableNonShared(m_mode); };
-    bool isAutoLength() const { return JSC::isAutoLength(m_mode); }
+    bool isResizableOrGrowableShared() const { return JSC::isResizableOrGrowableShared(mode()); }
+    bool isGrowableShared() const { return JSC::isGrowableShared(mode()); };
+    bool isResizableNonShared() const { return JSC::isResizableNonShared(mode()); };
+    bool isAutoLength() const { return JSC::isAutoLength(mode()); }
 
     ALWAYS_INLINE bool canUseRawFieldsDirectly() const
     {
         // Non-resizable, or growable-shared but not auto-length (since it is growing only, m_length and m_byteOffset are always valid).
-        return JSC::canUseArrayBufferViewRawFieldsDirectly(m_mode);
+        return JSC::canUseArrayBufferViewRawFieldsDirectly(mode());
     }
 
     bool hasVector() const { return !!m_vector; }
@@ -348,7 +356,19 @@ public:
     static constexpr ptrdiff_t offsetOfVector() { return OBJECT_OFFSETOF(JSArrayBufferView, m_vector); }
     static constexpr ptrdiff_t offsetOfLength() { return OBJECT_OFFSETOF(JSArrayBufferView, m_length); }
     static constexpr ptrdiff_t offsetOfByteOffset() { return OBJECT_OFFSETOF(JSArrayBufferView, m_byteOffset); }
-    static constexpr ptrdiff_t offsetOfMode() { return OBJECT_OFFSETOF(JSArrayBufferView, m_mode); }
+    static constexpr ptrdiff_t offsetOfMode()
+    {
+#if USE(BUN_JSC_ADDITIONS)
+        return offsetOfModeAndNext() + ModeAndNext::offsetOfType();
+#else
+        return OBJECT_OFFSETOF(JSArrayBufferView, m_mode);
+#endif
+    }
+#if USE(BUN_JSC_ADDITIONS)
+    using ModeAndNext = CompactPointerTuple<JSCell*, TypedArrayMode>;
+    static constexpr ptrdiff_t offsetOfModeAndNext() { return OBJECT_OFFSETOF(JSArrayBufferView, m_modeAndNext); }
+    static constexpr uint64_t fastModeBits() { return ModeAndNext(nullptr, FastTypedArray).data(); }
+#endif
 
     static inline RefPtr<ArrayBufferView> toWrapped(VM&, JSValue);
     static inline RefPtr<ArrayBufferView> toWrappedAllowResizable(VM&, JSValue);
@@ -369,20 +389,45 @@ private:
 protected:
     friend class LLIntOffsetsExtractor;
     friend class ArrayBuffer;
+#if USE(BUN_JSC_ADDITIONS)
+    friend class Heap;
+#endif
 
     ArrayBuffer* existingBufferInButterfly();
+
+    void setMode(TypedArrayMode mode)
+    {
+#if USE(BUN_JSC_ADDITIONS)
+        m_modeAndNext.setType(mode);
+#else
+        m_mode = mode;
+#endif
+    }
+#if USE(BUN_JSC_ADDITIONS)
+    JSArrayBufferView* nextUnmaterializedView() const { return static_cast<JSArrayBufferView*>(m_modeAndNext.pointer()); }
+    void setNextUnmaterializedView(JSArrayBufferView* next) { m_modeAndNext.setPointer(next); }
+#endif
 
     VectorPtr m_vector;
     size_t m_length;
     size_t m_byteOffset { 0 };
+#if USE(BUN_JSC_ADDITIONS)
+    // Keep the weak link in the mode word's padding so accounting does not enlarge views.
+    ModeAndNext m_modeAndNext;
+#else
     TypedArrayMode m_mode;
+#endif
 };
+
+#if USE(BUN_JSC_ADDITIONS)
+static_assert(sizeof(JSArrayBufferView) == WTF::roundUpToMultipleOf<alignof(JSArrayBufferView)>(JSArrayBufferView::offsetOfModeAndNext() + sizeof(TypedArrayMode)));
+#endif
 
 inline JSArrayBufferView* validateTypedArray(JSGlobalObject*, JSValue);
 
 inline ArrayBuffer* JSArrayBufferView::existingBufferInButterfly()
 {
-    ASSERT(isWastefulTypedArray(m_mode));
+    ASSERT(isWastefulTypedArray(mode()));
     return butterfly()->indexingHeader()->arrayBuffer();
 }
 

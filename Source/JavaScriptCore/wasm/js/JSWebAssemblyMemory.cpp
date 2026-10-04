@@ -51,6 +51,11 @@ void JSWebAssemblyMemory::adopt(Ref<Wasm::Memory>&& memory)
 {
     m_memory.swap(memory);
     ASSERT(m_memory->refCount() == 1);
+#if USE(BUN_JSC_ADDITIONS)
+    auto& vm = this->vm();
+    m_memory->handle().accountWasmMemory(vm.heap.arrayBufferMemoryAccount());
+    vm.heap.reportArrayBufferMemoryAllocated(m_memory->size(), this);
+#endif
 }
 
 Structure* JSWebAssemblyMemory::createStructure(VM& vm, JSGlobalObject* globalObject, JSValue prototype)
@@ -296,7 +301,12 @@ void JSWebAssemblyMemory::growSuccessCallback(VM& vm, PageCount oldPageCount, Pa
         }
     }
 
+#if USE(BUN_JSC_ADDITIONS)
+    m_memory->handle().accountWasmMemory(vm.heap.arrayBufferMemoryAccount());
+    vm.heap.reportArrayBufferMemoryAllocated(newPageCount.bytes() - oldPageCount.bytes(), this);
+#else
     vm.heap.reportExtraMemoryAllocated(this, newPageCount.bytes() - oldPageCount.bytes());
+#endif
 }
 
 void JSWebAssemblyMemory::finishCreation(VM& vm)
@@ -320,7 +330,11 @@ void JSWebAssemblyMemory::visitChildrenImpl(JSCell* cell, Visitor& visitor)
 
     Base::visitChildren(thisObject, visitor);
     visitor.append(thisObject->m_bufferWrapper);
-    visitor.reportExtraMemoryVisited(thisObject->memory().size());
+    size_t bytes = thisObject->memory().size();
+    visitor.reportExtraMemoryVisited(bytes);
+#if USE(BUN_JSC_ADDITIONS)
+    visitor.reportArrayBufferMemoryVisited(bytes);
+#endif
 }
 
 DEFINE_VISIT_CHILDREN(JSWebAssemblyMemory);

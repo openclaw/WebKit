@@ -30,6 +30,9 @@
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
 #include "ArrayBufferSharingMode.h"
+#if USE(BUN_JSC_ADDITIONS)
+#include "ArrayBufferMemoryAccounting.h"
+#endif
 #include "BufferMemoryHandle.h"
 #include "GCIncomingRefCounted.h"
 #include "Watchpoint.h"
@@ -37,6 +40,8 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 #include "WeakImpl.h"
 #include <wtf/CagedPtr.h>
 #include <wtf/CheckedArithmetic.h>
+#include <wtf/Lock.h>
+#include <wtf/Locker.h>
 #include <wtf/SharedTask.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMalloc.h>
@@ -103,6 +108,21 @@ public:
     BufferMemoryHandle* memoryHandle() const { return m_memoryHandle.get(); }
 
     static constexpr ptrdiff_t offsetOfSizeInBytes() { return OBJECT_OFFSETOF(SharedArrayBufferContents, m_sizeInBytes); }
+
+#if USE(BUN_JSC_ADDITIONS)
+    void setAllocationAccounting(bool usesArrayBufferAllocator, ArrayBufferAllocation&& allocation)
+    {
+        m_usesArrayBufferAllocator = usesArrayBufferAllocator;
+        m_allocation = WTF::move(allocation);
+    }
+
+    void accountAllocation(ArrayBufferMemoryAccount& account)
+    {
+        Locker locker { m_accountingLock };
+        if (m_usesArrayBufferAllocator && !m_allocation)
+            m_allocation = ArrayBufferAllocation::create(account, sizeInBytes(std::memory_order_relaxed));
+    }
+#endif
     
 private:
     SharedArrayBufferContents(std::span<uint8_t> data, std::optional<size_t> maxByteLength, RefPtr<BufferMemoryHandle> memoryHandle, ArrayBufferDestructorFunction&& destructor, Mode mode)
@@ -129,6 +149,11 @@ private:
     size_t m_maxByteLength;
     bool m_hasMaxByteLength : 1 { false };
     Mode m_mode : 1 { Mode::Default };
+#if USE(BUN_JSC_ADDITIONS)
+    Lock m_accountingLock;
+    bool m_usesArrayBufferAllocator { false };
+    ArrayBufferAllocation m_allocation;
+#endif
 };
 
 class ArrayBufferContents final {
@@ -201,6 +226,10 @@ public:
         swap(m_sizeInBytes, other.m_sizeInBytes);
         swap(m_maxByteLength, other.m_maxByteLength);
         swap(m_hasMaxByteLength, other.m_hasMaxByteLength);
+#if USE(BUN_JSC_ADDITIONS)
+        swap(m_usesArrayBufferAllocator, other.m_usesArrayBufferAllocator);
+        swap(m_allocation, other.m_allocation);
+#endif
     }
 
     ArrayBufferContents detach()
@@ -222,6 +251,10 @@ private:
         m_sizeInBytes = 0;
         m_maxByteLength = 0;
         m_hasMaxByteLength = false;
+#if USE(BUN_JSC_ADDITIONS)
+        m_usesArrayBufferAllocator = false;
+        m_allocation.reset();
+#endif
     }
 
     friend class ArrayBuffer;
@@ -244,6 +277,10 @@ private:
     size_t m_sizeInBytes { 0 };
     size_t m_maxByteLength { 0 };
     bool m_hasMaxByteLength { false };
+#if USE(BUN_JSC_ADDITIONS)
+    bool m_usesArrayBufferAllocator { false };
+    ArrayBufferAllocation m_allocation;
+#endif
 };
 
 class ArrayBuffer final : public GCIncomingRefCounted<ArrayBuffer> {
@@ -253,7 +290,11 @@ public:
     JS_EXPORT_PRIVATE static Ref<ArrayBuffer> create(std::span<const uint8_t> = { });
     JS_EXPORT_PRIVATE static Ref<ArrayBuffer> create(ArrayBufferContents&&);
     JS_EXPORT_PRIVATE static Ref<ArrayBuffer> createAdopted(std::span<const uint8_t>);
-    JS_EXPORT_PRIVATE static Ref<ArrayBuffer> createFromBytes(std::span<const uint8_t> data, ArrayBufferDestructorFunction&&);
+    JS_EXPORT_PRIVATE static Ref<ArrayBuffer> createFromBytes(std::span<const uint8_t> data, ArrayBufferDestructorFunction&&
+#if USE(BUN_JSC_ADDITIONS)
+        , ArrayBufferAllocationMode = ArrayBufferAllocationMode::External
+#endif
+    );
     JS_EXPORT_PRIVATE static Ref<ArrayBuffer> createShared(Ref<SharedArrayBufferContents>&&, bool forceFixedLengthIfWasm = true);
     JS_EXPORT_PRIVATE static RefPtr<ArrayBuffer> tryCreate(size_t numElements, unsigned elementByteSize, std::optional<size_t> maxByteLength = std::nullopt);
     JS_EXPORT_PRIVATE static RefPtr<ArrayBuffer> tryCreate(ArrayBuffer&);
@@ -282,6 +323,10 @@ public:
     inline bool isResizableNonShared() const { return m_contents.isResizableNonShared(); }
 
     inline size_t gcSizeEstimateInBytes() const;
+
+#if USE(BUN_JSC_ADDITIONS)
+    void accountMemory(ArrayBufferMemoryAccount&);
+#endif
 
     JS_EXPORT_PRIVATE RefPtr<ArrayBuffer> slice(double begin, double end) const;
     JS_EXPORT_PRIVATE RefPtr<ArrayBuffer> slice(double begin) const;
@@ -340,6 +385,11 @@ private:
     static constexpr unsigned s_lockedFlag = INT32_MIN;
     Checked<unsigned> m_pinCount { 0 };
     bool m_isWasmMemory { false };
+#if USE(BUN_JSC_ADDITIONS)
+    void updateExternalMemoryAccounting(size_t);
+    RefPtr<ArrayBufferMemoryAccount> m_holderAccount;
+    size_t m_externalBytes { 0 };
+#endif
 };
 
 void* ArrayBuffer::data() LIFETIME_BOUND

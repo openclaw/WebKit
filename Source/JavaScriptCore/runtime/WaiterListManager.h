@@ -49,7 +49,7 @@ public:
 
     // Sync waiter only; any thread. Wake the VM's thread if it is parked in Atomics.wait /
     // memory.atomic.wait so that it sees the termination request that was just fired.
-    void notifyOfTerminationRequest();
+    void notifyOfVMTrap();
     // Sync waiter only; its own thread, holding the lock of the list it is (un)parking on.
     void setParkedList(RefPtr<WaiterList>&&);
 
@@ -126,7 +126,7 @@ private:
     ThreadSafeWeakPtr<DeferredWorkTimer::Ticket> m_ticket { nullptr };
     RefPtr<RunLoop::DispatchTimer> m_timer { nullptr };
     Condition m_condition;
-    // Sync waiter only: the list it is parked on, for notifyOfTerminationRequest() to lock.
+    // Sync waiter only: the list it is parked on, for notifyOfVMTrap() to lock.
     Lock m_parkedListLock;
     RefPtr<WaiterList> m_parkedList WTF_GUARDED_BY_LOCK(m_parkedListLock);
     bool m_isAsync { false };

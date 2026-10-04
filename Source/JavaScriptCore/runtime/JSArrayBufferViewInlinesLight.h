@@ -33,7 +33,7 @@ namespace JSC {
 
 inline bool JSArrayBufferView::isShared()
 {
-    switch (m_mode) {
+    switch (mode()) {
     case WastefulTypedArray:
     case ResizableNonSharedWastefulTypedArray:
     case ResizableNonSharedAutoLengthWastefulTypedArray:
@@ -55,9 +55,9 @@ template<JSArrayBufferView::Requester requester>
 inline ArrayBuffer* JSArrayBufferView::possiblySharedBufferImpl()
 {
     if (requester == ConcurrentThread)
-        ASSERT(m_mode != FastTypedArray && m_mode != OversizeTypedArray);
+        ASSERT(mode() != FastTypedArray && mode() != OversizeTypedArray);
 
-    switch (m_mode) {
+    switch (mode()) {
     case WastefulTypedArray:
     case ResizableNonSharedWastefulTypedArray:
     case ResizableNonSharedAutoLengthWastefulTypedArray:
