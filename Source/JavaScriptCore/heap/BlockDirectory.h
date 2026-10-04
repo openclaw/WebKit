@@ -80,6 +80,7 @@ public:
 
     // Intended for diagnostics only (rdar://157153895)
     bool isFreeListedCell(const void*);
+    void configureAllocationSampling(bool enabled);
 
     RefPtr<SharedTask<MarkedBlock::Handle*()>> parallelNotEmptyBlockSource();
     

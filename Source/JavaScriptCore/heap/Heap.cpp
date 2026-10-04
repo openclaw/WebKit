@@ -577,6 +577,13 @@ void Heap::reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(const JSCell*
 
 void Heap::reportExtraMemoryAllocatedSlowCase(GCDeferralContext* deferralContext, const JSCell* cell, size_t size)
 {
+    if (cell && cell->isString()) {
+        if (auto* profiler = vm().heapProfiler())
+            profiler->samplePreciseAllocation(const_cast<JSCell*>(cell), size);
+    }
+    // Sampling observes short string storage too, without changing GC's accounting threshold.
+    if (size <= minExtraMemory)
+        return;
     didAllocate(size, "extra", nullptr, 0, cell);
     if (cell) {
         if (isWithinThreshold(cell->cellState(), barrierThreshold())) [[unlikely]]
@@ -686,6 +693,8 @@ void Heap::reconcileWeakReferencesInMarkedCells(CellSet& cellSet, CollectionScop
 void Heap::reconcileWeakReferencesAtGCEnd()
 {
     CollectionScope collectionScope = this->collectionScope().value_or(CollectionScope::Full);
+    if (auto* profiler = vm().heapProfiler())
+        profiler->reconcileSampledAllocations(collectionScope);
 
 #if ENABLE(AOT)
     vm().m_aotInstances.removeAllMatching([&](AOT::Instance* instance) {
@@ -1769,6 +1778,8 @@ Heap::AuxiliaryEvacuationResult Heap::evacuateSparseAuxiliaryBlocks(double maxim
             RELEASE_ASSERT(MarkedBlock::blockFor(newCell)->handle().cellSize() == cellSize);
             Butterfly* oldButterfly = owner->butterfly();
             memcpySpan(unsafeMakeSpan(static_cast<uint8_t*>(newCell), cellSize), unsafeMakeSpan(std::bit_cast<const uint8_t*>(oldCell), cellSize));
+            if (auto* profiler = vm.heapProfiler())
+                profiler->reallocateSampledCell(oldCell, newCell, 0);
             owner->setButterfly(vm, std::bit_cast<Butterfly*>(std::bit_cast<char*>(oldButterfly) + (std::bit_cast<char*>(newCell) - std::bit_cast<char*>(oldCell))));
             if (isTesting) [[unlikely]] {
                 // As a JSValue this is a cell at an address that is never mapped; as a length it is out of bounds.

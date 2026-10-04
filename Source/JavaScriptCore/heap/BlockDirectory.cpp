@@ -208,6 +208,14 @@ void BlockDirectory::stopAllocating()
 #endif
 }
 
+void BlockDirectory::configureAllocationSampling(bool enabled)
+{
+    Locker locker { m_localAllocatorsLock };
+    m_localAllocators.forEach([&](LocalAllocator* allocator) {
+        allocator->configureAllocationSampling(enabled);
+    });
+}
+
 void BlockDirectory::prepareForAllocation()
 {
     m_localAllocators.forEach(
@@ -532,4 +540,3 @@ void BlockDirectory::assertSweeperIsSuspended() const
 }
 #endif
 } // namespace JSC
-
