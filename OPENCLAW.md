@@ -201,13 +201,20 @@ Bun must be rebuilt with its matching stack-reader adapter. It must also preserv
 The release gate includes the landed stack-position adapter, the complete CallSite/util/source-map and minifier regressions, live stack visitor, async positions, and owned/persistent JSC cache replay.
 
 
-The compatibility arm builds that same exact W150 tree with **only**
-`scripts/build/deps/webkit-artifacts.json` changed. Its index must remain equal
-to the prepared tree before and after compilation, and its only tracked worktree
-change must be the manifest. Startup and all three unchanged memory-release
-tests must pass. A separate build applies the feature adapters for the full
-regression selection. Both gates are mandatory for assembly and publication.
+The compatibility arm first reproduces that exact W150 tree, then applies only
+its required namespace API counterpart from `patches/008-namespace.patch`.
+The adapter SHA-256 and resulting tree `aee7cd52d7efcb9835b434a24fa47de06cc664f6`
+are pinned in `variants.json`. A manifest-only attempt against the original
+prepared tree failed to compile because it accessed the removed public
+`TriState` namespace marker. **Bun #106 (or this exact adapter) must accompany
+the manifest update.** No legacy marker shim is restored in the engine.
 
+After that explicit pairing, the index must retain the pinned paired tree
+before and after compilation, and the manifest must be the sole tracked
+worktree change. Startup and all three unchanged memory-release tests must pass.
+The separate feature build applies the remaining adapters for the full regression
+selection. Both gates are mandatory for assembly and publication; the failed
+manifest-only result is retained as dependency evidence.
 
 The ArrayBuffer patch is qualified in five interpreter/JIT/concurrent-GC modes,
 with process ownership, worker snapshot, native external-buffer and serializer

@@ -30,7 +30,10 @@ assert engine['passed'] and engine['source']==sys.argv[2]
 compatibility=json.loads((root/'compatibility-gate.json').read_text())
 assert compatibility['passed'] and compatibility['source']==sys.argv[2]
 assert compatibility['base_commit']==sys.argv[3] and compatibility['prepared_tree']==sys.argv[4]
-assert compatibility['only_manifest_changed'] and compatibility['memory_tests']==3 and compatibility['startup'] is True
+config=json.loads((Path(__file__).resolve().parents[1]/'variants.json').read_text())['upstream_sync']
+assert compatibility['paired_tree']==config['paired_tree']
+assert compatibility['required_namespace_adapter_sha256']==config['required_namespace_adapter_sha256']
+assert compatibility['only_manifest_changed_after_pairing'] and compatibility['memory_tests']==3 and compatibility['startup'] is True
 record={'passed':True,'base_commit':sys.argv[3],'prepared_tree':sys.argv[4],
         'selected_files':len(selected),'result_rows':len(rows),'regressions':0,'tests':counts,
         'adapter_sha256':hashlib.sha256((root/'bun-sync-adapters.patch').read_bytes()).hexdigest()}
