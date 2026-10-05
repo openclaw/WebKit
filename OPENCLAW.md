@@ -152,7 +152,7 @@ No changes yet.
 
 - Cache source-relative stack line and column lookups on demand, including syntax-selected positions; carries engine PR #8 onto the rebased release line, thanks @steipete.
 - Build both fork engine artifacts at the exact pull-request head before landing, with native Linux qualification and a Linux-hosted macOS arm64 compilation check.
-- Require the repeated-coordinate regression in the full JSC stress matrix and direct execution/cache modes while retaining every rebased release gate.
+- Require the repeated-coordinate regression and surrounding error-stack stress cases, with seven direct stack execution modes including interpreter, baseline-only, DFG-only, eager FTL and concurrent GC, while retaining every rebased release gate.
 
 ## Rebased engine batch
 

@@ -8,7 +8,7 @@ tar -xzf "$ARTIFACT_DIR/bun-webkit-linux-amd64.tar.gz" -C "$QUALIFICATION_DIR/en
 jsc="$QUALIFICATION_DIR/engine/bun-webkit/bin/jsc"
 "$jsc" --useDollarVM=true -e 'if(typeof $vm.moduleNamespaceForRequire!=="function")throw Error("namespace hook absent")'
 Tools/Scripts/run-jsc-stress-tests JSTests/stress --jsc "$jsc" --child-processes 16 \
-  --filter 'promise|microtask|dynamic-import|bun-async-context|module-loader|top-level-await|async-module|module-namespace|intl-segmenter|callsite-syntax-positions|stack-position-regressions' \
+  --filter 'promise|microtask|dynamic-import|bun-async-context|module-loader|top-level-await|async-module|module-namespace|intl-segmenter|callsite-syntax-positions|stack-position-regressions|error-stack' \
   --output-dir "$QUALIFICATION_DIR/jsc-stress" --no-retry > "$QUALIFICATION_DIR/jsc-stress.log" 2>&1
 python3 .github/openclaw/verify-jsc-results.py "$QUALIFICATION_DIR/jsc-stress" --require module-namespace-esmodule-marker.js --require callsite-syntax-positions.js --require stack-position-regressions.js --require stack-position-regressions-cache.js
 python3 .github/openclaw/check-stack-visitor.py "$jsc" > "$QUALIFICATION_DIR/stack-visitor.log"
@@ -38,5 +38,5 @@ for name,minimum in [('jsc-stress',1400),('jsc-modules',1600)]:
     assert len(lines)>=minimum,(name,len(lines))
     assert all(line.endswith(': PASS') for line in lines),name+' failures'
     counts[name]=len(lines)
-(root/'engine-gate.json').write_text(json.dumps({'passed':True,'source':sys.argv[2],'stress_counts':counts,'sampling_tiers':4,'arraybuffer_execution_modes':5,'stack_execution_modes':4,'stack_cache':json.loads((root/'jsc-stack/cache-files.json').read_text())},indent=2)+'\n')
+(root/'engine-gate.json').write_text(json.dumps({'passed':True,'source':sys.argv[2],'stress_counts':counts,'sampling_tiers':4,'arraybuffer_execution_modes':5,'stack_execution_modes':7,'stack_cache':json.loads((root/'jsc-stack/cache-files.json').read_text())},indent=2)+'\n')
 PY
