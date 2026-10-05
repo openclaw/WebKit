@@ -1,4 +1,4 @@
-name: OpenClaw exit mutex diagnostic
+name: OpenClaw exit mutex owner proof
 on:
   workflow_dispatch:
 permissions:
@@ -55,16 +55,15 @@ jobs:
           ulimit -c unlimited
           git rev-parse HEAD > "$RUNNER_TEMP/exit-proof/source.log"
           ldd "$RUNNER_TEMP/jsc-build/bin/jsc" > "$RUNNER_TEMP/exit-proof/ldd.log"
-          python3 .github/openclaw/exit-mutex-diagnostic.py \
-            --binary "$RUNNER_TEMP/jsc-build/bin/jsc" \
-            --fixture "$GITHUB_WORKSPACE/JSTests/stress/masquerader-as-function-in-promise.js" \
+          python3 .github/openclaw/paired-exit-owner.py \
+            --build "$RUNNER_TEMP/jsc-build" \
             --output "$RUNNER_TEMP/exit-proof" --cores "$RUNNER_TEMP/exit-cores"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: exit-proof-${{ matrix.runner }}
           path: |
-            ${{ runner.temp }}/exit-proof/*.json
-            ${{ runner.temp }}/exit-proof/*.log
+            ${{ runner.temp }}/exit-proof/**/*.json
+            ${{ runner.temp }}/exit-proof/**/*.log
           if-no-files-found: warn
           retention-days: 7

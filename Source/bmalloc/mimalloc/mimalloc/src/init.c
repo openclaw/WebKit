@@ -10,6 +10,9 @@ terms of the MIT license. A copy of the license can be found in the file
 
 #include <string.h>  // memcpy, memset
 #include <stdlib.h>  // atexit
+#if defined(__linux__)
+#include <unistd.h>
+#endif
 
 #define MI_MEMID_INIT(kind)   {{{NULL,0}}, kind, true /* pinned */, true /* committed */, false /* zero */ }
 #define MI_MEMID_STATIC       MI_MEMID_INIT(MI_MEM_STATIC)
@@ -992,6 +995,10 @@ void mi_cdecl mi_process_done(void) mi_attr_noexcept {
 
   // release any thread specific resources and ensure _mi_thread_done is called on all but the main thread
   _mi_prim_thread_done_auto_done();
+  #if defined(__linux__)
+  // Diagnostic only: give live helpers a scheduling window after key teardown.
+  usleep(1000);
+  #endif
 
   #ifndef MI_SKIP_COLLECT_ON_EXIT
     #if (MI_DEBUG || !defined(MI_SHARED_LIB))

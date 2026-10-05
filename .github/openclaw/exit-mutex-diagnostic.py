@@ -30,36 +30,8 @@ flags = ['--validateOptions=true', '--useFTLJIT=false', '--useFunctionDotArgumen
          '--useConcurrentJIT=false', '--thresholdForJITAfterWarmUp=100', '--scribbleFreeCells=true',
          '--collectContinuously=true', '--useGenerationalGC=false', '--verifyGC=true']
 # Run GDB after process termination, preserving natural thread scheduling during reproduction.
-gdb_script = args.output / 'capture.gdb'
-gdb_script.write_text('''set pagination off
-set print frame-arguments all
-set print elements 32
-info threads
-p/x _mi_heap_default_key
-info variables myThreadData
-thread apply all bt full
-thread apply all info registers
-info sharedlibrary
-info proc mappings
-python
-for thread in gdb.selected_inferior().threads():
-    thread.switch()
-    frame = gdb.newest_frame()
-    while frame:
-        name = frame.name() or ''
-        if 'mutex' in name.lower():
-            frame.select()
-            print('MUTEX_FRAME', thread.num, name)
-            try:
-                mutex = frame.read_var('mutex')
-                print('MUTEX_ADDRESS', mutex)
-                print('MUTEX_VALUE', mutex.dereference())
-                gdb.execute('info symbol ' + str(int(mutex)))
-            except gdb.error as error:
-                print(error)
-        frame = frame.older()
-end
-''')
+gdb_script = Path(__file__).resolve().with_name('capture-exit-owner.gdb')
+
 rows = []
 provenance = {'diagnostic_only': True, 'machine': platform.machine(), 'flags': flags,
               'binary_sha256': hashlib.sha256(args.binary.read_bytes()).hexdigest(),

@@ -859,6 +859,11 @@ Mutex::~Mutex()
 
 void Mutex::lock()
 {
+#if OS(LINUX) && defined(__GLIBC__)
+    // Diagnostic only: stop before glibc's fatal path loses the caller's unwind chain.
+    if (__atomic_load_n(&m_mutex.__data.__kind, __ATOMIC_RELAXED))
+        __builtin_trap();
+#endif
     int result = pthread_mutex_lock(&m_mutex);
     ASSERT_UNUSED(result, !result);
 }
