@@ -7,6 +7,8 @@ QUALIFICATION_DIR=$(cd "$QUALIFICATION_DIR" && pwd)
 jsc="$ENGINE_BUILD_DIR/bin/jsc"
 "$ENGINE_BUILD_DIR/bin/testmasm" > "$QUALIFICATION_DIR/testmasm.log" 2>&1
 "$ENGINE_BUILD_DIR/bin/testFFI" > "$QUALIFICATION_DIR/testffi.log" 2>&1
+"$ENGINE_BUILD_DIR/bin/testMimallocExit" > "$QUALIFICATION_DIR/mimalloc-exit.log" 2>&1
+"$ENGINE_BUILD_DIR/bin/testMimallocExitInFlight" > "$QUALIFICATION_DIR/mimalloc-exit-in-flight.log" 2>&1
 Tools/Scripts/run-jsc-stress-tests JSTests/stress --jsc "$jsc" --child-processes "${ENGINE_TEST_JOBS:-4}" \
   --filter 'promise|microtask|dynamic-import|bun-async-context|module-loader|top-level-await|async-module|module-namespace|intl-segmenter|callsite-syntax-positions|stack-position-regressions|error-stack' \
   --output-dir "$QUALIFICATION_DIR/jsc-stress" --no-retry > "$QUALIFICATION_DIR/jsc-stress.log" 2>&1

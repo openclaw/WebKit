@@ -104,6 +104,8 @@ def build(label, destination):
     if label == 'bun-webkit-linux-amd64':
         run(str(artifact/'bin/jsc'), '-e', 'print("OpenClaw WebKit ready")')
         run(str(artifact/'bin/testFFI'))
+        run(str(artifact/'bin/testMimallocExit'))
+        run(str(artifact/'bin/testMimallocExitInFlight'))
     shutil.rmtree(artifact)
 
 def main():
