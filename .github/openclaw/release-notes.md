@@ -1,8 +1,10 @@
-This release adds engine PR #8's repeated stack-coordinate cache to the qualified OpenClaw engine on upstream `5718a6ec579b98362ea7276a426deedcc6281ef5`.
+This release adds the non-LTO Windows ARM64 artifact to the qualified OpenClaw engine on upstream `5718a6ec579b98362ea7276a426deedcc6281ef5`, with native Windows 11 ARM64 startup, DFG JIT and FFI gates bound to the archive and source.
 
-- Cache requested provider-relative stack line and column conversions under the existing line-table lock, preserving document offsets, builtin overrides, and persistent bytecode format; thanks @steipete. Regressions cover repeated reads, independent providers, UTF-16 columns, and compressed line-table boundaries across interpreter/JIT tiers and cache modes.
+- Build Windows ARM64 with the unchanged upstream cross-compilation recipe and require both JSC and testFFI to be native ARM64 PE files.
 
 The previously released engine changes remain included:
+
+- Cache requested provider-relative stack line and column conversions under the existing line-table lock, preserving document offsets, builtin overrides, and persistent bytecode format; thanks @steipete. Regressions cover repeated reads, independent providers, UTF-16 columns, and compressed line-table boundaries across interpreter/JIT tiers and cache modes.
 
 - Release free allocator memory from idle compiler threads and long Atomics waits; thanks @Jarred-Sumner.
 - Preserve Segmenter surrogate boundaries, opt-in Proxy global prototypes, module-loader AsyncLocalStorage context, and per-VM worker heap/stack budgets; thanks @steipete and @robobun.
@@ -12,7 +14,7 @@ The previously released engine changes remain included:
 - Synchronize the accounting-related parallel-helper assertion and visited-memory counters.
 - Preserve syntax-selected stack positions for calls, constructors, property reads and async continuations, including live/captured stacks and cache replay; thanks @robobun for the upstream source-position work.
 
-Qualification includes all nine artifact builds, Linux JSC module/promise/namespace/Segmenter and allocation-sampling regressions, the W113 paired Bun selection, a build of the exact prepared upstream-synced Bun runtime with its required namespace API adapter and candidate manifest with startup and unchanged upstream memory-release tests, and a separate build with feature adapters for the complete fork selection and patch regressions. Syntax-selected stack positions are checked across execution tiers, live/captured stacks, and cache replay. Other targets have build/provenance proof; native runtime qualification is Linux x64.
+Qualification includes all ten artifact builds, Linux JSC module/promise/namespace/Segmenter and allocation-sampling regressions, the W113 paired Bun selection, a build of the exact prepared upstream-synced Bun runtime with its required namespace API adapter and candidate manifest with startup and unchanged upstream memory-release tests, and a separate build with feature adapters for the complete fork selection and patch regressions. Syntax-selected stack positions are checked across execution tiers, live/captured stacks, and cache replay. Other targets have build/provenance proof; native runtime qualification covers Linux x64 and Windows ARM64 JSC startup, DFG JIT and FFI probes. Bun consumer qualification is separate.
 
 The new engine requires Bun's updated mimalloc idle hook and matching embedding adapters. A manifest-only update of the original sync tree does not compile: its old namespace marker access must be replaced by the namespace adapter (Bun #106), paired atomically with this engine. Consumers must rebuild with the manifest's exact headers and libraries; an older executable is not interchangeable.
 

@@ -21,8 +21,9 @@ Bun adapters and a joint rebuild because engine class layouts change.
 commit and each active workflow-to-artifact mapping. The release workflow uses
 LTO for Linux glibc x64/arm64, macOS x64/arm64, and its optional Linux musl
 x64/arm64 and Windows x64 targets. Fork CI adds non-LTO Linux x64 and macOS arm64.
-That is nine artifacts. Windows arm64, debug, ASAN, Android and FreeBSD are not
-selected by these OpenClaw workflows. x64 has one Nehalem baseline.
+Windows ARM64 adds the upstream non-LTO release lane, for ten artifacts. LLVM's
+CodeView register-tuple limitation prevents ARM64 LTO (oven-sh/bun#31345).
+Debug, ASAN, Android and FreeBSD are not selected by these OpenClaw workflows. x64 has one Nehalem baseline.
 
 ## Add a patch and qualify
 
@@ -46,7 +47,10 @@ they do not update or publish the Bun fork. The job runs the original 44-file
 fork selector output plus its two dependency checks, requires identical all-pass
 results, and checks Segmenter, four Proxy regressions, both 14-variant ALS hook
 modes and at least 14 worker resource-limit cases. Other platforms are built;
-this gate does not claim native runtime qualification on every architecture.
+this gate does not claim native runtime qualification on every architecture. A
+Windows 11 ARM64 job verifies archive provenance and native ARM64 PE identity,
+then runs JSC startup, DFG JIT and testFFI probes. Assembly and publication require
+its source- and archive-bound receipt.
 
 ## Publish and verify
 
@@ -65,7 +69,7 @@ concurrent GC. This workflow provides the pre-merge check; it cannot publish.
 For final publication, dispatch the reviewed full SHA with `publish: true`.
 This builds every lane and runs all qualification gates before waiting at the protected
 `openclaw-artifacts` environment. Only the publication job has repository write
-permission. It assembles exactly the nine archives, `manifest.json`,
+permission. It assembles exactly the ten archives, `manifest.json`,
 `SHA256SUMS`, `provenance.tar.gz`, and `LICENSE-SOURCES.txt`.
 
 Repository immutable releases must be enabled. Once the publishing dispatch is
@@ -146,7 +150,7 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
-No changes yet.
+- Add the upstream non-LTO Windows ARM64 archive and require native Windows 11 ARM64 startup, JIT and FFI qualification before publication.
 
 ## Repeated stack coordinates (2026-10-05)
 

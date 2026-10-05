@@ -9,6 +9,60 @@ concurrency:
   group: openclaw-engine-checks-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  windows-arm64-build:
+    if: github.repository == 'openclaw/WebKit'
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 64
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/LayoutTests/
+            !/JSTests/
+            !/PerformanceTests/
+            !/Websites/
+            !/ManualTests/
+            !/WebDriverTests/
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.3.0'
+      - name: Build unchanged upstream Windows ARM64 lane
+        env:
+          BUILDX_METADATA_PROVENANCE: max
+        run: python3 .github/openclaw/artifacts.py build --lane bun-webkit-windows-arm64 --output "$RUNNER_TEMP/windows-artifact"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: bun-webkit-windows-arm64
+          path: ${{ runner.temp }}/windows-artifact
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+  windows-arm64:
+    needs: windows-arm64-build
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: bun-webkit-windows-arm64
+          path: ${{ runner.temp }}/windows-artifact
+      - name: Qualify native ARM64 engine
+        shell: pwsh
+        run: ./.github/openclaw/qualify-windows-arm64.ps1 -ArtifactDirectory "$env:RUNNER_TEMP/windows-artifact" -OutputDirectory "$env:RUNNER_TEMP/windows-proof" -Source $env:GITHUB_SHA
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: windows-arm64-qualification
+          path: ${{ runner.temp }}/windows-proof/gate.json
+          if-no-files-found: error
+          retention-days: 7
   linux-native:
     if: github.repository == 'openclaw/WebKit'
     runs-on: blacksmith-32vcpu-ubuntu-2404
