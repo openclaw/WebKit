@@ -54,8 +54,11 @@ Batch 1 is published from `openclaw/batch-1` so concurrently reviewed batch-2
 engine changes can land on `openclaw/main` without entering this release. All publication
 branches require the same protected environment and full-SHA/green-job checks.
 
-Pull requests run **OpenClaw engine checks**, a read-only Linux build using the same
-lane recipe and Bun qualification gate. It also runs the ArrayBuffer accounting
+Pull requests run **OpenClaw engine checks** at the exact PR head, with a native
+Linux build using the same lane recipe and Bun qualification gate, plus the
+macOS arm64 fork artifact cross-built on a separate Linux runner. Both jobs are
+read-only; the macOS lane proves compilation, not native macOS execution.
+The native job also runs the ArrayBuffer accounting
 and confirmed parked-waiter inspection regression with LLInt, DFG, FTL and
 concurrent GC. This workflow provides the pre-merge check; it cannot publish.
 
@@ -145,6 +148,12 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 No changes yet.
 
+## Repeated stack coordinates (2026-10-05)
+
+- Cache source-relative stack line and column lookups on demand, including syntax-selected positions; carries engine PR #8 onto the rebased release line, thanks @steipete.
+- Build both fork engine artifacts at the exact pull-request head before landing, with native Linux qualification and a Linux-hosted macOS arm64 compilation check.
+- Require the repeated-coordinate regression and surrounding error-stack stress cases, with seven direct stack execution modes including interpreter, baseline-only, DFG-only, eager FTL and concurrent GC, while retaining every rebased release gate.
+
 ## Rebased engine batch
 
 - Keep syntax-selected stack positions separate from exception ranges for calls, constructors, property reads, and async continuations. Preserve the positions across bytecode rewriting, optimization, and cache replay.
@@ -222,3 +231,9 @@ regressions. A combined regression inspects a worker during the new idle-memory
 purge and notification windows. VM inspection runs before the idle-purge branch,
 with the waiter-list lock dropped and VM heap access restored only for inspection;
 both paths recheck notification/termination before waiting again.
+
+The source provider caches only requested line/column conversions under its existing
+line-table lock. Coordinates remain relative to the provider's text; document
+offsets and builtin provider overrides retain their existing behavior. The cache
+fills only when a reader requests a position, and the persistent bytecode-cache
+format is unchanged.
