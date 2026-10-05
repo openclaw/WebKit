@@ -2157,22 +2157,31 @@ JSC_DEFINE_HOST_FUNCTION(functionEvalFromIncrementalBytecodeCache, (JSGlobalObje
             for (auto& leaf : leaves) {
                 auto* executable = const_cast<UnlinkedFunctionExecutable*>(leaf.key);
                 auto [forCall, forConstruct] = executable->codeBlocksDecodingCached(vm);
+                Vector<CachedBytecode::FunctionUpdate, 2> pending;
+                size_t payloadOffset = bytes->size();
                 auto append = [&](UnlinkedFunctionCodeBlock* code, CodeSpecializationKind kind) {
                     if (!code || bytes->hasFunctionCodeBlock(leaf.value.base(), kind))
                         return;
                     BytecodeCacheError cacheError;
                     auto function = encodeFunctionCodeBlock(vm, code, cacheError);
                     RELEASE_ASSERT(function && !cacheError.isValid());
-                    auto next = bytes->copyWithFunctionUpdate(leaf.value.base(), *executable, kind, *function);
-                    RELEASE_ASSERT(next && next->hasFunctionCodeBlock(leaf.value.base(), kind));
-                    for (auto& child : next->leafExecutables())
-                        children.set(child.key, child.value);
-                    next->leafExecutables().clear();
-                    bytes = WTF::move(next);
-                    ++updates;
+                    size_t size = function->size();
+                    pending.append(CachedBytecode::FunctionUpdate { leaf.value.base(), kind, { executable->features(), executable->lexicallyScopedFeatures(), executable->hasCapturedVariables() }, function.releaseNonNull(), payloadOffset });
+                    payloadOffset += size;
                 };
                 append(forCall, CodeSpecializationKind::CodeForCall);
                 append(forConstruct, CodeSpecializationKind::CodeForConstruct);
+                if (pending.isEmpty())
+                    continue;
+                auto next = bytes->copyWithFunctionUpdates(pending.span());
+                RELEASE_ASSERT(next);
+                for (const auto& update : pending)
+                    RELEASE_ASSERT(next->hasFunctionCodeBlock(leaf.value.base(), update.kind));
+                for (auto& child : next->leafExecutables())
+                    children.set(child.key, child.value);
+                next->leafExecutables().clear();
+                bytes = WTF::move(next);
+                updates += pending.size();
             }
             leaves = WTF::move(children);
         }

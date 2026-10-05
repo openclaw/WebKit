@@ -48,7 +48,7 @@ index 919681b7b59..105f76991e8 100644
                  JSC::JSUint8Array* buffer = WebCore::createBuffer(globalObject, producedBytecode->span());
                  RETURN_IF_EXCEPTION(throwScope, nullptr);
 diff --git a/src/jsc/bindings/NodeVMCompilationCache.cpp b/src/jsc/bindings/NodeVMCompilationCache.cpp
-index 6d27c23b92f..6fb690b75dc 100644
+index 6d27c23b92f..f5819fb4018 100644
 --- a/src/jsc/bindings/NodeVMCompilationCache.cpp
 +++ b/src/jsc/bindings/NodeVMCompilationCache.cpp
 @@ -9,6 +9,8 @@
@@ -60,16 +60,17 @@ index 6d27c23b92f..6fb690b75dc 100644
  #include <JavaScriptCore/WeakInlines.h>
  #include <wtf/Hasher.h>
  #include <charconv>
-@@ -23,6 +25,8 @@ static constexpr size_t defaultAdmissionThreshold = 1750;
+@@ -23,6 +25,9 @@ static constexpr size_t defaultAdmissionThreshold = 1750;
  static constexpr size_t maxAdmissionThreshold = 2000;
  // Per-entry reservation covers the entry, two StringImpls, weak handles, payload owner and hash-table slack.
  static constexpr size_t entryOverhead = 1024;
 +static constexpr size_t bindingOverhead = 256;
 +static constexpr size_t payloadOverhead = 256;
++static constexpr size_t updateOverhead = 512;
  
  static JSValue importerFor(const SourceCode& source)
  {
-@@ -102,6 +106,9 @@ NodeVMCompilationCache::~NodeVMCompilationCache()
+@@ -102,6 +107,9 @@ NodeVMCompilationCache::~NodeVMCompilationCache()
  const NodeVMCompilationCache::Statistics& NodeVMCompilationCache::statistics()
  {
      initialize();
@@ -79,7 +80,7 @@ index 6d27c23b92f..6fb690b75dc 100644
      return m_statistics;
  }
  
-@@ -123,16 +130,133 @@ NodeVMCompilationCache::Entry* NodeVMCompilationCache::find(const SourceCode& so
+@@ -123,16 +131,176 @@ NodeVMCompilationCache::Entry* NodeVMCompilationCache::find(const SourceCode& so
      return &entry;
  }
  
@@ -132,7 +133,7 @@ index 6d27c23b92f..6fb690b75dc 100644
 +        auto* key = binding.key;
 +        removeBinding(key, binding);
 +    }
-+    m_metadataBytes -= entry.bytes;
++    m_metadataBytes -= entry.bytes + entry.pending.size() * updateOverhead;
      --m_statistics.entries;
      unsigned hash = entry.hash;
 +    m_entriesByID.remove(entry.id);
@@ -162,10 +163,10 @@ index 6d27c23b92f..6fb690b75dc 100644
 +    ++m_bindingsSincePrune;
 +}
 +
-+void NodeVMCompilationCache::bindLeaves(Entry& entry, CachedBytecode& bytecode)
++void NodeVMCompilationCache::bindLeaves(Entry& entry, CachedBytecode& bytecode, size_t payloadOffset)
 +{
 +    for (auto& leaf : bytecode.leafExecutables())
-+        didDecodeFunction(entry.id, const_cast<UnlinkedFunctionExecutable*>(leaf.key), leaf.value.base());
++        didDecodeFunction(entry.id, const_cast<UnlinkedFunctionExecutable*>(leaf.key), leaf.value.base() + payloadOffset);
 +    bytecode.leafExecutables().clear();
 +}
 +
@@ -180,6 +181,48 @@ index 6d27c23b92f..6fb690b75dc 100644
 +        removeBinding(executable, *m_bindings.find(executable)->value);
 +}
 +
++static uint64_t functionSlotKey(ptrdiff_t offset, CodeSpecializationKind kind)
++{
++    return (static_cast<uint64_t>(offset) << 1) + (kind == CodeSpecializationKind::CodeForConstruct) + 1;
++}
++
++bool NodeVMCompilationCache::hasFunction(Entry& entry, ptrdiff_t offset, CodeSpecializationKind kind)
++{
++    if (entry.pendingSlots.contains(functionSlotKey(offset, kind)))
++        return true;
++    if (static_cast<size_t>(offset) < entry.bytecode->size())
++        return entry.bytecode->hasFunctionCodeBlock(offset, kind);
++    auto it = std::upper_bound(entry.pending.begin(), entry.pending.end(), static_cast<size_t>(offset), [](size_t offset, const auto& update) {
++        return offset < update.payloadOffset;
++    });
++    RELEASE_ASSERT(it != entry.pending.begin());
++    --it;
++    return it->bytecode->hasFunctionCodeBlock(offset - it->payloadOffset, kind);
++}
++
++NodeVMCompilationCache::Entry* NodeVMCompilationCache::materialize(uint64_t id)
++{
++    auto it = m_entriesByID.find(id);
++    if (it == m_entriesByID.end())
++        return nullptr;
++    if (it->value->pending.isEmpty())
++        return it->value;
++    size_t charge = it->value->serializedSize + payloadOverhead;
++    if (!makeRoom(charge) || (it = m_entriesByID.find(id)) == m_entriesByID.end())
++        return nullptr;
++    auto& entry = *it->value;
++    auto bytes = entry.bytecode->copyWithFunctionUpdates(entry.pending.span());
++    RELEASE_ASSERT(bytes);
++    accountPayload(*bytes, id);
++    m_statistics.copiedBytes += bytes->size();
++    ++m_statistics.materializations;
++    entry.bytecode = WTF::move(bytes);
++    m_metadataBytes -= entry.pending.size() * updateOverhead;
++    entry.pending.clear();
++    entry.pendingSlots.clear();
++    return &entry;
++}
++
 +void NodeVMCompilationCache::didGenerateFunction(VM& vm, const UnlinkedFunctionExecutable* executable, CodeSpecializationKind kind, const UnlinkedFunctionCodeBlock* block)
 +{
 +    auto binding = m_bindings.find(executable);
@@ -187,7 +230,7 @@ index 6d27c23b92f..6fb690b75dc 100644
 +        return;
 +    uint64_t id = binding->value->entry->id;
 +    ptrdiff_t offset = binding->value->offset;
-+    if (binding->value->entry->bytecode->hasFunctionCodeBlock(offset, kind))
++    if (hasFunction(*binding->value->entry, offset, kind))
 +        return;
 +    Strong<UnlinkedFunctionCodeBlock> protectedBlock(vm, const_cast<UnlinkedFunctionCodeBlock*>(block));
 +    BytecodeCacheError error;
@@ -195,19 +238,20 @@ index 6d27c23b92f..6fb690b75dc 100644
 +    auto it = m_entriesByID.find(id);
 +    if (!function || it == m_entriesByID.end())
 +        return;
-+    size_t size = it->value->bytecode->size() + function->size();
-+    size_t charge = size + payloadOverhead + function->leafExecutables().size() * bindingOverhead;
++    size_t size = it->value->serializedSize + function->size();
++    size_t charge = function->size() + payloadOverhead + updateOverhead + function->leafExecutables().size() * bindingOverhead;
 +    if (size > INT32_MAX || !makeRoom(charge) || (it = m_entriesByID.find(id)) == m_entriesByID.end()) {
 +        ++m_statistics.rejectedUpdates;
 +        return;
 +    }
 +    auto& entry = *it->value;
-+    auto updated = entry.bytecode->copyWithFunctionUpdate(offset, *executable, kind, *function);
-+    if (!updated)
-+        return;
-+    accountPayload(*updated, id);
-+    bindLeaves(entry, *updated);
-+    entry.bytecode = WTF::move(updated);
++    size_t payloadOffset = entry.serializedSize;
++    accountPayload(*function, id);
++    entry.pending.append(CachedBytecode::FunctionUpdate { offset, kind, { executable->features(), executable->lexicallyScopedFeatures(), executable->hasCapturedVariables() }, function.releaseNonNull(), payloadOffset });
++    entry.pendingSlots.add(functionSlotKey(offset, kind));
++    m_metadataBytes += updateOverhead;
++    entry.serializedSize = size;
++    bindLeaves(entry, entry.pending.last().bytecode.get(), payloadOffset);
 +    ++m_statistics.updates;
 +}
 +
@@ -215,7 +259,7 @@ index 6d27c23b92f..6fb690b75dc 100644
  {
      const String& filename = source.provider()->sourceURL();
      size_t sourceBytes = source.length() * (source.view().is8Bit() ? size_t(1) : size_t(2));
-@@ -140,29 +264,22 @@ void NodeVMCompilationCache::insert(JSGlobalObject* globalObject, const SourceCo
+@@ -140,29 +308,22 @@ void NodeVMCompilationCache::insert(JSGlobalObject* globalObject, const SourceCo
      size_t baseBytes = sourceBytes + filenameBytes + entryOverhead;
      if (baseBytes > m_statistics.limit)
          return;
@@ -253,13 +297,14 @@ index 6d27c23b92f..6fb690b75dc 100644
      // Copy the exact slices: a substring must not keep a much larger parent string alive.
      entry->source = source.view().is8Bit() ? String(source.view().span8()) : String(source.view().span16());
      entry->filename = filename.is8Bit() ? String(filename.span8()) : String(filename.span16());
-@@ -170,13 +287,15 @@ void NodeVMCompilationCache::insert(JSGlobalObject* globalObject, const SourceCo
+@@ -170,13 +331,16 @@ void NodeVMCompilationCache::insert(JSGlobalObject* globalObject, const SourceCo
      entry->hasImporter = importer.isCell();
      if (entry->hasImporter)
          entry->importer = Weak<JSCell>(importer.asCell());
 -    // Drop the encoder's update/leaf maps; cached payloads never own growing decoded graphs.
 -    entry->bytecode = NodeVM::createOwnedCachedBytecode(bytes->span());
 +    accountPayload(*bytes, entry->id);
++    entry->serializedSize = bytes->size();
 +    entry->bytecode = WTF::move(bytes);
      entry->decoded = Weak<UnlinkedProgramCodeBlock>(block);
 -    entry->bytes = charge;
@@ -273,7 +318,7 @@ index 6d27c23b92f..6fb690b75dc 100644
      ++m_statistics.entries;
  }
  
-@@ -187,7 +306,7 @@ void NodeVMCompilationCache::observeCompilation(JSGlobalObject* globalObject, co
+@@ -187,7 +351,7 @@ void NodeVMCompilationCache::observeCompilation(JSGlobalObject* globalObject, co
          return;
      ++m_statistics.misses;
      Strong<UnlinkedProgramCodeBlock> protectedBlock(globalObject->vm(), block);
@@ -282,7 +327,18 @@ index 6d27c23b92f..6fb690b75dc 100644
  }
  
  UnlinkedProgramCodeBlock* NodeVMCompilationCache::getOrCompile(JSGlobalObject* globalObject, ProgramExecutable* executable, const SourceCode& source, const Identity& identity, bool hasCachedData, ParserError& error)
-@@ -208,11 +327,6 @@ UnlinkedProgramCodeBlock* NodeVMCompilationCache::getOrCompile(JSGlobalObject* g
+@@ -198,7 +362,9 @@ UnlinkedProgramCodeBlock* NodeVMCompilationCache::getOrCompile(JSGlobalObject* g
+     if (enabled) {
+         if (auto* entry = find(source, identity)) {
+             auto* block = entry->decoded.get();
+-            if (!block) {
++            if (!block)
++                entry = materialize(entry->id);
++            if (!block && entry) {
+                 LexicallyScopedFeatures features = globalObject->globalScopeExtension() ? TaintedByWithScopeLexicallyScopedFeature : NoLexicallyScopedFeatures;
+                 SourceCodeKey key(source, {}, SourceCodeType::ProgramType, features, JSParserScriptMode::Classic, DerivedContextType::None, EvalContextType::None, false, identity.codeGenerationMode, std::nullopt);
+                 block = decodeCodeBlock<UnlinkedProgramCodeBlock>(vm, key, *entry->bytecode);
+@@ -208,11 +374,6 @@ UnlinkedProgramCodeBlock* NodeVMCompilationCache::getOrCompile(JSGlobalObject* g
                  }
              }
              if (block) {
@@ -294,7 +350,7 @@ index 6d27c23b92f..6fb690b75dc 100644
                  ++m_statistics.hits;
                  recordParseFromUnlinkedCodeBlock(executable, source, block);
                  return block;
-@@ -223,18 +337,11 @@ UnlinkedProgramCodeBlock* NodeVMCompilationCache::getOrCompile(JSGlobalObject* g
+@@ -223,18 +384,11 @@ UnlinkedProgramCodeBlock* NodeVMCompilationCache::getOrCompile(JSGlobalObject* g
      auto* block = vm.codeCache()->getUnlinkedProgramCodeBlock(vm, executable, source, identity.codeGenerationMode, error);
      if (block && enabled) {
          Strong<UnlinkedProgramCodeBlock> protectedBlock(vm, block);
@@ -314,7 +370,7 @@ index 6d27c23b92f..6fb690b75dc 100644
  JSC_DEFINE_HOST_FUNCTION(nodeVMCompilationCacheStats, (JSGlobalObject * globalObject, CallFrame*))
  {
      auto& vm = globalObject->vm();
-@@ -250,6 +357,10 @@ JSC_DEFINE_HOST_FUNCTION(nodeVMCompilationCacheStats, (JSGlobalObject * globalOb
+@@ -250,6 +404,12 @@ JSC_DEFINE_HOST_FUNCTION(nodeVMCompilationCacheStats, (JSGlobalObject * globalOb
      Bun::putDirectNamed(vm, result, "decodes"_s, jsNumber(stats.decodes));
      Bun::putDirectNamed(vm, result, "misses"_s, jsNumber(stats.misses));
      Bun::putDirectNamed(vm, result, "evictions"_s, jsNumber(stats.evictions));
@@ -322,11 +378,13 @@ index 6d27c23b92f..6fb690b75dc 100644
 +    Bun::putDirectNamed(vm, result, "rejectedUpdates"_s, jsNumber(stats.rejectedUpdates));
 +    Bun::putDirectNamed(vm, result, "payloadBytes"_s, jsNumber(stats.payloadBytes));
 +    Bun::putDirectNamed(vm, result, "bindings"_s, jsNumber(stats.bindings));
++    Bun::putDirectNamed(vm, result, "materializations"_s, jsNumber(stats.materializations));
++    Bun::putDirectNamed(vm, result, "copiedBytes"_s, jsNumber(stats.copiedBytes));
      return JSValue::encode(result);
  }
  
 diff --git a/src/jsc/bindings/NodeVMCompilationCache.h b/src/jsc/bindings/NodeVMCompilationCache.h
-index c5e8d931dec..2cef2c518e7 100644
+index c5e8d931dec..89922b14e30 100644
 --- a/src/jsc/bindings/NodeVMCompilationCache.h
 +++ b/src/jsc/bindings/NodeVMCompilationCache.h
 @@ -7,12 +7,16 @@
@@ -346,12 +404,14 @@ index c5e8d931dec..2cef2c518e7 100644
  }
  namespace Zig {
  class GlobalObject;
-@@ -46,31 +50,53 @@ public:
+@@ -46,31 +50,58 @@ public:
          uint64_t decodes { 0 };
          uint64_t misses { 0 };
          uint64_t evictions { 0 };
 +        uint64_t updates { 0 };
 +        uint64_t rejectedUpdates { 0 };
++        uint64_t materializations { 0 };
++        uint64_t copiedBytes { 0 };
 +        size_t payloadBytes { 0 };
 +        size_t bindings { 0 };
      };
@@ -389,6 +449,9 @@ index c5e8d931dec..2cef2c518e7 100644
          RefPtr<JSC::CachedBytecode> bytecode;
          JSC::Weak<JSC::UnlinkedProgramCodeBlock> decoded;
          size_t bytes;
++        size_t serializedSize;
++        Vector<JSC::CachedBytecode::FunctionUpdate> pending;
++        WTF::UncheckedKeyHashSet<uint64_t> pendingSlots;
 +        WTF::SentinelLinkedList<Binding, WTF::BasicRawSentinelNode<Binding>> bindings;
      };
      using Entries = WTF::UncheckedKeyHashMap<unsigned, std::unique_ptr<Entry>>;
@@ -403,7 +466,7 @@ index c5e8d931dec..2cef2c518e7 100644
      WTF::SentinelLinkedList<Entry, WTF::BasicRawSentinelNode<Entry>> m_lru;
      Statistics m_statistics;
      bool m_initialized { false };
-@@ -78,7 +104,12 @@ private:
+@@ -78,7 +109,14 @@ private:
      bool admit(const JSC::SourceCode&);
      Entry* find(const JSC::SourceCode&, const Identity&);
      void remove(Entry&);
@@ -413,7 +476,9 @@ index c5e8d931dec..2cef2c518e7 100644
 +    bool makeRoom(size_t);
 +    void removeBinding(const JSC::UnlinkedFunctionExecutable*, Binding&);
 +    void accountPayload(JSC::CachedBytecode&, uint64_t);
-+    void bindLeaves(Entry&, JSC::CachedBytecode&);
++    void bindLeaves(Entry&, JSC::CachedBytecode&, size_t payloadOffset = 0);
++    bool hasFunction(Entry&, ptrdiff_t, JSC::CodeSpecializationKind);
++    Entry* materialize(uint64_t);
  };
  
  JSC::JSValue createNodeVMCompilationCacheStatsForTesting(Zig::GlobalObject*);
@@ -537,7 +602,7 @@ index 5944d34d470..66ce7c4dbd0 100644
      // CodeGenerationMode, i.e. a debugger attached, runs the Script.
      JSC::WriteBarrier<JSC::UnlinkedProgramCodeBlock> m_unlinkedCodeBlock;
 diff --git a/test/js/node/vm/vm.test.ts b/test/js/node/vm/vm.test.ts
-index 8d751f1dfa5..87bccd2b7ee 100644
+index 8d751f1dfa5..1fd0b0d0a7c 100644
 --- a/test/js/node/vm/vm.test.ts
 +++ b/test/js/node/vm/vm.test.ts
 @@ -1018,6 +1018,26 @@ test("accepts valid bytecode", () => {
@@ -567,7 +632,7 @@ index 8d751f1dfa5..87bccd2b7ee 100644
  test("can't use bytecode from a different script", () => {
    const firstScript = new Script("1 + 1;");
    const cachedData = firstScript.createCachedData();
-@@ -2968,6 +2988,87 @@ describe("bounded vm compilation cache", () => {
+@@ -2968,6 +2988,89 @@ describe("bounded vm compilation cache", () => {
      );
    });
  
@@ -584,6 +649,7 @@ index 8d751f1dfa5..87bccd2b7ee 100644
 +      assert.equal(value.used(41)(), 42);
 +      const warm = stats();
 +      assert(warm.updates >= 2);
++      assert.equal(warm.materializations,cold.materializations);
 +      assert(warm.bytes > cold.bytes);
 +      script = value = null;
 +      await new Promise(setImmediate);
@@ -592,6 +658,7 @@ index 8d751f1dfa5..87bccd2b7ee 100644
 +      assert(stats().decodes > cold.decodes);
 +      assert.equal(again.used(41)(), 42);
 +      assert.equal(stats().updates, warm.updates);
++      assert.equal(stats().materializations,warm.materializations+1);
 +      assert.equal(again.unused(), 99);
 +      assert.equal(stats().updates, warm.updates + 1);
 +      assert(stats().bytes <= stats().limit);
@@ -655,12 +722,12 @@ index 8d751f1dfa5..87bccd2b7ee 100644
    test.concurrent("can be disabled", async () => {
      await runCacheFixture(
        `
-@@ -2975,7 +3076,7 @@ describe("bounded vm compilation cache", () => {
+@@ -2975,7 +3078,7 @@ describe("bounded vm compilation cache", () => {
        import { runInThisContext } from "node:vm";
        import { nodeVMCompilationCacheStats as stats } from "bun:internal-for-testing";
        for(let i=0;i<3;i++) assert.equal(runInThisContext("40 + 2"),42);
 -      assert.deepEqual(stats(), {limit:0,admissionThreshold:0,observedSources:0,active:false,bytes:0,entries:0,hits:0,decodes:0,misses:0,evictions:0});
-+      assert.deepEqual(stats(), {limit:0,admissionThreshold:0,observedSources:0,active:false,bytes:0,entries:0,hits:0,decodes:0,misses:0,evictions:0,updates:0,rejectedUpdates:0,payloadBytes:0,bindings:0});
++      assert.deepEqual(stats(), {limit:0,admissionThreshold:0,observedSources:0,active:false,bytes:0,entries:0,hits:0,decodes:0,misses:0,evictions:0,updates:0,rejectedUpdates:0,payloadBytes:0,bindings:0,materializations:0,copiedBytes:0});
        console.log("ok");
      `,
        "0",

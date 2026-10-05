@@ -89,7 +89,14 @@ public:
     void setIncrementalCacheID(uint64_t id) { m_incrementalCacheID = id; }
     void setDestructionCallback(Function<void()>&& callback) { m_destructionCallback = WTF::move(callback); }
     JS_EXPORT_PRIVATE bool hasFunctionCodeBlock(ptrdiff_t executableOffset, CodeSpecializationKind) const;
-    JS_EXPORT_PRIVATE RefPtr<CachedBytecode> copyWithFunctionUpdate(ptrdiff_t executableOffset, const UnlinkedFunctionExecutable&, CodeSpecializationKind, const CachedBytecode&) const;
+    struct FunctionUpdate {
+        ptrdiff_t executableOffset;
+        CodeSpecializationKind kind;
+        CachedFunctionExecutableMetadata metadata;
+        Ref<CachedBytecode> bytecode;
+        size_t payloadOffset;
+    };
+    JS_EXPORT_PRIVATE RefPtr<CachedBytecode> copyWithFunctionUpdates(std::span<const FunctionUpdate>) const;
 
     JS_EXPORT_PRIVATE void addGlobalUpdate(Ref<CachedBytecode>);
     JS_EXPORT_PRIVATE void addFunctionUpdate(const UnlinkedFunctionExecutable*, CodeSpecializationKind, Ref<CachedBytecode>);

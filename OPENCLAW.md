@@ -149,9 +149,9 @@ through `VM::ClientData`. The identifier is an eviction token, not an ownership
 edge. Embedders must validate weak executable identities and discard callbacks
 for evicted tokens. Instrumented compilation does not generate update callbacks.
 
-`copyWithFunctionUpdate` appends an encoded function body and patches a copy of
-the executable record. Existing payload bytes remain immutable. It returns only
-the new body's leaf map, with offsets rebased into the resulting payload. The
+`copyWithFunctionUpdates` combines ordered immutable function deltas in one
+allocation and patches a copy of their executable records. Existing payload bytes
+remain immutable. It returns the new bodies' leaf maps with rebased offsets. The
 embedder must bound both binding metadata and all outstanding payload versions,
 including payloads that live decoders still hold after eviction. A destruction
 callback supports that accounting without retaining a decoder or executable.
@@ -166,3 +166,8 @@ fork selection. The adapter does not update Bun's published engine manifest.
 The Bun adapter also removes the unused public cached-data JIT compilation from
 [oven-sh/bun#41769](https://github.com/oven-sh/bun/pull/41769), preserving decoding
 and source validation when the JIT is unavailable. Thanks @robobun.
+
+The Bun adapter keeps bounded serialized deltas until a weak program block must
+be decoded again. It then combines them once. Pending payloads and their index
+are charged immediately; combining also reserves the new snapshot before
+releasing any old owner. Cache entries never retain decoded graphs.
