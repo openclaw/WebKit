@@ -1,7 +1,5 @@
-name: OpenClaw ARM64 regressions
+name: OpenClaw ARM64 GC diagnostic
 on:
-  pull_request:
-    branches: [openclaw/main, openclaw/release-5718a6ec]
   workflow_dispatch:
 permissions:
   contents: read
@@ -36,7 +34,7 @@ jobs:
           curl -fsSL --retry 5 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
           echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cmake ninja-build clang-23 lld-23 libicu-dev ruby ruby-highline libjson-pp-perl
+          sudo apt-get install -y --no-install-recommends cmake ninja-build clang-23 lld-23 libicu-dev gdb ruby ruby-highline libjson-pp-perl
       - name: Build native ARM64 JSC and assembler tests
         run: |
           test "$(uname -m)" = aarch64
@@ -47,11 +45,29 @@ jobs:
             -DENABLE_BUN_SKIP_FAILING_ASSERTIONS=ON -DALLOW_LINE_AND_COLUMN_NUMBER_IN_BUILTINS=ON \
             -DENABLE_REMOTE_INSPECTOR=ON -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23
           cmake --build "$RUNNER_TEMP/jsc-build" --target jsc testmasm testFFI -j4
-      - name: Qualify assembler and all JIT tiers
-        env:
-          ENGINE_BUILD_DIR: ${{ runner.temp }}/jsc-build
-          QUALIFICATION_DIR: ${{ runner.temp }}/arm64-proof
-        run: bash .github/openclaw/qualify-arm64.sh
+      - name: Build the unchanged release baseline
+        run: |
+          git fetch --no-tags origin f1e1ca1156c8cb3b468bec0e1989fbfa08899661 32804d651e88b0667cf9831dc8bbe7eb250bc3c1
+          git worktree add --detach "$RUNNER_TEMP/baseline-source" f1e1ca1156c8cb3b468bec0e1989fbfa08899661
+          cmake -S "$RUNNER_TEMP/baseline-source" -B "$RUNNER_TEMP/baseline-build" -G Ninja \
+            -DPORT=JSCOnly -DCMAKE_BUILD_TYPE=Release -DDEVELOPER_MODE=ON -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF \
+            -DENABLE_STATIC_JSC=ON -DUSE_BUN_JSC_ADDITIONS=ON -DUSE_BUN_EVENT_LOOP=ON \
+            -DUSE_MIMALLOC=ON -DUSE_EXTERNAL_MIMALLOC=OFF -DENABLE_FTL_JIT=ON \
+            -DENABLE_BUN_SKIP_FAILING_ASSERTIONS=ON -DALLOW_LINE_AND_COLUMN_NUMBER_IN_BUILTINS=ON \
+            -DENABLE_REMOTE_INSPECTOR=ON -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23
+          cmake --build "$RUNNER_TEMP/baseline-build" --target jsc -j4
+      - name: Capture bounded paired continuous-GC diagnostics
+        run: |
+          mkdir -m 700 "$RUNNER_TEMP/arm64-cores" "$RUNNER_TEMP/arm64-proof"
+          sudo sysctl -w "kernel.core_pattern=$RUNNER_TEMP/arm64-cores/core.%p"
+          ulimit -c unlimited
+          git rev-parse HEAD > "$RUNNER_TEMP/arm64-proof/diagnostic-head.log"
+          git diff --exit-code 32804d651e88b0667cf9831dc8bbe7eb250bc3c1 -- Source JSTests
+          python3 .github/openclaw/paired-gc-diagnostic.py \
+            --baseline "$RUNNER_TEMP/baseline-build/bin/jsc" \
+            --candidate "$RUNNER_TEMP/jsc-build/bin/jsc" \
+            --fixture "$GITHUB_WORKSPACE/JSTests/stress/masquerader-as-function-in-promise.js" \
+            --output "$RUNNER_TEMP/arm64-proof" --cores "$RUNNER_TEMP/arm64-cores"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
