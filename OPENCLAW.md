@@ -150,7 +150,16 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+No changes yet.
+
+## Windows ARM64 artifacts (2026-10-05)
+
 - Add the upstream non-LTO Windows ARM64 archive and require native Windows 11 ARM64 startup, JIT and FFI qualification before publication.
+
+Published in immutable release
+[`autobuild-c75925d9c51b8df1402320f9c472805a90ac6353`](https://github.com/openclaw/WebKit/releases/tag/autobuild-c75925d9c51b8df1402320f9c472805a90ac6353).
+The release contains ten engine archives plus checksums, the manifest, provenance
+and source/license notices. The Bun fork adopts its manifest separately.
 
 ## Repeated stack coordinates (2026-10-05)
 
