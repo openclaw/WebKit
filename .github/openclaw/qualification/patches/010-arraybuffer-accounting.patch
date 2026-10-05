@@ -885,10 +885,10 @@ index f85d1129..43c9a8be 100644
              }
 diff --git a/test/js/node/process/arraybuffer-accounting.fixture.mjs b/test/js/node/process/arraybuffer-accounting.fixture.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..d2bce713c2bd0a7bc66262eb327e1a6cf52676b4
+index 0000000000000000000000000000000000000000..8611deb06e3f23ad5605ac7693efcfb6c833a16d
 --- /dev/null
 +++ b/test/js/node/process/arraybuffer-accounting.fixture.mjs
-@@ -0,0 +1,361 @@
+@@ -0,0 +1,366 @@
 +import assert from "node:assert/strict";
 +import { once } from "node:events";
 +import { readFileSync } from "node:fs";
@@ -1081,6 +1081,11 @@ index 0000000000000000000000000000000000000000..d2bce713c2bd0a7bc66262eb327e1a6c
 +  return [before, retained, isolated, released];
 +}
 +
++// Keep JIT compilation of the busy loop separate from this large fixture.
++function spinUntilReleased(flag) {
++  while (!Atomics.load(flag, 0)) {}
++}
++
 +const kind = isMainThread ? process.argv[2] : typeof workerData === "string" ? workerData : workerData.kind;
 +if (!isMainThread && ["busy", "wait", "shutdown", "startup"].includes(kind)) {
 +  // Finish startup work before comparing snapshots of a fresh allocation.
@@ -1091,7 +1096,7 @@ index 0000000000000000000000000000000000000000..d2bce713c2bd0a7bc66262eb327e1a6c
 +  if (kind === "wait") {
 +    assert.equal(Atomics.wait(flag, 0, 0), "ok");
 +  } else {
-+    while (!Atomics.load(flag, 0)) {}
++    spinUntilReleased(flag);
 +  }
 +  parentPort.postMessage("released");
 +} else if (!isMainThread && kind === "transfer") {

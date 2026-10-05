@@ -54,7 +54,8 @@ def assemble(inputs,out,source):
     if (windows.get('passed') is not True or windows.get('source')!=source
         or windows.get('lane')!='bun-webkit-windows-arm64' or windows.get('architecture')!='arm64'
         or windows.get('sha256')!=artifacts['bun-webkit-windows-arm64.tar.gz']['sha256']
-        or any(windows.get(k) is not True for k in ('startup','dfg','ffi'))):
+        or any(windows.get(k) is not True for k in ('startup','dfg','ffi','arraybuffer_accounting'))
+        or windows.get('arraybuffer_modes')!=5):
         raise ValueError('missing or mismatched native Windows ARM64 qualification')
     gate['windows_arm64']=windows
     # Retain low-level provenance and test logs as a separate archive.

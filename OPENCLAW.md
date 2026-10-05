@@ -49,7 +49,7 @@ results, and checks Segmenter, four Proxy regressions, both 14-variant ALS hook
 modes and at least 14 worker resource-limit cases. Other platforms are built;
 this gate does not claim native runtime qualification on every architecture. A
 Windows 11 ARM64 job verifies archive provenance and native ARM64 PE identity,
-then runs JSC startup, DFG JIT and testFFI probes. Assembly and publication require
+then runs JSC startup, DFG JIT, testFFI and ArrayBuffer accounting in five execution modes. Assembly and publication require
 its source- and archive-bound receipt.
 
 ## Publish and verify
@@ -149,6 +149,10 @@ in sync with the Bun integration until that integration becomes the qualificatio
 baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
+
+## ARM64 arithmetic and Windows artifacts (2026-10-05)
+
+- Fix ARM64 register-to-memory 64-bit addition so DFG typed-array allocations update their accounting counter without corrupting the source register; cover the operation in testmasm and qualify native ARM64 JSC across interpreter and JIT tiers.
 
 - Add the upstream non-LTO Windows ARM64 archive and require native Windows 11 ARM64 startup, JIT and FFI qualification before publication.
 
