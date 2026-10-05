@@ -11359,10 +11359,12 @@ IGNORE_CLANG_WARNINGS_END
 #endif
 #if USE(BUN_JSC_ADDITIONS)
         auto listAddress = m_out.absolute(vm().heap.addressOfUnmaterializedArrayBufferViews());
+        auto bytesAddress = m_out.absolute(vm().heap.addressOfUnmaterializedArrayBufferBytes());
         auto modeAndNext = m_out.bitOr(m_out.loadPtr(listAddress), m_out.constInt64(JSArrayBufferView::fastModeBits()));
         // The packed store initializes mode too, so mode loads must alias it.
         m_out.storePtr(modeAndNext, m_out.address(m_heaps.JSArrayBufferView_mode, fastResultValue, JSArrayBufferView::offsetOfModeAndNext()));
         m_out.storePtr(fastResultValue, listAddress);
+        m_out.storePtr(m_out.add(m_out.loadPtr(bytesAddress), byteSizeWithoutAdjustment), bytesAddress);
 #else
         m_out.store32As8(m_out.constInt32(FastTypedArray), fastResultValue, m_heaps.JSArrayBufferView_mode);
 #endif

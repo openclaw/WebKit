@@ -587,12 +587,12 @@ public:
 #if USE(BUN_JSC_ADDITIONS)
     size_t allocatedArrayBufferSize() const { return m_arrayBufferMemoryAccount->allocatedBytes(); }
     size_t heldArrayBufferSize() const { return m_arrayBufferMemoryAccount->externalBytes(); }
-    size_t arrayBufferPayloadSize() const { return heldArrayBufferSize() + unmaterializedArrayBufferSize(); }
+    size_t arrayBufferPayloadSize() const { return heldArrayBufferSize() + m_unmaterializedArrayBufferBytes; }
     size_t arrayBufferObjectSize() const { return m_arrayBufferMemoryAccount->objectBytes(); }
     JS_EXPORT_PRIVATE void addUnmaterializedArrayBufferView(JSArrayBufferView*);
-    JS_EXPORT_PRIVATE size_t unmaterializedArrayBufferSize() const;
-    void materializeArrayBufferView(size_t bytes) { m_unmaterializedArrayBufferBytes = unmaterializedArrayBufferSize() - bytes; }
+    void materializeArrayBufferView(size_t bytes) { m_unmaterializedArrayBufferBytes -= bytes; }
     JSArrayBufferView** addressOfUnmaterializedArrayBufferViews() { return &m_unmaterializedArrayBufferViews; }
+    size_t* addressOfUnmaterializedArrayBufferBytes() { return &m_unmaterializedArrayBufferBytes; }
     void didAllocateArrayBufferMemory(size_t bytes) { m_arrayBufferBytesAllocated += bytes; }
     void reportArrayBufferMemoryAllocated(size_t, const JSCell* = nullptr);
     ArrayBufferMemoryAccount& arrayBufferMemoryAccount() { return m_arrayBufferMemoryAccount.get(); }
@@ -1024,8 +1024,7 @@ private:
     Ref<ArrayBufferMemoryAccount> m_arrayBufferMemoryAccount { ArrayBufferMemoryAccount::create() };
     JSArrayBufferView* m_unmaterializedArrayBufferViews { nullptr };
     JSArrayBufferView* m_oldUnmaterializedArrayBufferViews { nullptr };
-    mutable JSArrayBufferView* m_accountedUnmaterializedArrayBufferViews { nullptr };
-    mutable size_t m_unmaterializedArrayBufferBytes { 0 };
+    size_t m_unmaterializedArrayBufferBytes { 0 };
     uint64_t m_arrayBufferBytesAllocated { 0 };
     uint64_t m_arrayBufferBytesAllocatedAtLastCollection { 0 };
     uint64_t m_bytesAllocatedAtLastReportingCollection { 0 };

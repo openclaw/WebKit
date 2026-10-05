@@ -1100,7 +1100,7 @@ size_t Heap::objectCount()
 size_t Heap::arrayBufferSize()
 {
 #if USE(BUN_JSC_ADDITIONS)
-    return allocatedArrayBufferSize() + unmaterializedArrayBufferSize();
+    return allocatedArrayBufferSize() + m_unmaterializedArrayBufferBytes;
 #else
     return m_arrayBuffers.size();
 #endif
@@ -1112,18 +1112,7 @@ void Heap::addUnmaterializedArrayBufferView(JSArrayBufferView* view)
     ASSERT(!view->hasArrayBuffer());
     view->setNextUnmaterializedView(m_unmaterializedArrayBufferViews);
     m_unmaterializedArrayBufferViews = view;
-}
-
-size_t Heap::unmaterializedArrayBufferSize() const
-{
-    // Inspections run on the owning VM thread. Only allocations since the last
-    // inspection, materialization or collection need to be added to its total.
-    for (auto* view = m_unmaterializedArrayBufferViews; view != m_accountedUnmaterializedArrayBufferViews; view = view->nextUnmaterializedView()) {
-        ASSERT(!view->hasArrayBuffer());
-        m_unmaterializedArrayBufferBytes += view->byteLengthRaw();
-    }
-    m_accountedUnmaterializedArrayBufferViews = m_unmaterializedArrayBufferViews;
-    return m_unmaterializedArrayBufferBytes;
+    m_unmaterializedArrayBufferBytes += view->byteLengthRaw();
 }
 
 void Heap::didAllocateArrayBufferAuxiliaryMemory(Subspace* subspace, size_t bytes)
@@ -1148,7 +1137,7 @@ size_t Heap::externalMemorySizeForReporting()
 {
     return m_nativeExternalMemoryAfterLastCollection
         + (m_nonArrayBufferBytesAllocated - m_nonArrayBufferBytesAllocatedAtLastCollection)
-        + arrayBufferPayloadSize() + arrayBufferObjectSize();
+        + heldArrayBufferSize() + m_unmaterializedArrayBufferBytes + arrayBufferObjectSize();
 }
 
 size_t Heap::jsHeapSizeForReporting()
@@ -3215,36 +3204,20 @@ void Heap::sweepArrayBuffers()
     // Surviving views are old after each sweep. Eden cannot reclaim that suffix.
     auto* end = collectionScope() == CollectionScope::Full ? nullptr : m_oldUnmaterializedArrayBufferViews;
     auto* view = m_unmaterializedArrayBufferViews;
-    auto removeView = [&](JSArrayBufferView* next) {
-        if (previous)
-            previous->setNextUnmaterializedView(next);
-        else
-            m_unmaterializedArrayBufferViews = next;
-    };
-    // Materialization first accounts the prefix. Its remaining unaccounted
-    // views therefore need neither a buffer-mode check nor a dead-byte debit.
-    while (view != m_accountedUnmaterializedArrayBufferViews) {
-        ASSERT(!view->hasArrayBuffer());
-        auto* next = view->nextUnmaterializedView();
-        if (isMarked(view)) {
-            m_unmaterializedArrayBufferBytes += view->byteLengthRaw();
-            previous = view;
-        } else
-            removeView(next);
-        view = next;
-    }
     while (view != end) {
         auto* next = view->nextUnmaterializedView();
         if (view->hasArrayBuffer() || !isMarked(view)) {
             if (!view->hasArrayBuffer())
                 m_unmaterializedArrayBufferBytes -= view->byteLengthRaw();
-            removeView(next);
+            if (previous)
+                previous->setNextUnmaterializedView(next);
+            else
+                m_unmaterializedArrayBufferViews = next;
         } else
             previous = view;
         view = next;
     }
     m_oldUnmaterializedArrayBufferViews = m_unmaterializedArrayBufferViews;
-    m_accountedUnmaterializedArrayBufferViews = m_unmaterializedArrayBufferViews;
 #endif
 }
 

@@ -722,7 +722,7 @@ void ArrayBuffer::updateExternalMemoryAccounting(size_t bytes)
         return;
     if (bytes > m_externalBytes)
         m_holderAccount->acquire(bytes - m_externalBytes);
-    else if (bytes < m_externalBytes)
+    else
         m_holderAccount->release(m_externalBytes - bytes);
     m_externalBytes = bytes;
 }

@@ -146,7 +146,6 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 ## Unreleased
 
 - Cache source-relative stack line and column lookups on demand, including syntax-selected positions.
-- Defer FastTypedArray byte summation until inspection, materialization, or collection while retaining exact worker snapshots; skip unchanged external-byte atomic updates.
 - Build both fork engine artifacts at the exact pull-request head before landing, with native Linux qualification and a Linux-hosted macOS arm64 compilation check.
 - Keep syntax-selected stack positions separate from exception ranges for calls, constructors, property reads, and async continuations. Preserve the positions across bytecode rewriting, optimization, and cache replay.
 
@@ -168,10 +167,3 @@ line-table lock. Coordinates remain relative to the provider's text; document
 offsets and builtin provider overrides retain their existing behavior. The cache
 fills only when a reader requests a position, and the persistent bytecode-cache
 format is unchanged.
-
-Unmaterialized typed-array views remain in the VM-owned weak list. Allocations
-prepend their views without updating a second byte counter. Statistics and
-materialization sum only the prefix added since the last observation, and collection
-accounts surviving new views while pruning dead ones. All reporting still runs on
-the owning VM thread, including busy and parked workers; it never returns a deferred
-estimate. Materialized backing stores retain their cross-thread atomic accounts.
