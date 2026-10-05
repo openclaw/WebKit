@@ -89,8 +89,8 @@ jobs:
           set -euo pipefail
           jsc="$RUNNER_TEMP/jsc-artifact/bun-webkit/bin/jsc"
           "$jsc" -e 'if (typeof evalFromIncrementalBytecodeCache !== "function") throw new Error("incremental cache test hook is missing");'
-          Tools/Scripts/run-jsc-stress-tests JSTests/stress --jsc "$jsc" --child-processes 16 --filter 'incremental-bytecode-cache' --output-dir "$RUNNER_TEMP/incremental-results" --no-retry
-          python3 .github/openclaw/verify-jsc-results.py "$RUNNER_TEMP/incremental-results" --require incremental-bytecode-cache.js
+          Tools/Scripts/run-jsc-stress-tests JSTests/stress --jsc "$jsc" --child-processes 16 --filter 'incremental-bytecode-cache|bytecode-cache-has-decoded-expression-info' --output-dir "$RUNNER_TEMP/incremental-results" --no-retry
+          python3 .github/openclaw/verify-jsc-results.py "$RUNNER_TEMP/incremental-results" --require incremental-bytecode-cache.js --require bytecode-cache-has-decoded-expression-info.js
       - name: Qualify the paired Bun adapter and fork selection
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/linux-artifact
