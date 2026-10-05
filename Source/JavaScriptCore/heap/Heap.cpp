@@ -3387,7 +3387,8 @@ void Heap::updateAllocationLimits()
         // the new allocation limit based on the current size of the heap, with a
         // fixed minimum.
         size_t lastMaxHeapSize = m_maxHeapSize;
-        m_maxHeapSize = std::max(minHeapSize(m_heapType, m_ramSize), proportionalHeapSize(currentHeapSize, m_ramSize));
+        size_t minimumHeapSize = minHeapSize(m_heapType, m_ramSize);
+        m_maxHeapSize = std::max(minimumHeapSize, proportionalHeapSize(currentHeapSize, m_ramSize));
         m_maxEdenSize = m_maxHeapSize - currentHeapSize;
         if (m_isInOpportunisticTask && !isCritical) {
             // After an Opportunistic Full GC, we allow eden to occupy all the space we recovered.
@@ -3396,6 +3397,16 @@ void Heap::updateAllocationLimits()
             // Eden GC to ensure that eden can grow to at least m_maxHeapSize.
             m_maxHeapSize = std::max(m_maxHeapSize, lastMaxHeapSize);
         }
+#if USE(BUN_JSC_ADDITIONS)
+        if (m_embedderMaxHeapSize) {
+            // Each budgeted worker shares the machine's RAM with other VMs.
+            CheckedSize workerGrowthCeiling = currentHeapSize;
+            workerGrowthCeiling += currentHeapSize;
+            if (!workerGrowthCeiling.hasOverflowed())
+                m_maxHeapSize = std::min(m_maxHeapSize, std::max(minimumHeapSize, workerGrowthCeiling.value()));
+            m_maxEdenSize = std::min(m_maxEdenSize, m_maxHeapSize - currentHeapSize);
+        }
+#endif
         dataLogLnIf(verbose, "Full: maxHeapSize = ", m_maxHeapSize);
         dataLogLnIf(verbose, "Full: maxEdenSize = ", m_maxEdenSize);
         m_sizeAfterLastFullCollect = currentHeapSize;
