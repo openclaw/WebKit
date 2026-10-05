@@ -145,6 +145,8 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+- Fix ARM64 MacroAssembler register-to-memory `add64` operand order, restoring DFG typed-array allocation accounting and preserving the source register; cover the operation in testmasm and native ARM64 qualification.
+
 - Cache source-relative stack line and column lookups on demand, including syntax-selected positions.
 - Build both fork engine artifacts at the exact pull-request head before landing, with native Linux qualification and a Linux-hosted macOS arm64 compilation check.
 - Keep syntax-selected stack positions separate from exception ranges for calls, constructors, property reads, and async continuations. Preserve the positions across bytecode rewriting, optimization, and cache replay.
