@@ -1100,7 +1100,7 @@ size_t Heap::objectCount()
 size_t Heap::arrayBufferSize()
 {
 #if USE(BUN_JSC_ADDITIONS)
-    return allocatedArrayBufferSize() + m_unmaterializedArrayBufferBytes;
+    return allocatedArrayBufferSize() + unmaterializedArrayBufferSize();
 #else
     return m_arrayBuffers.size();
 #endif
@@ -1112,7 +1112,18 @@ void Heap::addUnmaterializedArrayBufferView(JSArrayBufferView* view)
     ASSERT(!view->hasArrayBuffer());
     view->setNextUnmaterializedView(m_unmaterializedArrayBufferViews);
     m_unmaterializedArrayBufferViews = view;
-    m_unmaterializedArrayBufferBytes += view->byteLengthRaw();
+}
+
+size_t Heap::unmaterializedArrayBufferSize() const
+{
+    // Inspections run on the owning VM thread. Only allocations since the last
+    // inspection, materialization or collection need to be added to its total.
+    for (auto* view = m_unmaterializedArrayBufferViews; view != m_accountedUnmaterializedArrayBufferViews; view = view->nextUnmaterializedView()) {
+        ASSERT(!view->hasArrayBuffer());
+        m_unmaterializedArrayBufferBytes += view->byteLengthRaw();
+    }
+    m_accountedUnmaterializedArrayBufferViews = m_unmaterializedArrayBufferViews;
+    return m_unmaterializedArrayBufferBytes;
 }
 
 void Heap::didAllocateArrayBufferAuxiliaryMemory(Subspace* subspace, size_t bytes)
@@ -1137,7 +1148,7 @@ size_t Heap::externalMemorySizeForReporting()
 {
     return m_nativeExternalMemoryAfterLastCollection
         + (m_nonArrayBufferBytesAllocated - m_nonArrayBufferBytesAllocatedAtLastCollection)
-        + heldArrayBufferSize() + m_unmaterializedArrayBufferBytes + arrayBufferObjectSize();
+        + arrayBufferPayloadSize() + arrayBufferObjectSize();
 }
 
 size_t Heap::jsHeapSizeForReporting()
@@ -3204,20 +3215,27 @@ void Heap::sweepArrayBuffers()
     // Surviving views are old after each sweep. Eden cannot reclaim that suffix.
     auto* end = collectionScope() == CollectionScope::Full ? nullptr : m_oldUnmaterializedArrayBufferViews;
     auto* view = m_unmaterializedArrayBufferViews;
+    bool isUnaccounted = true;
     while (view != end) {
+        if (view == m_accountedUnmaterializedArrayBufferViews)
+            isUnaccounted = false;
         auto* next = view->nextUnmaterializedView();
         if (view->hasArrayBuffer() || !isMarked(view)) {
-            if (!view->hasArrayBuffer())
+            if (!view->hasArrayBuffer() && !isUnaccounted)
                 m_unmaterializedArrayBufferBytes -= view->byteLengthRaw();
             if (previous)
                 previous->setNextUnmaterializedView(next);
             else
                 m_unmaterializedArrayBufferViews = next;
-        } else
+        } else {
+            if (isUnaccounted)
+                m_unmaterializedArrayBufferBytes += view->byteLengthRaw();
             previous = view;
+        }
         view = next;
     }
     m_oldUnmaterializedArrayBufferViews = m_unmaterializedArrayBufferViews;
+    m_accountedUnmaterializedArrayBufferViews = m_unmaterializedArrayBufferViews;
 #endif
 }
 

@@ -142,6 +142,8 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+- Cache source-relative stack line and column lookups on demand, including syntax-selected positions.
+- Defer FastTypedArray byte summation until inspection, materialization, or collection while retaining exact worker snapshots.
 - Keep syntax-selected stack positions separate from exception ranges for calls, constructors, property reads, and async continuations. Preserve the positions across bytecode rewriting, optimization, and cache replay.
 
 - Add real byte-based JSC heap allocation sampling with weighted allocating-stack profiles and independent major/minor collection inclusion.
@@ -156,3 +158,15 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 `CodeBlock::callSitePositionForBytecodeIndex` returns an optional absolute source offset for an exact instruction or async resume label. Stack readers use this position while exception expression ranges and debugger line tables retain their existing divots. RareData owns the two sparse vectors, including decoded cache entries; the bytecode cache revision prevents older layouts from being reused.
 
 Bun must be rebuilt with its matching stack-reader adapter. It must also preserve built-in error constructor syntax: rewriting `new Error()` as `Error()` changes the position and allows a returning arrow to become a proper tail call. The engine's proper-tail-call behavior is unchanged. The integration continues @robobun’s upstream Bun source-position work in [#35179](https://github.com/oven-sh/bun/pull/35179), [#37396](https://github.com/oven-sh/bun/pull/37396), and [#41580](https://github.com/oven-sh/bun/pull/41580).
+
+The source provider caches only requested line/column conversions under its existing
+line-table lock. Coordinates remain relative to the provider's text; document
+offsets and builtin provider overrides retain their existing behavior. Nothing is
+computed at throw time or added to the persistent bytecode-cache format.
+
+Unmaterialized typed-array views remain in the VM-owned weak list. Allocations
+prepend their views without updating a second byte counter. Statistics and
+materialization sum only the prefix added since the last observation, and collection
+accounts surviving new views while pruning dead ones. All reporting still runs on
+the owning VM thread, including busy and parked workers; it never returns a deferred
+estimate. Materialized backing stores retain their cross-thread atomic accounts.

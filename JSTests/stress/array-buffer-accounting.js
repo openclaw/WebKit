@@ -175,3 +175,29 @@ var modeSharedView = new Uint8Array(modeShared);
 modeShared.grow(32);
 equal(modeSharedView.length, 32, "grown shared auto length");
 equal(modeSharedView[24], 0, "grown shared indexed bounds");
+
+// Read fresh allocations after materializing an old view, and collect a prefix
+// that has never been inspected. Neither operation may lose or double its bytes.
+var deferredViews = [allocate(37)];
+fullGC();
+var deferredBefore = memoryUsage().arrayBuffers;
+for (var i = 0; i < 64; ++i)
+    deferredViews.push(allocate(17));
+deferredViews[0].buffer;
+equal(memoryUsage().arrayBuffers, deferredBefore + 64 * 17, "old materialization with a fresh prefix");
+for (var i = 0; i < 64; ++i)
+    deferredViews.push(allocate(17));
+edenGC();
+equal(memoryUsage().arrayBuffers, deferredBefore + 128 * 17, "uninspected live prefix after eden");
+deferredViews.push(allocate(0));
+deferredViews[deferredViews.length - 1].buffer;
+equal(memoryUsage().arrayBuffers, deferredBefore + 128 * 17, "empty materialization");
+fullGC();
+var uninspectedBefore = memoryUsage().arrayBuffers;
+temporary = [];
+garbage();
+temporary = null;
+fullGC();
+equal(memoryUsage().arrayBuffers, uninspectedBefore, "uninspected dead prefix after full GC");
+deferredViews.push(allocate(19));
+equal(memoryUsage().arrayBuffers, uninspectedBefore + 19, "allocation after prefix reclamation");

@@ -11679,10 +11679,6 @@ void SpeculativeJIT::emitNewTypedArrayWithSizeInRegister(Node* node, TypedArrayT
     or64(TrustedImm64(JSArrayBufferView::fastModeBits()), scratchGPR);
     store64(scratchGPR, Address(resultGPR, JSArrayBufferView::offsetOfModeAndNext()));
     storePtr(resultGPR, Address(scratchGPR2));
-    move(sizeGPR, scratchGPR);
-    lshiftPtr(TrustedImm32(logElementSize(typedArrayType)), scratchGPR);
-    move(TrustedImmPtr(vm().heap.addressOfUnmaterializedArrayBufferBytes()), scratchGPR2);
-    add64(scratchGPR, Address(scratchGPR2));
 #else
     store8(TrustedImm32(FastTypedArray), Address(resultGPR, JSArrayBufferView::offsetOfMode()));
 #endif
