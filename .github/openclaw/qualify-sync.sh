@@ -27,6 +27,7 @@ for patch in 008-namespace.patch 009-allocation-sampling.patch 010-als-regressio
   git apply --index --exclude=CHANGELOG.md --exclude='docs/*' "$inputs/patches/$patch"
 done
 git apply --index "$inputs/sync/inspect-stack-position.patch"
+git apply --index "$inputs/patches/011-bun-gc-timer-wake.patch"
 cp "$inputs/worker-resource-limits.test.ts" test/js/node/worker_threads/openclaw-resource-limits.test.ts
 git add test/js/node/worker_threads/openclaw-resource-limits.test.ts
 python3 "$inputs/stage-sync-artifact.py" "$ARTIFACT_DIR/bun-webkit-linux-amd64.tar.gz" --version "$SOURCE_SHA" --output "$QUALIFICATION_DIR/sync-input"
