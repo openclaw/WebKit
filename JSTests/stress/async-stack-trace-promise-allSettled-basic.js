@@ -1,5 +1,5 @@
 //@ requireOptions("--useAsyncStackTrace=1")
-
+// Stack columns name syntax tokens, not call parentheses.
 const source = "async-stack-trace-promise-allSettled-basic.js";
 
 function nop() {}
@@ -60,11 +60,11 @@ function unwrap(promise) {
     shouldBe(results.length, 1);
     shouldBe(results[0].status, "rejected");
     testStack(results[0].reason, [
-      ["thrower", "53:59"],
-      ["async run", "55:36"],
+      ["thrower", "53:50"],
+      ["async run", "55:12"],
       ["drainMicrotasks", "[native code]"],
-      ["unwrap", "47:18"],
-      ["global code", "59:27"]
+      ["unwrap", "47:3"],
+      ["global code", "59:21"]
     ]);
   }
 }
@@ -98,25 +98,25 @@ function unwrap(promise) {
     shouldBe(results[3].status, "rejected");
     shouldBe(results[4].status, "rejected");
     testStack(results[1].reason, [
-      ["task1", "78:20"],
-      ["async run", "89:36"],
+      ["task1", "78:11"],
+      ["async run", "89:12"],
       ["drainMicrotasks", "[native code]"],
-      ["unwrap", "47:18"],
-      ["global code", "93:27"]
+      ["unwrap", "47:3"],
+      ["global code", "93:21"]
     ]);
     testStack(results[3].reason, [
-      ["task2", "85:20"],
-      ["async run", "89:36"],
+      ["task2", "85:11"],
+      ["async run", "89:12"],
       ["drainMicrotasks", "[native code]"],
-      ["unwrap", "47:18"],
-      ["global code", "93:27"]
+      ["unwrap", "47:3"],
+      ["global code", "93:21"]
     ]);
     testStack(results[4].reason, [
-      ["task3", "87:52"],
-      ["async run", "89:36"],
+      ["task3", "87:43"],
+      ["async run", "89:12"],
       ["drainMicrotasks", "[native code]"],
-      ["unwrap", "47:18"],
-      ["global code", "93:27"]
+      ["unwrap", "47:3"],
+      ["global code", "93:21"]
     ]);
   }
 }
