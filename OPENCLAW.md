@@ -156,3 +156,9 @@ embedder must bound both binding metadata and all outstanding payload versions,
 including payloads that live decoders still hold after eviction. A destruction
 callback supports that accounting without retaining a decoder or executable.
 These optional APIs do not change disk caches or public cached-data generation.
+
+The Linux qualification adapter `010-incremental-bytecode.patch` exercises the
+matching Bun cache on the same engine artifact, including weak-body reuse after
+GC, update eviction and byte bounds, and public cached-data determinism. The
+qualification gate requires all ten focused cases as well as the unchanged
+fork selection. The adapter does not update Bun's published engine manifest.

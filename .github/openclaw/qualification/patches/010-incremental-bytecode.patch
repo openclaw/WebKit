@@ -1,0 +1,537 @@
+diff --git a/src/jsc/bindings/BunClientData.cpp b/src/jsc/bindings/BunClientData.cpp
+index d56add189a0..e762f6238b8 100644
+--- a/src/jsc/bindings/BunClientData.cpp
++++ b/src/jsc/bindings/BunClientData.cpp
+@@ -283,6 +283,16 @@ void JSVMClientData::reconcileWeakReferencesAtGCEnd(JSC::VM& vm, JSC::Collection
+     Bun::JSCTaskScheduler::cancelWorkOfDeadRealms(this, vm);
+ }
+ 
++void JSVMClientData::didDecodeCachedFunction(JSC::VM&, uint64_t id, JSC::UnlinkedFunctionExecutable* executable, ptrdiff_t offset)
++{
++    nodeVMCompilationCache.didDecodeFunction(id, executable, offset);
++}
++
++void JSVMClientData::didGenerateUnlinkedFunctionCodeBlock(JSC::VM& vm, const JSC::UnlinkedFunctionExecutable* executable, JSC::CodeSpecializationKind kind, const JSC::UnlinkedFunctionCodeBlock* block)
++{
++    nodeVMCompilationCache.didGenerateFunction(vm, executable, kind, block);
++}
++
+ void JSVMClientData::setDecoderStringTable(std::span<const uint8_t> bytes)
+ {
+     if (m_decoderStringTable)
+diff --git a/src/jsc/bindings/BunClientData.h b/src/jsc/bindings/BunClientData.h
+index fd9e452ecd4..30716c89f13 100644
+--- a/src/jsc/bindings/BunClientData.h
++++ b/src/jsc/bindings/BunClientData.h
+@@ -301,6 +301,8 @@ public:
+     WTF::UncheckedKeyHashMap<WTF::String, RefPtr<JSC::SourceProvider>> isolationSourceProviderCache;
+ 
+     void reconcileWeakReferencesAtGCEnd(JSC::VM&, JSC::CollectionScope) final;
++    void didDecodeCachedFunction(JSC::VM&, uint64_t, JSC::UnlinkedFunctionExecutable*, ptrdiff_t) final;
++    void didGenerateUnlinkedFunctionCodeBlock(JSC::VM&, const JSC::UnlinkedFunctionExecutable*, JSC::CodeSpecializationKind, const JSC::UnlinkedFunctionCodeBlock*) final;
+ 
+     JSC::DecoderStringTable* decoderStringTable() final { return m_decoderStringTable.get(); }
+     void setDecoderStringTable(std::span<const uint8_t>);
+diff --git a/src/jsc/bindings/NodeVM.cpp b/src/jsc/bindings/NodeVM.cpp
+index 919681b7b59..105f76991e8 100644
+--- a/src/jsc/bindings/NodeVM.cpp
++++ b/src/jsc/bindings/NodeVM.cpp
+@@ -266,9 +266,7 @@ JSC::JSFunction* constructAnonymousFunction(JSC::JSGlobalObject* globalObject, c
+ 
+     if (bytecodeAccepted == TriState::Indeterminate) {
+         if (options.produceCachedData) {
+-            RefPtr<JSC::CachedBytecode> producedBytecode = WebCore::clientData(vm)->nodeVMCompilationCache.bytecode(sourceCode, cacheIdentity);
+-            if (!producedBytecode)
+-                producedBytecode = getBytecode(globalObject, JSC::SourceCodeType::ProgramType, sourceCode);
++            RefPtr<JSC::CachedBytecode> producedBytecode = getBytecode(globalObject, JSC::SourceCodeType::ProgramType, sourceCode);
+             if (producedBytecode) {
+                 JSC::JSUint8Array* buffer = WebCore::createBuffer(globalObject, producedBytecode->span());
+                 RETURN_IF_EXCEPTION(throwScope, nullptr);
+diff --git a/src/jsc/bindings/NodeVMCompilationCache.cpp b/src/jsc/bindings/NodeVMCompilationCache.cpp
+index 6d27c23b92f..6fb690b75dc 100644
+--- a/src/jsc/bindings/NodeVMCompilationCache.cpp
++++ b/src/jsc/bindings/NodeVMCompilationCache.cpp
+@@ -9,6 +9,8 @@
+ #include <JavaScriptCore/ProgramExecutable.h>
+ #include <JavaScriptCore/SourceCodeKey.h>
+ #include <JavaScriptCore/UnlinkedProgramCodeBlock.h>
++#include <JavaScriptCore/UnlinkedFunctionExecutable.h>
++#include <JavaScriptCore/UnlinkedFunctionCodeBlock.h>
+ #include <JavaScriptCore/WeakInlines.h>
+ #include <wtf/Hasher.h>
+ #include <charconv>
+@@ -23,6 +25,8 @@ static constexpr size_t defaultAdmissionThreshold = 1750;
+ static constexpr size_t maxAdmissionThreshold = 2000;
+ // Per-entry reservation covers the entry, two StringImpls, weak handles, payload owner and hash-table slack.
+ static constexpr size_t entryOverhead = 1024;
++static constexpr size_t bindingOverhead = 256;
++static constexpr size_t payloadOverhead = 256;
+ 
+ static JSValue importerFor(const SourceCode& source)
+ {
+@@ -102,6 +106,9 @@ NodeVMCompilationCache::~NodeVMCompilationCache()
+ const NodeVMCompilationCache::Statistics& NodeVMCompilationCache::statistics()
+ {
+     initialize();
++    m_statistics.payloadBytes = m_payloadBudget->bytes.load(std::memory_order_relaxed);
++    m_statistics.bytes = retainedBytes();
++    m_statistics.bindings = m_bindings.size();
+     return m_statistics;
+ }
+ 
+@@ -123,16 +130,133 @@ NodeVMCompilationCache::Entry* NodeVMCompilationCache::find(const SourceCode& so
+     return &entry;
+ }
+ 
++size_t NodeVMCompilationCache::retainedBytes() const
++{
++    return m_metadataBytes + m_payloadBudget->bytes.load(std::memory_order_relaxed);
++}
++
++bool NodeVMCompilationCache::makeRoom(size_t bytes)
++{
++    if (bytes > m_statistics.limit)
++        return false;
++    // A full weak sweep must be amortized: a full cache can need room on every update.
++    if (retainedBytes() > m_statistics.limit - bytes && m_bindingsSincePrune >= std::max<size_t>(64, m_bindings.size() / 2)) {
++        pruneDeadFunctions();
++        m_bindingsSincePrune = 0;
++    }
++    while (retainedBytes() > m_statistics.limit - bytes) {
++        if (m_lru.isEmpty())
++            return false;
++        remove(*m_lru.begin());
++        ++m_statistics.evictions;
++    }
++    return true;
++}
++
++void NodeVMCompilationCache::accountPayload(CachedBytecode& bytecode, uint64_t id)
++{
++    size_t charge = bytecode.size() + payloadOverhead;
++    m_payloadBudget->bytes.fetch_add(charge, std::memory_order_relaxed);
++    bytecode.setIncrementalCacheID(id);
++    bytecode.setDestructionCallback([budget = m_payloadBudget.copyRef(), charge] {
++        budget->bytes.fetch_sub(charge, std::memory_order_relaxed);
++    });
++}
++
++void NodeVMCompilationCache::removeBinding(const UnlinkedFunctionExecutable* executable, Binding& binding)
++{
++    binding.remove();
++    m_metadataBytes -= bindingOverhead;
++    m_bindings.remove(executable);
++}
++
+ void NodeVMCompilationCache::remove(Entry& entry)
+ {
+-    m_statistics.bytes -= entry.bytes;
++    while (!entry.bindings.isEmpty()) {
++        auto& binding = *entry.bindings.begin();
++        // The key remains available after the weak handle has been cleared by GC.
++        auto* key = binding.key;
++        removeBinding(key, binding);
++    }
++    m_metadataBytes -= entry.bytes;
+     --m_statistics.entries;
+     unsigned hash = entry.hash;
++    m_entriesByID.remove(entry.id);
+     entry.remove();
+     m_entries.remove(hash);
+ }
+ 
+-void NodeVMCompilationCache::insert(JSGlobalObject* globalObject, const SourceCode& source, const Identity& identity, UnlinkedProgramCodeBlock* block, bool fullBytecode)
++void NodeVMCompilationCache::didDecodeFunction(uint64_t id, UnlinkedFunctionExecutable* executable, ptrdiff_t offset)
++{
++    auto it = m_entriesByID.find(id);
++    if (it == m_entriesByID.end())
++        return;
++    if (auto old = m_bindings.find(executable); old != m_bindings.end())
++        removeBinding(executable, *old->value);
++    // Registration may occur inside decodeCodeBlock: never evict its caller's entry here.
++    if (bindingOverhead > m_statistics.limit || retainedBytes() > m_statistics.limit - bindingOverhead)
++        return;
++    auto binding = makeUnique<Binding>();
++    binding->key = executable;
++    binding->executable = Weak<UnlinkedFunctionExecutable>(executable);
++    binding->entry = it->value;
++    binding->offset = offset;
++    it->value->bindings.append(binding.get());
++    m_bindings.add(executable, WTF::move(binding));
++    m_metadataBytes += bindingOverhead;
++    ++m_bindingsSincePrune;
++}
++
++void NodeVMCompilationCache::bindLeaves(Entry& entry, CachedBytecode& bytecode)
++{
++    for (auto& leaf : bytecode.leafExecutables())
++        didDecodeFunction(entry.id, const_cast<UnlinkedFunctionExecutable*>(leaf.key), leaf.value.base());
++    bytecode.leafExecutables().clear();
++}
++
++void NodeVMCompilationCache::pruneDeadFunctions()
++{
++    Vector<const UnlinkedFunctionExecutable*> dead;
++    for (auto& binding : m_bindings) {
++        if (!binding.value->executable)
++            dead.append(binding.key);
++    }
++    for (auto* executable : dead)
++        removeBinding(executable, *m_bindings.find(executable)->value);
++}
++
++void NodeVMCompilationCache::didGenerateFunction(VM& vm, const UnlinkedFunctionExecutable* executable, CodeSpecializationKind kind, const UnlinkedFunctionCodeBlock* block)
++{
++    auto binding = m_bindings.find(executable);
++    if (binding == m_bindings.end() || binding->value->executable.get() != executable)
++        return;
++    uint64_t id = binding->value->entry->id;
++    ptrdiff_t offset = binding->value->offset;
++    if (binding->value->entry->bytecode->hasFunctionCodeBlock(offset, kind))
++        return;
++    Strong<UnlinkedFunctionCodeBlock> protectedBlock(vm, const_cast<UnlinkedFunctionCodeBlock*>(block));
++    BytecodeCacheError error;
++    auto function = encodeFunctionCodeBlock(vm, block, error);
++    auto it = m_entriesByID.find(id);
++    if (!function || it == m_entriesByID.end())
++        return;
++    size_t size = it->value->bytecode->size() + function->size();
++    size_t charge = size + payloadOverhead + function->leafExecutables().size() * bindingOverhead;
++    if (size > INT32_MAX || !makeRoom(charge) || (it = m_entriesByID.find(id)) == m_entriesByID.end()) {
++        ++m_statistics.rejectedUpdates;
++        return;
++    }
++    auto& entry = *it->value;
++    auto updated = entry.bytecode->copyWithFunctionUpdate(offset, *executable, kind, *function);
++    if (!updated)
++        return;
++    accountPayload(*updated, id);
++    bindLeaves(entry, *updated);
++    entry.bytecode = WTF::move(updated);
++    ++m_statistics.updates;
++}
++
++void NodeVMCompilationCache::insert(JSGlobalObject* globalObject, const SourceCode& source, const Identity& identity, UnlinkedProgramCodeBlock* block)
+ {
+     const String& filename = source.provider()->sourceURL();
+     size_t sourceBytes = source.length() * (source.view().is8Bit() ? size_t(1) : size_t(2));
+@@ -140,29 +264,22 @@ void NodeVMCompilationCache::insert(JSGlobalObject* globalObject, const SourceCo
+     size_t baseBytes = sourceBytes + filenameBytes + entryOverhead;
+     if (baseBytes > m_statistics.limit)
+         return;
+-    RefPtr<CachedBytecode> bytes;
+-    if (fullBytecode)
+-        bytes = NodeVM::getBytecode(globalObject, SourceCodeType::ProgramType, source);
+-    else {
+-        BytecodeCacheError error;
+-        FileSystem::FileHandle file;
+-        bytes = serializeBytecode(globalObject->vm(), block, source, SourceCodeType::ProgramType, static_cast<LexicallyScopedFeatures>(identity.lexicalFeatures), JSParserScriptMode::Classic, file, error, identity.codeGenerationMode);
+-    }
++    BytecodeCacheError error;
++    FileSystem::FileHandle file;
++    auto bytes = serializeBytecode(globalObject->vm(), block, source, SourceCodeType::ProgramType, static_cast<LexicallyScopedFeatures>(identity.lexicalFeatures), JSParserScriptMode::Classic, file, error, identity.codeGenerationMode);
+     if (!bytes || bytes->size() > m_statistics.limit - baseBytes)
+         return;
+-    size_t charge = baseBytes + bytes->size();
++    size_t charge = baseBytes + bytes->size() + payloadOverhead + bytes->leafExecutables().size() * bindingOverhead;
+     unsigned hash = cacheHash(source, identity);
+     if (auto it = m_entries.find(hash); it != m_entries.end())
+         remove(*it->value);
+-    while (m_statistics.bytes > m_statistics.limit - charge) {
+-        remove(*m_lru.begin());
+-        ++m_statistics.evictions;
+-    }
++    if (!makeRoom(charge))
++        return;
+     auto entry = makeUnique<Entry>();
+     entry->hash = hash;
++    entry->id = m_nextID++;
++    RELEASE_ASSERT(m_nextID);
+     entry->identity = identity;
+-    entry->fullBytecode = fullBytecode;
+-    entry->promotionAttempted = fullBytecode;
+     // Copy the exact slices: a substring must not keep a much larger parent string alive.
+     entry->source = source.view().is8Bit() ? String(source.view().span8()) : String(source.view().span16());
+     entry->filename = filename.is8Bit() ? String(filename.span8()) : String(filename.span16());
+@@ -170,13 +287,15 @@ void NodeVMCompilationCache::insert(JSGlobalObject* globalObject, const SourceCo
+     entry->hasImporter = importer.isCell();
+     if (entry->hasImporter)
+         entry->importer = Weak<JSCell>(importer.asCell());
+-    // Drop the encoder's update/leaf maps; cached payloads never own growing decoded graphs.
+-    entry->bytecode = NodeVM::createOwnedCachedBytecode(bytes->span());
++    accountPayload(*bytes, entry->id);
++    entry->bytecode = WTF::move(bytes);
+     entry->decoded = Weak<UnlinkedProgramCodeBlock>(block);
+-    entry->bytes = charge;
++    entry->bytes = baseBytes;
++    m_metadataBytes += baseBytes;
+     m_lru.append(entry.get());
++    m_entriesByID.add(entry->id, entry.get());
++    bindLeaves(*entry, *entry->bytecode);
+     m_entries.add(hash, WTF::move(entry));
+-    m_statistics.bytes += charge;
+     ++m_statistics.entries;
+ }
+ 
+@@ -187,7 +306,7 @@ void NodeVMCompilationCache::observeCompilation(JSGlobalObject* globalObject, co
+         return;
+     ++m_statistics.misses;
+     Strong<UnlinkedProgramCodeBlock> protectedBlock(globalObject->vm(), block);
+-    insert(globalObject, source, identity, block, false);
++    insert(globalObject, source, identity, block);
+ }
+ 
+ UnlinkedProgramCodeBlock* NodeVMCompilationCache::getOrCompile(JSGlobalObject* globalObject, ProgramExecutable* executable, const SourceCode& source, const Identity& identity, bool hasCachedData, ParserError& error)
+@@ -208,11 +327,6 @@ UnlinkedProgramCodeBlock* NodeVMCompilationCache::getOrCompile(JSGlobalObject* g
+                 }
+             }
+             if (block) {
+-                if (!entry->promotionAttempted) {
+-                    entry->promotionAttempted = true;
+-                    Strong<UnlinkedProgramCodeBlock> protectedBlock(vm, block);
+-                    insert(globalObject, source, identity, block, true);
+-                }
+                 ++m_statistics.hits;
+                 recordParseFromUnlinkedCodeBlock(executable, source, block);
+                 return block;
+@@ -223,18 +337,11 @@ UnlinkedProgramCodeBlock* NodeVMCompilationCache::getOrCompile(JSGlobalObject* g
+     auto* block = vm.codeCache()->getUnlinkedProgramCodeBlock(vm, executable, source, identity.codeGenerationMode, error);
+     if (block && enabled) {
+         Strong<UnlinkedProgramCodeBlock> protectedBlock(vm, block);
+-        insert(globalObject, source, identity, block, false);
++        insert(globalObject, source, identity, block);
+     }
+     return block;
+ }
+ 
+-RefPtr<CachedBytecode> NodeVMCompilationCache::bytecode(const SourceCode& source, const Identity& identity)
+-{
+-    if (auto* entry = find(source, identity); entry && entry->fullBytecode)
+-        return entry->bytecode;
+-    return nullptr;
+-}
+-
+ JSC_DEFINE_HOST_FUNCTION(nodeVMCompilationCacheStats, (JSGlobalObject * globalObject, CallFrame*))
+ {
+     auto& vm = globalObject->vm();
+@@ -250,6 +357,10 @@ JSC_DEFINE_HOST_FUNCTION(nodeVMCompilationCacheStats, (JSGlobalObject * globalOb
+     Bun::putDirectNamed(vm, result, "decodes"_s, jsNumber(stats.decodes));
+     Bun::putDirectNamed(vm, result, "misses"_s, jsNumber(stats.misses));
+     Bun::putDirectNamed(vm, result, "evictions"_s, jsNumber(stats.evictions));
++    Bun::putDirectNamed(vm, result, "updates"_s, jsNumber(stats.updates));
++    Bun::putDirectNamed(vm, result, "rejectedUpdates"_s, jsNumber(stats.rejectedUpdates));
++    Bun::putDirectNamed(vm, result, "payloadBytes"_s, jsNumber(stats.payloadBytes));
++    Bun::putDirectNamed(vm, result, "bindings"_s, jsNumber(stats.bindings));
+     return JSValue::encode(result);
+ }
+ 
+diff --git a/src/jsc/bindings/NodeVMCompilationCache.h b/src/jsc/bindings/NodeVMCompilationCache.h
+index c5e8d931dec..2cef2c518e7 100644
+--- a/src/jsc/bindings/NodeVMCompilationCache.h
++++ b/src/jsc/bindings/NodeVMCompilationCache.h
+@@ -7,12 +7,16 @@
+ #include <wtf/HashMap.h>
+ #include <wtf/HashSet.h>
+ #include <wtf/SentinelLinkedList.h>
++#include <wtf/ThreadSafeRefCounted.h>
++#include <atomic>
+ 
+ namespace JSC {
+ class JSGlobalObject;
+ class ParserError;
+ class ProgramExecutable;
+ class UnlinkedProgramCodeBlock;
++class UnlinkedFunctionExecutable;
++class UnlinkedFunctionCodeBlock;
+ }
+ namespace Zig {
+ class GlobalObject;
+@@ -46,31 +50,53 @@ public:
+         uint64_t decodes { 0 };
+         uint64_t misses { 0 };
+         uint64_t evictions { 0 };
++        uint64_t updates { 0 };
++        uint64_t rejectedUpdates { 0 };
++        size_t payloadBytes { 0 };
++        size_t bindings { 0 };
+     };
+     ~NodeVMCompilationCache();
+     bool isActive() const { return m_statistics.active; }
+     void observeCompilation(JSC::JSGlobalObject*, const JSC::SourceCode&, const Identity&, bool hasCachedData, JSC::UnlinkedProgramCodeBlock*);
+     JSC::UnlinkedProgramCodeBlock* getOrCompile(JSC::JSGlobalObject*, JSC::ProgramExecutable*, const JSC::SourceCode&, const Identity&, bool hasCachedData, JSC::ParserError&);
+-    RefPtr<JSC::CachedBytecode> bytecode(const JSC::SourceCode&, const Identity&);
++    void didDecodeFunction(uint64_t, JSC::UnlinkedFunctionExecutable*, ptrdiff_t);
++    void didGenerateFunction(JSC::VM&, const JSC::UnlinkedFunctionExecutable*, JSC::CodeSpecializationKind, const JSC::UnlinkedFunctionCodeBlock*);
++    void pruneDeadFunctions();
+     const Statistics& statistics();
+ 
+ private:
++    struct PayloadBudget : WTF::ThreadSafeRefCounted<PayloadBudget> {
++        std::atomic<size_t> bytes { 0 };
++    };
++    struct Entry;
++    struct Binding : WTF::BasicRawSentinelNode<Binding> {
++        const JSC::UnlinkedFunctionExecutable* key;
++        JSC::Weak<JSC::UnlinkedFunctionExecutable> executable;
++        Entry* entry;
++        ptrdiff_t offset;
++    };
+     struct Entry : WTF::BasicRawSentinelNode<Entry> {
+         unsigned hash;
++        uint64_t id;
+         Identity identity;
+         WTF::String source;
+         WTF::String filename;
+         JSC::Weak<JSC::JSCell> importer;
+         bool hasImporter;
+-        bool fullBytecode { false };
+-        bool promotionAttempted { false };
+         RefPtr<JSC::CachedBytecode> bytecode;
+         JSC::Weak<JSC::UnlinkedProgramCodeBlock> decoded;
+         size_t bytes;
++        WTF::SentinelLinkedList<Binding, WTF::BasicRawSentinelNode<Binding>> bindings;
+     };
+     using Entries = WTF::UncheckedKeyHashMap<unsigned, std::unique_ptr<Entry>>;
+     WTF::UncheckedKeyHashSet<uint64_t> m_seenSources;
+     Entries m_entries;
++    WTF::UncheckedKeyHashMap<uint64_t, Entry*> m_entriesByID;
++    WTF::UncheckedKeyHashMap<const JSC::UnlinkedFunctionExecutable*, std::unique_ptr<Binding>> m_bindings;
++    Ref<PayloadBudget> m_payloadBudget { adoptRef(*new PayloadBudget) };
++    size_t m_metadataBytes { 0 };
++    size_t m_bindingsSincePrune { 0 };
++    uint64_t m_nextID { 1 };
+     WTF::SentinelLinkedList<Entry, WTF::BasicRawSentinelNode<Entry>> m_lru;
+     Statistics m_statistics;
+     bool m_initialized { false };
+@@ -78,7 +104,12 @@ private:
+     bool admit(const JSC::SourceCode&);
+     Entry* find(const JSC::SourceCode&, const Identity&);
+     void remove(Entry&);
+-    void insert(JSC::JSGlobalObject*, const JSC::SourceCode&, const Identity&, JSC::UnlinkedProgramCodeBlock*, bool fullBytecode);
++    void insert(JSC::JSGlobalObject*, const JSC::SourceCode&, const Identity&, JSC::UnlinkedProgramCodeBlock*);
++    size_t retainedBytes() const;
++    bool makeRoom(size_t);
++    void removeBinding(const JSC::UnlinkedFunctionExecutable*, Binding&);
++    void accountPayload(JSC::CachedBytecode&, uint64_t);
++    void bindLeaves(Entry&, JSC::CachedBytecode&);
+ };
+ 
+ JSC::JSValue createNodeVMCompilationCacheStatsForTesting(Zig::GlobalObject*);
+diff --git a/src/jsc/bindings/NodeVMScript.cpp b/src/jsc/bindings/NodeVMScript.cpp
+index 7de417fb10a..0e979793f44 100644
+--- a/src/jsc/bindings/NodeVMScript.cpp
++++ b/src/jsc/bindings/NodeVMScript.cpp
+@@ -264,11 +264,7 @@ JSC::ProgramExecutable* NodeVMScript::createExecutable()
+ 
+ void NodeVMScript::cacheBytecode()
+ {
+-    NodeVMCompilationCache::Identity identity { m_options.lineOffset.zeroBasedInt(), m_options.columnOffset.zeroBasedInt(), NodeVMCompilationCache::Kind::Script, m_options.filenameProvided, m_options.produceCachedData, {}, globalObject()->globalScopeExtension() ? JSC::TaintedByWithScopeLexicallyScopedFeature : JSC::NoLexicallyScopedFeatures };
+-    if (!m_options.hasCachedData)
+-        m_cachedBytecode = WebCore::clientData(vm())->nodeVMCompilationCache.bytecode(m_source, identity);
+-    if (!m_cachedBytecode)
+-        m_cachedBytecode = getBytecode(globalObject(), JSC::SourceCodeType::ProgramType, m_source);
++    m_cachedBytecode = getBytecode(globalObject(), JSC::SourceCodeType::ProgramType, m_source);
+     m_cachedDataProduced = m_cachedBytecode != nullptr;
+ }
+ 
+diff --git a/test/js/node/vm/vm.test.ts b/test/js/node/vm/vm.test.ts
+index 8d751f1dfa5..c38157c39b0 100644
+--- a/test/js/node/vm/vm.test.ts
++++ b/test/js/node/vm/vm.test.ts
+@@ -2968,6 +2968,87 @@ describe("bounded vm compilation cache", () => {
+     );
+   });
+ 
++  test.concurrent("promotes only generated bodies and reuses them after GC", async () => {
++    await runCacheFixture(`
++      import assert from "node:assert/strict";
++      import { Script } from "node:vm";
++      import { nodeVMCompilationCacheStats as stats } from "bun:internal-for-testing";
++      const source = "({used: function(n){return () => n + 1}, unused: function(){return 99}})";
++      let script = new Script(source);
++      let value = script.runInThisContext();
++      const cold = stats();
++      assert.equal(cold.updates, 0);
++      assert.equal(value.used(41)(), 42);
++      const warm = stats();
++      assert(warm.updates >= 2);
++      assert(warm.bytes > cold.bytes);
++      script = value = null;
++      await new Promise(setImmediate);
++      Bun.gc(true);
++      let again = new Script(source).runInThisContext();
++      assert(stats().decodes > cold.decodes);
++      assert.equal(again.used(41)(), 42);
++      assert.equal(stats().updates, warm.updates);
++      assert.equal(again.unused(), 99);
++      assert.equal(stats().updates, warm.updates + 1);
++      assert(stats().bytes <= stats().limit);
++      console.log("ok");
++    `);
++  });
++
++  test.concurrent("bounds updates and ignores lazy callbacks from evicted snapshots", async () => {
++    await runCacheFixture(
++      `
++      import assert from "node:assert/strict";
++      import { Script } from "node:vm";
++      import { nodeVMCompilationCacheStats as stats } from "bun:internal-for-testing";
++      const functions = Array.from({length:80}, (_, i) =>
++        "f" + i + ":function(){return [" + Array.from({length:80},(_, n)=>n+i).join(",") + "].length}").join(",");
++      const source = "({" + functions + "})";
++      new Script(source).runInThisContext();
++      await new Promise(setImmediate);
++      Bun.gc(true);
++      const retained = new Script(source).runInThisContext();
++      assert(stats().decodes > 0);
++      for (let i=0; i<80; ++i) {
++        assert.equal(retained["f"+i](), 80);
++        assert(stats().bytes <= stats().limit);
++      }
++      assert(stats().evictions > 0 || stats().rejectedUpdates > 0);
++      const before = stats();
++      for (let i=0; i<200; ++i) new Script(String(i)).runInThisContext();
++      Bun.gc(true);
++      for (let i=0; i<80; ++i) assert.equal(retained["f"+i](), 80);
++      assert(stats().bytes <= stats().limit);
++      assert(stats().evictions >= before.evictions);
++      console.log("ok");
++    `,
++      "131072",
++    );
++  });
++
++  test.concurrent("public cachedData is independent of private lazy promotion", async () => {
++    await runCacheFixture(`
++      import assert from "node:assert/strict";
++      import { Script } from "node:vm";
++      const source = "({a:()=>42,b:()=>99})";
++      const options = { filename: "cache-determinism.js" };
++      const cold = new Script(source,options).createCachedData();
++      let value = new Script(source,options).runInThisContext();
++      assert.equal(value.a(),42);
++      assert.deepEqual(new Script(source,options).createCachedData(),cold);
++      assert.deepEqual(new Script(source,{...options,produceCachedData:true}).cachedData,cold);
++      value = null;
++      await new Promise(setImmediate);
++      Bun.gc(true);
++      const accepted = new Script(source,{...options,cachedData:cold});
++      assert.equal(accepted.cachedDataRejected,false);
++      assert.equal(accepted.runInThisContext().b(),99);
++      assert.deepEqual(accepted.createCachedData(),cold);
++      console.log("ok");
++    `);
++  });
++
+   test.concurrent("can be disabled", async () => {
+     await runCacheFixture(
+       `
+@@ -2975,7 +3056,7 @@ describe("bounded vm compilation cache", () => {
+       import { runInThisContext } from "node:vm";
+       import { nodeVMCompilationCacheStats as stats } from "bun:internal-for-testing";
+       for(let i=0;i<3;i++) assert.equal(runInThisContext("40 + 2"),42);
+-      assert.deepEqual(stats(), {limit:0,admissionThreshold:0,observedSources:0,active:false,bytes:0,entries:0,hits:0,decodes:0,misses:0,evictions:0});
++      assert.deepEqual(stats(), {limit:0,admissionThreshold:0,observedSources:0,active:false,bytes:0,entries:0,hits:0,decodes:0,misses:0,evictions:0,updates:0,rejectedUpdates:0,payloadBytes:0,bindings:0});
+       console.log("ok");
+     `,
+       "0",
