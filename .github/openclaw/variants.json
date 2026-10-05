@@ -38,9 +38,13 @@
     {
       "label": "bun-webkit-windows-amd64-lto",
       "consumer": "openclaw-release.yml optional windows-x64"
+    },
+    {
+      "label": "bun-webkit-windows-arm64",
+      "consumer": "openclaw-release.yml windows-arm64: release without LTO"
     }
   ],
-  "excluded": "Windows arm64, Android, FreeBSD, debug and ASAN are not selected by the fork's active OpenClaw workflows. There is no separate x64 baseline WebKit archive.",
+  "excluded": "Android, FreeBSD, debug and ASAN are not selected by the fork's active OpenClaw workflows. Windows arm64 uses upstream's non-LTO lane because LLVM CodeView cannot encode its LTO register tuples. There is no separate x64 baseline WebKit archive.",
   "upstream_sync": {
     "base_commit": "d2d2a26ef973cdd97b37953f5dba58052acad74f",
     "upstream_commit": "1878660bb47a6a87ebe518cea0581ef4bf9b71f8",
