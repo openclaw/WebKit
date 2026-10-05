@@ -40,6 +40,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 #include <JavaScriptCore/SourceOrigin.h>
 #include <JavaScriptCore/SourceTaintedOrigin.h>
 #include <span>
+#include <wtf/HashMap.h>
 #include <wtf/Lock.h>
 #include <wtf/Noncopyable.h>
 #include <wtf/RefCountedFixedVector.h>
@@ -129,6 +130,8 @@ private:
 
     mutable Lock m_lock;
     LineStarts m_lineStarts WTF_GUARDED_BY_LOCK(m_lock);
+    using LineColumnMap = UncheckedKeyHashMap<uint64_t, LineColumn, WTF::IntHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>>;
+    LineColumnMap m_cachedLineColumns WTF_GUARDED_BY_LOCK(m_lock);
 };
 
 class JS_EXPORT_PRIVATE SourceProvider : public ThreadSafeRefCounted<SourceProvider> {
