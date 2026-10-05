@@ -150,6 +150,8 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+- Prevent late JSC helper-thread allocation from overwriting a recycled pthread TLS key during process exit; add a deterministic native allocator-exit regression. Ports the allocator correction from oven-sh/WebKit#698, thanks @dylan-conway.
+
 ## ARM64 arithmetic and Windows artifacts (2026-10-05)
 
 - Fix ARM64 register-to-memory 64-bit addition so DFG typed-array allocations update their accounting counter without corrupting the source register; cover the operation in testmasm and qualify native ARM64 JSC across interpreter and JIT tiers.
