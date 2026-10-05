@@ -3215,23 +3215,32 @@ void Heap::sweepArrayBuffers()
     // Surviving views are old after each sweep. Eden cannot reclaim that suffix.
     auto* end = collectionScope() == CollectionScope::Full ? nullptr : m_oldUnmaterializedArrayBufferViews;
     auto* view = m_unmaterializedArrayBufferViews;
-    bool isUnaccounted = true;
+    auto removeView = [&](JSArrayBufferView* next) {
+        if (previous)
+            previous->setNextUnmaterializedView(next);
+        else
+            m_unmaterializedArrayBufferViews = next;
+    };
+    // Materialization first accounts the prefix. Its remaining unaccounted
+    // views therefore need neither a buffer-mode check nor a dead-byte debit.
+    while (view != m_accountedUnmaterializedArrayBufferViews) {
+        ASSERT(!view->hasArrayBuffer());
+        auto* next = view->nextUnmaterializedView();
+        if (isMarked(view)) {
+            m_unmaterializedArrayBufferBytes += view->byteLengthRaw();
+            previous = view;
+        } else
+            removeView(next);
+        view = next;
+    }
     while (view != end) {
-        if (view == m_accountedUnmaterializedArrayBufferViews)
-            isUnaccounted = false;
         auto* next = view->nextUnmaterializedView();
         if (view->hasArrayBuffer() || !isMarked(view)) {
-            if (!view->hasArrayBuffer() && !isUnaccounted)
+            if (!view->hasArrayBuffer())
                 m_unmaterializedArrayBufferBytes -= view->byteLengthRaw();
-            if (previous)
-                previous->setNextUnmaterializedView(next);
-            else
-                m_unmaterializedArrayBufferViews = next;
-        } else {
-            if (isUnaccounted)
-                m_unmaterializedArrayBufferBytes += view->byteLengthRaw();
+            removeView(next);
+        } else
             previous = view;
-        }
         view = next;
     }
     m_oldUnmaterializedArrayBufferViews = m_unmaterializedArrayBufferViews;

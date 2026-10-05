@@ -11,10 +11,10 @@ for (const terminator of ["\n", "\r\n", "\u2028", "\u2029"]) {
 }
 for (let repeat = 0; repeat < Math.min(testLoopCount, 30); ++repeat) {
     for (const { create, line, column } of sources) {
-        const stack = create().stack;
-        const firstFrame = stack.split("\n").find(frame => /:(\d+):(\d+)\)?$/.test(frame));
-        const match = /:(\d+):(\d+)\)?$/.exec(firstFrame);
-        if (!match || Number(match[1]) !== line || Number(match[2]) !== column)
-            throw new Error(`Expected ${line}:${column}, got ${stack}`);
+        const error = create();
+        // Anonymous eval frames omit their URL from stack strings, but expose
+        // the same computed coordinates through JSC's error properties.
+        if (error.line !== line || error.column !== column)
+            throw new Error(`Expected ${line}:${column}, got ${error.line}:${error.column}`);
     }
 }
