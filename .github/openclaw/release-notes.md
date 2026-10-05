@@ -1,4 +1,8 @@
-This release rebases the qualified OpenClaw engine patches onto upstream `5718a6ec579b98362ea7276a426deedcc6281ef5`.
+This release adds engine PR #8's repeated stack-coordinate cache to the qualified OpenClaw engine on upstream `5718a6ec579b98362ea7276a426deedcc6281ef5`.
+
+- Cache requested provider-relative stack line and column conversions under the existing line-table lock, preserving document offsets, builtin overrides, and persistent bytecode format; thanks @steipete. Regressions cover repeated reads, independent providers, UTF-16 columns, and compressed line-table boundaries across interpreter/JIT tiers and cache modes.
+
+The previously released engine changes remain included:
 
 - Release free allocator memory from idle compiler threads and long Atomics waits; thanks @Jarred-Sumner.
 - Preserve Segmenter surrogate boundaries, opt-in Proxy global prototypes, module-loader AsyncLocalStorage context, and per-VM worker heap/stack budgets; thanks @steipete and @robobun.

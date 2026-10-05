@@ -10,7 +10,7 @@ jsc="$QUALIFICATION_DIR/engine/bun-webkit/bin/jsc"
 Tools/Scripts/run-jsc-stress-tests JSTests/stress --jsc "$jsc" --child-processes 16 \
   --filter 'promise|microtask|dynamic-import|bun-async-context|module-loader|top-level-await|async-module|module-namespace|intl-segmenter|callsite-syntax-positions|stack-position-regressions' \
   --output-dir "$QUALIFICATION_DIR/jsc-stress" --no-retry > "$QUALIFICATION_DIR/jsc-stress.log" 2>&1
-python3 .github/openclaw/verify-jsc-results.py "$QUALIFICATION_DIR/jsc-stress" --require module-namespace-esmodule-marker.js --require callsite-syntax-positions.js --require stack-position-regressions.js
+python3 .github/openclaw/verify-jsc-results.py "$QUALIFICATION_DIR/jsc-stress" --require module-namespace-esmodule-marker.js --require callsite-syntax-positions.js --require stack-position-regressions.js --require stack-position-regressions-cache.js
 python3 .github/openclaw/check-stack-visitor.py "$jsc" > "$QUALIFICATION_DIR/stack-visitor.log"
 WEBKIT_CHECKOUT="$PWD" JSC="$jsc" RESULT_DIR="$QUALIFICATION_DIR/jsc-stack" bash .github/openclaw/qualification/stack/check-jsc.sh
 Tools/Scripts/run-jsc-stress-tests JSTests/modules.yaml --jsc "$jsc" --child-processes 16 \

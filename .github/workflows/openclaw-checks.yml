@@ -16,7 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 64
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: |
@@ -86,3 +87,27 @@ jobs:
             ${{ runner.temp }}/qualification/sync/runtime-cache/*.json
           if-no-files-found: error
           retention-days: 7
+  macos-fork-artifact:
+    if: github.repository == 'openclaw/WebKit'
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/LayoutTests/
+            !/JSTests/*
+            !/PerformanceTests/
+            !/Websites/
+            !/ManualTests/
+            !/WebDriverTests/
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.3.0'
+      - name: Build the macOS fork artifact on Linux without publishing
+        run: python3 .github/openclaw/artifacts.py build --lane bun-webkit-macos-arm64 --output "$RUNNER_TEMP/macos-fork-artifact"
