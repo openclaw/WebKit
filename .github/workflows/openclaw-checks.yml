@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 16
+          fetch-depth: 64
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: |
@@ -37,6 +37,7 @@ jobs:
       - name: Verify pipeline integrity and runner support
         run: |
           python3 .github/openclaw/test_release.py
+          python3 .github/openclaw/test_verify_jsc_results.py
           bash .github/openclaw/preflight.sh
       - name: Build native Linux engine with the unchanged lane
         env:
@@ -61,6 +62,7 @@ jobs:
         run: |
           bash .github/openclaw/qualify-engine.sh
           bash .github/openclaw/qualify.sh
+          bash .github/openclaw/qualify-sync-compatibility.sh
           bash .github/openclaw/qualify-sync.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
@@ -75,8 +77,12 @@ jobs:
             ${{ runner.temp }}/qualification/baseline/*.log
             ${{ runner.temp }}/qualification/candidate/*.json
             ${{ runner.temp }}/qualification/candidate/*.log
+            ${{ runner.temp }}/qualification/compatibility/*.log
             ${{ runner.temp }}/qualification/sync/*.json
             ${{ runner.temp }}/qualification/sync/*.log
             ${{ runner.temp }}/qualification/jsc-*/results
+            ${{ runner.temp }}/qualification/jsc-stack/*.log
+            ${{ runner.temp }}/qualification/jsc-stack/*.json
+            ${{ runner.temp }}/qualification/sync/runtime-cache/*.json
           if-no-files-found: error
           retention-days: 7

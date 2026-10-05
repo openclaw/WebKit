@@ -44,6 +44,8 @@
   "upstream_sync": {
     "base_commit": "d2d2a26ef973cdd97b37953f5dba58052acad74f",
     "upstream_commit": "1878660bb47a6a87ebe518cea0581ef4bf9b71f8",
-    "prepared_tree": "d9ec052fccc81afbf43a5344e52bc980f439d587"
+    "prepared_tree": "d9ec052fccc81afbf43a5344e52bc980f439d587",
+    "paired_tree": "aee7cd52d7efcb9835b434a24fa47de06cc664f6",
+    "required_namespace_adapter_sha256": "6fdc093961584d2bd77176dcbaf487ab7ec07e14e5a19d11f881d751976a569d"
   }
 }

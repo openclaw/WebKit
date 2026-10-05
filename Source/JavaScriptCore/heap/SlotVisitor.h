@@ -154,7 +154,7 @@ public:
 
     void reportExtraMemoryVisited(size_t) final;
 #if USE(BUN_JSC_ADDITIONS)
-    void reportWorkerTypedArrayBytesVisited(size_t) final;
+    void reportArrayBufferMemoryVisited(size_t) final;
 #endif
 #if ENABLE(RESOURCE_USAGE)
     void reportExternalMemoryVisited(size_t) final;

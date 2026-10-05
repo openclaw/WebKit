@@ -28,6 +28,8 @@ for arm in baseline candidate; do
       git apply --exclude=CHANGELOG.md --exclude='docs/*' --exclude='test/js/node/worker_threads/*' "$patch"
     done
     git apply --exclude=CHANGELOG.md --exclude='docs/*' "$inputs/patches/008-namespace.patch"
+    git apply --exclude=CHANGELOG.md --exclude='docs/*' "$inputs/patches/009-stack-positions.patch"
+    git apply --exclude=CHANGELOG.md --exclude='docs/*' "$inputs/patches/010-arraybuffer-accounting.patch"
     cp "$inputs/worker-resource-limits.test.ts" test/js/node/worker_threads/openclaw-resource-limits.test.ts
     git diff --check
     git diff --binary HEAD > "$QUALIFICATION_DIR/bun-adapters.patch"
@@ -61,8 +63,11 @@ python3 "$inputs/compare-fork-ci.py" "$QUALIFICATION_DIR/baseline" "$QUALIFICATI
 candidate="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
 unset BUN_WEBKIT_ARTIFACT_MANIFEST BUN_BUILD_CACHE_DIR BUN_BUILD_PREFETCH_DIR
 "$candidate" test test/js/bun/resolve/esModule.test.ts test/js/bun/namespace-prototype-pollution.test.ts test/js/bun/resolve/require-esm-evaluating-cycle.test.ts test/js/bun/import-attributes/import-attributes.test.ts test/js/node/module/require-extensions.test.ts > "$QUALIFICATION_DIR/namespace.log" 2>&1
+"$candidate" test --expose-internals test/js/node/v8/capture-stack-trace.test.js test/js/bun/sourcemap/internal-sourcemap.test.ts > "$QUALIFICATION_DIR/stack-positions.log" 2>&1
 "$candidate" "$inputs/segmenter.js" > "$QUALIFICATION_DIR/segmenter.log" 2>&1
 "$candidate" test test/js/node/vm/vm.test.ts -t 'a Proxy in the prototype chain' > "$QUALIFICATION_DIR/proxy.log" 2>&1
+"$candidate" test test/js/node/process/process.test.js -t 'ArrayBuffer memory ownership' > "$QUALIFICATION_DIR/arraybuffer.log" 2>&1
+"$candidate" test test/js/node/worker_threads/worker_threads.test.ts -t 'getHeapStatistics' > "$QUALIFICATION_DIR/worker-statistics.log" 2>&1
 "$candidate" test test/js/node/worker_threads/openclaw-resource-limits.test.ts -t 'resourceLimits' > "$QUALIFICATION_DIR/resource-limits.log" 2>&1
 "$candidate" "$inputs/module-context.mjs" matrix > "$QUALIFICATION_DIR/als-plugin.json"
 "$candidate" "$inputs/module-context.mjs" matrix --native-hooks > "$QUALIFICATION_DIR/als-native.json"
@@ -76,7 +81,7 @@ assert faith['selected_files']==44 and faith['result_files']==46
 for name in ['als-plugin','als-native']:
  rows=json.loads((root/(name+'.json')).read_text())['results']
  assert len(rows)==14 and all(r['exitCode']==0 for r in rows)
-for name,minimum in [('proxy',4),('resource-limits',14),('namespace',41)]:
+for name,minimum in [('proxy',4),('resource-limits',14),('namespace',41),('arraybuffer',19),('worker-statistics',7)]:
  text=(root/(name+'.log')).read_text()
  passes=re.search(r'(\d+) pass',text)
  assert passes and int(passes[1])>=minimum, name+' missing passing cases'

@@ -32,6 +32,12 @@ def assemble(inputs,out,source):
     if (sync.get('passed') is not True or any(sync.get(k)!=config['upstream_sync'][k] for k in ('base_commit','prepared_tree'))
         or engine.get('passed') is not True or engine.get('source')!=source):
         raise ValueError('missing or mismatched upstream-sync/engine qualification')
+    compatibility=gate.get('compatibility',{})
+    if (compatibility.get('passed') is not True or compatibility.get('source')!=source
+        or any(compatibility.get(k)!=config['upstream_sync'][k] for k in ('base_commit','prepared_tree','paired_tree','required_namespace_adapter_sha256'))
+        or compatibility.get('only_manifest_changed_after_pairing') is not True or compatibility.get('memory_tests')!=3
+        or compatibility.get('startup') is not True):
+        raise ValueError('missing or mismatched namespace-paired Bun compatibility gate')
     artifacts={}; lanes=[]
     for lane in config['lanes']:
         label=lane['label']; name=label+'.tar.gz'; directory=inputs/label

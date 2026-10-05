@@ -23,9 +23,10 @@ test "$(git write-tree)" = "$SYNC_TREE"
 for patch in "$inputs"/patches/00[3-7]-*.patch; do
   git apply --index --exclude=CHANGELOG.md --exclude='docs/*' --exclude='test/js/node/worker_threads/*' "$patch"
 done
-for patch in 008-namespace.patch 009-allocation-sampling.patch 010-als-regressions.patch; do
+for patch in 008-namespace.patch 009-allocation-sampling.patch 010-als-regressions.patch 009-stack-positions.patch 010-arraybuffer-accounting.patch; do
   git apply --index --exclude=CHANGELOG.md --exclude='docs/*' "$inputs/patches/$patch"
 done
+git apply --index "$inputs/sync/inspect-stack-position.patch"
 cp "$inputs/worker-resource-limits.test.ts" test/js/node/worker_threads/openclaw-resource-limits.test.ts
 git add test/js/node/worker_threads/openclaw-resource-limits.test.ts
 python3 "$inputs/stage-sync-artifact.py" "$ARTIFACT_DIR/bun-webkit-linux-amd64.tar.gz" --version "$SOURCE_SHA" --output "$QUALIFICATION_DIR/sync-input"
@@ -49,14 +50,29 @@ export HOME="$results/home" TMPDIR="$results/tmp" PATH="$results/bin:$PATH" OPEN
 # Recompute the engine/nightly selection and retain every W150 upstream-sync case.
 "$candidate" --eval 'import {selectTests} from "./scripts/openclaw-ci/tests.ts"; import{execFileSync}from"node:child_process";import{readFileSync,writeFileSync,mkdirSync}from"node:fs";const tracked=execFileSync("git",["ls-files","-z","test"],{encoding:"utf8"}).split("\0").filter(Boolean);const original=JSON.parse(readFileSync(process.argv[1],"utf8"));const selected=[...new Set([...original,...selectTests(["scripts/build/deps/webkit.ts"],tracked,true,"linux")])].sort();for(const file of selected)if(!tracked.includes(file))throw Error("missing selected test "+file);mkdirSync("build/openclaw-ci",{recursive:true});writeFileSync("build/openclaw-ci/selected.json",JSON.stringify(selected,null,2)+"\n");' "$inputs/sync/selected.json"
 cp build/openclaw-ci/selected.json "$results/selected.json"
-"$candidate" scripts/openclaw-ci/tests.ts test > "$results/tests.log" 2>&1
-cp build/openclaw-ci/results.json "$results/results.json"
+if "$candidate" scripts/openclaw-ci/tests.ts test > "$results/tests.log" 2>&1; then
+  selection_exit=0
+else
+  selection_exit=$?
+fi
+if test -f build/openclaw-ci/results.json; then
+  cp build/openclaw-ci/results.json "$results/results.json"
+fi
+if test "$selection_exit" -ne 0; then exit "$selection_exit"; fi
 # Run these unchanged upstream tests explicitly as well, so skips cannot satisfy the gate.
 "$candidate" test test/js/web/atomics.test.ts test/js/bun/wasm/compile-rss.test.ts -t 'Atomics.wait lets mimalloc|a notify that arrives while Atomics.wait|WebAssembly.compile does not retain' > "$results/memory-release.log" 2>&1
+"$candidate" test --expose-internals test/js/node/v8/capture-stack-trace.test.js test/js/node/util/util.test.js test/js/bun/sourcemap > "$results/stack-positions.log" 2>&1
+"$candidate" test test/bundler/bundler_minify.test.ts > "$results/stack-minifier.log" 2>&1
+python3 "$inputs/stack/check-runtime-cache.py" --baseline "$QUALIFICATION_DIR/bun/build/qualify-baseline/bun" --candidate "$candidate" --fixture "$inputs/stack/observe-regressions.js" --output "$results/runtime-cache" --expected-version 38 > "$results/stack-cache.json"
 "$candidate" "$inputs/segmenter.js" > "$results/segmenter.log" 2>&1
 "$candidate" test test/js/node/vm/vm.test.ts -t 'a Proxy in the prototype chain' > "$results/proxy.log" 2>&1
 "$candidate" test test/js/node/worker_threads/openclaw-resource-limits.test.ts -t resourceLimits > "$results/resource-limits.log" 2>&1
 "$candidate" test test/js/bun/resolve/esModule.test.ts test/js/bun/namespace-prototype-pollution.test.ts test/js/bun/resolve/require-esm-evaluating-cycle.test.ts test/js/bun/import-attributes/import-attributes.test.ts test/js/node/module/require-extensions.test.ts > "$results/namespace.log" 2>&1
+"$candidate" test test/js/node/process/process.test.js -t 'ArrayBuffer memory ownership' > "$results/arraybuffer.log" 2>&1
+"$candidate" test test/js/node/worker_threads/worker_threads.test.ts -t 'getHeapStatistics' > "$results/worker-statistics.log" 2>&1
+"$candidate" test test/napi/napi.test.ts -t 'charges external payload without charging the ArrayBuffer allocator' > "$results/arraybuffer-native.log" 2>&1
+"$candidate" test --expose-internals test/js/bun/jsc/bun-jsc.test.ts test/js/node/v8/v8-serdes-buffer.test.ts > "$results/arraybuffer-serializer.log" 2>&1
+"$candidate" test "$inputs/inspection-idle.test.ts" > "$results/inspection-idle.log" 2>&1
 "$candidate" test test/js/node/inspector/inspector-profiler.test.ts test/js/node/inspector/inspector.test.ts > "$results/inspector.log" 2>&1
 "$candidate" test test/js/node/async_hooks test/js/bun/resolve/import-defer.test.ts test/js/bun/resolve/dynamic-import-tla-cycle.test.ts test/js/bun/resolve/require-esm-gc-roots.test.ts test/js/bun/resolve/require-esm-microtask-order.test.ts test/js/bun/resolve/require-esm-evaluating-cycle.test.ts test/js/bun/resolve/require-esm-transitive-tla.test.ts > "$results/als-suites.log" 2>&1
 "$candidate" "$inputs/module-context.mjs" matrix > "$results/als-plugin.json"

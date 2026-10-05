@@ -17,7 +17,7 @@ class ReleaseIntegrity(unittest.TestCase):
         self.root=Path(self.temp.name);self.inputs=self.root/'inputs';self.inputs.mkdir()
         self.out=self.root/'release'
         config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())
-        q=self.inputs/'qualification';q.mkdir();(q/'gate.json').write_text(json.dumps({'passed':True,'source':SOURCE,'bun_commit':config['bun_commit'],'upstream_sync':{'passed':True,**config['upstream_sync']},'engine':{'passed':True,'source':SOURCE}}))
+        q=self.inputs/'qualification';q.mkdir();(q/'gate.json').write_text(json.dumps({'passed':True,'source':SOURCE,'bun_commit':config['bun_commit'],'upstream_sync':{'passed':True,**config['upstream_sync']},'engine':{'passed':True,'source':SOURCE},'compatibility':{'passed':True,'source':SOURCE,**config['upstream_sync'],'only_manifest_changed_after_pairing':True,'memory_tests':3,'startup':True}}))
         for lane in config['lanes']:
             label=lane['label'];d=self.inputs/label;d.mkdir();(d/'provenance').mkdir()
             f=d/(label+'.tar.gz');f.write_bytes(label.encode())
@@ -97,6 +97,33 @@ class ReleaseIntegrity(unittest.TestCase):
     def test_missing_upstream_sync_gate_rejected(self):
         p=self.inputs/'qualification/gate.json';m=json.loads(p.read_text());del m['upstream_sync'];p.write_text(json.dumps(m))
         with self.assertRaisesRegex(ValueError,'upstream-sync'):self.assemble()
+    def test_missing_paired_compatibility_rejected(self):
+        p=self.inputs/'qualification/gate.json';m=json.loads(p.read_text());del m['compatibility'];p.write_text(json.dumps(m))
+        with self.assertRaisesRegex(ValueError,'namespace-paired'):self.assemble()
+    def test_missing_or_failed_startup_rejected(self):
+        p=self.inputs/'qualification/gate.json'
+        for value in [None,False]:
+            with self.subTest(startup=value):
+                m=json.loads(p.read_text())
+                if value is None:m['compatibility'].pop('startup',None)
+                else:m['compatibility']['startup']=value
+                p.write_text(json.dumps(m))
+                with self.assertRaisesRegex(ValueError,'namespace-paired'):self.assemble()
+                if self.out.exists():self.out.rmdir()
+    def test_wrong_paired_tree_or_namespace_adapter_rejected(self):
+        p=self.inputs/'qualification/gate.json'
+        original=json.loads(p.read_text())
+        for key in ['paired_tree','required_namespace_adapter_sha256']:
+            with self.subTest(field=key):
+                m=json.loads(json.dumps(original));m['compatibility'][key]='b'*40;p.write_text(json.dumps(m))
+                with self.assertRaisesRegex(ValueError,'namespace-paired'):self.assemble()
+                if self.out.exists():self.out.rmdir()
+    def test_wrong_prepared_tree_rejected(self):
+        p=self.inputs/'qualification/gate.json';m=json.loads(p.read_text());m['compatibility']['prepared_tree']='b'*40;p.write_text(json.dumps(m))
+        with self.assertRaisesRegex(ValueError,'namespace-paired'):self.assemble()
+    def test_extra_runtime_changes_rejected(self):
+        p=self.inputs/'qualification/gate.json';m=json.loads(p.read_text());m['compatibility']['only_manifest_changed_after_pairing']=False;p.write_text(json.dumps(m))
+        with self.assertRaisesRegex(ValueError,'namespace-paired'):self.assemble()
     def test_wrong_sync_tree_rejected(self):
         p=self.inputs/'qualification/gate.json';m=json.loads(p.read_text());m['upstream_sync']['prepared_tree']='b'*40;p.write_text(json.dumps(m))
         with self.assertRaisesRegex(ValueError,'upstream-sync'):self.assemble()

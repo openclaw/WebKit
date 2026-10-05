@@ -6,6 +6,9 @@
 - Expose the require(esm) `__esModule` marker as an own enumerable namespace property while preserving unmarked imports and live bindings. Adapts [oven-sh/WebKit#279](https://github.com/oven-sh/WebKit/pull/279). Thanks @robobun!
 
 - Add per-VM byte-based heap allocation sampling including string backing storage, with weighted JavaScript stack trees, weak sampled-cell tracking, and separate major/minor collection inclusion. C++ and generated free-list allocation fast paths remain unchanged when disabled.
+- Track ArrayBuffer allocation origin across transfers, count unmaterialized typed-array vectors in all JIT tiers, separate backing storage from JavaScript heap statistics, and permit owning-thread VM inspections during execution and atomic waits. Builds on the accounting investigation in oven-sh/WebKit#303; thanks @robobun.
+- Fix an unsynchronized activity-count assertion in parallel GC helpers.
+- Make extra/external-memory visitor counters atomic throughout their update and reporting paths.
 
 This changelog covers updates to JavaScriptCore in Bun's WebKit fork, from `9a2cc42ae1bf` to `7bc2f97e2835`.
 

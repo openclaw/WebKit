@@ -249,6 +249,10 @@ void MarkedSpace::registerPreciseAllocation(PreciseAllocation* allocation, bool 
         // Existing code's ordering is calling `didAllocate` and increasing capacity.
         size_t size = allocation->cellSize();
         heap().didAllocate(size);
+#if USE(BUN_JSC_ADDITIONS)
+        heap().didAllocateArrayBufferAuxiliaryMemory(allocation->subspace(), size);
+        heap().addArrayBufferAuxiliaryCapacity(allocation->subspace(), size);
+#endif
         m_capacity += size;
     }
 }
@@ -268,6 +272,9 @@ void MarkedSpace::sweepPreciseAllocations()
                 static_cast<IsoSubspace*>(allocation->subspace())->sweepLowerTierPreciseCell(allocation);
             else {
                 m_capacity -= allocation->cellSize();
+#if USE(BUN_JSC_ADDITIONS)
+                heap().removeArrayBufferAuxiliaryCapacity(allocation->subspace(), allocation->cellSize());
+#endif
                 allocation->destroy();
             }
             continue;
