@@ -72,7 +72,7 @@ void Waiter::setParkedList(RefPtr<WaiterList>&& list)
     m_parkedList = WTF::move(list);
 }
 
-void Waiter::notifyOfTerminationRequest()
+void Waiter::notifyOfVMTrap()
 {
     ASSERT(!m_isAsync);
     RefPtr<WaiterList> parkedList;
@@ -81,7 +81,7 @@ void Waiter::notifyOfTerminationRequest()
         parkedList = m_parkedList;
     }
     // Not parked (yet): waitSyncImpl publishes the list before it tests for the request, so a wait
-    // that starts after this sees the NeedTermination trap our caller has already fired.
+    // that starts after this sees the trap our caller has already fired.
     if (!parkedList)
         return;
     // Notify under the list's lock, which the waiter holds from testing for the request until it is
@@ -122,7 +122,7 @@ WaiterListManager::WaitSyncResult WaiterListManager::waitSyncImpl(VM& vm, ValueT
     MonotonicTime time = MonotonicTime::timePointFromNow(timeout);
 
     {
-        VMBlockingScope waitScope(vm, StopTheWorldEvent::AtomicsWaitBlocked);
+        std::optional<VMBlockingScope> waitScope(std::in_place, vm, StopTheWorldEvent::AtomicsWaitBlocked);
 
         Locker listLocker { list->lock };
         if (WTF::atomicLoad(ptr) != expectedValue)
@@ -139,6 +139,13 @@ WaiterListManager::WaitSyncResult WaiterListManager::waitSyncImpl(VM& vm, ValueT
         bool didReleaseFreeMemory = false;
 #endif
         while (syncWaiter->isOnList() && time.now() < time && !shouldStopWaitingForTermination(vm)) {
+            if (vm.traps().needHandling(VMTraps::NeedVMInspection)) {
+                DropLockForScope unlock(listLocker);
+                waitScope.reset();
+                vm.traps().runVMInspections();
+                waitScope.emplace(vm, StopTheWorldEvent::AtomicsWaitBlocked);
+                continue;
+            }
 #if USE(MIMALLOC)
             if (!didReleaseFreeMemory && releaseFreeMemoryTime < time) {
                 if (MonotonicTime::now() < releaseFreeMemoryTime) {

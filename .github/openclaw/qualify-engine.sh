@@ -22,6 +22,13 @@ common=(--useDollarVM=true --useGenerationalGC=true --forceMiniVMMode=false)
 "$jsc" "${common[@]}" --useJIT=false "$fixture" > "$QUALIFICATION_DIR/sampling-interpreter.log" 2>&1
 "$jsc" "${common[@]}" --useDFGJIT=false --useFTLJIT=false "$fixture" > "$QUALIFICATION_DIR/sampling-baseline.log" 2>&1
 "$jsc" "${common[@]}" --useConcurrentJIT=false --thresholdForOptimizeAfterWarmUp=10 --thresholdForFTLOptimizeAfterWarmUp=20 "$fixture" > "$QUALIFICATION_DIR/sampling-ftl.log" 2>&1
+fixture=JSTests/stress/array-buffer-accounting.js
+common=(--useGenerationalGC=true --forceMiniVMMode=false)
+"$jsc" "${common[@]}" --useJIT=false "$fixture" > "$QUALIFICATION_DIR/accounting-interpreter.log" 2>&1
+"$jsc" "${common[@]}" --useDFGJIT=false --useFTLJIT=false "$fixture" > "$QUALIFICATION_DIR/accounting-baseline.log" 2>&1
+"$jsc" "${common[@]}" --useFTLJIT=false --useConcurrentJIT=false "$fixture" > "$QUALIFICATION_DIR/accounting-dfg.log" 2>&1
+"$jsc" "${common[@]}" --useConcurrentJIT=false --thresholdForJITAfterWarmUp=10 --thresholdForOptimizeAfterWarmUp=20 --thresholdForFTLOptimizeAfterWarmUp=20 "$fixture" > "$QUALIFICATION_DIR/accounting-ftl.log" 2>&1
+"$jsc" "${common[@]}" --gcAtEnd=true --useConcurrentGC=true "$fixture" > "$QUALIFICATION_DIR/accounting-concurrent.log" 2>&1
 python3 - "$QUALIFICATION_DIR" "$source_sha" <<'PY'
 import json,sys
 from pathlib import Path
@@ -31,5 +38,5 @@ for name,minimum in [('jsc-stress',1400),('jsc-modules',1600)]:
     assert len(lines)>=minimum,(name,len(lines))
     assert all(line.endswith(': PASS') for line in lines),name+' failures'
     counts[name]=len(lines)
-(root/'engine-gate.json').write_text(json.dumps({'passed':True,'source':sys.argv[2],'stress_counts':counts,'sampling_tiers':4,'stack_execution_modes':4,'stack_cache':json.loads((root/'jsc-stack/cache-files.json').read_text())},indent=2)+'\n')
+(root/'engine-gate.json').write_text(json.dumps({'passed':True,'source':sys.argv[2],'stress_counts':counts,'sampling_tiers':4,'arraybuffer_execution_modes':5,'stack_execution_modes':4,'stack_cache':json.loads((root/'jsc-stack/cache-files.json').read_text())},indent=2)+'\n')
 PY

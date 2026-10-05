@@ -54,8 +54,13 @@ Batch 1 is published from `openclaw/batch-1` so concurrently reviewed batch-2
 engine changes can land on `openclaw/main` without entering this release. All publication
 branches require the same protected environment and full-SHA/green-job checks.
 
-After a green build/test dispatch, dispatch the same full SHA with `publish:
-true`. This repeats the build and qualification, then waits at the protected
+Pull requests run **OpenClaw engine checks**, a read-only Linux build using the same
+lane recipe and Bun qualification gate. It also runs the ArrayBuffer accounting
+and confirmed parked-waiter inspection regression with LLInt, DFG, FTL and
+concurrent GC. This workflow provides the pre-merge check; it cannot publish.
+
+For final publication, dispatch the reviewed full SHA with `publish: true`.
+This builds every lane and runs all qualification gates before waiting at the protected
 `openclaw-artifacts` environment. Only the publication job has repository write
 permission. It assembles exactly the nine archives, `manifest.json`,
 `SHA256SUMS`, `provenance.tar.gz`, and `LICENSE-SOURCES.txt`.
@@ -75,7 +80,8 @@ still checks the published release's immutable state. Publication first atomical
 creates `autobuild-<full SHA>`, creates a draft, uploads every asset, verifies
 GitHub's asset digests, and publishes it. It then requires `immutable: true`,
 downloads every public asset, and checks the manifest and SHA256SUMS again.
-Existing tags, drafts and releases are never resumed or overwritten. A partial
+A separate `publish: false` dispatch is an optional dry run; it never substitutes
+for the final publication run’s own green gates. Existing tags, drafts and releases are never resumed or overwritten. A partial
 publication needs investigation and a new source commit/tag; there is no
 replacement option. Inspect the publication receipt before updating a consumer.
 
@@ -126,6 +132,15 @@ artifact as namespace qualification. It does not invoke artifact publication.
 The separate artifact workflow remains the coordinator's build/test/publish
 entrypoint.
 
+## ArrayBuffer ownership and worker snapshots
+
+The accounting adapter in `.github/openclaw/qualification/patches/010-arraybuffer-accounting.patch`
+uses the engine's allocation-origin and holder accounts for process, V8 and worker
+statistics. The qualification gate exercises its Node-compatible ownership cases
+and worker inspections in addition to the existing fork selection. Keep the adapter
+in sync with the Bun integration until that integration becomes the qualification
+baseline. Engine and Bun headers and libraries must be rebuilt together.
+
 ## Unreleased
 
 No changes yet.
@@ -136,10 +151,14 @@ No changes yet.
 
 - Add real byte-based JSC heap allocation sampling with weighted allocating-stack profiles and independent major/minor collection inclusion.
 - Check allocation sampling across interpreter and JIT tiers before merging engine pull requests.
+- Preserve ArrayBuffer allocator attribution across worker transfers, report fresh holder external bytes, and exclude backing storage from JS heap statistics and worker limits; builds on oven-sh/WebKit#303, thanks @robobun.
+- Inspect worker memory on its owning VM thread during JavaScript execution and atomic waits; the matching Bun reporting adapter must ship with this engine.
+- Synchronize the parallel-helper activity assertion with task claims and completion; fixes a race exposed by ThreadSanitizer during accounting qualification.
+- Use atomic loads and resets for visited extra/external-memory totals updated by parallel markers.
 
 ## Rebased release qualification
 
-- Rebase the four batch-1 engine patches and the landed namespace, allocation-sampling and stack-position patches onto oven-sh/WebKit `5718a6ec579b98362ea7276a426deedcc6281ef5` (upstream #768). Thanks @Jarred-Sumner for idle compiler-thread and Atomics.wait memory release.
+- Rebase the four batch-1 engine patches and the landed namespace, allocation-sampling, stack-position and ArrayBuffer-accounting patches onto oven-sh/WebKit `5718a6ec579b98362ea7276a426deedcc6281ef5` (upstream #768). Thanks @Jarred-Sumner for idle compiler-thread and Atomics.wait memory release.
 - Retain the published batch-1 release. Publish this separately qualified batch only through the protected `openclaw/release-5718a6ec` environment policy; updating the Bun main manifest is a separate integration task.
 
 The existing qualification baseline remains upstream `1600131e46b5af48bbda3559af8d8a3327230b6e` with its committed archive checksums. The source/provenance base advances to `5718a6ec579b98362ea7276a426deedcc6281ef5`; the Docker and lane recipes are unchanged. Unlanded engine work is not included in this rebase.
@@ -188,3 +207,11 @@ to the prepared tree before and after compilation, and its only tracked worktree
 change must be the manifest. Startup and all three unchanged memory-release
 tests must pass. A separate build applies the feature adapters for the full
 regression selection. Both gates are mandatory for assembly and publication.
+
+
+The ArrayBuffer patch is qualified in five interpreter/JIT/concurrent-GC modes,
+with process ownership, worker snapshot, native external-buffer and serializer
+regressions. A combined regression inspects a worker during the new idle-memory
+purge and notification windows. VM inspection runs before the idle-purge branch,
+with the waiter-list lock dropped and VM heap access restored only for inspection;
+both paths recheck notification/termination before waiting again.

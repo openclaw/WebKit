@@ -23,7 +23,7 @@ test "$(git write-tree)" = "$SYNC_TREE"
 for patch in "$inputs"/patches/00[3-7]-*.patch; do
   git apply --index --exclude=CHANGELOG.md --exclude='docs/*' --exclude='test/js/node/worker_threads/*' "$patch"
 done
-for patch in 008-namespace.patch 009-allocation-sampling.patch 010-als-regressions.patch 009-stack-positions.patch; do
+for patch in 008-namespace.patch 009-allocation-sampling.patch 010-als-regressions.patch 009-stack-positions.patch 010-arraybuffer-accounting.patch; do
   git apply --index --exclude=CHANGELOG.md --exclude='docs/*' "$inputs/patches/$patch"
 done
 cp "$inputs/worker-resource-limits.test.ts" test/js/node/worker_threads/openclaw-resource-limits.test.ts
@@ -60,6 +60,11 @@ python3 "$inputs/stack/check-runtime-cache.py" --baseline "$QUALIFICATION_DIR/bu
 "$candidate" test test/js/node/vm/vm.test.ts -t 'a Proxy in the prototype chain' > "$results/proxy.log" 2>&1
 "$candidate" test test/js/node/worker_threads/openclaw-resource-limits.test.ts -t resourceLimits > "$results/resource-limits.log" 2>&1
 "$candidate" test test/js/bun/resolve/esModule.test.ts test/js/bun/namespace-prototype-pollution.test.ts test/js/bun/resolve/require-esm-evaluating-cycle.test.ts test/js/bun/import-attributes/import-attributes.test.ts test/js/node/module/require-extensions.test.ts > "$results/namespace.log" 2>&1
+"$candidate" test test/js/node/process/process.test.js -t 'ArrayBuffer memory ownership' > "$results/arraybuffer.log" 2>&1
+"$candidate" test test/js/node/worker_threads/worker_threads.test.ts -t 'getHeapStatistics' > "$results/worker-statistics.log" 2>&1
+"$candidate" test test/napi/napi.test.ts -t 'charges external payload without charging the ArrayBuffer allocator' > "$results/arraybuffer-native.log" 2>&1
+"$candidate" test --expose-internals test/js/bun/jsc/bun-jsc.test.ts test/js/node/v8/v8-serdes-buffer.test.ts > "$results/arraybuffer-serializer.log" 2>&1
+"$candidate" test "$inputs/inspection-idle.test.ts" > "$results/inspection-idle.log" 2>&1
 "$candidate" test test/js/node/inspector/inspector-profiler.test.ts test/js/node/inspector/inspector.test.ts > "$results/inspector.log" 2>&1
 "$candidate" test test/js/node/async_hooks test/js/bun/resolve/import-defer.test.ts test/js/bun/resolve/dynamic-import-tla-cycle.test.ts test/js/bun/resolve/require-esm-gc-roots.test.ts test/js/bun/resolve/require-esm-microtask-order.test.ts test/js/bun/resolve/require-esm-evaluating-cycle.test.ts test/js/bun/resolve/require-esm-transitive-tla.test.ts > "$results/als-suites.log" 2>&1
 "$candidate" "$inputs/module-context.mjs" matrix > "$results/als-plugin.json"

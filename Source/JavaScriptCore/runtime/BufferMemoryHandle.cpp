@@ -248,6 +248,10 @@ void* BufferMemoryHandle::nullBasePointer()
 
 BufferMemoryHandle::~BufferMemoryHandle()
 {
+#if USE(BUN_JSC_ADDITIONS)
+    if (m_wasmMemoryAccount)
+        m_wasmMemoryAccount->release(size());
+#endif
     if (m_memory) {
         void* memory = this->memory();
         BufferMemoryManager::singleton().freePhysicalBytes(m_size);

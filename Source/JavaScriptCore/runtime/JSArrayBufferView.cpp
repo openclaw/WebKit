@@ -69,7 +69,7 @@ JSArrayBufferView::ConstructionContext::ConstructionContext(VM& vm, Structure* s
         // Attempt GC allocation.
         void* temp;
         size_t size = sizeOf(length, elementSize);
-        temp = vm.primitiveGigacageAuxiliarySpace().allocate(vm, size, nullptr, AllocationFailureMode::ReturnNull);
+        temp = vm.typedArrayAuxiliarySpace().allocate(vm, size, nullptr, AllocationFailureMode::ReturnNull);
         if (!temp)
             return;
 
@@ -100,7 +100,11 @@ JSArrayBufferView::ConstructionContext::ConstructionContext(VM& vm, Structure* s
     if (!m_vector)
         return;
 
+#if USE(BUN_JSC_ADDITIONS)
+    vm.heap.reportArrayBufferMemoryAllocated(size.value());
+#else
     vm.heap.reportExtraMemoryAllocated(static_cast<JSCell*>(nullptr), size.value());
+#endif
     
     m_structure = structure;
     m_mode = OversizeTypedArray;
@@ -166,7 +170,11 @@ JSArrayBufferView::JSArrayBufferView(VM& vm, ConstructionContext& context)
     : Base(vm, context.structure(), nullptr)
     , m_length(context.length())
     , m_byteOffset(context.byteOffset())
+#if USE(BUN_JSC_ADDITIONS)
+    , m_modeAndNext(nullptr, context.mode())
+#else
     , m_mode(context.mode())
+#endif
 {
     setButterfly(vm, context.butterfly());
     m_vector.setWithoutBarrier(context.vector());
@@ -176,10 +184,16 @@ void JSArrayBufferView::finishCreation(VM& vm)
 {
     Base::finishCreation(vm);
     ASSERT(is<JSArrayBufferView>(this));
-    switch (m_mode) {
+    switch (mode()) {
     case FastTypedArray:
+#if USE(BUN_JSC_ADDITIONS)
+        vm.heap.addUnmaterializedArrayBufferView(this);
+#endif
         return;
     case OversizeTypedArray:
+#if USE(BUN_JSC_ADDITIONS)
+        vm.heap.addUnmaterializedArrayBufferView(this);
+#endif
         vm.heap.addFinalizer(this, finalize);
         return;
     case WastefulTypedArray:
@@ -232,8 +246,8 @@ void JSArrayBufferView::finalize(JSCell* cell)
     // This JSArrayBufferView could be an OversizeTypedArray that was converted
     // to a WastefulTypedArray via slowDownAndWasteMemory(). Hence, it is possible
     // to get to this finalizer and found the mode to be WastefulTypedArray.
-    ASSERT(thisObject->m_mode == OversizeTypedArray || thisObject->hasArrayBuffer());
-    if (thisObject->m_mode == OversizeTypedArray)
+    ASSERT(thisObject->mode() == OversizeTypedArray || thisObject->hasArrayBuffer());
+    if (thisObject->mode() == OversizeTypedArray)
         Gigacage::free(Gigacage::Primitive, thisObject->vector());
 }
 
@@ -294,7 +308,7 @@ ArrayBuffer* JSArrayBufferView::slowDownAndWasteMemory()
     RefPtr<ArrayBuffer> buffer;
     size_t bytesAlreadyReported = 0;
 
-    switch (m_mode) {
+    switch (mode()) {
     case FastTypedArray: {
         buffer = ArrayBuffer::tryCreate(span());
         if (!buffer)
@@ -316,6 +330,9 @@ ArrayBuffer* JSArrayBufferView::slowDownAndWasteMemory()
     }
 
     RELEASE_ASSERT(buffer);
+#if USE(BUN_JSC_ADDITIONS)
+    heap->materializeArrayBufferView(byteLengthRaw());
+#endif
     // Don't create bufferfly until we know we have an ArrayBuffer.
     setButterfly(vm, Butterfly::createOrGrowArrayRight(
         butterfly(), vm, this, structure,
@@ -326,7 +343,7 @@ ArrayBuffer* JSArrayBufferView::slowDownAndWasteMemory()
         butterfly()->indexingHeader()->setArrayBuffer(buffer.get());
         m_vector.setWithoutBarrier(buffer->data());
         WTF::storeStoreFence();
-        m_mode = WastefulTypedArray; // There is no possibility that FastTypedArray or OversizeTypedArray becomes resizable ones since resizable ones do not start with FastTypedArray or OversizeTypedArray.
+        setMode(WastefulTypedArray); // Fast and Oversize views cannot become resizable here.
     }
     heap->addReference(this, buffer.get(), bytesAlreadyReported);
 
