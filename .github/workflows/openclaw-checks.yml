@@ -1,11 +1,28 @@
-name: ARM64 accounting before-fix proof
+name: ARM64 accounting artifact replay
 on:
   workflow_dispatch:
+    inputs:
+      run_id:
+        description: Engine artifact workflow run
+        type: string
+        required: true
+      source:
+        description: Full engine source SHA from artifact manifest
+        type: string
+        required: true
+      archive_sha256:
+        description: Independently verified ARM64 archive SHA256
+        type: string
+        required: true
+      expect_failure:
+        description: Require the known before-fix forced-optimization undercount
+        type: boolean
+        default: false
 permissions:
   contents: read
   actions: read
 jobs:
-  before:
+  accounting:
     runs-on: windows-11-arm
     timeout-minutes: 15
     steps:
@@ -18,18 +35,25 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: bun-webkit-windows-arm64
-          run-id: 37293130816
+          run-id: ${{ inputs.run_id }}
           github-token: ${{ github.token }}
           path: input
-      - name: Probe exact before-fix native ARM64 archive
+      - name: Probe exact native ARM64 archive
         shell: pwsh
+        env:
+          EXPECTED_SOURCE: ${{ inputs.source }}
+          EXPECTED_SHA256: ${{ inputs.archive_sha256 }}
+          EXPECT_FAILURE: ${{ inputs.expect_failure }}
+          SOURCE_RUN: ${{ inputs.run_id }}
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
+          if ($env:EXPECTED_SOURCE -cnotmatch '^[0-9a-f]{40}$' -or $env:EXPECTED_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $env:SOURCE_RUN -notmatch '^\d+$') { throw 'Invalid exact-source inputs' }
           if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') { throw 'Expected native ARM64' }
           $archive = 'input/bun-webkit-windows-arm64.tar.gz'
           $digest = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
-          if ($digest -cne 'dbe30b56af503584b2fc512c1669217bb8ef7daf4d155fb614387d219052b9b7') { throw 'Wrong baseline archive' }
+          $manifest = Get-Content -Raw input/bun-webkit-windows-arm64.manifest.json | ConvertFrom-Json
+          if ($digest -cne $env:EXPECTED_SHA256 -or $manifest.source -cne $env:EXPECTED_SOURCE -or $manifest.lane.label -cne 'bun-webkit-windows-arm64' -or $manifest.files.'bun-webkit-windows-arm64.tar.gz'.sha256 -cne $digest) { throw 'Wrong source or archive' }
           New-Item -ItemType Directory -Path unpacked,proof | Out-Null
           tar -xzf $archive -C unpacked
           if ($LASTEXITCODE -ne 0) { throw 'Extraction failed' }
@@ -50,13 +74,19 @@ jobs:
             $results[$mode.Name] = $LASTEXITCODE
             Get-Content "proof/$($mode.Name).log"
           }
-          @{ archiveSha256=$digest; source='8b1a979c5ac866d8c927c3d7a0179b2002185f7d'; architecture='arm64'; results=$results } | ConvertTo-Json | Set-Content proof/before.json
-          if ($results.interpreter -ne 0 -or $results.baseline -ne 0 -or $results.dfg -eq 0) { throw 'Expected interpreter/baseline pass and DFG regression' }
-          if ((Get-Content -Raw proof/dfg.log) -notmatch 'allocation') { throw 'DFG failed for an unexpected reason' }
+          $fixtureHash = (Get-FileHash -Algorithm SHA256 JSTests/stress/array-buffer-accounting.js).Hash.ToLowerInvariant()
+          @{ archiveSha256=$digest; source=$env:EXPECTED_SOURCE; run=$env:SOURCE_RUN; architecture='arm64'; fixtureSha256=$fixtureHash; expectedFailure=($env:EXPECT_FAILURE -eq 'true'); results=$results } | ConvertTo-Json | Set-Content proof/accounting.json
+          if ($env:EXPECT_FAILURE -eq 'true') {
+            if ($results.interpreter -ne 0 -or $results.baseline -ne 0 -or $results.ftl -eq 0) { throw 'Expected interpreter/baseline pass and forced-optimization regression' }
+            $log = Get-Content -Raw proof/ftl.log
+            if ($log -notmatch 'young vector allocation: (\d+) !== 256000' -or [int]$Matches[1] -le 0 -or [int]$Matches[1] -ge 256000) { throw 'Unexpected before-fix failure' }
+          } elseif (@($results.Values | Where-Object { $_ -ne 0 }).Count -ne 0) {
+            throw 'Corrected engine must pass all five configured modes'
+          }
           exit 0
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: before-arm64-accounting
+          name: windows-arm64-accounting
           path: proof
           if-no-files-found: error
