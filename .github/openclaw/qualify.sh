@@ -63,7 +63,7 @@ candidate="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
 unset BUN_WEBKIT_ARTIFACT_MANIFEST BUN_BUILD_CACHE_DIR BUN_BUILD_PREFETCH_DIR
 "$candidate" test test/js/bun/resolve/esModule.test.ts test/js/bun/namespace-prototype-pollution.test.ts test/js/bun/resolve/require-esm-evaluating-cycle.test.ts test/js/bun/import-attributes/import-attributes.test.ts test/js/node/module/require-extensions.test.ts > "$QUALIFICATION_DIR/namespace.log" 2>&1
 "$candidate" test --expose-internals test/js/node/v8/capture-stack-trace.test.js test/js/bun/sourcemap/internal-sourcemap.test.ts > "$QUALIFICATION_DIR/stack-positions.log" 2>&1
-"$candidate" test test/js/node/vm/vm.test.ts -t 'bounded vm compilation cache|repeated vm source executes after GC' > "$QUALIFICATION_DIR/incremental-cache.log" 2>&1
+"$candidate" test test/js/node/vm/vm.test.ts -t 'bounded vm compilation cache|repeated vm source executes after GC|accepts valid bytecode when the JIT is unavailable' > "$QUALIFICATION_DIR/incremental-cache.log" 2>&1
 "$candidate" "$inputs/segmenter.js" > "$QUALIFICATION_DIR/segmenter.log" 2>&1
 "$candidate" test test/js/node/vm/vm.test.ts -t 'a Proxy in the prototype chain' > "$QUALIFICATION_DIR/proxy.log" 2>&1
 "$candidate" test test/js/node/worker_threads/openclaw-resource-limits.test.ts -t 'resourceLimits' > "$QUALIFICATION_DIR/resource-limits.log" 2>&1
@@ -79,12 +79,12 @@ assert faith['selected_files']==44 and faith['result_files']==46
 for name in ['als-plugin','als-native']:
  rows=json.loads((root/(name+'.json')).read_text())['results']
  assert len(rows)==14 and all(r['exitCode']==0 for r in rows)
-for name,minimum in [('proxy',4),('resource-limits',14),('namespace',41),('incremental-cache',10)]:
+for name,minimum in [('proxy',4),('resource-limits',14),('namespace',41),('incremental-cache',11)]:
  text=(root/(name+'.log')).read_text()
  passes=re.search(r'(\d+) pass',text)
  assert passes and int(passes[1])>=minimum, name+' missing passing cases'
  assert re.search(r'\b0 fail\b',text),name+' failures'
 (root/'gate.json').write_text(json.dumps({'passed':True,'source':sys.argv[2],'bun_commit':sys.argv[3],
- 'selected_files':44,'result_files':46,'als_variants_per_mode':14,'proxy_minimum':4,'resource_minimum':14,'incremental_cache_minimum':10,
+ 'selected_files':44,'result_files':46,'als_variants_per_mode':14,'proxy_minimum':4,'resource_minimum':14,'incremental_cache_minimum':11,
  'bun_adapter_sha256':hashlib.sha256((root/'bun-adapters.patch').read_bytes()).hexdigest()},indent=2)+'\n')
 PY

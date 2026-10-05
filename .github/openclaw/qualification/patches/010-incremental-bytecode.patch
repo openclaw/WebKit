@@ -418,11 +418,77 @@ index c5e8d931dec..2cef2c518e7 100644
  
  JSC::JSValue createNodeVMCompilationCacheStatsForTesting(Zig::GlobalObject*);
 diff --git a/src/jsc/bindings/NodeVMScript.cpp b/src/jsc/bindings/NodeVMScript.cpp
-index 7de417fb10a..0e979793f44 100644
+index 7de417fb10a..940dfe0c466 100644
 --- a/src/jsc/bindings/NodeVMScript.cpp
 +++ b/src/jsc/bindings/NodeVMScript.cpp
-@@ -264,11 +264,7 @@ JSC::ProgramExecutable* NodeVMScript::createExecutable()
+@@ -6,7 +6,6 @@
  
+ #include "JavaScriptCore/CodeCache.h"
+ #include "JavaScriptCore/Completion.h"
+-#include "JavaScriptCore/JIT.h"
+ #include "JavaScriptCore/JSWeakMap.h"
+ #include "JavaScriptCore/JSWeakMapInlines.h"
+ #include "JavaScriptCore/ProgramCodeBlock.h"
+@@ -176,36 +175,13 @@ constructScript(JSGlobalObject* globalObject, CallFrame* callFrame, JSValue newT
+     WTF::Vector<uint8_t>& cachedData = script->cachedData();
+ 
+     if (!cachedData.isEmpty()) {
+-        JSC::ProgramExecutable* executable = script->cachedExecutable();
+-        if (!executable) {
+-            executable = script->createExecutable();
+-        }
+-        ASSERT(executable);
+-
+         JSC::LexicallyScopedFeatures lexicallyScopedFeatures = globalObject->globalScopeExtension() ? JSC::TaintedByWithScopeLexicallyScopedFeature : JSC::NoLexicallyScopedFeatures;
+         JSC::SourceCodeKey key(script->source(), {}, JSC::SourceCodeType::ProgramType, lexicallyScopedFeatures, JSC::JSParserScriptMode::Classic, JSC::DerivedContextType::None, JSC::EvalContextType::None, false, {}, std::nullopt);
+         Ref<JSC::CachedBytecode> cachedBytecode = NodeVM::createOwnedCachedBytecode(cachedData.span());
+         JSC::UnlinkedProgramCodeBlock* unlinkedBlock = JSC::decodeCodeBlock<UnlinkedProgramCodeBlock>(vm, key, WTF::move(cachedBytecode));
+ 
+-        if (!unlinkedBlock) {
+-            script->cachedDataRejected(TriState::True);
+-        } else {
+-            JSC::JSScope* jsScope = globalObject->globalScope();
+-            JSC::CodeBlock* codeBlock = nullptr;
+-            {
+-                // JSC::ProgramCodeBlock::create() requires GC to be deferred.
+-                DeferGC deferGC(vm);
+-                codeBlock = JSC::ProgramCodeBlock::create(vm, executable, unlinkedBlock, jsScope);
+-                RETURN_IF_EXCEPTION(scope, {});
+-            }
+-            JSC::CompilationResult compilationResult = JIT::compileSync(vm, codeBlock, JITCompilationEffort::JITCompilationCanFail);
+-            if (compilationResult != JSC::CompilationResult::CompilationFailed) {
+-                executable->installCode(codeBlock);
+-                script->cachedDataRejected(TriState::False);
+-            } else {
+-                script->cachedDataRejected(TriState::True);
+-            }
+-        }
++        // Runs link their own block; decoding alone determines whether cachedData is accepted.
++        script->cachedDataRejected(unlinkedBlock ? TriState::False : TriState::True);
+     } else if (script->options().produceCachedData)
+         script->cacheBytecode();
+ 
+@@ -230,8 +206,7 @@ JSC::UnlinkedProgramCodeBlock* NodeVMScript::unlinkedCodeBlockFor(JSGlobalObject
+     if (m_unlinkedCodeBlock && m_unlinkedCodeBlock->codeGenerationMode() == codeGenerationMode)
+         return m_unlinkedCodeBlock.get();
+ 
+-    // The CodeCache records the parse on the executable it is given (that changes what the executable keys
+-    // later lookups with, so m_cachedExecutable is not used for this); every run links its own anyway.
++    // A throwaway executable: the CodeCache records the parse on the one it is given, and every run links its own.
+     NodeVMCompilationCache::Identity identity { m_options.lineOffset.zeroBasedInt(), m_options.columnOffset.zeroBasedInt(), NodeVMCompilationCache::Kind::Script, m_options.filenameProvided, m_options.produceCachedData, codeGenerationMode, globalObject->globalScopeExtension() ? JSC::TaintedByWithScopeLexicallyScopedFeature : JSC::NoLexicallyScopedFeatures };
+     auto& cache = WebCore::clientData(vm)->nodeVMCompilationCache;
+     JSC::UnlinkedProgramCodeBlock* block;
+@@ -255,20 +230,9 @@ JSValue NodeVMScript::evaluate(JSGlobalObject* globalObject, NakedPtr<JSC::Excep
+     return JSC::evaluate(globalObject, m_source, unlinkedCodeBlockFor(globalObject, ignoredError), globalObject, exception);
+ }
+ 
+-JSC::ProgramExecutable* NodeVMScript::createExecutable()
+-{
+-    VM& vm = JSC::getVM(globalObject());
+-    m_cachedExecutable.set(vm, this, JSC::ProgramExecutable::create(globalObject(), m_source));
+-    return m_cachedExecutable.get();
+-}
+-
  void NodeVMScript::cacheBytecode()
  {
 -    NodeVMCompilationCache::Identity identity { m_options.lineOffset.zeroBasedInt(), m_options.columnOffset.zeroBasedInt(), NodeVMCompilationCache::Kind::Script, m_options.filenameProvided, m_options.produceCachedData, {}, globalObject()->globalScopeExtension() ? JSC::TaintedByWithScopeLexicallyScopedFeature : JSC::NoLexicallyScopedFeatures };
@@ -434,11 +500,74 @@ index 7de417fb10a..0e979793f44 100644
      m_cachedDataProduced = m_cachedBytecode != nullptr;
  }
  
+@@ -305,7 +269,6 @@ void NodeVMScript::visitChildrenImpl(JSCell* cell, Visitor& visitor)
+     NodeVMScript* thisObject = uncheckedDowncast<NodeVMScript>(cell);
+     ASSERT_GC_OBJECT_INHERITS(thisObject, info());
+     Base::visitChildren(thisObject, visitor);
+-    visitor.append(thisObject->m_cachedExecutable);
+     visitor.append(thisObject->m_cachedBytecodeBuffer);
+     visitor.append(thisObject->m_unlinkedCodeBlock);
+     NodeVMScriptFetcher::visitSource(visitor, thisObject->m_source);
+diff --git a/src/jsc/bindings/NodeVMScript.h b/src/jsc/bindings/NodeVMScript.h
+index 5944d34d470..66ce7c4dbd0 100644
+--- a/src/jsc/bindings/NodeVMScript.h
++++ b/src/jsc/bindings/NodeVMScript.h
+@@ -63,7 +63,6 @@ public:
+ 
+     static JSObject* createPrototype(VM& vm, JSGlobalObject* globalObject);
+ 
+-    JSC::ProgramExecutable* createExecutable();
+     void cacheBytecode();
+     JSC::JSUint8Array* getBytecodeBuffer();
+ 
+@@ -76,7 +75,6 @@ public:
+     const JSC::SourceCode& source() const { return m_source; }
+     const ScriptOptions& options() const { return m_options; }
+     WTF::Vector<uint8_t>& cachedData() { return m_options.cachedData; }
+-    JSC::ProgramExecutable* cachedExecutable() const { return m_cachedExecutable.get(); }
+     bool cachedDataProduced() const { return m_cachedDataProduced; }
+     void cachedDataProduced(bool value) { m_cachedDataProduced = value; }
+     TriState cachedDataRejected() const { return m_cachedDataRejected; }
+@@ -88,7 +86,6 @@ private:
+     JSC::SourceCode m_source;
+     RefPtr<JSC::CachedBytecode> m_cachedBytecode;
+     JSC::WriteBarrier<JSC::JSUint8Array> m_cachedBytecodeBuffer;
+-    JSC::WriteBarrier<JSC::ProgramExecutable> m_cachedExecutable;
+     // The compile every run links. Only recompiled (and replaced) when a global object with a different
+     // CodeGenerationMode, i.e. a debugger attached, runs the Script.
+     JSC::WriteBarrier<JSC::UnlinkedProgramCodeBlock> m_unlinkedCodeBlock;
 diff --git a/test/js/node/vm/vm.test.ts b/test/js/node/vm/vm.test.ts
-index 8d751f1dfa5..c38157c39b0 100644
+index 8d751f1dfa5..87bccd2b7ee 100644
 --- a/test/js/node/vm/vm.test.ts
 +++ b/test/js/node/vm/vm.test.ts
-@@ -2968,6 +2968,87 @@ describe("bounded vm compilation cache", () => {
+@@ -1018,6 +1018,26 @@ test("accepts valid bytecode", () => {
+   expect(secondScript.runInThisContext()).toBe(2);
+ });
+ 
++test.concurrent("accepts valid bytecode when the JIT is unavailable", async () => {
++  await using proc = Bun.spawn({
++    cmd: [
++      bunExe(),
++      "-e",
++      `const { Script } = require("node:vm");
++       const cachedData = new Script("40 + 2").createCachedData();
++       const script = new Script("40 + 2", { cachedData });
++       console.log(script.cachedDataRejected, script.runInThisContext());`,
++    ],
++    env: { ...bunEnv, BUN_JSC_useJIT: "0" },
++    stdout: "pipe",
++    stderr: "pipe",
++  });
++  const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
++  expect(stdout).toBe("false 42\n");
++  expect(stderr).toBe("");
++  expect(exitCode).toBe(0);
++});
++
+ test("can't use bytecode from a different script", () => {
+   const firstScript = new Script("1 + 1;");
+   const cachedData = firstScript.createCachedData();
+@@ -2968,6 +2988,87 @@ describe("bounded vm compilation cache", () => {
      );
    });
  
@@ -526,7 +655,7 @@ index 8d751f1dfa5..c38157c39b0 100644
    test.concurrent("can be disabled", async () => {
      await runCacheFixture(
        `
-@@ -2975,7 +3056,7 @@ describe("bounded vm compilation cache", () => {
+@@ -2975,7 +3076,7 @@ describe("bounded vm compilation cache", () => {
        import { runInThisContext } from "node:vm";
        import { nodeVMCompilationCacheStats as stats } from "bun:internal-for-testing";
        for(let i=0;i<3;i++) assert.equal(runInThisContext("40 + 2"),42);

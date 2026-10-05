@@ -160,5 +160,9 @@ These optional APIs do not change disk caches or public cached-data generation.
 The Linux qualification adapter `010-incremental-bytecode.patch` exercises the
 matching Bun cache on the same engine artifact, including weak-body reuse after
 GC, update eviction and byte bounds, and public cached-data determinism. The
-qualification gate requires all ten focused cases as well as the unchanged
+qualification gate requires all eleven focused cases as well as the unchanged
 fork selection. The adapter does not update Bun's published engine manifest.
+
+The Bun adapter also removes the unused public cached-data JIT compilation from
+[oven-sh/bun#41769](https://github.com/oven-sh/bun/pull/41769), preserving decoding
+and source validation when the JIT is unavailable. Thanks @robobun.
