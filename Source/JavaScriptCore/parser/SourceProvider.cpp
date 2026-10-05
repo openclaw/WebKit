@@ -320,8 +320,12 @@ static unsigned lineEndFor(StringView text, const EncodedLineStarts& lineStarts,
 LineColumn LineStartTable::lineColumnForOffset(StringView text, unsigned offset)
 {
     Locker locker { m_lock };
-    auto line = EncodedLineStarts { ensureBuilt(text).bytes }.lineContaining(offset);
-    return { line.line0Based, offset - line.start };
+    // Syntax-selected stack positions bypass the per-instruction expression cache.
+    // Cache provider-relative coordinates so document offsets remain applied by the caller.
+    return m_cachedLineColumns.ensure(offset, [&] {
+        auto line = EncodedLineStarts { ensureBuilt(text).bytes }.lineContaining(offset);
+        return LineColumn { line.line0Based, offset - line.start };
+    }).iterator->value;
 }
 
 LineStartTable::PositionInfo LineStartTable::positionInfoForOffset(StringView text, unsigned offset)
@@ -365,4 +369,3 @@ LineColumn BuiltinsSourceProvider::lineColumnInTextForOffset(unsigned offset)
 }
 
 } // namespace JSC
-

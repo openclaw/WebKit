@@ -54,8 +54,11 @@ Batch 1 is published from `openclaw/batch-1` so concurrently reviewed batch-2
 engine changes can land on `openclaw/main` without entering this release. Both
 branches require the same protected environment and full-SHA/green-job checks.
 
-Pull requests run **OpenClaw engine checks**, a read-only Linux build using the same
-lane recipe and Bun qualification gate. It also runs the ArrayBuffer accounting
+Pull requests run **OpenClaw engine checks** at the exact PR head, with a native
+Linux build using the same lane recipe and Bun qualification gate, plus the
+macOS arm64 fork artifact cross-built on a separate Linux runner. Both jobs are
+read-only; the macOS lane proves compilation, not native macOS execution.
+The native job also runs the ArrayBuffer accounting
 and confirmed parked-waiter inspection regression with LLInt, DFG, FTL and
 concurrent GC. This workflow provides the pre-merge check; it cannot publish.
 
@@ -142,6 +145,8 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+- Cache source-relative stack line and column lookups on demand, including syntax-selected positions.
+- Build both fork engine artifacts at the exact pull-request head before landing, with native Linux qualification and a Linux-hosted macOS arm64 compilation check.
 - Keep syntax-selected stack positions separate from exception ranges for calls, constructors, property reads, and async continuations. Preserve the positions across bytecode rewriting, optimization, and cache replay.
 
 - Add real byte-based JSC heap allocation sampling with weighted allocating-stack profiles and independent major/minor collection inclusion.
@@ -156,3 +161,9 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 `CodeBlock::callSitePositionForBytecodeIndex` returns an optional absolute source offset for an exact instruction or async resume label. Stack readers use this position while exception expression ranges and debugger line tables retain their existing divots. RareData owns the two sparse vectors, including decoded cache entries; the bytecode cache revision prevents older layouts from being reused.
 
 Bun must be rebuilt with its matching stack-reader adapter. It must also preserve built-in error constructor syntax: rewriting `new Error()` as `Error()` changes the position and allows a returning arrow to become a proper tail call. The engine's proper-tail-call behavior is unchanged. The integration continues @robobun’s upstream Bun source-position work in [#35179](https://github.com/oven-sh/bun/pull/35179), [#37396](https://github.com/oven-sh/bun/pull/37396), and [#41580](https://github.com/oven-sh/bun/pull/41580).
+
+The source provider caches only requested line/column conversions under its existing
+line-table lock. Coordinates remain relative to the provider's text; document
+offsets and builtin provider overrides retain their existing behavior. The cache
+fills only when a reader requests a position, and the persistent bytecode-cache
+format is unchanged.
