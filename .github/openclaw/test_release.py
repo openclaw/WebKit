@@ -24,10 +24,10 @@ class ReleaseIntegrity(unittest.TestCase):
             (d/(label+'.manifest.json')).write_text(json.dumps({'source':SOURCE,'lane':{'label':label},'files':{f.name:{'sha256':release.sha(f),'size':f.stat().st_size}}}))
         w=self.inputs/'windows-arm64-qualification';w.mkdir()
         archive=self.inputs/'bun-webkit-windows-arm64/bun-webkit-windows-arm64.tar.gz'
-        (w/'gate.json').write_text(json.dumps({'passed':True,'source':SOURCE,'lane':'bun-webkit-windows-arm64','architecture':'arm64','sha256':release.sha(archive),'startup':True,'dfg':True,'ffi':True}))
+        (w/'gate.json').write_text(json.dumps({'passed':True,'source':SOURCE,'lane':'bun-webkit-windows-arm64','architecture':'arm64','sha256':release.sha(archive),'startup':True,'dfg':True,'ffi':True,'arraybuffer_accounting':True,'arraybuffer_modes':5}))
     def test_windows_gate_rejects_wrong_source_digest_or_failed_probe(self):
         p=self.inputs/'windows-arm64-qualification/gate.json';original=json.loads(p.read_text())
-        for key,value in [('source','b'*40),('sha256','0'*64),('architecture','x64'),('startup',False),('dfg',False),('ffi',False)]:
+        for key,value in [('source','b'*40),('sha256','0'*64),('architecture','x64'),('startup',False),('dfg',False),('ffi',False),('arraybuffer_accounting',False),('arraybuffer_accounting',None),('arraybuffer_modes',4),('arraybuffer_modes',None)]:
             with self.subTest(key=key):
                 p.write_text(json.dumps({**original,key:value}))
                 with self.assertRaisesRegex(ValueError,'native Windows ARM64'):self.assemble()

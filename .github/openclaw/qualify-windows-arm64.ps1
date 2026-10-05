@@ -36,5 +36,18 @@ $result = & $jsc -e $probe
 if ($LASTEXITCODE -ne 0 -or $result -cne 'windows-arm64-jsc-ok') { throw 'Native JSC startup/JIT probe failed.' }
 & $ffi
 if ($LASTEXITCODE -ne 0) { throw 'Native testFFI failed.' }
-@{ passed = $true; source = $Source; lane = $label; sha256 = $digest; architecture = 'arm64'; startup = $true; dfg = $true; ffi = $true } |
+$fixture = Join-Path $PSScriptRoot '../../JSTests/stress/array-buffer-accounting.js'
+$modes = @(
+  @{ Name = 'interpreter'; Flags = @('--useJIT=false') },
+  @{ Name = 'baseline'; Flags = @('--useDFGJIT=false', '--useFTLJIT=false') },
+  @{ Name = 'dfg'; Flags = @('--useFTLJIT=false', '--useConcurrentJIT=false') },
+  @{ Name = 'ftl'; Flags = @('--useConcurrentJIT=false', '--thresholdForJITAfterWarmUp=10', '--thresholdForOptimizeAfterWarmUp=20', '--thresholdForFTLOptimizeAfterWarmUp=20') },
+  @{ Name = 'concurrent'; Flags = @('--gcAtEnd=true', '--useConcurrentGC=true') }
+)
+foreach ($mode in $modes) {
+  $flags = @('--useGenerationalGC=true', '--forceMiniVMMode=false') + $mode.Flags
+  & $jsc @flags $fixture *> (Join-Path $OutputDirectory "accounting-$($mode.Name).log")
+  if ($LASTEXITCODE -ne 0) { throw "Native ARM64 ArrayBuffer accounting failed in $($mode.Name) mode." }
+}
+@{ passed = $true; source = $Source; lane = $label; sha256 = $digest; architecture = 'arm64'; startup = $true; dfg = $true; ffi = $true; arraybuffer_accounting = $true; arraybuffer_modes = $modes.Count } |
   ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $OutputDirectory 'gate.json')

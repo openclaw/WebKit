@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix ARM64 MacroAssembler register-to-memory `add64` operand order, restoring DFG typed-array allocation accounting and preserving the source register.
+
 - Fix `Intl.Segmenter` containing lookups around surrogate pairs so segment boundaries and word status agree with iteration.
 - Expose the require(esm) `__esModule` marker as an own enumerable namespace property while preserving unmarked imports and live bindings. Adapts [oven-sh/WebKit#279](https://github.com/oven-sh/WebKit/pull/279). Thanks @robobun!
 
