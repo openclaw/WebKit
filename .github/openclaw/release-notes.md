@@ -1,4 +1,10 @@
-This release rebases the qualified OpenClaw engine patches onto upstream `5718a6ec579b98362ea7276a426deedcc6281ef5`.
+This release adds the non-LTO Windows ARM64 artifact to the qualified OpenClaw engine on upstream `5718a6ec579b98362ea7276a426deedcc6281ef5`, with native Windows 11 ARM64 startup, DFG JIT and FFI gates bound to the archive and source.
+
+- Build Windows ARM64 with the unchanged upstream cross-compilation recipe and require both JSC and testFFI to be native ARM64 PE files.
+
+The previously released engine changes remain included:
+
+- Cache requested provider-relative stack line and column conversions under the existing line-table lock, preserving document offsets, builtin overrides, and persistent bytecode format; thanks @steipete. Regressions cover repeated reads, independent providers, UTF-16 columns, and compressed line-table boundaries across interpreter/JIT tiers and cache modes.
 
 - Release free allocator memory from idle compiler threads and long Atomics waits; thanks @Jarred-Sumner.
 - Preserve Segmenter surrogate boundaries, opt-in Proxy global prototypes, module-loader AsyncLocalStorage context, and per-VM worker heap/stack budgets; thanks @steipete and @robobun.

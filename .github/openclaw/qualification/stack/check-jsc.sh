@@ -3,14 +3,17 @@ set -euo pipefail
 : "${WEBKIT_CHECKOUT:?}" "${JSC:?}" "${RESULT_DIR:?}"
 mkdir -p "$RESULT_DIR"
 cd "$WEBKIT_CHECKOUT"
-for mode in default interpreter optimizer eager-ftl; do
+for mode in default interpreter baseline dfg optimizer eager-ftl concurrent; do
  args=()
  case "$mode" in
  interpreter) args=(--useJIT=false);;
+ baseline) args=(--useDFGJIT=false --useFTLJIT=false);;
+ dfg) args=(--useFTLJIT=false --useConcurrentJIT=false);;
  optimizer) args=(--useBytecodeOptimizer=true);;
- eager-ftl) args=(--useConcurrentJIT=false --thresholdForOptimizeAfterWarmUp=10 --thresholdForFTLOptimizeAfterWarmUp=20);;
+ eager-ftl) args=(--useConcurrentJIT=false --thresholdForJITAfterWarmUp=10 --thresholdForOptimizeAfterWarmUp=10 --thresholdForFTLOptimizeAfterWarmUp=20);;
+ concurrent) args=(--gcAtEnd=true --useConcurrentGC=true);;
  esac
- for fixture in callsite-syntax-positions.js stack-position-regressions.js callsite-async-position.mjs; do
+ for fixture in callsite-syntax-positions.js stack-position-regressions.js stack-position-regressions-cache.js callsite-async-position.mjs; do
   module=(); case "$fixture" in *.mjs) module=(-m);; esac
   "$JSC" "${args[@]}" "${module[@]}" "JSTests/stress/$fixture" > "$RESULT_DIR/$mode-$fixture.log" 2>&1
  done
@@ -21,7 +24,7 @@ for kind in owned persistent; do
  args=(--diskCachePath="$cache")
  if test "$kind" = persistent; then args+=(--diskCachePayloadIsPersistentForTesting=true); fi
  for repeat in cold warm; do
-  for fixture in callsite-syntax-positions.js stack-position-regressions.js callsite-async-position.mjs; do
+  for fixture in callsite-syntax-positions.js stack-position-regressions.js stack-position-regressions-cache.js callsite-async-position.mjs; do
    module=(); case "$fixture" in *.mjs) module=(-m);; esac
    "$JSC" "${args[@]}" "${module[@]}" "JSTests/stress/$fixture" > "$RESULT_DIR/cache-$kind-$repeat-$fixture.log" 2>&1
   done
