@@ -49,7 +49,7 @@ jobs:
           cmake --build "$RUNNER_TEMP/jsc-build" --target jsc testmasm testFFI -j4
       - name: Qualify assembler and all JIT tiers
         env:
-          JSC_BUILD_DIR: ${{ runner.temp }}/jsc-build
+          ENGINE_BUILD_DIR: ${{ runner.temp }}/jsc-build
           QUALIFICATION_DIR: ${{ runner.temp }}/arm64-proof
         run: bash .github/openclaw/qualify-arm64.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

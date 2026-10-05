@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
-: "${JSC_BUILD_DIR:?}" "${QUALIFICATION_DIR:?}"
+: "${ENGINE_BUILD_DIR:?}" "${QUALIFICATION_DIR:?}"
 case "$(uname -m)" in arm64|aarch64) ;; *) echo 'Native ARM64 host required' >&2; exit 1;; esac
 mkdir -p "$QUALIFICATION_DIR"
 QUALIFICATION_DIR=$(cd "$QUALIFICATION_DIR" && pwd)
-jsc="$JSC_BUILD_DIR/bin/jsc"
-"$JSC_BUILD_DIR/bin/testmasm" > "$QUALIFICATION_DIR/testmasm.log" 2>&1
-"$JSC_BUILD_DIR/bin/testFFI" > "$QUALIFICATION_DIR/testffi.log" 2>&1
-Tools/Scripts/run-jsc-stress-tests JSTests/stress --jsc "$jsc" --child-processes "${JSC_TEST_JOBS:-4}" \
+jsc="$ENGINE_BUILD_DIR/bin/jsc"
+"$ENGINE_BUILD_DIR/bin/testmasm" > "$QUALIFICATION_DIR/testmasm.log" 2>&1
+"$ENGINE_BUILD_DIR/bin/testFFI" > "$QUALIFICATION_DIR/testffi.log" 2>&1
+Tools/Scripts/run-jsc-stress-tests JSTests/stress --jsc "$jsc" --child-processes "${ENGINE_TEST_JOBS:-4}" \
   --filter 'promise|microtask|dynamic-import|bun-async-context|module-loader|top-level-await|async-module|module-namespace|intl-segmenter|callsite-syntax-positions|stack-position-regressions|error-stack' \
   --output-dir "$QUALIFICATION_DIR/jsc-stress" --no-retry > "$QUALIFICATION_DIR/jsc-stress.log" 2>&1
 python3 .github/openclaw/verify-jsc-results.py "$QUALIFICATION_DIR/jsc-stress" --require module-namespace-esmodule-marker.js --require callsite-syntax-positions.js --require stack-position-regressions.js
-Tools/Scripts/run-jsc-stress-tests JSTests/modules.yaml --jsc "$jsc" --child-processes "${JSC_TEST_JOBS:-4}" \
+Tools/Scripts/run-jsc-stress-tests JSTests/modules.yaml --jsc "$jsc" --child-processes "${ENGINE_TEST_JOBS:-4}" \
   --output-dir "$QUALIFICATION_DIR/jsc-modules" --no-retry > "$QUALIFICATION_DIR/jsc-modules.log" 2>&1
 # Accounting requires generational GC; run its established explicit modes below.
 for fixture in array-buffer-accounting heap-allocation-sampling; do
