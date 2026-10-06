@@ -244,6 +244,10 @@ CollectionScope Collector::decideCollectionScope()
 {
     if (!Options::useGenerationalGC() || VM::isInMiniMode())
         return CollectionScope::Full;
+#if USE(BUN_JSC_ADDITIONS)
+    if (m_heap.workerRequiresFullCollection())
+        return CollectionScope::Full;
+#endif
     if (m_currentRequest.scope)
         return *m_currentRequest.scope;
     if (m_heap.m_shouldDoFullCollection || m_heap.overCriticalMemoryThreshold())
@@ -611,6 +615,7 @@ NEVER_INLINE bool Collector::runEndPhase(GCConductor conn)
 
     m_afterGC = MonotonicTime::now();
 
+    auto endingCollectionScope = m_heap.collectionScope();
     m_heap.didFinishCollection();
 
     // Upstream removed this callback as unused (322293@main). Bun sets it (JSC__VM__collectAsyncIdle).
@@ -622,12 +627,35 @@ NEVER_INLINE bool Collector::runEndPhase(GCConductor conn)
         dataLog("p=", thisPauseMS, "ms (max ", maxPauseMS(thisPauseMS), "), cycle ", (m_afterGC - m_beforeGC).milliseconds(), "ms END]\n");
     }
 
+    GCRequest::Ticket workerVerificationTicket = 0;
     {
         Locker locker { *m_threadLock };
         m_requests.removeFirst();
         m_lastServedTicket++;
+#if USE(BUN_JSC_ADDITIONS)
+        if (endingCollectionScope == CollectionScope::Full) {
+            auto completed = m_lastServedTicket;
+            m_heap.m_workerVerificationTicket.compare_exchange_strong(completed, 0, std::memory_order_acq_rel);
+        }
+        if (endingCollectionScope == CollectionScope::Eden && m_heap.m_embedderMaxHeapSize
+            && m_heap.m_workerHeapSizeUpperBound >= m_heap.m_embedderMaxHeapSize && m_heap.m_isSafeToCollect && !m_heap.m_isShuttingDown && !m_threadShouldStop) {
+            if (m_requests.isEmpty()) {
+                RELEASE_ASSERT(m_lastGrantedTicket != std::numeric_limits<GCRequest::Ticket>::max());
+                m_requests.append(GCRequest(CollectionScope::Full));
+                ++m_lastGrantedTicket;
+            }
+            workerVerificationTicket = m_lastServedTicket + 1;
+        }
+#endif
         m_heap.clearMutatorWaiting();
     }
+#if USE(BUN_JSC_ADDITIONS)
+    if (workerVerificationTicket)
+        m_heap.scheduleWorkerHeapVerification(workerVerificationTicket);
+#else
+    UNUSED_PARAM(workerVerificationTicket);
+    UNUSED_PARAM(endingCollectionScope);
+#endif
     ParkingLot::unparkAll(&m_heap.m_worldState);
 
     dataLogLnIf(Options::logGC(), "GC END!");

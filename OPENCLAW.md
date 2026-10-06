@@ -45,7 +45,7 @@ Qualification-only Bun adapters live under `.github/openclaw/qualification`;
 they do not update or publish the Bun fork. The job runs the original 44-file
 fork selector output plus its two dependency checks, requires identical all-pass
 results, and checks Segmenter, four Proxy regressions, both 14-variant ALS hook
-modes and at least 14 worker resource-limit cases. Other platforms are built;
+modes and at least 16 worker resource-limit cases. Other platforms are built;
 this gate does not claim native runtime qualification on every architecture.
 
 ## Publish and verify
@@ -148,6 +148,8 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 - Deliver pending worker heap-limit termination promptly after GC by invalidating optimized code on the mutator, preserving full-GC live accounting and external-buffer exclusions.
 
 - Preserve mimalloc pthread TLS-key ownership during shell exit by draining active setters before deletion; cover both late and in-flight allocations with native regressions. Builds on oven-sh/WebKit#698, thanks @dylan-conway.
+- Let workers use young-generation collections within their heap budgets; verify exhaustion with a full collection and preserve progress while idle through the matching Bun timer adapter.
+- Bound budgeted workers' post-full growth independently of machine-wide RAM, while retaining the collector minimum, separate nursery pacing and full-only heap-limit verification.
 
 - Fix ARM64 MacroAssembler register-to-memory `add64` operand order, restoring DFG typed-array allocation accounting and preserving the source register; cover the operation in testmasm and native ARM64 qualification.
 
