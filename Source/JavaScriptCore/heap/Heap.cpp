@@ -109,6 +109,7 @@
 #include "TypeProfilerLog.h"
 #include "UnlinkedEvalCodeBlock.h"
 #include "VM.h"
+#include "VMTrapsInlines.h"
 #include "VerifierSlotVisitor.h"
 #include "WasmCallee.h"
 #include "WeakMapImplInlines.h"
@@ -2381,6 +2382,12 @@ void Heap::runCollectionEpilogue()
     
     if (shouldSweepSynchronously())
         sweepSynchronously();
+
+#if USE(BUN_JSC_ADDITIONS)
+    // A capped worker may spend nearly all its time in GC, starving signal-based trap delivery.
+    if (m_heapLimitExceeded)
+        vm().traps().invalidateCodeBlocksForPendingTraps();
+#endif
 
     if (Options::logGC()) [[unlikely]] {
         MonotonicTime after = MonotonicTime::now();
