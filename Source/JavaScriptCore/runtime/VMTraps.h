@@ -227,7 +227,7 @@ public:
     inline void deferTermination(DeferAction);
     inline void undoDeferTermination(DeferAction);
 
-    inline void notifyGrabAllLocks();
+    inline void invalidateCodeBlocksForPendingTraps();
 
     bool hasTrapBit(Event event)
     {
