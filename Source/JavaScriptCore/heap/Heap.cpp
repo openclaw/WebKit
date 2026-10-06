@@ -2507,12 +2507,34 @@ NEVER_INLINE bool Heap::runEndPhase(GCConductor conn)
         dataLog("p=", thisPauseMS, "ms (max ", maxPauseMS(thisPauseMS), "), cycle ", (m_afterGC - m_beforeGC).milliseconds(), "ms END]\n");
     }
     
+    Ticket workerVerificationTicket = 0;
     {
         Locker locker { *m_threadLock };
         m_requests.removeFirst();
         m_lastServedTicket++;
+#if USE(BUN_JSC_ADDITIONS)
+        if (endingCollectionScope == CollectionScope::Full) {
+            auto completed = m_lastServedTicket;
+            m_workerVerificationTicket.compare_exchange_strong(completed, 0, std::memory_order_acq_rel);
+        }
+        if (endingCollectionScope == CollectionScope::Eden && m_embedderMaxHeapSize
+            && m_workerHeapSizeUpperBound >= m_embedderMaxHeapSize && m_isSafeToCollect && !m_isShuttingDown && !m_threadShouldStop) {
+            if (m_requests.isEmpty()) {
+                RELEASE_ASSERT(m_lastGrantedTicket != std::numeric_limits<Ticket>::max());
+                m_requests.append(GCRequest(CollectionScope::Full));
+                ++m_lastGrantedTicket;
+            }
+            workerVerificationTicket = m_lastServedTicket + 1;
+        }
+#endif
         clearMutatorWaiting();
     }
+#if USE(BUN_JSC_ADDITIONS)
+    if (workerVerificationTicket)
+        scheduleWorkerHeapVerification(workerVerificationTicket);
+#else
+    UNUSED_PARAM(workerVerificationTicket);
+#endif
     ParkingLot::unparkAll(&m_worldState);
 
     dataLogLnIf(Options::logGC(), "GC END!");
@@ -3097,6 +3119,28 @@ void Heap::waitForCollection(Ticket ticket)
         });
 }
 
+#if USE(BUN_JSC_ADDITIONS)
+void Heap::scheduleWorkerHeapVerification(Ticket ticket)
+{
+    if (!m_isSafeToCollect || m_isShuttingDown || m_threadShouldStop)
+        return;
+    auto previous = m_workerVerificationTicket.load(std::memory_order_acquire);
+    do {
+        if (previous >= ticket)
+            return;
+    } while (!m_workerVerificationTicket.compare_exchange_weak(previous, ticket, std::memory_order_acq_rel));
+    m_stopIfNecessaryTimer->scheduleWorkerHeapVerification();
+}
+
+void Heap::finishWorkerHeapVerification()
+{
+    while (auto ticket = m_workerVerificationTicket.load(std::memory_order_acquire)) {
+        waitForCollection(ticket);
+        m_workerVerificationTicket.compare_exchange_strong(ticket, 0, std::memory_order_acq_rel);
+    }
+}
+#endif
+
 void Heap::sweepEagerlyInEpilogue()
 {
     m_objectSpace.sweepPreciseAllocations();
@@ -3127,6 +3171,10 @@ bool Heap::suspendCompilerThreads()
 void Heap::willStartCollection()
 {
     ++m_gcVersion;
+#if USE(BUN_JSC_ADDITIONS)
+    if (workerRequiresFullCollection())
+        scheduleWorkerHeapVerification(m_lastServedTicket + 1);
+#endif
     if (Options::verifyGC()) [[unlikely]] {
         m_verifierSlotVisitor = makeUnique<VerifierSlotVisitor>(*this);
         ASSERT(!m_isMarkingForGCVerifier);
@@ -3250,26 +3298,58 @@ void Heap::setWorkerHeapLimits(size_t heapBytes, size_t edenBytes)
 {
     m_embedderMaxHeapSize = heapBytes;
     m_embedderMaxEdenSize = edenBytes;
-    applyWorkerAllocationLimits(m_sizeAfterLastCollect);
+    m_workerHasFullAccounting = false;
+    updateWorkerHeapAccounting(false);
+    applyWorkerAllocationLimits();
 }
 
-void Heap::applyWorkerAllocationLimits(size_t currentHeapSize)
+void Heap::updateWorkerHeapAccounting(bool isFullCollection)
+{
+    if (isFullCollection) {
+        m_workerBufferBytesAfterFullCollection = CheckedSize(m_fastArrayBufferBytesVisited.load(std::memory_order_relaxed));
+        m_workerBufferBytesAfterFullCollection += m_externalArrayBufferBytesVisited.load(std::memory_order_relaxed);
+        m_workerHasFullAccounting = true;
+    }
+    // Eden preserves these old-generation charges. Only the preceding full's
+    // typed-vector deduction stays paired with them; ArrayBuffer bytes stay out.
+    CheckedSize accounted = m_totalBytesVisited;
+    accounted += m_extraMemorySize.loadRelaxed();
+    accounted += m_deprecatedExtraMemorySize;
+    if (accounted.hasOverflowed() || (m_workerHasFullAccounting && m_workerBufferBytesAfterFullCollection.hasOverflowed()))
+        m_workerHeapSizeUpperBound = std::numeric_limits<size_t>::max();
+    else {
+        size_t vectors = m_workerHasFullAccounting ? m_workerBufferBytesAfterFullCollection.value() : 0;
+        ASSERT(accounted.value() >= vectors);
+        m_workerHeapSizeUpperBound = accounted.value() >= vectors
+            ? accounted.value() - vectors : std::numeric_limits<size_t>::max();
+    }
+    m_workerAllocatedAtLastCollection = totalBytesAllocated();
+}
+
+size_t Heap::remainingWorkerAllocationBudget() const
+{
+    if (!m_embedderMaxHeapSize)
+        return std::numeric_limits<size_t>::max();
+    size_t remaining = m_embedderMaxHeapSize > m_workerHeapSizeUpperBound
+        ? m_embedderMaxHeapSize - m_workerHeapSizeUpperBound : 0;
+    uint64_t total = totalBytesAllocated();
+    if (total < m_workerAllocatedAtLastCollection)
+        return 0;
+    uint64_t allocated = total - m_workerAllocatedAtLastCollection;
+    return allocated >= remaining ? 0 : remaining - static_cast<size_t>(allocated);
+}
+
+bool Heap::workerRequiresFullCollection() const
+{
+    return m_embedderMaxHeapSize && (!m_workerHasFullAccounting || !remainingWorkerAllocationBudget());
+}
+
+void Heap::applyWorkerAllocationLimits()
 {
     if (m_embedderMaxEdenSize)
         m_maxEdenSize = std::min(m_maxEdenSize, m_embedderMaxEdenSize);
-    if (m_embedderMaxHeapSize) {
-        // Allocation pressure requests a full GC; only the post-full-GC live set may terminate a VM.
-        size_t remaining = m_embedderMaxHeapSize > m_sizeAfterLastFullCollectExcludingArrayBuffers
-            ? m_embedderMaxHeapSize - m_sizeAfterLastFullCollectExcludingArrayBuffers : 1;
-        m_maxEdenSize = std::min(m_maxEdenSize, remaining);
-        m_shouldDoFullCollection = true;
-    }
-    if (m_embedderMaxHeapSize || m_embedderMaxEdenSize) {
-        CheckedSize nextLimit = currentHeapSize;
-        nextLimit += std::max<size_t>(1, m_maxEdenSize);
-        if (!nextLimit.hasOverflowed())
-            m_maxHeapSize = std::min(m_maxHeapSize, nextLimit.value());
-    }
+    if (m_embedderMaxHeapSize)
+        m_maxEdenSize = std::min(m_maxEdenSize, std::max<size_t>(1, remainingWorkerAllocationBudget()));
 }
 #endif
 
@@ -3314,7 +3394,8 @@ void Heap::updateAllocationLimits()
         // the new allocation limit based on the current size of the heap, with a
         // fixed minimum.
         size_t lastMaxHeapSize = m_maxHeapSize;
-        m_maxHeapSize = std::max(minHeapSize(m_heapType, m_ramSize), proportionalHeapSize(currentHeapSize, m_ramSize));
+        size_t minimumHeapSize = minHeapSize(m_heapType, m_ramSize);
+        m_maxHeapSize = std::max(minimumHeapSize, proportionalHeapSize(currentHeapSize, m_ramSize));
         m_maxEdenSize = m_maxHeapSize - currentHeapSize;
         if (m_isInOpportunisticTask && !isCritical) {
             // After an Opportunistic Full GC, we allow eden to occupy all the space we recovered.
@@ -3323,6 +3404,16 @@ void Heap::updateAllocationLimits()
             // Eden GC to ensure that eden can grow to at least m_maxHeapSize.
             m_maxHeapSize = std::max(m_maxHeapSize, lastMaxHeapSize);
         }
+#if USE(BUN_JSC_ADDITIONS)
+        if (m_embedderMaxHeapSize) {
+            // Each budgeted worker shares the machine's RAM with other VMs.
+            CheckedSize workerGrowthCeiling = currentHeapSize;
+            workerGrowthCeiling += currentHeapSize;
+            if (!workerGrowthCeiling.hasOverflowed())
+                m_maxHeapSize = std::min(m_maxHeapSize, std::max(minimumHeapSize, workerGrowthCeiling.value()));
+            m_maxEdenSize = std::min(m_maxEdenSize, m_maxHeapSize - currentHeapSize);
+        }
+#endif
         dataLogLnIf(verbose, "Full: maxHeapSize = ", m_maxHeapSize);
         dataLogLnIf(verbose, "Full: maxEdenSize = ", m_maxEdenSize);
         m_sizeAfterLastFullCollect = currentHeapSize;
@@ -3356,8 +3447,10 @@ void Heap::updateAllocationLimits()
         m_sizeAfterLastFullCollectExcludingArrayBuffers = currentHeapSize > buffers ? currentHeapSize - buffers : 0;
         m_heapLimitExceeded = m_embedderMaxHeapSize && m_sizeAfterLastFullCollectExcludingArrayBuffers > m_embedderMaxHeapSize;
     }
+    if (m_embedderMaxHeapSize)
+        updateWorkerHeapAccounting(m_collectionScope == CollectionScope::Full);
     if (m_embedderMaxHeapSize || m_embedderMaxEdenSize)
-        applyWorkerAllocationLimits(currentHeapSize);
+        applyWorkerAllocationLimits();
     if (std::exchange(m_reenableEdenActivityCallback, false) && m_edenActivityCallback)
         m_edenActivityCallback->setEnabled(true);
     if (std::exchange(m_reenableFullActivityCallback, false) && m_fullActivityCallback)
@@ -3550,6 +3643,10 @@ bool Heap::shouldDoFullCollection()
 {
     if (!useGenerationalGC())
         return true;
+#if USE(BUN_JSC_ADDITIONS)
+    if (workerRequiresFullCollection())
+        return true;
+#endif
 
     if (!m_currentRequest.scope)
         return m_shouldDoFullCollection || overCriticalMemoryThreshold();
@@ -3742,6 +3839,10 @@ void Heap::collectIfNecessaryOrDefer(GCDeferralContext* deferralContext)
 
         ASSERT(m_maxHeapSize > m_sizeAfterLastCollect);
         size_t bytesAllowedThisCycle = m_maxHeapSize - m_sizeAfterLastCollect;
+#if USE(BUN_JSC_ADDITIONS)
+        if (m_embedderMaxHeapSize || m_embedderMaxEdenSize)
+            bytesAllowedThisCycle = std::min(bytesAllowedThisCycle, m_maxEdenSize);
+#endif
 
         bool isCritical = overCriticalMemoryThreshold();
         if (isCritical)

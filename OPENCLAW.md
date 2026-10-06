@@ -46,7 +46,7 @@ Qualification-only Bun adapters live under `.github/openclaw/qualification`;
 they do not update or publish the Bun fork. The job runs the original 44-file
 fork selector output plus its two dependency checks, requires identical all-pass
 results, and checks Segmenter, four Proxy regressions, both 14-variant ALS hook
-modes and at least 14 worker resource-limit cases. Other platforms are built;
+modes and at least 16 worker resource-limit cases. Other platforms are built;
 this gate does not claim native runtime qualification on every architecture. A
 Windows 11 ARM64 job verifies archive provenance and native ARM64 PE identity,
 then runs JSC startup, DFG JIT, testFFI and ArrayBuffer accounting in five execution modes. Assembly and publication require
@@ -149,6 +149,9 @@ in sync with the Bun integration until that integration becomes the qualificatio
 baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
+
+- Let workers use young-generation collections within their heap budgets; verify exhaustion with a full collection and preserve progress while idle through the matching Bun timer adapter.
+- Bound budgeted workers' post-full growth independently of machine-wide RAM, while retaining the collector minimum, separate nursery pacing and full-only heap-limit verification.
 
 ## Worker termination and allocator exit (2026-10-06)
 
