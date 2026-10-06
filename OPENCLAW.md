@@ -150,6 +150,8 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+- Deliver pending worker heap-limit termination promptly after GC by invalidating optimized code on the mutator, preserving full-GC live accounting and external-buffer exclusions.
+
 - Prevent late JSC helper-thread allocation from overwriting a recycled pthread TLS key during process exit; add a deterministic native allocator-exit regression. Ports the allocator correction from oven-sh/WebKit#698, thanks @dylan-conway.
 
 ## ARM64 arithmetic and Windows artifacts (2026-10-05)
