@@ -148,7 +148,7 @@ void JSLock::didAcquireLock()
     }
 
     // Note: everything below must come after addCurrentThread().
-    m_vm->traps().notifyGrabAllLocks();
+    m_vm->traps().invalidateCodeBlocksForPendingTraps();
 
 #if ENABLE(SAMPLING_PROFILER)
     {

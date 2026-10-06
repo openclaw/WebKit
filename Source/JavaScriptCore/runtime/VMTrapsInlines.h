@@ -67,9 +67,9 @@ ALWAYS_INLINE DeferTraps::~DeferTraps()
     m_traps.m_trapsDeferred = m_previousTrapsDeferred;
 }
 
-inline void VMTraps::notifyGrabAllLocks()
+inline void VMTraps::invalidateCodeBlocksForPendingTraps()
 {
-    if (needHandling(AsyncEvents))
+    if (!m_trapsDeferred && needHandling(AsyncEvents))
         invalidateCodeBlocksOnStack();
 }
 
