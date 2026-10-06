@@ -38,6 +38,7 @@
 #include "SynchronousStopTheWorldMutatorScheduler.h"
 #include "TypeProfiler.h"
 #include "VerifierSlotVisitorInlines.h"
+#include "StopIfNecessaryTimer.h"
 #include <wtf/ListDump.h>
 #include <wtf/ParkingLot.h>
 #include <wtf/Scope.h>
@@ -252,6 +253,14 @@ CollectionScope Collector::decideCollectionScope()
 {
     if (!Options::useGenerationalGC() || VM::isInMiniMode())
         return CollectionScope::Full;
+#if USE(BUN_JSC_ADDITIONS)
+    bool needsWorkerVerification = false;
+    forEachHeap([&](Heap& heap) {
+        needsWorkerVerification |= heap.workerRequiresFullCollection();
+    });
+    if (needsWorkerVerification)
+        return CollectionScope::Full;
+#endif
     if (m_currentRequest.scope)
         return *m_currentRequest.scope;
     // FIXME: This policy probably needs rethinking for global collections, and overCriticalMemoryThreshold()
@@ -659,11 +668,35 @@ NEVER_INLINE bool Collector::runEndPhase(GCConductor conn)
         Locker locker { *m_threadLock };
         m_requests.removeFirst();
         m_lastServedTicket++;
+#if USE(BUN_JSC_ADDITIONS)
+        forEachHeap([&](Heap& heap) {
+            if (heap.m_lastCollectionScope == CollectionScope::Full) {
+                auto completed = m_lastServedTicket;
+                heap.m_workerVerificationTicket.compare_exchange_strong(completed, 0, std::memory_order_acq_rel);
+            }
+            if (heap.m_lastCollectionScope == CollectionScope::Eden && heap.m_embedderMaxHeapSize
+                && heap.m_workerHeapSizeUpperBound >= heap.m_embedderMaxHeapSize
+                && heap.m_isSafeToCollect && !heap.m_isShuttingDown && !m_threadShouldStop) {
+                if (m_requests.isEmpty()) {
+                    RELEASE_ASSERT(m_lastGrantedTicket != std::numeric_limits<GCRequest::Ticket>::max());
+                    m_requests.append(GCRequest(CollectionScope::Full));
+                    ++m_lastGrantedTicket;
+                }
+                auto ticket = m_lastServedTicket + 1;
+                auto previous = heap.m_workerVerificationTicket.load(std::memory_order_acquire);
+                while (previous < ticket && !heap.m_workerVerificationTicket.compare_exchange_weak(previous, ticket, std::memory_order_acq_rel)) { }
+            }
+        });
+#endif
         forEachHeap([](Heap& heap) {
             heap.clearMutatorWaiting();
         });
     }
     forEachHeap([](Heap& heap) {
+#if USE(BUN_JSC_ADDITIONS)
+        if (heap.m_workerVerificationTicket.load(std::memory_order_acquire))
+            heap.m_stopIfNecessaryTimer->scheduleWorkerHeapVerification();
+#endif
         ParkingLot::unparkAll(&heap.m_worldState);
     });
 
