@@ -36,7 +36,7 @@ describe("resourceLimits", () => {
     expect(reads).toBe(2);
   });
 
-  async function runLimitedWorker(limits: object, body: string) {
+  async function runLimitedWorker(limits: object, body: string, env: Record<string, string> = {}) {
     await using child = Bun.spawn({
       cmd: [bunExe(), "-e", `
         const {Worker,resourceLimits}=require('node:worker_threads');
@@ -47,7 +47,7 @@ describe("resourceLimits", () => {
         w.on('error',e=>{result.events.push('error');result.error={name:e.name,code:e.code,message:e.message,limits:w.resourceLimits};});
         w.on('exit',code=>{result.events.push('exit');result.exit=code;result.after=w.resourceLimits;console.log(JSON.stringify(result));});
       `],
-      env: bunEnv,
+      env: { ...bunEnv, ...env },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -67,6 +67,62 @@ describe("resourceLimits", () => {
     const result = await runLimitedWorker(requested, "");
     const limits = { maxYoungGenerationSizeMb: 192, maxOldGenerationSizeMb: 4096, codeRangeSizeMb: 0, stackSizeMb: 4 };
     expect({ online: result.online, inside: result.messages[0].limits, after: result.after, exit: result.exit }).toEqual({ online: limits, inside: limits, after: {}, exit: 0 });
+  });
+
+  const withoutIdleGC = {
+    BUN_GC_TIMER_DISABLE: "1",
+    BUN_IDLE_GC_SECONDS: "0",
+    BUN_DISABLE_STOP_IF_NECESSARY_TIMER: "1",
+    BUN_GC_RUNS_UNTIL_SKIP_RELEASE_ACCESS: "0",
+  };
+
+  test.concurrent("allows natural young collections below the old heap limit", async () => {
+    const result = await runLimitedWorker(
+      { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 1 },
+      `
+        const { GCProfiler } = require('node:v8');
+        const profiler = new GCProfiler();
+        profiler.start();
+        let checksum = 0;
+        for (let round = 0; round < 1000; ++round) {
+          globalThis.batch = new Array(8192).fill(round);
+          checksum += batch[(round * 31) % batch.length];
+        }
+        const records = profiler.stop().statistics;
+        parentPort.postMessage({ checksum, young: records.filter(row => row.gcType === 'Scavenge').length });
+      `,
+      withoutIdleGC,
+    );
+    expect(result.messages.at(-1).checksum).toBe(499500);
+    expect(result.messages.at(-1).young).toBeGreaterThan(1);
+    expect({ events: result.events, exit: result.exit }).toEqual({ events: ["exit"], exit: 0 });
+  });
+
+  test.concurrent("verifies an old-limit crossing found by Eden before an idle worker parks", async () => {
+    const result = await runLimitedWorker(
+      { maxOldGenerationSizeMb: 16, maxYoungGenerationSizeMb: 64 },
+      `
+        const { edenGC } = require('bun:jsc');
+        parentPort.on('message', () => {});
+        globalThis.held = new Array(80000);
+        Bun.gc(true);
+        let checksum = 0;
+        for (let i = 0; i < held.length; ++i) {
+          const text = String(i).padStart(220, 'x');
+          checksum += text.charCodeAt(0) + text.charCodeAt(219);
+          held[i] = text;
+        }
+        parentPort.postMessage(checksum);
+        edenGC();
+      `,
+      withoutIdleGC,
+    );
+    expect(result.messages.at(-1)).toBe(13800000);
+    expect({ events: result.events, code: result.error?.code, exit: result.exit }).toEqual({
+      events: ["error", "exit"],
+      code: "ERR_WORKER_OUT_OF_MEMORY",
+      exit: 1,
+    });
   });
 
   test("terminates only the worker with the Node heap OOM event contract", async () => {

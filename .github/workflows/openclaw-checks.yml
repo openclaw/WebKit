@@ -60,8 +60,8 @@ jobs:
           # $vm is a JavaScript identifier.
           # shellcheck disable=SC2016
           "$RUNNER_TEMP/jsc-artifact/bun-webkit/bin/jsc" --useDollarVM=1 -e 'if (typeof $vm.moduleNamespaceForRequire !== "function") throw new Error("namespace test hook is missing");'
-          Tools/Scripts/run-jsc-stress-tests JSTests/stress --jsc "$RUNNER_TEMP/jsc-artifact/bun-webkit/bin/jsc" --child-processes 16 --filter 'module-namespace|module-loader-security-thenable-namespace' --output-dir "$RUNNER_TEMP/jsc-results" --no-retry
-          python3 .github/openclaw/verify-jsc-results.py "$RUNNER_TEMP/jsc-results"
+          Tools/Scripts/run-jsc-stress-tests JSTests/stress --jsc "$RUNNER_TEMP/jsc-artifact/bun-webkit/bin/jsc" --child-processes 16 --filter 'module-namespace|module-loader-security-thenable-namespace|worker-heap-generational-cadence' --output-dir "$RUNNER_TEMP/jsc-results" --no-retry
+          python3 .github/openclaw/verify-jsc-results.py "$RUNNER_TEMP/jsc-results" --require worker-heap-generational-cadence.js
       - name: Exercise syntax-selected stack positions
         shell: bash
         run: |

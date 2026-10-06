@@ -29,6 +29,7 @@ for arm in baseline candidate; do
     git apply --exclude=CHANGELOG.md --exclude='docs/*' "$inputs/patches/008-namespace.patch"
     git apply --exclude=CHANGELOG.md --exclude='docs/*' "$inputs/patches/009-stack-positions.patch"
     git apply --exclude=CHANGELOG.md --exclude='docs/*' "$inputs/patches/010-arraybuffer-accounting.patch"
+    git apply "$inputs/patches/011-bun-gc-timer-wake.patch"
     cp "$inputs/worker-resource-limits.test.ts" test/js/node/worker_threads/openclaw-resource-limits.test.ts
     git diff --check
     git diff --binary HEAD > "$QUALIFICATION_DIR/bun-adapters.patch"
@@ -89,12 +90,12 @@ assert faith['selected_files']==44 and faith['result_files']==46
 for name in ['als-plugin','als-native']:
  rows=json.loads((root/(name+'.json')).read_text())['results']
  assert len(rows)==14 and all(r['exitCode']==0 for r in rows)
-for name,minimum in [('proxy',4),('resource-limits',14),('namespace',41),('arraybuffer',19),('worker-statistics',7)]:
+for name,minimum in [('proxy',4),('resource-limits',16),('namespace',41),('arraybuffer',19),('worker-statistics',7)]:
  text=(root/(name+'.log')).read_text()
  passes=re.search(r'(\d+) pass',text)
  assert passes and int(passes[1])>=minimum, name+' missing passing cases'
  assert re.search(r'\b0 fail\b',text),name+' failures'
 (root/'gate.json').write_text(json.dumps({'passed':True,'source':sys.argv[2],'bun_commit':sys.argv[3],
- 'selected_files':44,'result_files':46,'als_variants_per_mode':14,'proxy_minimum':4,'resource_minimum':14,
+ 'selected_files':44,'result_files':46,'als_variants_per_mode':14,'proxy_minimum':4,'resource_minimum':16,
  'bun_adapter_sha256':hashlib.sha256((root/'bun-adapters.patch').read_bytes()).hexdigest()},indent=2)+'\n')
 PY
