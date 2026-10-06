@@ -239,8 +239,9 @@ int main()
         rootsSurvived = evaluate(context, "gcProgressRoots.length + gcProgressRoots[32767].child.value", &checksum)
             && checksum == 65535;
         elapsedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+        // Final VM destruction must retain the API lock and its active atom string table.
+        JSGlobalContextRelease(context);
     }
-    JSGlobalContextRelease(context);
     const bool passed = foundPassiveCollector && completedBeforeHelperRelease && !foundLateWaitStall && !timedOut && rootsSurvived;
     std::printf("{\"passed\":%s,\"passiveCollectorObserved\":%s,\"lateWaitStallObserved\":%s,\"completedBeforeHelperRelease\":%s,\"timedOut\":%s,\"rootsSurvived\":%s,\"helperCount\":%u,\"worldStateAtStall\":%u,\"collectorParkingThreadId\":%llu,\"mutatorParkingThreadId\":%llu,\"conditionAddress\":\"%p\",\"worldAddress\":\"%p\",\"elapsedMs\":%.3f}\n",
         passed ? "true" : "false", foundPassiveCollector ? "true" : "false", foundLateWaitStall ? "true" : "false",
