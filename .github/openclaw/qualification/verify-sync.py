@@ -24,7 +24,7 @@ assert json.loads((out/'als-retention.json').read_text())['passed'] is True
 cache=json.loads((out/'stack-cache.json').read_text())
 assert len(cache)==4 and all(r['matches']==r['total']==56 for r in cache if r['arm']=='candidate')
 assert cache[-1]['arm']=='candidate' and cache[-1]['repeat']=='warm' and cache[-1]['cache_hit_proven'] is True
-assert len((out/'engine-limits.log').read_text().splitlines())==7
+assert len((out/'engine-limits.log').read_text().splitlines())==9
 engine=json.loads((root/'engine-gate.json').read_text())
 assert engine['passed'] and engine['source']==sys.argv[2]
 compatibility=json.loads((root/'compatibility-gate.json').read_text())
