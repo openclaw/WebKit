@@ -23,3 +23,5 @@ The new engine requires Bun's updated mimalloc idle hook and matching embedding 
 Source and licenses: LICENSE-SOURCES.txt. Checksums: SHA256SUMS and manifest.json. Build and qualification evidence: provenance.tar.gz.
 
 Rollback by restoring the prior Bun manifest and WebKit pin together, then rebuilding. Prior releases remain available.
+
+Worker heap-cap termination now invalidates optimized code at the mutator GC epilogue, avoiding repeated full collections while a pending termination trap waits for a signal. Full-GC managed live accounting and ArrayBuffer exclusions are unchanged.

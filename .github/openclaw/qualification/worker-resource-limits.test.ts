@@ -99,6 +99,14 @@ describe("resourceLimits", () => {
     expect({ code: result.error?.code, exit: result.exit }).toEqual({ code: "ERR_WORKER_OUT_OF_MEMORY", exit: 1 });
   });
 
+  test("near-limit managed churn survives with external backing stores", async () => {
+    const result = await runLimitedWorker({ maxOldGenerationSizeMb: 32, maxYoungGenerationSizeMb: 4 },
+      "globalThis.held=new Array(22*1024*1024/8).fill(7);globalThis.external=new Uint8Array(64*1024*1024);external[0]=11;let sum=0;for(let i=0;i<128;i++){let temporary=new Array(64*1024).fill(i);sum+=temporary[i];}parentPort.postMessage({sum,length:held.length,value:held[0],external:external.byteLength,byte:external[0]});");
+    expect({ events: result.events, exit: result.exit, value: result.messages.at(-1) }).toEqual({
+      events: ["exit"], exit: 0, value: { sum: 8128, length: 2883584, value: 7, external: 67108864, byte: 11 },
+    });
+  });
+
   test("a young-only limit sizes the nursery without capping retained objects", async () => {
     const result = await runLimitedWorker({ maxYoungGenerationSizeMb: 4 },
       "globalThis.held=[];for(let i=0;i<8;i++)held.push(new Array(1024*1024).fill(i));Bun.gc(true);parentPort.postMessage('retained');");
