@@ -1,10 +1,11 @@
-This release fixes ARM64 register-to-memory 64-bit addition, restoring DFG typed-array allocation accounting and preserving the source register. The testmasm regression checks the stored sum, source register, adjacent memory and 64-bit wraparound. Native macOS and Linux ARM64 qualification covers assembler tests and JSC interpreter, baseline, DFG, FTL and concurrent-GC modes.
+This release delivers pending worker heap-limit termination promptly after GC. It invalidates optimized code at the mutator's collection epilogue so existing JavaScript safe points deliver the pending trap without repeated full collections. Full-GC managed live accounting, heap budgets and ArrayBuffer exclusions are unchanged. Native regressions cover termination after one over-cap full collection and near-limit survival; Bun qualification retains the worker OOM event contract and external-buffer controls.
 
-This release adds the non-LTO Windows ARM64 artifact to the qualified OpenClaw engine on upstream `5718a6ec579b98362ea7276a426deedcc6281ef5`, with native Windows 11 ARM64 startup, DFG JIT and FFI gates bound to the archive and source.
-
-- Build Windows ARM64 with the unchanged upstream cross-compilation recipe and require both JSC and testFFI to be native ARM64 PE files.
+It also fixes the JSC shell's mimalloc process-exit TLS race by closing admission and draining in-flight setters before deleting the pthread key. Deterministic native regressions cover late initialization and an already-admitted setter. Standard Bun builds disable this allocator teardown and are unaffected by that race. Thanks @dylan-conway for the diagnosis in oven-sh/WebKit#698.
 
 The previously released engine changes remain included:
+
+- Correct ARM64 register-to-memory 64-bit addition, restoring DFG typed-array allocation accounting and preserving the source register. Native macOS and Linux ARM64 qualification covers assembler tests and JSC interpreter, baseline, DFG, FTL and concurrent-GC modes.
+- Include the non-LTO Windows ARM64 archive alongside the other nine artifacts on upstream `5718a6ec579b98362ea7276a426deedcc6281ef5`, with native Windows 11 ARM64 startup, DFG JIT, FFI and accounting gates bound to the archive and source. The unchanged upstream cross-compilation recipe requires both JSC and testFFI to be native ARM64 PE files.
 
 - Cache requested provider-relative stack line and column conversions under the existing line-table lock, preserving document offsets, builtin overrides, and persistent bytecode format; thanks @steipete. Regressions cover repeated reads, independent providers, UTF-16 columns, and compressed line-table boundaries across interpreter/JIT tiers and cache modes.
 
@@ -23,5 +24,3 @@ The new engine requires Bun's updated mimalloc idle hook and matching embedding 
 Source and licenses: LICENSE-SOURCES.txt. Checksums: SHA256SUMS and manifest.json. Build and qualification evidence: provenance.tar.gz.
 
 Rollback by restoring the prior Bun manifest and WebKit pin together, then rebuilding. Prior releases remain available.
-
-Worker heap-cap termination now invalidates optimized code at the mutator GC epilogue, avoiding repeated full collections while a pending termination trap waits for a signal. Full-GC managed live accounting and ArrayBuffer exclusions are unchanged.
