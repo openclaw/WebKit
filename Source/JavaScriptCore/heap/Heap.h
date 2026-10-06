@@ -50,6 +50,7 @@
 #include <wtf/ApproximateTime.h>
 #include <wtf/AutomaticThread.h>
 #include <wtf/Box.h>
+#include <wtf/CheckedArithmetic.h>
 #include <wtf/ConcurrentPtrHashSet.h>
 #include <wtf/Deque.h>
 #include <wtf/DoublyLinkedList.h>
@@ -343,6 +344,7 @@ class HeapUtil;
 class Heap {
     WTF_MAKE_NONCOPYABLE(Heap);
 public:
+    friend class StopIfNecessaryTimer;
     static JSC::Heap* heap(const JSValue); // 0 for immediate values
     static JSC::Heap* heap(const HeapCell*);
 
@@ -818,6 +820,10 @@ private:
     
     void waitForMembershipChange(uint64_t ticket);
     void waitForCollection(GCRequest::Ticket);
+#if USE(BUN_JSC_ADDITIONS)
+    void scheduleWorkerHeapVerification(GCRequest::Ticket);
+    void finishWorkerHeapVerification();
+#endif
     void waitForAllCollections();
     
     void willStartCollection(CollectionScope);
@@ -943,11 +949,19 @@ private:
     size_t m_maxEdenSizeWhenCritical;
     size_t m_maxHeapSize;
 #if USE(BUN_JSC_ADDITIONS)
-    void applyWorkerAllocationLimits(size_t currentHeapSize);
+    void updateWorkerHeapAccounting(bool isFullCollection);
+    size_t remainingWorkerAllocationBudget() const;
+    bool workerRequiresFullCollection() const;
+    void applyWorkerAllocationLimits();
     size_t arrayBufferGCMemorySize() const;
     size_t m_embedderMaxHeapSize { 0 };
     size_t m_embedderMaxEdenSize { 0 };
     size_t m_sizeAfterLastFullCollectExcludingArrayBuffers { 0 };
+    size_t m_workerHeapSizeUpperBound { 0 };
+    CheckedSize m_workerBufferBytesAfterFullCollection { 0 };
+    uint64_t m_workerAllocatedAtLastCollection { 0 };
+    bool m_workerHasFullAccounting { false };
+    std::atomic<GCRequest::Ticket> m_workerVerificationTicket { 0 };
     bool m_heapLimitExceeded { false };
 #endif
 

@@ -40,8 +40,19 @@ void StopIfNecessaryTimer::doWork(VM& vm)
 {
     cancelTimer();
     WTF::storeStoreFence();
+#if USE(BUN_JSC_ADDITIONS)
+    vm.heap.finishWorkerHeapVerification();
+#endif
     vm.heap.stopIfNecessary();
 }
+
+#if USE(BUN_JSC_ADDITIONS)
+void StopIfNecessaryTimer::scheduleWorkerHeapVerification()
+{
+    // A heap-limit decision cannot depend on optional idle GC maintenance.
+    setTimeUntilFire(0_s);
+}
+#endif
 
 void StopIfNecessaryTimer::scheduleSoon()
 {

@@ -39,6 +39,9 @@ public:
     void doWork(VM&) final;
     
     void scheduleSoon();
+#if USE(BUN_JSC_ADDITIONS)
+    void scheduleWorkerHeapVerification();
+#endif
 
     void LEGACY_NODELETE disable();
 
