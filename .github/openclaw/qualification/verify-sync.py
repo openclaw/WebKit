@@ -25,6 +25,10 @@ cache=json.loads((out/'stack-cache.json').read_text())
 assert len(cache)==4 and all(r['matches']==r['total']==56 for r in cache if r['arm']=='candidate')
 assert cache[-1]['arm']=='candidate' and cache[-1]['repeat']=='warm' and cache[-1]['cache_hit_proven'] is True
 assert len((out/'engine-limits.log').read_text().splitlines())==9
+gc_progress=json.loads((out/'engine-gc-progress.json').read_text())
+assert all(gc_progress[key] is True for key in ['passed','passiveCollectorObserved','completedBeforeHelperRelease','rootsSurvived']),'passive collector did not progress'
+assert all(gc_progress[key] is False for key in ['lateWaitStallObserved','timedOut']),'passive collector stalled'
+assert type(gc_progress['helperCount']) is int and gc_progress['helperCount']>0,'GC helper precondition missing'
 engine=json.loads((root/'engine-gate.json').read_text())
 assert engine['passed'] and engine['source']==sys.argv[2]
 compatibility=json.loads((root/'compatibility-gate.json').read_text())
@@ -36,6 +40,7 @@ assert compatibility['required_namespace_adapter_sha256']==config['required_name
 assert compatibility['only_manifest_changed_after_pairing'] and compatibility['memory_tests']==3 and compatibility['startup'] is True
 record={'passed':True,'base_commit':sys.argv[3],'prepared_tree':sys.argv[4],
         'selected_files':len(selected),'result_rows':len(rows),'regressions':0,'tests':counts,
+        'gc_progress':gc_progress,
         'adapter_sha256':hashlib.sha256((root/'bun-sync-adapters.patch').read_bytes()).hexdigest()}
 (root/'sync-gate.json').write_text(json.dumps(record,indent=2)+'\n')
 gate=json.loads((root/'gate.json').read_text());gate['upstream_sync']=record;gate['engine']=engine;gate['compatibility']=compatibility

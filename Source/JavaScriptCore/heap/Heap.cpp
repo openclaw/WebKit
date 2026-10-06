@@ -2849,6 +2849,13 @@ void Heap::waitForCollector(const Func& func)
             }
         }
         
+        if (!done) {
+            // The collector may already be waiting passively for helper threads. Pair its
+            // predicate and wait with this notification, without holding m_threadLock.
+            Locker locker { m_markingMutex };
+            m_markingConditionVariable.notifyAll();
+        }
+
         // If we're in a stop-the-world scenario, we need to wait for that even if done is true.
         unsigned oldState = m_worldState.load();
         if (stopIfNecessarySlow(oldState))
