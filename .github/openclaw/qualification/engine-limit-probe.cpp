@@ -7,7 +7,7 @@
 #include <JavaScriptCore/VM.h>
 #include <JavaScriptCore/HeapObserver.h>
 #include <JavaScriptCore/VMTraps.h>
-#include <wtf/BinarySemaphore.h>
+#include <wtf/threads/BinarySemaphore.h>
 #include <wtf/MonotonicTime.h>
 #include <wtf/WorkQueue.h>
 #include <cstdio>
