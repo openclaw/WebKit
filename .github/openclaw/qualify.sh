@@ -68,6 +68,15 @@ unset BUN_WEBKIT_ARTIFACT_MANIFEST BUN_BUILD_CACHE_DIR BUN_BUILD_PREFETCH_DIR
 "$candidate" test test/js/node/process/process.test.js -t 'ArrayBuffer memory ownership' > "$QUALIFICATION_DIR/arraybuffer.log" 2>&1
 "$candidate" test test/js/node/worker_threads/worker_threads.test.ts -t 'getHeapStatistics' > "$QUALIFICATION_DIR/worker-statistics.log" 2>&1
 "$candidate" test test/js/node/worker_threads/openclaw-resource-limits.test.ts -t 'resourceLimits' > "$QUALIFICATION_DIR/resource-limits.log" 2>&1
+mkdir -p "$QUALIFICATION_DIR/worker-engine"
+tar -xzf "$ARTIFACT_DIR/bun-webkit-linux-amd64.tar.gz" -C "$QUALIFICATION_DIR/worker-engine"
+WK="$QUALIFICATION_DIR/worker-engine/bun-webkit"
+clang++-23 -std=c++23 -O2 -DNDEBUG -DBUILDING_WITH_CMAKE=1 -DHAVE_CONFIG_H=1 \
+  -I"$WK/include" -I"$WK/include/JavaScriptCore" -I"$WK/include/wtf" \
+  "$inputs/engine-limit-probe.cpp" "$QUALIFICATION_DIR/bun/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o" \
+  -Wl,--start-group "$WK"/lib/*.a -Wl,--end-group -lpthread -ldl -lm -latomic \
+  -o "$QUALIFICATION_DIR/engine-limit-probe" > "$QUALIFICATION_DIR/engine-limit-build.log" 2>&1
+"$QUALIFICATION_DIR/engine-limit-probe" > "$QUALIFICATION_DIR/engine-limits.log" 2>&1
 "$candidate" "$inputs/module-context.mjs" matrix > "$QUALIFICATION_DIR/als-plugin.json"
 "$candidate" "$inputs/module-context.mjs" matrix --native-hooks > "$QUALIFICATION_DIR/als-native.json"
 python3 - "$QUALIFICATION_DIR" "$SOURCE_SHA" "$BUN_COMMIT" <<'PY'
