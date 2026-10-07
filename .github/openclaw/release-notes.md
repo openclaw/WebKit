@@ -1,10 +1,12 @@
 This release wakes a passive garbage collector when its mutator starts waiting, allowing collection to progress when shared GC helpers are occupied elsewhere. A native regression checks the late-wait transition, completion before helper release, and survival of rooted objects.
 
-It also delivers pending worker heap-limit termination promptly after GC. It invalidates optimized code at the mutator's collection epilogue so existing JavaScript safe points deliver the pending trap without repeated full collections. Full-GC managed live accounting, heap budgets and ArrayBuffer exclusions are unchanged. Native regressions cover termination after one over-cap full collection and near-limit survival; Bun qualification retains the worker OOM event contract and external-buffer controls.
+Budgeted workers now use young-generation collections and bound post-full-collection growth independently of machine-wide RAM. Full collections still verify heap-limit exhaustion. Idle collection requires the matching immediate GC timer wakeup in [Bun #129](https://github.com/openclaw/bun/pull/129); include that companion when consuming this engine.
+
+The previously released worker termination and allocator fixes remain included. The engine delivers pending worker heap-limit termination promptly after GC. It invalidates optimized code at the mutator's collection epilogue so existing JavaScript safe points deliver the pending trap without repeated full collections. Full-GC managed live accounting, heap budgets and ArrayBuffer exclusions are unchanged. Native regressions cover termination after one over-cap full collection and near-limit survival; Bun qualification retains the worker OOM event contract and external-buffer controls.
 
 It also fixes the JSC shell's mimalloc process-exit TLS race by closing admission and draining in-flight setters before deleting the pthread key. Deterministic native regressions cover late initialization and an already-admitted setter. Standard Bun builds disable this allocator teardown and are unaffected by that race. Thanks @dylan-conway for the diagnosis in oven-sh/WebKit#698.
 
-The previously released engine changes remain included:
+Other previously released engine changes remain included:
 
 - Correct ARM64 register-to-memory 64-bit addition, restoring DFG typed-array allocation accounting and preserving the source register. Native macOS and Linux ARM64 qualification covers assembler tests and JSC interpreter, baseline, DFG, FTL and concurrent-GC modes.
 - Include the non-LTO Windows ARM64 archive alongside the other nine artifacts on upstream `5718a6ec579b98362ea7276a426deedcc6281ef5`, with native Windows 11 ARM64 startup, DFG JIT, FFI and accounting gates bound to the archive and source. The unchanged upstream cross-compilation recipe requires both JSC and testFFI to be native ARM64 PE files.

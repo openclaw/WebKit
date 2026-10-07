@@ -150,6 +150,9 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+## Passive collector progress and worker cadence (2026-10-07)
+
+- Wake passive collectors when a mutator begins waiting, even while shared helpers serve another heap; the native regression requires completion before helper release and preserves rooted objects.
 - Let workers use young-generation collections within their heap budgets; verify exhaustion with a full collection and preserve progress while idle through the matching Bun timer adapter.
 - Bound budgeted workers' post-full growth independently of machine-wide RAM, while retaining the collector minimum, separate nursery pacing and full-only heap-limit verification.
 
