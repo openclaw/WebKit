@@ -755,6 +755,11 @@ SlotVisitor::SharedDrainResult SlotVisitor::drainInParallelPassively(MonotonicTi
             return SharedDrainResult::Done;
         }
 
+        // A mutator can start waiting after the entry check while helpers serve another heap.
+        if (heap.m_worldState.load() & Heap::mutatorWaitingBit) {
+            locker.unlockEarly();
+            return drainInParallel(timeout);
+        }
         collector().m_markingConditionVariable.waitUntil(collector().m_markingMutex, timeout);
     }
 }
