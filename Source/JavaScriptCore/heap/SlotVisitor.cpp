@@ -764,6 +764,13 @@ SlotVisitor::SharedDrainResult SlotVisitor::drainInParallelPassively(MonotonicTi
             return SharedDrainResult::Done;
         }
 
+        // A synchronous collector wait can begin after the entry check. Keep making
+        // progress even when the process-wide helper pool is serving another heap.
+        if (m_heap.m_worldState.load() & Heap::mutatorWaitingBit) {
+            locker.unlockEarly();
+            return drainInParallel(timeout);
+        }
+
         m_heap.m_markingConditionVariable.waitUntil(m_heap.m_markingMutex, timeout);
     }
 }

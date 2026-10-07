@@ -88,4 +88,10 @@ clang++-23 -std=c++23 -O2 -DNDEBUG -DBUILDING_WITH_CMAKE=1 -DHAVE_CONFIG_H=1 \
   -Wl,--start-group "$WK"/lib/*.a -Wl,--end-group -lpthread -ldl -lm -latomic \
   -o "$results/engine-limit-probe" > "$results/engine-limit-build.log" 2>&1
 "$results/engine-limit-probe" > "$results/engine-limits.log" 2>&1
+clang++-23 -std=c++23 -O2 -DNDEBUG -DBUILDING_WITH_CMAKE=1 -DHAVE_CONFIG_H=1 \
+  -I"$WK/include" -I"$WK/include/JavaScriptCore" -I"$WK/include/wtf" \
+  "$inputs/engine-gc-progress-probe.cpp" "$repo/build/qualify-sync/obj/vendor/mimalloc/src/static.c.o" \
+  -Wl,--start-group "$WK"/lib/*.a -Wl,--end-group -lpthread -ldl -lm -latomic \
+  -o "$results/engine-gc-progress-probe" > "$results/engine-gc-progress-build.log" 2>&1
+"$results/engine-gc-progress-probe" > "$results/engine-gc-progress.json" 2> "$results/engine-gc-progress.log"
 python3 "$inputs/verify-sync.py" "$QUALIFICATION_DIR" "$SOURCE_SHA" "$BUN_BASE" "$SYNC_TREE"
