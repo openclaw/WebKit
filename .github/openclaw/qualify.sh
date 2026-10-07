@@ -78,6 +78,12 @@ clang++-23 -std=c++23 -O2 -DNDEBUG -DBUILDING_WITH_CMAKE=1 -DHAVE_CONFIG_H=1 \
   -Wl,--start-group "$WK"/lib/*.a -Wl,--end-group -lpthread -ldl -lm -latomic \
   -o "$QUALIFICATION_DIR/engine-limit-probe" > "$QUALIFICATION_DIR/engine-limit-build.log" 2>&1
 "$QUALIFICATION_DIR/engine-limit-probe" > "$QUALIFICATION_DIR/engine-limits.log" 2>&1
+clang++-23 -std=c++23 -O2 -DNDEBUG -DBUILDING_WITH_CMAKE=1 -DHAVE_CONFIG_H=1 \
+  -I"$WK/include" -I"$WK/include/JavaScriptCore" -I"$WK/include/wtf" \
+  "$inputs/engine-gc-progress-probe.cpp" "$QUALIFICATION_DIR/bun/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o" \
+  -Wl,--start-group "$WK"/lib/*.a -Wl,--end-group -lpthread -ldl -lm -latomic \
+  -o "$QUALIFICATION_DIR/engine-gc-progress-probe" > "$QUALIFICATION_DIR/engine-gc-progress-build.log" 2>&1
+"$QUALIFICATION_DIR/engine-gc-progress-probe" > "$QUALIFICATION_DIR/engine-gc-progress.json" 2> "$QUALIFICATION_DIR/engine-gc-progress.log"
 "$candidate" "$inputs/module-context.mjs" matrix > "$QUALIFICATION_DIR/als-plugin.json"
 "$candidate" "$inputs/module-context.mjs" matrix --native-hooks > "$QUALIFICATION_DIR/als-native.json"
 python3 - "$QUALIFICATION_DIR" "$SOURCE_SHA" "$BUN_COMMIT" <<'PY'
@@ -95,7 +101,12 @@ for name,minimum in [('proxy',4),('resource-limits',16),('namespace',41),('array
  passes=re.search(r'(\d+) pass',text)
  assert passes and int(passes[1])>=minimum, name+' missing passing cases'
  assert re.search(r'\b0 fail\b',text),name+' failures'
+gc_progress=json.loads((root/'engine-gc-progress.json').read_text())
+assert all(gc_progress[key] is True for key in ['passed','passiveCollectorObserved','completedBeforeHelperRelease','rootsSurvived']),'passive collector did not progress'
+assert all(gc_progress[key] is False for key in ['lateWaitStallObserved','timedOut']),'passive collector stalled'
+assert type(gc_progress['helperCount']) is int and gc_progress['helperCount']>0,'GC helper precondition missing'
 (root/'gate.json').write_text(json.dumps({'passed':True,'source':sys.argv[2],'bun_commit':sys.argv[3],
  'selected_files':44,'result_files':46,'als_variants_per_mode':14,'proxy_minimum':4,'resource_minimum':16,
+ 'gc_progress':gc_progress,
  'bun_adapter_sha256':hashlib.sha256((root/'bun-adapters.patch').read_bytes()).hexdigest()},indent=2)+'\n')
 PY
