@@ -104,12 +104,17 @@ use an old Bun executable with headers/libraries from another engine ABI.
 ## Unreleased
 
 - Initialize new VM entry scratch buffers and alignment padding before entering JavaScript or native callees, preventing stale stack values from retaining otherwise unreachable objects during collection.
+- Store deferred microtask entry scopes as two initialized pointers, avoiding stale optional-flag padding that can conservatively retain lexical environments and cancellation reasons.
 
 The Linux x64 `testVMEntryRecord` native target poisons the next entry record and
 checks all fixed-arity and generic entry stubs, locator purity, nested-entry
 preservation, and ordinary JavaScript exception handling. Its synthetic callee
 captures storage before any legitimate spill; it never executes bytecode or
 collects while its deliberately incomplete JavaScript frame is active.
+
+The `testVMEntryScope` native target checks poisoned deferred-scope storage and
+entry, reset, nested-scope, and microtask lifecycle behavior. Deferred scopes keep
+the existing lazy entry and teardown boundaries without allocating heap storage.
 
 ## Batch 1 (2026-10-04)
 

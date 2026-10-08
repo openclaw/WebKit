@@ -31,9 +31,15 @@
 namespace JSC {
 
 ALWAYS_INLINE VMEntryScope::VMEntryScope(VM& vm, JSGlobalObject* globalObject)
-    : m_vm(vm)
-    , m_globalObject(globalObject)
 {
+    enter(vm, globalObject);
+}
+
+ALWAYS_INLINE void VMEntryScope::enter(VM& vm, JSGlobalObject* globalObject)
+{
+    ASSERT(!m_vm);
+    m_vm = &vm;
+    m_globalObject = globalObject;
     if (!vm.entryScope)
         setUpSlow();
     vm.clearLastException();
@@ -41,9 +47,17 @@ ALWAYS_INLINE VMEntryScope::VMEntryScope(VM& vm, JSGlobalObject* globalObject)
 
 ALWAYS_INLINE VMEntryScope::~VMEntryScope()
 {
-    if (m_vm.entryScope != this)
+    reset();
+}
+
+ALWAYS_INLINE void VMEntryScope::reset()
+{
+    if (!m_vm)
         return;
-    tearDownSlow();
+    if (m_vm->entryScope == this)
+        tearDownSlow();
+    m_globalObject = nullptr;
+    m_vm = nullptr;
 }
 
 } // namespace JSC

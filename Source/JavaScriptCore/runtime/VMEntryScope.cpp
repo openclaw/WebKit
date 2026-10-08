@@ -38,9 +38,9 @@ namespace JSC {
 
 void VMEntryScope::setUpSlow()
 {
-    m_vm.entryScope = this;
+    m_vm->entryScope = this;
 #if USE(BUN_JSC_ADDITIONS)
-    m_vm.didEnterFromOutside();
+    m_vm->didEnterFromOutside();
 #endif
 
     auto& thread = Thread::currentSingleton();
@@ -54,18 +54,18 @@ void VMEntryScope::setUpSlow()
 #endif
     }
 
-    if (m_vm.hasAnyEntryScopeServiceRequest()) [[unlikely]]
-        m_vm.executeEntryScopeServicesOnEntry();
+    if (m_vm->hasAnyEntryScopeServiceRequest()) [[unlikely]]
+        m_vm->executeEntryScopeServicesOnEntry();
 }
 
 void VMEntryScope::tearDownSlow()
 {
-    ASSERT_WITH_MESSAGE(!m_vm.hasCheckpointOSRSideState(), "Exitting the VM but pending checkpoint side state still available");
+    ASSERT_WITH_MESSAGE(!m_vm->hasCheckpointOSRSideState(), "Exitting the VM but pending checkpoint side state still available");
 
-    m_vm.entryScope = nullptr;
+    m_vm->entryScope = nullptr;
 
-    if (m_vm.hasAnyEntryScopeServiceRequest()) [[unlikely]]
-        m_vm.executeEntryScopeServicesOnExit();
+    if (m_vm->hasAnyEntryScopeServiceRequest()) [[unlikely]]
+        m_vm->executeEntryScopeServicesOnExit();
 }
 
 } // namespace JSC
