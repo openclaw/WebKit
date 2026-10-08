@@ -296,3 +296,21 @@ if (DEVELOPER_MODE)
         ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
     )
 endif ()
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$" AND NOT ENABLE_C_LOOP)
+    enable_language(ASM)
+    set(testVMEntryRecord_SOURCES
+        ../API/tests/VMEntryRecordProbeX86_64.S
+        ../API/tests/testVMEntryRecord.cpp
+    )
+    set(testVMEntryRecord_DEFINITIONS ${jsc_PRIVATE_DEFINITIONS})
+    set(testVMEntryRecord_PRIVATE_INCLUDE_DIRECTORIES ${jsc_PRIVATE_INCLUDE_DIRECTORIES})
+    set(testVMEntryRecord_FRAMEWORKS ${jsc_FRAMEWORKS})
+    set(testVMEntryRecord_LIBRARIES ${CMAKE_DL_LIBS})
+    if (USE_EXTERNAL_MIMALLOC)
+        list(APPEND testVMEntryRecord_SOURCES ExternalMimallocShims.cpp)
+        list(APPEND testVMEntryRecord_LIBRARIES $<TARGET_OBJECTS:mimalloc-obj>)
+    endif ()
+    WEBKIT_EXECUTABLE_DECLARE(testVMEntryRecord)
+    WEBKIT_EXECUTABLE(testVMEntryRecord)
+endif ()

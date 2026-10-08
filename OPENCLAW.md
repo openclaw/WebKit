@@ -101,6 +101,16 @@ Keep every prior release. Revert the Bun manifest and WebKit source pin together
 then rebuild Bun against that matched engine. Never replace a published asset or
 use an old Bun executable with headers/libraries from another engine ABI.
 
+## Unreleased
+
+- Initialize new VM entry scratch buffers and alignment padding before entering JavaScript or native callees, preventing stale stack values from retaining otherwise unreachable objects during collection.
+
+The Linux x64 `testVMEntryRecord` native target poisons the next entry record and
+checks all fixed-arity and generic entry stubs, locator purity, nested-entry
+preservation, and ordinary JavaScript exception handling. Its synthetic callee
+captures storage before any legitimate spill; it never executes bytecode or
+collects while its deliberately incomplete JavaScript frame is active.
+
 ## Batch 1 (2026-10-04)
 
 - Fix Segmenter queries at surrogate-pair boundaries; thanks @steipete.
