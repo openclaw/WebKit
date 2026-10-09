@@ -1732,14 +1732,14 @@ void VM::drainMicrotasks()
     if (executionForbidden()) [[unlikely]]
         m_defaultMicrotaskQueue->clear();
     else {
-        std::optional<VMEntryScope> entryScope;
+        VMEntryScope entryScope;
         if (!m_defaultMicrotaskQueue->isEmpty())
-            entryScope.emplace(*this, nullptr);
+            entryScope.enter(*this, nullptr);
         while (true) {
             m_defaultMicrotaskQueue->performMicrotaskCheckpoint</* useCallOnEachMicrotask */ true>(*this,
                 [&](JSGlobalObject*, JSGlobalObject* nextGlobalObject) {
                     if (entryScope && nextGlobalObject)
-                        entryScope->setGlobalObject(nextGlobalObject);
+                        entryScope.setGlobalObject(nextGlobalObject);
                 });
             if (hasPendingTerminationException()) [[unlikely]]
                 return;
@@ -1749,7 +1749,7 @@ void VM::drainMicrotasks()
             if (m_defaultMicrotaskQueue->isEmpty())
                 break;
             if (!entryScope)
-                entryScope.emplace(*this, nullptr);
+                entryScope.enter(*this, nullptr);
         }
     }
     finalizeSynchronousJSExecution();

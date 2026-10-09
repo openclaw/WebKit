@@ -26,8 +26,8 @@
 #pragma once
 
 #include "JSExportMacros.h"
-#include <functional>
-#include <wtf/Vector.h>
+#include <wtf/Assertions.h>
+#include <wtf/Noncopyable.h>
 
 namespace JSC {
 
@@ -35,20 +35,39 @@ class JSGlobalObject;
 class VM;
 
 class VMEntryScope {
+    WTF_MAKE_NONCOPYABLE(VMEntryScope);
 public:
+    VMEntryScope() = default;
     VMEntryScope(VM&, JSGlobalObject*);
     ~VMEntryScope();
+    VMEntryScope(VMEntryScope&&) = delete;
+    VMEntryScope& operator=(VMEntryScope&&) = delete;
 
-    VM& vm() const { return m_vm; }
+    void enter(VM&, JSGlobalObject*);
+    void reset();
+    explicit operator bool() const { return m_vm; }
+
+    VM& vm() const
+    {
+        ASSERT(m_vm);
+        return *m_vm;
+    }
     JSGlobalObject* globalObject() const { return m_globalObject; }
-    void setGlobalObject(JSGlobalObject* globalObject) { m_globalObject = globalObject; }
+    void setGlobalObject(JSGlobalObject* globalObject)
+    {
+        ASSERT(m_vm);
+        m_globalObject = globalObject;
+    }
 
 private:
     JS_EXPORT_PRIVATE void setUpSlow();
     JS_EXPORT_PRIVATE void tearDownSlow();
 
-    VM& m_vm;
-    JSGlobalObject* m_globalObject;
+    // Pointer-sized state avoids optional's partial-word flag and uninitialized padding on the scanned stack.
+    VM* m_vm { nullptr };
+    JSGlobalObject* m_globalObject { nullptr };
 };
+
+static_assert(sizeof(VMEntryScope) == 2 * sizeof(void*));
 
 } // namespace JSC
