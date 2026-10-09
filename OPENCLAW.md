@@ -145,6 +145,8 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+- Release class-field identifier references when parser arenas are destroyed, preventing native string leaks during class initialization and Worker churn.
+
 - Deliver pending worker heap-limit termination promptly after GC by invalidating optimized code on the mutator, preserving full-GC live accounting and external-buffer exclusions.
 
 - Preserve mimalloc pthread TLS-key ownership during shell exit by draining active setters before deletion; cover both late and in-flight allocations with native regressions. Builds on oven-sh/WebKit#698, thanks @dylan-conway.
