@@ -17,6 +17,9 @@ cd "$QUALIFICATION_DIR/bun"
 git fetch --depth=1 origin "$BUN_COMMIT"
 git checkout --detach "$BUN_COMMIT"
 git apply "$inputs/patches/000-checksums.patch"
+# Apply openclaw/bun#151 equally to both frozen-source arms.
+git apply "$inputs/patches/012-vm-finalization-fixture.patch"
+sha256sum "$inputs/patches/012-vm-finalization-fixture.patch" > "$QUALIFICATION_DIR/vm-finalization-fixture.sha256"
 bootstrap=$(command -v bun)
 "$bootstrap" install --frozen-lockfile
 (cd test && "$bootstrap" install --frozen-lockfile)
@@ -41,6 +44,7 @@ for arm in baseline candidate; do
     export BUN_BUILD_PREFETCH_DIR="$QUALIFICATION_DIR/baseline-prefetch"
     revision="$BASE"
   fi
+  sha256sum test/js/node/vm/vm.test.ts > "$QUALIFICATION_DIR/vm-test-$arm.sha256"
   export BUN_BUILD_CACHE_DIR="$QUALIFICATION_DIR/cache-$arm"
   env -u GITHUB_SHA -u BUILDKITE_COMMIT -u GIT_SHA "$bootstrap" run build:release --lto=off --webkit-version="$revision" --buildDir="$QUALIFICATION_DIR/bun/build/qualify-$arm" --timings > "$QUALIFICATION_DIR/build-$arm.log" 2>&1
   candidate="$QUALIFICATION_DIR/bun/build/qualify-$arm/bun"
