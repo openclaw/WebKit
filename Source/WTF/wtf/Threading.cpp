@@ -100,6 +100,16 @@ static constexpr pas_thread_suspender s_pasThreadSuspender = {
 
 namespace WTF {
 
+#if OS(DARWIN) || !USE(PTHREADS)
+auto Thread::trySuspend(const ThreadSuspendLocker& locker) -> std::expected<SuspendResult, PlatformSuspendError>
+{
+    auto result = suspend(locker);
+    if (!result)
+        return makeUnexpected(result.error());
+    return SuspendResult::Suspended;
+}
+#endif
+
 // During suspend, suspend or resume should not be executed from the other threads.
 // We use global lock instead of per thread lock.
 // Consider the following case, there are threads A and B.
