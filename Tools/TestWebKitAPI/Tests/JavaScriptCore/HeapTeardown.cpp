@@ -44,7 +44,8 @@ struct FinalizationState {
 static void finalize(JSObjectRef object)
 {
     auto& state = *static_cast<FinalizationState*>(JSObjectGetPrivate(object));
-    auto* cell = ::toJS(object);
+    // The Structure may already be swept when this finalizer runs.
+    auto* cell = uncheckedToJS(object);
     auto& vm = cell->vm();
     ++state.count;
     state.shuttingDown = vm.heap.isShuttingDown();
