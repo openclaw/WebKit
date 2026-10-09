@@ -170,11 +170,12 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
-## Conservative stack retention (2026-10-09)
+## Stack retention and Linux suspension (2026-10-09)
 
 - Initialize new VM entry scratch buffers and alignment padding before entering JavaScript or native callees, preventing stale stack values from retaining otherwise unreachable objects during collection.
 - Store deferred microtask entry scopes as two initialized pointers, avoiding stale optional-flag padding that can conservatively retain lexical environments and cancellation reasons. Adapts the whole-word-state remedy in oven-sh/WebKit#694; thanks @robobun.
 - Verify dead-realm cleanup with the collected-realm fixture from openclaw/bun#151, adapted from oven-sh/bun#44544; thanks @robobun. Retain the qualified Linux Bun executables and hashes for three days, including failed qualification runs.
+- Retry asynchronous VM trap delivery after a foreign-stack suspension refusal without holding the process-wide suspension lock, allowing other VMs to collect while native calls await them. Blocking GC suspension and Mach suspension retain their existing contracts.
 
 ## Passive collector progress and worker cadence (2026-10-07)
 
