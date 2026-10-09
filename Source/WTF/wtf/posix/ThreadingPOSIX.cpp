@@ -665,7 +665,7 @@ auto Thread::suspend(const ThreadSuspendLocker& locker) -> std::expected<void, P
 }
 
 #if !OS(DARWIN)
-auto Thread::trySuspend(const ThreadSuspendLocker&) -> std::expected<SuspendResult, PlatformSuspendError>
+std::expected<Thread::SuspendResult, Thread::PlatformSuspendError> Thread::trySuspend(const ThreadSuspendLocker&)
 {
     RELEASE_ASSERT_WITH_MESSAGE(this != Thread::currentMayBeNull(), "We do not support suspending the current thread itself.");
     if (!m_suspendCount) {

@@ -101,7 +101,7 @@ static constexpr pas_thread_suspender s_pasThreadSuspender = {
 namespace WTF {
 
 #if OS(DARWIN) || !USE(PTHREADS)
-auto Thread::trySuspend(const ThreadSuspendLocker& locker) -> std::expected<SuspendResult, PlatformSuspendError>
+std::expected<Thread::SuspendResult, Thread::PlatformSuspendError> Thread::trySuspend(const ThreadSuspendLocker& locker)
 {
     auto result = suspend(locker);
     if (!result)
