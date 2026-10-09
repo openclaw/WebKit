@@ -35,11 +35,15 @@
 #include "Heap.h"
 #include "InitializeThreading.h"
 #include "JSCellInlines.h"
+#include "JSFunction.h"
 #include "JSGlobalObject.h"
 #include "JSLock.h"
+#include "JSObjectInlines.h"
 #include "JavaScript.h"
 #include "Options.h"
+#include "ThrowScope.h"
 #include "VM.h"
+#include "VMInlines.h"
 #include <atomic>
 #include <cstdio>
 #include <signal.h>
@@ -157,14 +161,19 @@ void runOnForeignStack(State& state)
     activeState = nullptr;
 }
 
-JSValueRef park(JSContextRef context, JSObjectRef, JSObjectRef, size_t, const JSValueRef[], JSValueRef*)
+JSC_DECLARE_HOST_FUNCTION(park);
+JSC_DEFINE_HOST_FUNCTION(park, (JSC::JSGlobalObject* globalObject, JSC::CallFrame*))
 {
-    // C API callbacks drop this lock. Model a native callout that retains VM
-    // ownership, so the trap sender must try to suspend its foreign stack.
-    JSLockHolder lock(toJS(context)->vm());
+    auto& vm = globalObject->vm();
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    // A host function retains the executing VM's ownership throughout the
+    // native call, as Bun's N-API bridge does.
+    RELEASE_ASSERT(vm.currentThreadIsHoldingAPILock());
     auto& state = *activeState;
     runOnForeignStack(state);
-    return JSValueMakeUndefined(context);
+    RELEASE_ASSERT(vm.traps().needHandling(JSC::VMTraps::NeedTermination));
+    RETURN_IF_EXCEPTION(scope, { });
+    RELEASE_AND_RETURN(scope, JSC::JSValue::encode(JSC::jsUndefined()));
 }
 
 JSValueRef evaluate(JSGlobalContextRef context, const char* text, JSValueRef* exception)
@@ -221,19 +230,23 @@ void testTerminationAndGC()
     auto worker = Thread::create("Foreign stack VM"_s, [&] {
         JSGlobalContextRef context = JSGlobalContextCreate(nullptr);
         auto& vm = toJS(context)->vm();
-        state.vm.store(&vm, std::memory_order_release);
         activeState = &state;
-        JSStringRef name = JSStringCreateWithUTF8CString("park");
-        JSObjectRef function = JSObjectMakeFunctionWithCallback(context, name, park);
-        JSObjectSetProperty(context, JSContextGetGlobalObject(context), name, function, kJSPropertyAttributeNone, nullptr);
-        JSStringRelease(name);
+        {
+            JSLockHolder lock(vm);
+            vm.ensureTerminationException();
+            auto* globalObject = toJS(context);
+            auto name = JSC::Identifier::fromString(vm, "park"_s);
+            auto* function = JSC::JSFunction::create(vm, globalObject, 0, name.string(), park, JSC::ImplementationVisibility::Public);
+            globalObject->putDirect(vm, name, function);
+        }
+        state.vm.store(&vm, std::memory_order_release);
         JSValueRef thrown = nullptr;
         JSValueRef result = evaluate(context, "park(); while (true) {}", &thrown);
         {
             JSLockHolder lock(vm);
             state.terminated.store(!result && thrown && toJS(toJS(context), thrown) == vm.terminationException()->value(), std::memory_order_release);
+            JSGlobalContextRelease(context);
         }
-        JSGlobalContextRelease(context);
     });
     waitFor(state.entered);
     unsigned signalsBefore = suspensionSignals.load();
@@ -255,7 +268,10 @@ void testTerminationAndGC()
     worker->waitForCompletion();
     RELEASE_ASSERT(state.returned.load() && state.terminated.load());
     JSValueUnprotect(parent, root);
-    JSGlobalContextRelease(parent);
+    {
+        JSLockHolder lock(toJS(parent)->vm());
+        JSGlobalContextRelease(parent);
+    }
     std::puts("PASS parent full GC before native release, rooted object retained, pending termination delivered");
 }
 }
