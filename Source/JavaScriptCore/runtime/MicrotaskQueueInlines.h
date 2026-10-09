@@ -145,7 +145,7 @@ inline void MicrotaskQueue::performMicrotaskCheckpoint(VM& vm, NOESCAPE const In
             return;
         }
 
-        std::optional<VMEntryScope> entryScope;
+        VMEntryScope entryScope;
         JSGlobalObject* currentGlobalObject = nullptr;
 
         // drain() handles an empty queue too, but it constructs a MicrotaskCallCache first. Check here so that an empty checkpoint skips that.
@@ -158,11 +158,11 @@ inline void MicrotaskQueue::performMicrotaskCheckpoint(VM& vm, NOESCAPE const In
 
             if (nextGlobalObject) {
                 if (!entryScope)
-                    entryScope.emplace(vm, nextGlobalObject);
+                    entryScope.enter(vm, nextGlobalObject);
                 else
-                    entryScope->setGlobalObject(nextGlobalObject);
+                    entryScope.setGlobalObject(nextGlobalObject);
             } else
-                entryScope = std::nullopt;
+                entryScope.reset();
 
             currentGlobalObject = nextGlobalObject;
         }
