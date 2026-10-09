@@ -108,6 +108,7 @@ def build(label, destination):
         run(str(artifact/'bin/testMimallocExitInFlight'))
         run(str(artifact/'bin/testVMEntryRecord'))
         run(str(artifact/'bin/testVMEntryScope'))
+        run(str(artifact / 'bin/testForeignStackSuspension'))
     shutil.rmtree(artifact)
 
 def main():
