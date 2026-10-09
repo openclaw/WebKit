@@ -174,6 +174,8 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+- Retry asynchronous VM trap delivery after a foreign-stack suspension refusal without holding the process-wide suspension lock, allowing other VMs to collect while native calls await them. Blocking GC suspension and Mach suspension retain their existing contracts.
+
 ## Passive collector progress and worker cadence (2026-10-07)
 
 - Wake passive collectors when a mutator begins waiting, even while shared helpers serve another heap; the native regression requires completion before helper release and preserves rooted objects.
