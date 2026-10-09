@@ -134,6 +134,20 @@ jobs:
           bash .github/openclaw/qualify.sh
           bash .github/openclaw/qualify-sync-compatibility.sh
           bash .github/openclaw/qualify-sync.sh
+      - name: Retain qualified Linux Bun executables
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: linux-bun-executables
+          path: |
+            ${{ runner.temp }}/qualification/bun/build/qualify-baseline/bun
+            ${{ runner.temp }}/qualification/bun/build/qualify-candidate/bun
+            ${{ runner.temp }}/qualification/bun-sync/build/qualify-sync/bun
+            ${{ runner.temp }}/qualification/bun-sync-compatibility/build/qualify-sync-compatibility/bun
+            ${{ runner.temp }}/qualification/*.sha256
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
