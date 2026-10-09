@@ -145,6 +145,8 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+- Retry asynchronous VM trap delivery after a foreign-stack suspension refusal without holding the process-wide suspension lock, allowing other VMs to collect while native calls await them. Blocking GC suspension and Mach suspension retain their existing contracts. Carries #25 onto engine main with its native regression.
+
 - Initialize new VM entry scratch buffers and alignment padding, and store deferred microtask entry scopes as two initialized pointers, preventing stale stack values from retaining otherwise unreachable objects; carries #24 onto engine main and adapts the whole-word-state remedy in oven-sh/WebKit#694, thanks @robobun.
 - Require the native VM entry storage regressions in the Linux x64 artifact check, qualify dead-realm cleanup with the collected-realm fixture from openclaw/bun#151, and retain both qualified Linux Bun executables and hashes for three days; the fixture adapts oven-sh/bun#44544, thanks @robobun.
 
