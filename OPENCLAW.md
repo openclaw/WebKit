@@ -145,6 +145,9 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+- Initialize new VM entry scratch buffers and alignment padding, and store deferred microtask entry scopes as two initialized pointers, preventing stale stack values from retaining otherwise unreachable objects; carries #24 onto engine main and adapts the whole-word-state remedy in oven-sh/WebKit#694, thanks @robobun.
+- Require the native VM entry storage regressions in the Linux x64 artifact check, qualify dead-realm cleanup with the collected-realm fixture from openclaw/bun#151, and retain both qualified Linux Bun executables and hashes for three days; the fixture adapts oven-sh/bun#44544, thanks @robobun.
+
 - Deliver pending worker heap-limit termination promptly after GC by invalidating optimized code on the mutator, preserving full-GC live accounting and external-buffer exclusions.
 
 - Preserve mimalloc pthread TLS-key ownership during shell exit by draining active setters before deletion; cover both late and in-flight allocations with native regressions. Builds on oven-sh/WebKit#698, thanks @dylan-conway.
