@@ -103,6 +103,8 @@ use an old Bun executable with headers/libraries from another engine ABI.
 
 ## Unreleased
 
+- Release class-field identifier references when parser arenas are destroyed, preventing native string leaks during class initialization and Worker churn.
+
 - Initialize new VM entry scratch buffers and alignment padding before entering JavaScript or native callees, preventing stale stack values from retaining otherwise unreachable objects during collection.
 - Store deferred microtask entry scopes as two initialized pointers, avoiding stale optional-flag padding that can conservatively retain lexical environments and cancellation reasons.
 - Verify dead-realm cleanup with the collected-realm fixture from openclaw/bun#151, adapted from oven-sh/bun#44544; thanks @robobun. Retain the qualified Linux Bun executables and hashes for three days, including failed qualification runs.
