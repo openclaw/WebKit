@@ -186,7 +186,7 @@ void testMessageRefusal()
     bool called = false;
     {
         ThreadSuspendLocker locker;
-        auto result = WTF::trySendMessage(locker, *worker, [&](PlatformRegisters&) { called = true; });
+        auto result = WTF::trySendMessage(locker, worker.get(), [&](PlatformRegisters&) { called = true; });
         RELEASE_ASSERT(result == WTF::MessageStatus::TemporarilyUnavailable);
         RELEASE_ASSERT(!called);
     }
@@ -195,7 +195,7 @@ void testMessageRefusal()
     waitFor(state.returned);
     {
         ThreadSuspendLocker locker;
-        auto result = WTF::trySendMessage(locker, *worker, [&](PlatformRegisters&) { called = true; });
+        auto result = WTF::trySendMessage(locker, worker.get(), [&](PlatformRegisters&) { called = true; });
         RELEASE_ASSERT(result == WTF::MessageStatus::MessageRan && called);
         // A refused attempt must not leave an outstanding suspension count.
         RELEASE_ASSERT(worker->suspend(locker));
