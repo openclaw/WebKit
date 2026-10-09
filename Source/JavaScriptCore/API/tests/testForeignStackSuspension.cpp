@@ -34,6 +34,7 @@
 #include "GCRequest.h"
 #include "Heap.h"
 #include "InitializeThreading.h"
+#include "JSCellInlines.h"
 #include "JSGlobalObject.h"
 #include "JSLock.h"
 #include "JavaScript.h"
