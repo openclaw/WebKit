@@ -101,11 +101,7 @@ Keep every prior release. Revert the Bun manifest and WebKit source pin together
 then rebuild Bun against that matched engine. Never replace a published asset or
 use an old Bun executable with headers/libraries from another engine ABI.
 
-## Unreleased
-
-- Initialize new VM entry scratch buffers and alignment padding before entering JavaScript or native callees, preventing stale stack values from retaining otherwise unreachable objects during collection.
-- Store deferred microtask entry scopes as two initialized pointers, avoiding stale optional-flag padding that can conservatively retain lexical environments and cancellation reasons.
-- Verify dead-realm cleanup with the collected-realm fixture from openclaw/bun#151, adapted from oven-sh/bun#44544; thanks @robobun. Retain the qualified Linux Bun executables and hashes for three days, including failed qualification runs.
+## VM entry storage
 
 The paired qualifier keeps its frozen Bun source and applies the test-only fix
 from `4c8accdd045b84c942fe447348a31a7cba04cde4` to both arms. The feature-sync
@@ -173,6 +169,12 @@ in sync with the Bun integration until that integration becomes the qualificatio
 baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
+
+## Conservative stack retention (2026-10-09)
+
+- Initialize new VM entry scratch buffers and alignment padding before entering JavaScript or native callees, preventing stale stack values from retaining otherwise unreachable objects during collection.
+- Store deferred microtask entry scopes as two initialized pointers, avoiding stale optional-flag padding that can conservatively retain lexical environments and cancellation reasons. Adapts the whole-word-state remedy in oven-sh/WebKit#694; thanks @robobun.
+- Verify dead-realm cleanup with the collected-realm fixture from openclaw/bun#151, adapted from oven-sh/bun#44544; thanks @robobun. Retain the qualified Linux Bun executables and hashes for three days, including failed qualification runs.
 
 ## Passive collector progress and worker cadence (2026-10-07)
 
