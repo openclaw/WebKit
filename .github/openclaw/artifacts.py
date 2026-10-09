@@ -106,6 +106,8 @@ def build(label, destination):
         run(str(artifact/'bin/testFFI'))
         run(str(artifact/'bin/testMimallocExit'))
         run(str(artifact/'bin/testMimallocExitInFlight'))
+        run(str(artifact/'bin/testVMEntryRecord'))
+        run(str(artifact/'bin/testVMEntryScope'))
     shutil.rmtree(artifact)
 
 def main():
