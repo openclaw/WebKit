@@ -28,6 +28,8 @@ for patch in 008-namespace.patch 009-allocation-sampling.patch 010-als-regressio
 done
 git apply --index "$inputs/sync/inspect-stack-position.patch"
 git apply --index "$inputs/patches/011-bun-gc-timer-wake.patch"
+git apply --index "$inputs/patches/012-vm-finalization-fixture.patch"
+sha256sum test/js/node/vm/vm.test.ts > "$QUALIFICATION_DIR/vm-test-sync.sha256"
 cp "$inputs/worker-resource-limits.test.ts" test/js/node/worker_threads/openclaw-resource-limits.test.ts
 git add test/js/node/worker_threads/openclaw-resource-limits.test.ts
 python3 "$inputs/stage-sync-artifact.py" "$ARTIFACT_DIR/bun-webkit-linux-amd64.tar.gz" --version "$SOURCE_SHA" --output "$QUALIFICATION_DIR/sync-input"
