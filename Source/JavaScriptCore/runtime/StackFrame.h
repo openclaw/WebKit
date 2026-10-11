@@ -79,8 +79,13 @@ public:
 
     bool hasLineAndColumnInfo() const
     {
-        if (auto* jsFrame = std::get_if<JSFrameData>(&m_frameData))
+        if (auto* jsFrame = std::get_if<JSFrameData>(&m_frameData)) {
+#if !USE(ALLOW_LINE_AND_COLUMN_NUMBER_IN_BUILTINS)
+            if (jsFrame->aotExecutable && isBuiltinFunction())
+                return false;
+#endif
             return jsFrame->codeBlock || jsFrame->aotExecutable;
+        }
         return false;
     }
 

@@ -238,6 +238,10 @@ String StackFrame::sourceURL(VM& vm, AllowURLOverride allowOverride) const
 {
     return WTF::switchOn(m_frameData,
         [&vm, allowOverride, this](const JSFrameData& jsFrame) -> String {
+#if !USE(ALLOW_LINE_AND_COLUMN_NUMBER_IN_BUILTINS)
+            if (jsFrame.aotExecutable && isBuiltinFunction())
+                return "[native code]"_s;
+#endif
             if (isAsyncFrameWithoutCodeBlock()) {
                 ASSERT(jsFrame.callee);
                 ASSERT(!jsFrame.codeBlock);
@@ -265,6 +269,10 @@ String StackFrame::sourceURLStripped(VM& vm) const
 {
     return WTF::switchOn(m_frameData,
         [&vm, this](const JSFrameData& jsFrame) -> String {
+#if !USE(ALLOW_LINE_AND_COLUMN_NUMBER_IN_BUILTINS)
+            if (jsFrame.aotExecutable && isBuiltinFunction())
+                return "[native code]"_s;
+#endif
             if (isAsyncFrameWithoutCodeBlock()) {
                 ASSERT(jsFrame.callee);
                 ASSERT(!jsFrame.codeBlock);
