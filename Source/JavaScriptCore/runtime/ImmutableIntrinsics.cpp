@@ -110,7 +110,7 @@ Vector<EncodedJSValue> ImmutableIntrinsics::describe(JSGlobalObject* globalObjec
         JSObject* object = JSValue::decode(values[number]).getObject();
         if (!object || description->m_entries[number].canonical != number || !object->structure()->inheritorsMayOverrideReadOnlyProperties())
             continue;
-        if (description->m_entries[number].type == JSFunctionType || (number > numberOfVariablesWithNumberedProperties && number <= variableNames.size()))
+        if (number > numberOfVariablesWithNumberedProperties && number <= variableNames.size())
             continue;
         object->structure()->forEachProperty(vm, [&](const PropertyTableEntry& property) {
             constexpr unsigned fixed = PropertyAttribute::ReadOnly | PropertyAttribute::DontDelete;
