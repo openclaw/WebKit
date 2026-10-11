@@ -1,5 +1,9 @@
 find_package(Threads REQUIRED)
 
+if (APPLE)
+    WEBKIT_ENABLE_LANGUAGE(OBJC OBJCXX)
+endif ()
+
 if (MSVC)
     include(OptionsMSVC)
 else ()
