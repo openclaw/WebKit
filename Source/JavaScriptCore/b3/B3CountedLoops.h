@@ -30,11 +30,9 @@ struct CountedLoop {
     // A Phi of the header: `start` from the pre-header, `next` from the latch.
     Value* inductionVariable { nullptr };
     Value* start { nullptr };
-    // Add(inductionVariable, step), SExt32(Trunc()) of that, or a Phi of that and the constant it saturates at.
+    // Add(inductionVariable, step), or a Phi of that and the constant it saturates at.
     Value* next { nullptr };
     int64_t step { 0 };
-    // `(i + step) | 0`: then it is not monotonic: past one end of int32 it goes on from the other.
-    bool wrapsAroundInt32 { false };
     std::optional<int64_t> saturation;
     // Loop invariant.
     Value* bound { nullptr };
@@ -49,7 +47,7 @@ static constexpr int64_t maxIterationsPerStrip = 1 << 16;
 using UpsilonsByPhi = UncheckedKeyHashMap<Value*, Vector<UpsilonValue*, 2>>;
 UpsilonsByPhi collectUpsilonsByPhi(Procedure&);
 
-// The owners of values are up to date, and the header has one predecessor outside the loop.
+// The owners of values are up to date, and the header has one predecessor outside the loop. Requires a non-overflowing counter so both strip-mining passes retain polls when that cannot be proved.
 std::optional<CountedLoop> analyzeCountedLoop(NaturalLoops&, const NaturalLoop&, const UpsilonsByPhi&, const ScopedLambda<bool(Value*)>& isInvariant);
 
 // For strip mining. Where relation(from, bound) holds: at most maxIterationsPerStrip from there, not beyond the bound, and on this side of what the variable saturates at.

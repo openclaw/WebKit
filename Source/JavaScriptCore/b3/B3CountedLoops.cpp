@@ -141,8 +141,8 @@ std::optional<CountedLoop> analyzeCountedLoop(NaturalLoops& loops, const Natural
         increment = upsilons[1 - indexOfConstant]->child(0);
     }
     if (increment->opcode() == SExt32 && increment->child(0)->opcode() == Trunc) {
-        increment = increment->child(0)->child(0);
-        result.wrapsAroundInt32 = true;
+        // An ordered strip endpoint cannot bound a counter that wraps past it.
+        return std::nullopt;
     }
     if (increment->opcode() != Add || increment->child(0) != result.inductionVariable || !increment->child(1)->hasInt64())
         return std::nullopt;
@@ -150,6 +150,33 @@ std::optional<CountedLoop> analyzeCountedLoop(NaturalLoops& loops, const Natural
     if (!result.step || result.step > maxIterationsPerStrip || result.step < -maxIterationsPerStrip || (result.step > 0) != result.increases())
         return std::nullopt;
     if (result.saturation && (result.isUnsigned() || *result.saturation == std::numeric_limits<int64_t>::min() || *result.saturation == std::numeric_limits<int64_t>::max()))
+        return std::nullopt;
+    auto additionCannotOverflowAt = [&](Value* value) {
+        int64_t lower;
+        int64_t upper;
+        if (value->hasInt64())
+            lower = upper = value->asInt64();
+        else if (value->opcode() == SExt32) {
+            lower = std::numeric_limits<int32_t>::min();
+            upper = std::numeric_limits<int32_t>::max();
+        } else if (value->opcode() == ZExt32) {
+            lower = 0;
+            upper = std::numeric_limits<uint32_t>::max();
+        } else
+            return false;
+        if (result.isUnsigned()) {
+            if (lower < 0 && upper >= 0)
+                return false;
+            return result.step > 0
+                ? static_cast<uint64_t>(upper) <= std::numeric_limits<uint64_t>::max() - result.step
+                : static_cast<uint64_t>(lower) >= static_cast<uint64_t>(-result.step);
+        }
+        return result.step > 0
+            ? upper <= std::numeric_limits<int64_t>::max() - result.step
+            : lower >= std::numeric_limits<int64_t>::min() - result.step;
+    };
+    // Later iterations are bounded by the loop test; the first may run before that test.
+    if (!additionCannotOverflowAt(result.bound) || (!relationHoldsOnEntry(result) && !additionCannotOverflowAt(result.start)))
         return std::nullopt;
     return result;
 }

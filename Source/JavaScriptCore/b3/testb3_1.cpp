@@ -25,12 +25,79 @@
 
 #include "config.h"
 #include "testb3.h"
+#include "B3CountedLoops.h"
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
 #if ENABLE(B3_JIT)
 
 Lock crashLock;
+
+#if USE(BUN_JSC_ADDITIONS)
+static void checkCountedLoopOverflow(bool wraps, int64_t step, int64_t bound, bool inclusive, bool expected, bool unknownStart = false, bool unknownBound = false, bool unsignedRelation = false)
+{
+    Procedure proc;
+    BasicBlock* entry = proc.addBlock();
+    BasicBlock* header = proc.addBlock();
+    BasicBlock* latch = proc.addBlock();
+    BasicBlock* exit = proc.addBlock();
+    Value* phi = header->appendNew<Value>(proc, Phi, Int64, Origin());
+    Value* start = entry->appendNew<Const64Value>(proc, Origin(), bound - 8 * step);
+    Value* boundValue = entry->appendNew<Const64Value>(proc, Origin(), bound);
+    if (unknownStart)
+        start = cCallArgumentValues<int64_t>(proc, entry)[0];
+    if (unknownBound)
+        boundValue = cCallArgumentValues<int64_t>(proc, entry)[0];
+    auto* initial = entry->appendNew<UpsilonValue>(proc, Origin(), start);
+    initial->setPhi(phi);
+    entry->appendNew<Value>(proc, Jump, Origin());
+    entry->setSuccessors(FrequentedBlock(header));
+
+    Value* next = header->appendNew<Value>(proc, Add, Origin(), phi, header->appendNew<Const64Value>(proc, Origin(), step));
+    if (wraps)
+        next = header->appendNew<Value>(proc, SExt32, Origin(), header->appendNew<Value>(proc, Trunc, Origin(), next));
+    auto relation = step > 0 ? (inclusive ? LessEqual : LessThan) : (inclusive ? GreaterEqual : GreaterThan);
+    if (unsignedRelation)
+        relation = step > 0 ? (inclusive ? BelowEqual : Below) : (inclusive ? AboveEqual : Above);
+    Value* condition = header->appendNew<Value>(proc, relation, Origin(), next, boundValue);
+    header->appendNew<Value>(proc, Branch, Origin(), condition);
+    header->setSuccessors(FrequentedBlock(latch), FrequentedBlock(exit));
+    auto* backedge = latch->appendNew<UpsilonValue>(proc, Origin(), next);
+    backedge->setPhi(phi);
+    latch->appendNew<Value>(proc, Jump, Origin());
+    latch->setSuccessors(FrequentedBlock(header));
+    exit->appendNew<Value>(proc, Return, Origin(), exit->appendNew<Const32Value>(proc, Origin(), 0));
+    proc.resetReachability();
+    proc.resetValueOwners();
+    auto& loops = proc.naturalLoops();
+    CHECK_EQ(loops.numLoops(), 1u);
+    auto counted = analyzeCountedLoop(loops, loops.loop(0), collectUpsilonsByPhi(proc), [&](Value* value) {
+        return !loops.belongsTo(value->owner, loops.loop(0));
+    });
+    CHECK_EQ(!!counted, expected);
+}
+
+void testCountedLoopRejectsInt32Wrap(bool wraps, int64_t step)
+{
+    checkCountedLoopOverflow(wraps, step, step > 0 ? std::numeric_limits<int32_t>::max() : std::numeric_limits<int32_t>::min(), true, !wraps);
+}
+
+void testCountedLoopRejectsInt64Overflow(int64_t step, bool inclusive)
+{
+    checkCountedLoopOverflow(false, step, step > 0 ? std::numeric_limits<int64_t>::max() : std::numeric_limits<int64_t>::min(), inclusive, false);
+}
+
+void testCountedLoopNeedsOverflowProof(bool forStart)
+{
+    checkCountedLoopOverflow(false, 1, std::numeric_limits<int32_t>::max(), true, false, forStart, !forStart);
+}
+
+void testCountedLoopUnsignedOverflow(int64_t step, bool mayOverflow)
+{
+    int64_t bound = mayOverflow ? (step > 0 ? -1 : 0) : 1024;
+    checkCountedLoopOverflow(false, step, bound, false, !mayOverflow, false, false, true);
+}
+#endif
 
 bool shouldRun(const TestConfig* config, UTF8CStringView testName)
 {
@@ -1071,6 +1138,22 @@ void run(const TestConfig* config)
 
     RUN(testComputeDivisionMagic<int32_t>(2, -2147483647, 0));
     RUN(testTrivialInfiniteLoop());
+#if USE(BUN_JSC_ADDITIONS)
+    RUN(testCountedLoopRejectsInt32Wrap(false, 1));
+    RUN(testCountedLoopRejectsInt32Wrap(false, -1));
+    RUN(testCountedLoopRejectsInt32Wrap(true, 1));
+    RUN(testCountedLoopRejectsInt32Wrap(true, -1));
+    RUN(testCountedLoopRejectsInt64Overflow(1, true));
+    RUN(testCountedLoopRejectsInt64Overflow(-1, true));
+    RUN(testCountedLoopRejectsInt64Overflow(2, false));
+    RUN(testCountedLoopRejectsInt64Overflow(-2, false));
+    RUN(testCountedLoopNeedsOverflowProof(true));
+    RUN(testCountedLoopNeedsOverflowProof(false));
+    RUN(testCountedLoopUnsignedOverflow(2, true));
+    RUN(testCountedLoopUnsignedOverflow(-2, true));
+    RUN(testCountedLoopUnsignedOverflow(2, false));
+    RUN(testCountedLoopUnsignedOverflow(-2, false));
+#endif
     RUN(testFoldPathEqual());
 
     RUN(testRShiftSelf32());
