@@ -87,10 +87,6 @@ public:
             return { };
 
         if (!storage) {
-#if ENABLE(AOT)
-            if (isAtCompactTable()) [[unlikely]]
-                return nextInCompactTable(vm);
-#endif
             storage = iteratedObject()->storage();
             if (!storage) {
                 markClosed(sentinel);
@@ -153,13 +149,6 @@ public:
     {
         markClosed(vm.orderedHashTableSentinel());
     }
-
-#if ENABLE(AOT)
-    // Of one without storage. The collection has an AOT::Typed::CompactTable, or had one at the last step: Field::Entry then holds a cell,
-    // see CompactTable::stepIterator().
-    bool isAtCompactTable() const { return iteratedObject()->m_compactTable || internalField(Field::Entry).get().isCell(); }
-    JS_EXPORT_PRIVATE JSValue nextInCompactTable(VM&);
-#endif
 
 private:
     JSSetIterator(VM& vm, Structure* structure)

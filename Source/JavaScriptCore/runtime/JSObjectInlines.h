@@ -741,13 +741,8 @@ ALWAYS_INLINE ASCIILiteral JSObject::putDirectInternal(VM& vm, PropertyName prop
     }
 
 #if USE(BUN_JSC_ADDITIONS)
-    if (structure->hasImmutableShape()) [[unlikely]] {
-#if ENABLE(AOT)
-        if constexpr (mode == PutModeDefineOwnProperty)
-            return putDirectToCompiledObject(vm, propertyName, value, newAttributes);
-#endif
+    if (structure->hasImmutableShape()) [[unlikely]]
         return throwImmutableShapeError(vm);
-    }
 #endif
 
     if constexpr (mode == PutModePut) {
@@ -762,10 +757,8 @@ ALWAYS_INLINE ASCIILiteral JSObject::putDirectInternal(VM& vm, PropertyName prop
     }
 
 #if ENABLE(AOT)
-    if ((mode == PutModePut || newAttributes || structure->growsAlone()) && structure->shouldConvertFirstObjectToDictionaryForAdd(vm)) [[unlikely]] {
+    if ((mode == PutModePut || newAttributes) && structure->shouldConvertFirstObjectToDictionaryForAdd(vm)) [[unlikely]] {
         convertToDictionary(vm);
-        // Nobody can follow it from here.
-        this->structure()->setGrowsAlone(true);
         return putDirectInternal<mode>(vm, propertyName, value, newAttributes, slot);
     }
 #endif

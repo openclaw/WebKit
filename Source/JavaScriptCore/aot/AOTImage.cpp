@@ -12,8 +12,6 @@
 #if ENABLE(AOT)
 
 #include "AOTCompiler.h"
-#include "AOTTypedOperations.h"
-#include "AOTTypedThreads.h"
 #include "CachedTypes.h"
 #include "CodeBlock.h"
 #include "CodeCache.h"
@@ -24,8 +22,6 @@
 #include "JSGlobalObject.h"
 #include "JSModuleEnvironment.h"
 #include "JSModuleRecord.h"
-#include "MachineContext.h"
-#include "MarkedBlockCage.h"
 #include "Options.h"
 #include "ParseInt.h"
 #include "SourceProvider.h"
@@ -34,8 +30,6 @@
 #include <wtf/NeverDestroyed.h>
 #include <wtf/SHA1.h>
 #include <wtf/TZoneMallocInlines.h>
-#include <wtf/AccessibleAddress.h>
-#include <wtf/threads/Signals.h>
 
 #if OS(DARWIN) || OS(LINUX) || OS(FREEBSD)
 #include <sys/mman.h>
@@ -52,27 +46,6 @@ namespace JSC { namespace AOT {
 WTF_MAKE_TZONE_ALLOCATED_IMPL(ImageBuilder);
 WTF_MAKE_TZONE_ALLOCATED_IMPL(Image);
 
-#if OS(DARWIN) || OS(LINUX) || OS(FREEBSD)
-static int s_fileOfImage = -1;
-static int64_t s_positionOfImageInFile;
-
-void* Image::mapPrivately(uint32_t offset, size_t size) const
-{
-    if (s_fileOfImage < 0)
-        return nullptr;
-    void* result = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE, s_fileOfImage, s_positionOfImageInFile + offset);
-    return result == MAP_FAILED ? nullptr : result;
-}
-
-void Image::unmap(void* memory, size_t size)
-{
-    munmap(memory, size);
-}
-#else
-void* Image::mapPrivately(uint32_t, size_t) const { return nullptr; }
-void Image::unmap(void*, size_t) { }
-#endif
-
 uint64_t imageStamp()
 {
     uint64_t stamp = computeJSCBytecodeCacheVersion();
@@ -82,23 +55,17 @@ uint64_t imageStamp()
     };
     mix(numberOfEntries);
     mix(Instance::offsetOfStates());
-    mix(Instance::stateOfLinkedWithoutData());
     mix(Instance::offsetOfOwnData());
     mix(Instance::offsetOfTypedStatics());
-    mix(Instance::offsetOfTypedTexts());
-    mix(Instance::offsetOfTypedData());
     mix(Instance::minStateWithData);
     mix(numberOfStubs);
-    mix(sizeof(ImageHeader));
     mix(numOpcodeIDs);
     mix(sizeof(VM));
     mix(sizeof(JSGlobalObject));
     mix(sizeof(CodeBlock));
     mix(sizeof(Data));
     mix(VM::offsetOfSoftStackLimit());
-    mix(Instance::offsetOfSoftStackLimit());
     mix(VM::offsetOfHeapBarrierThreshold());
-    mix(Instance::offsetOfBarrierThreshold());
     mix(CodeBlock::offsetOfJITData());
     mix(JSGlobalObject::offsetOfGlobalLexicalBindingEpoch());
 #if CPU(ARM64)
@@ -389,26 +356,23 @@ void collectConstructSites(CompiledFunctionInfo& info, UnlinkedCodeBlock* codeBl
 
 Vector<FunctionReportableSites> ImageBuilder::reportableSites()
 {
-    Vector<FunctionReportableSites> all(m_functions.size());
-    Typed::forEachIndexInParallel(m_functions.size(), [&](unsigned index) {
-        auto& info = m_functions[index].code.info;
+    Vector<FunctionReportableSites> all;
+    all.reserveInitialCapacity(m_functions.size());
+    for (auto& function : m_functions) {
+        auto& info = function.code.info;
         FunctionReportableSites result;
         result.offsets = WTF::move(info.callSites);
         result.identifierIndices = WTF::move(info.identifierIndices);
         result.typedIdentifierIndices = WTF::move(info.typedIdentifierIndices);
         result.typedIdentifierNames = WTF::move(info.typedIdentifierNames);
         result.typedCatchEntrypointsForCallSites = WTF::move(info.typedCatchEntrypointsForCallSites);
-        result.typedFunction = info.typedFunction;
-        result.typedPositions = WTF::move(info.typedPositions);
-        result.numberOfSitesWithoutCode = info.numberOfSitesWithoutCode;
-        result.typedSourceNames = WTF::move(info.typedSourceNames);
         result.constantIndices = WTF::move(info.constantIndices);
         for (unsigned i = 0; i < info.constructSites.size(); ++i) {
             if (info.constructionStarts[i].first || info.constructionStarts[i].second)
                 result.constructions.append({ info.constructSites[i], info.constructionStarts[i].first, info.constructionStarts[i].second });
         }
-        all[index] = WTF::move(result);
-    });
+        all.append(WTF::move(result));
+    }
     return all;
 }
 
@@ -434,11 +398,9 @@ bool Image::constructsAt(const ImageFunction& function, unsigned bytecodeOffset)
 static std::atomic<uint64_t> s_linkTimeConstantsUsed[4];
 static_assert(numberOfLinkTimeConstants <= 256);
 
-static std::atomic<bool> s_usesNumberedIntrinsics;
-
-void didUseNumberedIntrinsic()
+void didUseLinkTimeConstant(unsigned which)
 {
-    s_usesNumberedIntrinsics.store(true, std::memory_order_relaxed);
+    s_linkTimeConstantsUsed[which / 64].fetch_or(1ull << which % 64, std::memory_order_relaxed);
 }
 
 void ImageBuilder::add(ImageKey key, uint64_t rank, CompiledCode&& code, String&& nameForMap)
@@ -474,10 +436,6 @@ bool ImageBuilder::addRegExp(VM& vm, const String& pattern, OptionSet<Yarr::Flag
         if (!code)
             return notCompiled(charSize == Yarr::CharSize::Char8 ? "no code for 8-bit subjects"_s : "no code for 16-bit subjects"_s);
         result.code[charSize == Yarr::CharSize::Char16] = WTF::move(*code);
-        result.numSubpatterns = yarrPattern.m_numSubpatterns;
-        result.minimumSize = yarrPattern.m_body->m_minimumSize;
-        result.specificPattern = yarrPattern.m_specificPattern;
-        result.keepsMoreOfPattern = !yarrPattern.m_captureGroupNames.isEmpty() || !yarrPattern.m_namedGroupToParenIndices.isEmpty() || !yarrPattern.m_anchoredWords.isEmpty();
     }
     m_regExps.append(WTF::move(result));
     m_requestedRegExps.set(makeString(flags.toRaw(), '/', pattern), true);
@@ -489,19 +447,9 @@ Vector<uint8_t> ImageBuilder::finish()
     Locker locker { m_lock };
     if (Options::verboseAOTCompilation()) [[unlikely]]
         dataLogLn("AOT: compiled ", m_regExps.size(), " regular expressions, and left ", m_numberOfRegExpsNotCompiled, " to the interpreter");
-    {
-        Vector<uint32_t> order(m_functions.size(), [](size_t index) {
-            return static_cast<uint32_t>(index);
-        });
-        std::ranges::sort(order, [&](uint32_t first, uint32_t second) {
-            auto& a = m_functions[first];
-            auto& b = m_functions[second];
-            return std::tie(a.rank, a.key.module, a.key.start, a.key.kind) < std::tie(b.rank, b.key.module, b.key.start, b.key.kind);
-        });
-        m_functions = Vector<Function>(order.size(), [&](size_t index) {
-            return WTF::move(m_functions[order[index]]);
-        });
-    }
+    std::ranges::sort(m_functions, [](const Function& a, const Function& b) {
+        return std::tie(a.rank, a.key.module, a.key.start, a.key.kind) < std::tie(b.rank, b.key.module, b.key.start, b.key.kind);
+    });
 
     unsigned capacity = 16;
     while (capacity * 3 < m_functions.size() * 4)
@@ -788,23 +736,15 @@ Vector<uint8_t> ImageBuilder::finish()
         if (functionWithKey[bucket] == std::numeric_limits<uint32_t>::max())
             functionWithKey[bucket] = index;
     }
-    // By function: where each of its known callees is among the functions.
-    Vector<Vector<uint32_t>> calleesOf(m_functions.size());
-    Typed::forEachIndexInParallel(m_functions.size(), [&](unsigned index) {
-        calleesOf[index] = WTF::map(m_functions[index].code.info.knownCallees, [&](const ImageKey& key) {
-            for (unsigned bucket = key.hash() & (capacity - 1); functionWithKey[bucket] != std::numeric_limits<uint32_t>::max(); bucket = (bucket + 1) & (capacity - 1)) {
-                if (m_functions[functionWithKey[bucket]].key.sameFunction(key))
-                    return functionWithKey[bucket];
-            }
-            return ImageFunction::noSuchFunction;
-        });
-    });
-    auto directTargetOf = [&](size_t caller, const StubCall& call) -> std::optional<size_t> {
+    auto directTargetOf = [&](const CompiledFunctionInfo& info, const StubCall& call) -> std::optional<size_t> {
         if (call.function == StubCall::noFunction)
             return std::nullopt;
-        if (uint32_t target = calleesOf[caller][call.function]; target != ImageFunction::noSuchFunction)
-            return target;
-        const ImageKey& key = m_functions[caller].code.info.knownCallees[call.function];
+        const ImageKey& key = info.knownCallees[call.function];
+        for (unsigned bucket = key.hash() & (capacity - 1); functionWithKey[bucket] != std::numeric_limits<uint32_t>::max(); bucket = (bucket + 1) & (capacity - 1)) {
+            size_t target = functionWithKey[bucket];
+            if (m_functions[target].key.sameFunction(key))
+                return target;
+        }
         dataLogLn("AOT: there is no code for @", key.module, ":", key.start, ":", key.kind, ", which something calls without asking");
         RELEASE_ASSERT_NOT_REACHED();
         return std::nullopt;
@@ -836,10 +776,9 @@ Vector<uint8_t> ImageBuilder::finish()
                 call(index);
         }
         while (!worklist.isEmpty()) {
-            size_t caller = worklist.takeLast();
-            auto& info = m_functions[caller].code.info;
+            auto& info = m_functions[worklist.takeLast()].code.info;
             for (auto& stubCall : info.stubCalls) {
-                if (auto target = directTargetOf(caller, stubCall))
+                if (auto target = directTargetOf(info, stubCall))
                     call(*target);
             }
             for (auto& key : info.functionsCreated) {
@@ -899,11 +838,11 @@ Vector<uint8_t> ImageBuilder::finish()
             at.append(end);
             end += function.code.bytes.size();
         }
-        std::atomic<size_t> sizeOfVeneers { 0 };
-        Typed::forEachIndexInParallel(m_functions.size(), [&](unsigned index) {
+        size_t sizeOfVeneers = 0;
+        for (size_t index = 0; index < m_functions.size(); ++index) {
             auto& info = m_functions[index].code.info;
             for (auto& call : info.stubCalls) {
-                auto target = directTargetOf(index, call);
+                auto target = directTargetOf(info, call);
                 if (!target)
                     continue;
                 size_t from = at[index] + call.offset;
@@ -913,11 +852,8 @@ Vector<uint8_t> ImageBuilder::finish()
                 farCallees[index].append(static_cast<uint32_t>(*target));
                 sizeOfVeneers += sizeOfVeneer + sizeof(uint32_t) + imageStubsAlignment;
             }
-        });
-        if (sizeOfVeneers + stubs.bytes.size() + imageStubsAlignment >= stubCallReachSlack) {
-            dataLogLn("AOT: the program has too much machine code for an image: the calls of functions that are too far away for a call need ", sizeOfVeneers.load(), " bytes, and the limit is ", stubCallReachSlack - stubs.bytes.size() - imageStubsAlignment);
-            return { };
         }
+        RELEASE_ASSERT(sizeOfVeneers + stubs.bytes.size() + imageStubsAlignment < stubCallReachSlack);
     }
     size_t recordsSize = 0;
     size_t codeSize = 0;
@@ -937,8 +873,6 @@ Vector<uint8_t> ImageBuilder::finish()
         codeSize += sizeWithVeneers(functionIndex);
     }
     size_t functionsEnd = codeSize;
-    // As many as there can be in what the offsets of the header can address.
-    static_assert(maxStubCopiesPerImage * stubCallReach > std::numeric_limits<uint32_t>::max());
     if (stubsAt.size() > maxStubCopiesPerImage) {
         dataLogLn("AOT: the program has too much machine code for an image: ", codeSize, " bytes need ", stubsAt.size(), " copies of the stubs, and the limit is ", maxStubCopiesPerImage);
         return { };
@@ -956,8 +890,6 @@ Vector<uint8_t> ImageBuilder::finish()
         for (unsigned index = 0; index < m_functions.size(); ++index) {
             auto& function = m_functions[index];
             out->println("F\t", index, "\t", functionStarts[index], "\t", function.code.bytes.size(), "\t", function.key.module, "\t", function.key.start, "\t", function.key.kind, "\t", function.nameForMap);
-            if (!function.code.bytesByOperation.isNull())
-                out->println("O\t", index, function.code.bytesByOperation);
         }
         for (size_t at : stubsAt)
             out->println("C\t", at);
@@ -993,79 +925,36 @@ Vector<uint8_t> ImageBuilder::finish()
             codeGranules.append(function);
         }
     }
-    Vector<uint32_t> faultingAccesses;
-    Vector<uint32_t> throwSitesOfFaultingAccesses;
-    Vector<uint32_t> wideNamesOfFaultingAccesses;
-    for (unsigned index = 0; index < m_functions.size(); ++index) {
-        auto& info = m_functions[index].code.info;
-        RELEASE_ASSERT(hasStubsForFunctionsWithoutFrame || !info.hasNoFrame || info.faultingAccesses.isEmpty());
-        for (auto& access : info.faultingAccesses) {
-            uint32_t offset = functionStarts[index] + access.codeOffset;
-            uint32_t word = access.throwSite[0];
-            RELEASE_ASSERT(!(offset & FaultingAccessInImage::hasNoFrameBit));
-            RELEASE_ASSERT(faultingAccesses.isEmpty() || (faultingAccesses.last() & ~FaultingAccessInImage::hasNoFrameBit) < offset);
-            RELEASE_ASSERT(!(word & ThrowSite::hasB) && access.throwSite.size() == (word & ThrowSite::hasWideA ? 2 : 1));
-            if (word & ThrowSite::hasWideA && access.throwSite[1] != ThrowSite::none) {
-                wideNamesOfFaultingAccesses.append(faultingAccesses.size());
-                wideNamesOfFaultingAccesses.append(access.throwSite[1]);
-            }
-            faultingAccesses.append(offset | (info.hasNoFrame ? FaultingAccessInImage::hasNoFrameBit : 0));
-            throwSitesOfFaultingAccesses.append(word);
-        }
-    }
-    uint32_t numberOfFaultingAccesses = faultingAccesses.size();
-    faultingAccesses.appendVector(throwSitesOfFaultingAccesses);
-    faultingAccesses.appendVector(wideNamesOfFaultingAccesses);
-    Vector<Vector<uint8_t>> callSitesOf(m_functions.size());
-    Typed::forEachIndexInParallel(m_functions.size(), [&](unsigned index) {
-        auto& function = m_functions[index];
-        auto& callSites = callSitesOf[index];
+    Vector<uint8_t> callSites { 0 };
+    Vector<uint32_t> functionCallSites;
+    for (auto& function : m_functions) {
         Vector<std::pair<uint32_t, uint32_t>> all;
         for (auto& call : function.code.info.stubCalls) {
             if (call.callSite != StubCall::noCallSite && !call.isTailCall)
                 all.append({ call.offset + static_cast<uint32_t>(sizeOfNearCall), call.callSite });
         }
-        for (auto& access : function.code.info.faultingAccesses)
-            all.append({ access.codeOffset + static_cast<uint32_t>(sizeOfNearCall), access.callSite });
-        if (all.isEmpty())
-            return;
+        if (all.isEmpty()) {
+            functionCallSites.append(0);
+            continue;
+        }
         std::ranges::sort(all);
+        functionCallSites.append(safeCast<uint32_t>(callSites.size()));
         auto& spreadSites = function.code.info.spreadSites;
         auto& inlineFrames = function.code.info.inlineFrames;
-        // The typed compiler numbers its sites so: behind those that have no code.
-        bool isInCodeOrder = function.code.info.typedFunction != FunctionReportableSites::notTyped;
-        appendVarint(callSites, all.size() << 3 | isInCodeOrder << 2 | !inlineFrames.isEmpty() << 1 | !spreadSites.isEmpty());
-        if (isInCodeOrder)
-            appendVarint(callSites, function.code.info.numberOfSitesWithoutCode);
+        appendVarint(callSites, all.size() << 2 | !inlineFrames.isEmpty() << 1 | !spreadSites.isEmpty());
         if (!inlineFrames.isEmpty()) {
             appendVarint(callSites, inlineFrames.size() - 1);
             for (unsigned frame = 1; frame < inlineFrames.size(); ++frame) {
                 appendVarint(callSites, inlineFrames[frame].parent << 1 | inlineFrames[frame].isTailCall);
                 appendVarint(callSites, inlineFrames[frame].callSite);
-                if (function.code.info.typedFunction != FunctionReportableSites::notTyped) {
-                    appendVarint(callSites, inlineFrames[frame].knownCallee);
-                    continue;
-                }
                 StubCall call { };
                 call.function = inlineFrames[frame].knownCallee;
-                appendVarint(callSites, *directTargetOf(index, call));
+                appendVarint(callSites, *directTargetOf(function.code.info, call));
             }
         }
         uint32_t previousOffset = 0;
         int64_t previousSite = 0;
-        unsigned previousFrame = 0;
-        uint32_t number = function.code.info.numberOfSitesWithoutCode;
         for (auto& [offset, site] : all) {
-            if (isInCodeOrder) {
-                RELEASE_ASSERT(CallSiteIndex(PackedSite::bits(site)).bytecodeIndex().offset() == ++number && !PackedSite::isTailCallSite(site));
-                unsigned frame = PackedSite::inlineFrame(site);
-                appendVarint(callSites, static_cast<uint64_t>((offset - previousOffset) / codeOffsetUnit) << 1 | (frame != previousFrame));
-                if (frame != previousFrame)
-                    appendVarint(callSites, frame);
-                previousOffset = offset;
-                previousFrame = frame;
-                continue;
-            }
             appendVarint(callSites, (offset - previousOffset) / codeOffsetUnit);
             int64_t step = static_cast<int64_t>(site) - previousSite;
             appendVarint(callSites, static_cast<uint64_t>(step << 1) ^ static_cast<uint64_t>(step >> 63));
@@ -1080,14 +969,7 @@ Vector<uint8_t> ImageBuilder::finish()
                 appendVarint(callSites, entry.site);
             }
         }
-    });
-    Vector<uint8_t> callSites { 0 };
-    Vector<uint32_t> functionCallSites;
-    for (auto& ofFunction : callSitesOf) {
-        functionCallSites.append(ofFunction.isEmpty() ? 0 : safeCast<uint32_t>(callSites.size()));
-        callSites.appendVector(ofFunction);
     }
-    callSitesOf.clear();
 
     std::ranges::sort(m_regExps, [](const RegExpCode& a, const RegExpCode& b) {
         return ImageRegExp::hashOf(a.pattern, a.flags) < ImageRegExp::hashOf(b.pattern, b.flags);
@@ -1129,10 +1011,6 @@ Vector<uint8_t> ImageBuilder::finish()
             record.flags = regExp.flags.toRaw();
             record.codeFor8Bit = safeCast<uint32_t>(at[0]);
             record.codeFor16Bit = safeCast<uint32_t>(at[1]);
-            record.numSubpatterns = regExp.numSubpatterns;
-            record.minimumSize = regExp.minimumSize;
-            record.specificPattern = static_cast<uint8_t>(regExp.specificPattern);
-            record.keepsMoreOfPattern = regExp.keepsMoreOfPattern;
             imageRegExps.append(record);
             if (regExp.pattern.is8Bit())
                 regExpText.append(asBytes(regExp.pattern.span8()));
@@ -1316,9 +1194,6 @@ Vector<uint8_t> ImageBuilder::finish()
     header.functionStartsOffset = place(functionStarts.sizeInBytes());
     header.codeGranulesOffset = place(codeGranules.sizeInBytes());
     header.callSitesOffset = place(callSites.size());
-    header.faultingAccessesOffset = place(faultingAccesses.sizeInBytes());
-    header.numberOfFaultingAccesses = numberOfFaultingAccesses;
-    header.numberOfFaultingAccessesWithWideName = wideNamesOfFaultingAccesses.size() / 2;
     Vector<ImageFrame> frames;
     Vector<uint16_t> functionFrame;
     {
@@ -1354,12 +1229,6 @@ Vector<uint8_t> ImageBuilder::finish()
     header.framesOffset = place(frames.sizeInBytes());
     header.typedDataOffset = place(m_typedData.size());
     header.typedDataSize = safeCast<uint32_t>(m_typedData.size());
-    if (size_t sizeOfStatics = m_typedData.isEmpty() ? 0 : reinterpret_cast<const Typed::Data*>(m_typedData.span().data())->sizeOfStatics) {
-        tablesEnd = WTF::roundUpToMultipleOf<imagePageSize>(tablesEnd);
-        header.staticsOffset = safeCast<uint32_t>(tablesEnd);
-        header.staticsSize = safeCast<uint32_t>(sizeOfStatics);
-        tablesEnd += WTF::roundUpToMultipleOf<imagePageSize>(sizeOfStatics);
-    }
     header.functionsEnd = safeCast<uint32_t>(functionsEnd);
     header.stubsSize = safeCast<uint32_t>(stubs.bytes.size());
     for (unsigned i = 0; i < 4; ++i)
@@ -1370,8 +1239,7 @@ Vector<uint8_t> ImageBuilder::finish()
     RELEASE_ASSERT(stubs.returnsIntoAdapters.size() == numberOfAdapters);
     for (unsigned i = 0; i < numberOfAdapters; ++i)
         header.returnsIntoAdapters[i] = stubs.returnsIntoAdapters[i];
-    // 0: no code of the image loads an intrinsic by its number, and no realm numbers them for it.
-    header.intrinsicHash = ImmutableIntrinsics::shared() && s_usesNumberedIntrinsics.load() ? ImmutableIntrinsics::shared()->hash() : 0;
+    header.intrinsicHash = ImmutableIntrinsics::shared() ? ImmutableIntrinsics::shared()->hash() : 0;
     header.dispatchSize = safeCast<uint32_t>(dispatch.size());
     header.codeOffset = WTF::roundUpToMultipleOf<imagePageSize>(tablesEnd);
     header.codeSize = codeSize;
@@ -1418,14 +1286,8 @@ Vector<uint8_t> ImageBuilder::finish()
     memcpy(base + header.functionStartsOffset, functionStarts.span().data(), functionStarts.sizeInBytes());
     memcpy(base + header.codeGranulesOffset, codeGranules.span().data(), codeGranules.sizeInBytes());
     memcpy(base + header.callSitesOffset, callSites.span().data(), callSites.size());
-    memcpy(base + header.faultingAccessesOffset, faultingAccesses.span().data(), faultingAccesses.sizeInBytes());
     memcpy(base + header.framesOffset, frames.span().data(), frames.sizeInBytes());
     memcpy(base + header.typedDataOffset, m_typedData.span().data(), m_typedData.size());
-    if (header.staticsOffset) {
-        auto& typedData = *reinterpret_cast<const Typed::Data*>(m_typedData.span().data());
-        for (auto& run : std::span { typedData.at<std::array<uint32_t, 4>>(typedData.staticsRunsOffset), typedData.numberOfStaticsRuns })
-            std::ranges::fill(std::span { reinterpret_cast<uint64_t*>(base + header.staticsOffset) + run[0], run[1] }, run[2] | static_cast<uint64_t>(run[3]) << 32);
-    }
     for (auto& [table, at] : regExpTables) {
         for (auto& regExp : m_regExps) {
             bool copied = false;
@@ -1472,11 +1334,10 @@ Vector<uint8_t> ImageBuilder::finish()
     Vector<uint32_t> functionInBucket;
     functionInBucket.fill(0, capacity);
     size_t recordAt = 0;
-    BitVector isDuplicate(m_functions.size());
     for (size_t index = 0; index < m_functions.size(); ++index) {
         auto& function = m_functions[index];
         auto& info = function.code.info;
-        size_t codeAt = placement[index].first;
+        auto [codeAt, stubsForFunction] = placement[index];
 
         ImageFunction record { };
         RELEASE_ASSERT(functionStarts[index] == codeAt);
@@ -1514,7 +1375,6 @@ Vector<uint8_t> ImageBuilder::finish()
             auto& earlier = m_functions[functionInBucket[bucket]].code.bytes;
             if (earlier.size() != function.code.bytes.size() || memcmp(earlier.span().data(), function.code.bytes.span().data(), earlier.size()))
                 table[bucket].kind = std::numeric_limits<uint32_t>::max();
-            isDuplicate.quickSet(index);
             continue;
         }
         table[bucket] = key;
@@ -1528,8 +1388,17 @@ Vector<uint8_t> ImageBuilder::finish()
             memcpy(records + recordAt, info.siteConstants.span().data(), info.siteConstants.sizeInBytes());
             recordAt += info.siteConstants.sizeInBytes();
         }
-        memcpy(records + recordAt, calleesOf[index].span().data(), calleesOf[index].sizeInBytes());
-        recordAt += calleesOf[index].sizeInBytes();
+        for (auto& callee : info.knownCallees) {
+            uint32_t calleeIndex = ImageFunction::noSuchFunction;
+            for (unsigned bucket = callee.hash() & (capacity - 1); functionWithKey[bucket] != std::numeric_limits<uint32_t>::max(); bucket = (bucket + 1) & (capacity - 1)) {
+                if (m_functions[functionWithKey[bucket]].key.sameFunction(callee)) {
+                    calleeIndex = functionWithKey[bucket];
+                    break;
+                }
+            }
+            memcpy(records + recordAt, &calleeIndex, sizeof(calleeIndex));
+            recordAt += sizeof(calleeIndex);
+        }
         for (auto& [bytecodeOffset, codeOffset] : info.catchEntrypoints) {
             ImageCatchEntrypoint entrypoint { bytecodeOffset, codeOffset };
             memcpy(records + recordAt, &entrypoint, sizeof(entrypoint));
@@ -1542,29 +1411,21 @@ Vector<uint8_t> ImageBuilder::finish()
         }
         memcpy(records + recordAt, info.plans.span().data(), info.plans.sizeInBytes());
         recordAt += info.plans.sizeInBytes();
-    }
 
-    // What is done to the code of a function writes nothing outside of it.
-    Typed::forEachIndexInParallel(m_functions.size(), [&](unsigned index) {
-        if (isDuplicate.quickGet(index))
-            return;
-        auto& function = m_functions[index];
-        auto& info = function.code.info;
-        auto [codeAt, stubsForFunction] = placement[index];
         memcpy(code + codeAt, function.code.bytes.span().data(), function.code.bytes.size());
         for (auto& reference : info.indexReferences)
             IndexReferences::fill(code + codeAt, reference, safeCast<uint32_t>(index));
         for (auto& call : info.stubCalls)
             retargetStubCall(code, codeAt + call.offset, stubsForFunction + (call.thunk ? stubs.thunkOffsets[call.thunk - 1] : stubs.offsets[static_cast<unsigned>(call.stub)]), call.isTailCall);
-    });
+    }
 
-    Typed::forEachIndexInParallel(m_functions.size(), [&](unsigned index) {
+    for (size_t index = 0; index < m_functions.size(); ++index) {
         auto& info = m_functions[index].code.info;
         size_t codeAt = placement[index].first;
         for (auto& call : info.stubCalls) {
             if (call.function == StubCall::noFunction)
                 continue;
-            if (auto target = directTargetOf(index, call)) {
+            if (auto target = directTargetOf(info, call)) {
                 size_t targetAt = placement[*target].first;
                 size_t from = codeAt + call.offset;
                 if (size_t veneer = farCallees[index].find(static_cast<uint32_t>(*target)); veneer != notFound) {
@@ -1577,11 +1438,8 @@ Vector<uint8_t> ImageBuilder::finish()
                 continue;
             }
         }
-    });
+    }
     m_reportableSites = reportableSites();
-    Typed::forEachIndexInParallel(m_functions.size(), [&](unsigned index) {
-        m_functions[index].code = CompiledCode { };
-    });
     m_functions.clear();
     return image;
 }
@@ -1630,11 +1488,6 @@ Image* Image::registerImage(std::span<const uint8_t> data, const void* code)
         RELEASE_ASSERT(!header.codeSize || !other->header().codeSize);
     all.images.append(image);
     all.hasAny.store(true, std::memory_order_release);
-    if (header.numberOfFaultingAccesses) {
-        RELEASE_ASSERT(lowestAccessibleAddress() >= FaultingAccessInImage::reach, lowestAccessibleAddress());
-        classifyAddress(nullptr);
-        activateSignalHandlersFor(Signal::AccessFault);
-    }
     if (header.numberOfSlotRanges)
         TypedLayoutTable::setSlotTypes({ image->at<uint32_t>(header.slotRangesOffset), header.numberOfSlotRanges }, image->at<TypedLayoutTable::FieldType>(header.slotTypesOffset));
     if (header.fieldRangesOffset)
@@ -1751,18 +1604,6 @@ bool Image::containsCode(const void* pointer)
     return false;
 }
 
-bool Image::usesNumberedIntrinsics()
-{
-    auto& all = registry();
-    if (!all.hasAny.load(std::memory_order_acquire))
-        return true;
-    for (unsigned i = 0; i < all.images.size(); ++i) {
-        if (all.images[i]->header().intrinsicHash)
-            return true;
-    }
-    return false;
-}
-
 Image* Image::withCode()
 {
     auto& all = registry();
@@ -1779,7 +1620,6 @@ static const ImageHeader* s_imageHeader;
 static uintptr_t s_imageCode;
 static const uint32_t* s_functionStarts;
 static const uint32_t* s_codeGranules;
-static const uint32_t* s_faultingAccesses;
 
 ImageAddressInfo classifyAddress(const void* address)
 {
@@ -1790,7 +1630,6 @@ ImageAddressInfo classifyAddress(const void* address)
         s_imageCode = std::bit_cast<uintptr_t>(image->code());
         s_functionStarts = image->at<uint32_t>(image->header().functionStartsOffset);
         s_codeGranules = image->at<uint32_t>(image->header().codeGranulesOffset);
-        s_faultingAccesses = image->at<uint32_t>(image->header().faultingAccessesOffset);
         WTF::storeStoreFence();
         s_imageHeader = &image->header();
     }
@@ -1815,86 +1654,6 @@ ImageAddressInfo classifyAddress(const void* address)
     return { ImageAddressInfo::Function, index, static_cast<uint32_t>(offset - starts[index]) };
 }
 
-// Takes no lock and allocates nothing: the handler asks.
-std::optional<FaultingAccessInImage> faultingAccessAt(const void* instruction)
-{
-    if (!s_imageHeader)
-        return std::nullopt;
-    auto& header = *s_imageHeader;
-    uintptr_t offset = std::bit_cast<uintptr_t>(instruction) - s_imageCode;
-    if (offset >= header.functionsEnd)
-        return std::nullopt;
-    std::span offsets { s_faultingAccesses, header.numberOfFaultingAccesses };
-    auto found = std::ranges::lower_bound(offsets, static_cast<uint32_t>(offset), { }, [](uint32_t entry) {
-        return entry & ~FaultingAccessInImage::hasNoFrameBit;
-    });
-    if (found == offsets.end() || (*found & ~FaultingAccessInImage::hasNoFrameBit) != offset)
-        return std::nullopt;
-    uint32_t index = found - offsets.begin();
-    FaultingAccessInImage result { { offsets.data()[offsets.size() + index], ThrowSite::none }, !!(*found & FaultingAccessInImage::hasNoFrameBit) };
-    std::span wideNames { reinterpret_cast<const std::array<uint32_t, 2>*>(offsets.data() + 2 * offsets.size()), header.numberOfFaultingAccessesWithWideName };
-    auto name = std::ranges::lower_bound(wideNames, index, { }, [](auto& entry) {
-        return entry[0];
-    });
-    if (name != wideNames.end() && (*name)[0] == index)
-        result.throwSite[1] = (*name)[1];
-    return result;
-}
-
-#if CPU(ARM64)
-static uintptr_t& registerOf(PlatformRegisters& registers, unsigned number)
-{
-    RELEASE_ASSERT(number == 16 || number == 30);
-#if OS(DARWIN)
-    return number == 30 ? reinterpret_cast<uintptr_t&>(registers.__lr) : reinterpret_cast<uintptr_t&>(registers.__x[number]);
-#elif OS(WINDOWS)
-    return reinterpret_cast<uintptr_t&>(registers.X[number]);
-#elif OS(FREEBSD)
-    return number == 30 ? reinterpret_cast<uintptr_t&>(registers.machineContext.mc_gpregs.gp_lr) : reinterpret_cast<uintptr_t&>(registers.machineContext.mc_gpregs.gp_x[number]);
-#else
-    return reinterpret_cast<uintptr_t&>(registers.machineContext.regs[number]);
-#endif
-}
-#elif CPU(X86_64)
-static uintptr_t& scratchRegisterOf(PlatformRegisters& registers)
-{
-#if OS(DARWIN)
-    return reinterpret_cast<uintptr_t&>(registers.__r11);
-#elif OS(WINDOWS)
-    return reinterpret_cast<uintptr_t&>(registers.R11);
-#elif OS(FREEBSD)
-    return reinterpret_cast<uintptr_t&>(registers.machineContext.mc_r11);
-#else
-    return reinterpret_cast<uintptr_t&>(registers.machineContext.gregs[REG_R11]);
-#endif
-}
-#endif
-
-void prepareFaultingAccesses()
-{
-    addSignalHandler(Signal::AccessFault, [](Signal, SigInfo& info, PlatformRegisters& registers) {
-        uintptr_t address = std::bit_cast<uintptr_t>(info.faultingAddress);
-        if (address >= FaultingAccessInImage::reach && address - MarkedBlockCage::base() >= FaultingAccessInImage::reach)
-            return SignalAction::NotHandled;
-        auto instructionPointer = MachineContext::instructionPointer(registers);
-        if (!instructionPointer)
-            return SignalAction::NotHandled;
-        auto access = faultingAccessAt(instructionPointer->untaggedPtr());
-        if (!access)
-            return SignalAction::NotHandled;
-        uintptr_t returnAddress = std::bit_cast<uintptr_t>(instructionPointer->untaggedPtr()) + sizeOfNearCall;
-#if CPU(ARM64)
-        if (access->hasNoFrame)
-            registerOf(registers, 16) = registerOf(registers, 30);
-        registerOf(registers, 30) = returnAddress;
-#elif CPU(X86_64)
-        scratchRegisterOf(registers) = returnAddress;
-#endif
-        MachineContext::setInstructionPointer(registers, std::bit_cast<void*>(s_imageCode + s_imageHeader->stubOffsets[static_cast<unsigned>(access->hasNoFrame ? Stub::LeafThrowAtFault : Stub::ThrowAtFault)]));
-        return SignalAction::Handled;
-    });
-}
-
 std::optional<uint32_t> imageCodeOffset(const void* address)
 {
     Image* image = Image::withCode();
@@ -1911,15 +1670,12 @@ bool hasCode()
     return s_imageHeader || Image::withCode();
 }
 
-// Behind the first word. Of sites in the order of the code: how many numbers have no code.
-static uint64_t skipInlineFrames(const uint8_t*& at, uint64_t first)
+static void skipInlineFrames(const uint8_t*& at, uint64_t first)
 {
-    uint64_t numberOfSitesWithoutCode = first & 4 ? readVarint(at) : 0;
     if (!(first & 2))
-        return numberOfSitesWithoutCode;
+        return;
     for (uint64_t count = readVarint(at) * 3; count--;)
         readVarint(at);
-    return numberOfSitesWithoutCode;
 }
 
 ImageInlineFrame inlineFrameOf(const ImageFunction& function, unsigned frame)
@@ -1929,8 +1685,6 @@ ImageInlineFrame inlineFrameOf(const ImageFunction& function, unsigned frame)
     const uint8_t* at = image.at<uint8_t>(image.header().callSitesOffset) + function.callSites;
     uint64_t first = readVarint(at);
     RELEASE_ASSERT(first & 2);
-    if (first & 4)
-        readVarint(at);
     uint64_t count = readVarint(at);
     RELEASE_ASSERT(frame <= count);
     ImageInlineFrame result { };
@@ -1944,48 +1698,6 @@ ImageInlineFrame inlineFrameOf(const ImageFunction& function, unsigned frame)
     return result;
 }
 
-FramesOfSites::FramesOfSites(const ImageFunction& function)
-{
-    if (!function.callSites)
-        return;
-    Image& image = Image::of(function);
-    const uint8_t* at = image.at<uint8_t>(image.header().callSitesOffset) + function.callSites;
-    uint64_t first = readVarint(at);
-    RELEASE_ASSERT(first & 4);
-    uint64_t withoutCode = readVarint(at);
-    if (first & 2) {
-        m_inlinedCalls = readVarint(at);
-        m_inlineFrames = at;
-        for (uint64_t words = m_inlinedCalls * 3; words--;)
-            readVarint(at);
-    }
-    RELEASE_ASSERT(m_inlinedCalls <= withoutCode);
-    m_inFunctionItself = withoutCode - m_inlinedCalls;
-    m_withCode = first >> 3;
-    m_sites = at;
-}
-
-unsigned FramesOfSites::next()
-{
-    if (m_inFunctionItself) {
-        --m_inFunctionItself;
-        return 0;
-    }
-    if (m_inlinedCalls) {
-        --m_inlinedCalls;
-        unsigned parent = static_cast<unsigned>(readVarint(m_inlineFrames) >> 1);
-        readVarint(m_inlineFrames);
-        readVarint(m_inlineFrames);
-        return parent;
-    }
-    if (!m_withCode)
-        return 0;
-    --m_withCode;
-    if (readVarint(m_sites) & 1)
-        m_frame = static_cast<unsigned>(readVarint(m_sites));
-    return m_frame;
-}
-
 std::optional<uint32_t> tryCallSiteAt(const ImageFunction& function, uint32_t offsetOfReturnAddress)
 {
     if (!function.callSites)
@@ -1995,24 +1707,8 @@ std::optional<uint32_t> tryCallSiteAt(const ImageFunction& function, uint32_t of
     uint32_t offset = 0;
     int64_t site = 0;
     uint64_t first = readVarint(at);
-    uint64_t number = skipInlineFrames(at, first);
-    if (first & 4) {
-        unsigned frame = 0;
-        for (uint64_t count = first >> 3; count--;) {
-            uint64_t word = readVarint(at);
-            offset += (word >> 1) * codeOffsetUnit;
-            if (word & 1)
-                frame = static_cast<unsigned>(readVarint(at));
-            ++number;
-            if (offset >= offsetOfReturnAddress) {
-                if (offset == offsetOfReturnAddress)
-                    return PackedSite::pack(frame, CallSiteIndex(BytecodeIndex(static_cast<uint32_t>(number))).bits());
-                break;
-            }
-        }
-        return std::nullopt;
-    }
-    for (uint64_t count = first >> 3; count--;) {
+    skipInlineFrames(at, first);
+    for (uint64_t count = first >> 2; count--;) {
         offset += readVarint(at) * codeOffsetUnit;
         uint64_t step = readVarint(at);
         site += static_cast<int64_t>(step >> 1) ^ -static_cast<int64_t>(step & 1);
@@ -2034,10 +1730,8 @@ std::optional<uint32_t> spreadSite(const ImageFunction& function, uint32_t callS
     uint64_t first = readVarint(at);
     if (!(first & 1))
         return std::nullopt;
-    // Only the bytecode tier has them.
-    RELEASE_ASSERT(!(first & 4));
     skipInlineFrames(at, first);
-    for (uint64_t count = first >> 3; count--;) {
+    for (uint64_t count = first >> 2; count--;) {
         readVarint(at);
         readVarint(at);
     }
@@ -2093,7 +1787,7 @@ auto Image::codeForRegExp(const String& pattern, OptionSet<Yarr::Flags> flags) -
                 continue;
             StringView said = it->is8Bit ? StringView { std::span { reinterpret_cast<const Latin1Character*>(text + it->text), it->length } } : StringView { std::span { reinterpret_cast<const char16_t*>(text + it->text), it->length } };
             if (said == pattern)
-                return CodeForRegExp { static_cast<const uint8_t*>(image->m_code) + it->codeFor8Bit, static_cast<const uint8_t*>(image->m_code) + it->codeFor16Bit, it->numSubpatterns, it->minimumSize, static_cast<Yarr::SpecificPattern>(it->specificPattern), !!it->keepsMoreOfPattern };
+                return CodeForRegExp { static_cast<const uint8_t*>(image->m_code) + it->codeFor8Bit, static_cast<const uint8_t*>(image->m_code) + it->codeFor16Bit };
         }
     }
     return std::nullopt;
@@ -2437,16 +2131,9 @@ static AOTFileUse useAOTFile(std::span<const uint8_t> bytes, uint64_t position, 
 
 AOTFileUse useAOTFile(std::span<const uint8_t> bytes, AOTFileHandle file, int64_t offsetInFile)
 {
-    AOTFileUse result = useAOTFile(bytes, offsetInFile, [&](size_t offsetOfCode, size_t size, const char*& failureReason) {
+    return useAOTFile(bytes, offsetInFile, [&](size_t offsetOfCode, size_t size, const char*& failureReason) {
         return mapCode(file, offsetInFile + offsetOfCode, size, failureReason);
     }, unmapCode);
-#if !OS(WINDOWS)
-    if (result.code) {
-        AOT::s_fileOfImage = dup(file);
-        AOT::s_positionOfImageInFile = offsetInFile;
-    }
-#endif
-    return result;
 }
 
 #else
@@ -2480,7 +2167,7 @@ AOTFileUse useAOTFileInLoadedSection(std::span<const uint8_t> bytes)
 
 #endif
 
-Vector<uint8_t> buildAOTFile(VM& vm, std::span<const SourceCode> sources, bool isModule, std::span<const uint8_t> typedProgram, unsigned numberOfModulesWithoutEntry)
+Vector<uint8_t> buildAOTFile(VM& vm, const SourceCode& source, bool isModule, std::span<const uint8_t> typedProgram)
 {
     auto& options = vm.bytecodeGenerationOptions;
     options.resolveAllScopeSlotsStatically = true;
@@ -2496,37 +2183,27 @@ Vector<uint8_t> buildAOTFile(VM& vm, std::span<const SourceCode> sources, bool i
         BytecodeLinkEncoder::Hints hints;
         hints.compileAheadOfTime = true;
         BytecodeLinkEncoder encoder(vm, &strings, WTF::move(hints));
-        Vector<uint32_t, 1> modules;
-        unsigned numberOfModules = 0;
-        for (auto& source : sources) {
-            ParserError error;
-            UnlinkedCodeBlock* codeBlock = isModule
-                ? static_cast<UnlinkedCodeBlock*>(recursivelyGenerateUnlinkedCodeBlockForModuleProgram(vm, source, StrictModeLexicallyScopedFeature, JSParserScriptMode::Module, { }, error, EvalContextType::None))
-                : static_cast<UnlinkedCodeBlock*>(recursivelyGenerateUnlinkedCodeBlockForProgram(vm, source, NoLexicallyScopedFeatures, JSParserScriptMode::Classic, { }, error, EvalContextType::None));
-            if (error.isValid() || !codeBlock)
-                return { };
-            encoder.addModule(isModule ? sourceCodeKeyForSerializedModule(vm, source) : sourceCodeKeyForSerializedProgram(vm, source), codeBlock, source, { });
-            if (numberOfModules++ >= numberOfModulesWithoutEntry)
-                modules.append(numberOfModules - 1);
-        }
-        if (!typedProgram.empty() && !encoder.setTypedProgram(typedProgram, modules.span()))
+        ParserError error;
+        UnlinkedCodeBlock* codeBlock = isModule
+            ? static_cast<UnlinkedCodeBlock*>(recursivelyGenerateUnlinkedCodeBlockForModuleProgram(vm, source, StrictModeLexicallyScopedFeature, JSParserScriptMode::Module, { }, error, EvalContextType::None))
+            : static_cast<UnlinkedCodeBlock*>(recursivelyGenerateUnlinkedCodeBlockForProgram(vm, source, NoLexicallyScopedFeatures, JSParserScriptMode::Classic, { }, error, EvalContextType::None));
+        if (error.isValid() || !codeBlock)
+            return { };
+        encoder.addModule(isModule ? sourceCodeKeyForSerializedModule(vm, source) : sourceCodeKeyForSerializedProgram(vm, source), codeBlock, source, { });
+        if (!typedProgram.empty() && !encoder.setTypedProgram(typedProgram, 0))
             return { };
         linked = encoder.finish();
     }
     auto sizeOfImage = aotImageSize(linked.aotImage.span());
     if (!linked.payload || !sizeOfImage)
         return { };
-    MonotonicTime start = MonotonicTime::now();
     AOT::ProgramData::RetainedPositions positions { linked.reportableSites, [](uint32_t, LineColumn, UTF8CString&, LineColumn&) { return false; } };
     Vector<uint8_t> data = AOT::ProgramData::build(vm, strings.serialize().span(), linked.payload->span(), linked.moduleEntryOffsets.span(), linked.aotImage.span(), positions, linked.reportableSites.span(), linked.variablesExportedByModules.span());
     if (data.isEmpty())
         return { };
-    dataLogLnIf(Options::verboseAOTCompilation(), "AOT: the program data took ", static_cast<unsigned>((MonotonicTime::now() - start).milliseconds()), " ms");
-    start = MonotonicTime::now();
     Vector<uint8_t> file;
     file.append(linked.aotImage.span().first(*sizeOfImage));
     file.appendVector(data);
-    dataLogLnIf(Options::verboseAOTCompilation(), "AOT: copying the image into the file took ", static_cast<unsigned>((MonotonicTime::now() - start).milliseconds()), " ms");
     return file;
 }
 
@@ -2567,7 +2244,7 @@ namespace JSC {
 bool isAOTImagePC(const void*) { return false; }
 bool registerAOTImage(std::span<const uint8_t>, const void*) { return false; }
 AOTFileUse useAOTFile(std::span<const uint8_t>, int, int64_t) { return { "not supported on this platform", "not supported on this platform" }; }
-Vector<uint8_t> buildAOTFile(VM&, std::span<const SourceCode>, bool, std::span<const uint8_t>, unsigned) { return { }; }
+Vector<uint8_t> buildAOTFile(VM&, const SourceCode&, bool, std::span<const uint8_t>) { return { }; }
 std::optional<size_t> aotImageSize(std::span<const uint8_t>) { return std::nullopt; }
 std::optional<unsigned> aotImageRegExpCount(std::span<const uint8_t>) { return std::nullopt; }
 std::optional<std::pair<size_t, size_t>> aotImageCodeRange(std::span<const uint8_t>) { return std::nullopt; }

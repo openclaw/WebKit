@@ -25,7 +25,6 @@
 
 #pragma once
 
-#include "AOTTypedObject.h"
 #include "JSObjectInlines.h"
 #include "MarkedVector.h"
 #include "ObjectConstructor.h"
@@ -241,9 +240,6 @@ ALWAYS_INLINE JSObject* tryCreateObjectViaCloning(VM& vm, JSGlobalObject* global
 {
     static constexpr bool verbose = false;
 
-#if USE(BUN_JSC_ADDITIONS)
-    source->flattenIfCacheableDictionary(vm);
-#endif
     Structure* sourceStructure = source->structure();
 
     ASSERT(sourceStructure->canPerformFastPropertyEnumerationCommon());
@@ -329,24 +325,8 @@ ALWAYS_INLINE bool objectAssignFast(JSGlobalObject* globalObject, JSFinalObject*
         return false;
 
     Structure* sourceStructure = source->structure();
-    if (!sourceStructure->canPerformFastPropertyEnumerationCommon()) {
-#if ENABLE(AOT)
-        // The names live as long as the program.
-        if (sourceStructure->compiledLayout()) {
-            bool hasOnlyFields = uncheckedDowncast<AOT::Typed::Object>(source)->forEachFieldAsProperty([&](UniquedStringImpl& name, JSValue value) {
-                properties.append(&name);
-                values.appendWithCrashOnOverflow(value);
-                return true;
-            });
-            if (!hasOnlyFields)
-                return false;
-            if (properties.size())
-                target->putOwnDataPropertyBatching(vm, properties.mutableSpan().data(), values.data(), properties.size());
-            return true;
-        }
-#endif
+    if (!sourceStructure->canPerformFastPropertyEnumerationCommon())
         return false;
-    }
 
     if (objectCloneFast(vm, target, source))
         return true;

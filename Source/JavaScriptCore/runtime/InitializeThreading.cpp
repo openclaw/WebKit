@@ -157,11 +157,6 @@ void initializeWithOptionsCustomization(NOESCAPE const ScopedLambda<void()>& opt
             }
         }
 
-#if ENABLE(AOT)
-        if (Options::useAOT())
-            AOT::prepareFaultingAccesses();
-#endif
-
         assertInvariants();
 
         WTF::compilerFence();

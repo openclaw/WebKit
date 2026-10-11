@@ -96,9 +96,6 @@ public:
     {
         m_state = NotCompiled;
         m_minimumSize = 0;
-#if ENABLE(AOT) && ENABLE(YARR_JIT)
-        m_codeOfImage = { };
-#endif
         m_constructionErrorCode = Yarr::ErrorCode::NoError;
     }
 
@@ -238,9 +235,6 @@ private:
 
     static RegExp* createWithoutCaching(VM&, const String&, OptionSet<Yarr::Flags>);
     void finishCreationFromCache(VM&, unsigned numSubpatterns, String&& atom, Yarr::SpecificPattern);
-#if ENABLE(AOT) && ENABLE(YARR_JIT)
-    bool takeCodeFromImage(VM&);
-#endif
 
     enum RegExpState : uint8_t {
         ParseError,
@@ -298,10 +292,6 @@ private:
     uint16_t m_workInInterpreter { 0 };
     unsigned m_numSubpatterns { 0 };
     unsigned m_minimumSize { 0 };
-#if ENABLE(AOT) && ENABLE(YARR_JIT)
-    // For 8-bit and for 16-bit subjects, with subpatterns: what m_regExpJITCode has from the image, while it has it, of an expression that is served by code. See matchInlineOnce().
-    std::array<const void*, 2> m_codeOfImage { };
-#endif
     std::unique_ptr<Yarr::BytecodePattern> m_regExpBytecode;
 #if USE(BUN_JSC_ADDITIONS)
     // Of a long pattern, from its creation to its first match, so that it is parsed once.

@@ -21,6 +21,10 @@ realm (`createGlobalObject().load()`), on another thread (`$.agent.start()`), or
 If compilation fails, `--writeAOTImageTo` exits unsuccessfully without creating or overwriting the image.
 `check-compile-failure.py <jsc>` checks both cases.
 
+The shell compiles ordinary JavaScript through the bytecode AOT compiler, which infers types from the whole program.
+An embedder may instead provide serialized typed IR with `BytecodeLinkEncoder::setTypedProgram()`. That optional input has a
+separate frontend; the shell does not produce it. Keep source compilation available until a replacement source frontend is wired in.
+
 | Goal | Tool |
 | --- | --- |
 | Quick regression check (10 seconds) | `run-tests.py <jsc>` runs `JSTests/stress/aot-*.js` and `sound-types-*.js`, each with its own options and again with validation. |

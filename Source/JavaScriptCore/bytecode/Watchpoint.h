@@ -107,8 +107,7 @@ class WatchpointSet;
     JSC_WATCHPOINT_TYPES_WITHOUT_DFG(macro) \
     macro(AdaptiveStructure, DFG::AdaptiveStructureWatchpoint) \
     macro(AOTSlot, AOT::SlotWatchpoint) \
-    macro(AOTAssumption, AOT::AssumptionWatchpoint) \
-    macro(AOTTransition, AOT::TransitionWatchpoint)
+    macro(AOTAssumption, AOT::AssumptionWatchpoint)
 #elif ENABLE(DFG_JIT)
 #define JSC_WATCHPOINT_TYPES(macro) \
     JSC_WATCHPOINT_TYPES_WITHOUT_DFG(macro) \

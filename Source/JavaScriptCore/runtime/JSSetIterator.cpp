@@ -26,8 +26,6 @@
 #include "config.h"
 #include "JSSetIterator.h"
 
-#include "AOTTypedCompactTable.h"
-
 #include "JSCInlines.h"
 #include "JSInternalFieldObjectImplInlines.h"
 #include "JSSet.h"
@@ -48,17 +46,9 @@ void JSSetIterator::finishCreation(VM& vm,  JSSet* iteratedObject, IterationKind
     Base::finishCreation(vm);
     setEntry(vm, 0);
     setIteratedObject(vm, iteratedObject);
-    // Not storage(): a table that is none stays what it is until the first step, and beyond.
-    internalField(Field::Storage).set(vm, this, iteratedObject->m_storage.get());
+    internalField(Field::Storage).set(vm, this, iteratedObject->storage());
     internalField(Field::Kind).setWithoutWriteBarrier(jsNumber(static_cast<int32_t>(kind)));
 }
-
-#if ENABLE(AOT)
-JSValue JSSetIterator::nextInCompactTable(VM& vm)
-{
-    return AOT::Typed::CompactTable::stepIterator<SetTraits>(vm, this).key;
-}
-#endif
 
 void JSSetIterator::finishCreation(VM& vm)
 {

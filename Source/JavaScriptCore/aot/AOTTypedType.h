@@ -182,7 +182,7 @@ ASCIILiteral nameOf(Store);
 unsigned sizeOf(Store);
 Rep repOf(Store);
 inline bool holdsCells(Rep rep) { return rep == Rep::Cell || rep == Rep::JSValue; }
-inline bool holdsCells(Store store) { return store == Store::Cell || store == Store::JSValue || store == Store::Cell32 || store == Store::OptionalCell32; }
+inline bool holdsCells(Store store) { return store == Store::Cell || store == Store::JSValue; }
 
 } } } // namespace JSC::AOT::Typed
 

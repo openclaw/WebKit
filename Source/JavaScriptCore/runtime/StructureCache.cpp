@@ -104,11 +104,8 @@ Structure* StructureCache::emptyStructureForPrototypeFromBaseStructure(JSGlobalO
     TypeInfo typeInfo = baseStructure->typeInfo();
     JSType type = typeInfo.type();
     // See JSObject::becomeDerivedArray().
-    if (type == ArrayType && globalObject->vm().useImmutableIntrinsics && baseStructure->storedPrototype() != JSValue(prototype)) [[unlikely]] {
+    if (type == ArrayType && globalObject->vm().useImmutableIntrinsics && baseStructure->storedPrototype() != JSValue(prototype)) [[unlikely]]
         type = DerivedArrayType;
-        if (!hasAnyArrayStorage(indexingType))
-            indexingType = (indexingType & ~(IndexingShapeMask | CopyOnWrite)) | ArrayStorageShape;
-    }
 
     return createEmptyStructure(globalObject, prototype, TypeInfo(type, typeInfo.inlineTypeFlags(), typeInfo.outOfLineTypeFlags()), baseStructure->classInfoForCells(), indexingType, 0, false, nullptr, shouldCacheStructure);
 }

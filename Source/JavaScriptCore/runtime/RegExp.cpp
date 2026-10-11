@@ -177,14 +177,6 @@ static constexpr unsigned maxLengthOfPatternParsedForSyntaxAlone = 4096;
 void RegExp::finishCreation(VM& vm)
 {
     Base::finishCreation(vm);
-#if ENABLE(AOT) && ENABLE(YARR_JIT)
-    if (auto code = AOT::Image::codeForRegExp(m_patternString, m_flags); code && !code->keepsMoreOfPattern) {
-        m_specificPattern = code->specificPattern;
-        m_numSubpatterns = code->numSubpatterns;
-        m_ovector = FixedVector<int>(offsetVectorBaseForNamedCaptures());
-        return;
-    }
-#endif
 #if USE(BUN_JSC_ADDITIONS)
     if (Options::useLazyRegExpPatternConstruction() && m_patternString.length() > maxLengthOfPatternParsedForSyntaxAlone) {
         auto pattern = makeUniqueWithoutFastMallocCheck<Yarr::YarrPattern>(m_patternString, m_flags, m_constructionErrorCode);
@@ -397,23 +389,6 @@ bool RegExp::startsInterpreted(std::optional<StringView> subject) const
     return m_workInInterpreter + (subject ? subject->length() / 32 : 0) < workBeforeJIT;
 }
 
-#if ENABLE(AOT) && ENABLE(YARR_JIT)
-// Without a Yarr::YarrPattern: finishCreation() made none either.
-bool RegExp::takeCodeFromImage(VM& vm)
-{
-    auto code = AOT::Image::codeForRegExp(m_patternString, m_flags);
-    if (!code || code->keepsMoreOfPattern)
-        return false;
-    if (!hasCode())
-        vm.regExpCache()->addToStrongCache(this);
-    ensureRegExpJITCode().setCodeFromImage(code->for8Bit, code->for16Bit, offsetVectorSize());
-    m_state = JITCode;
-    m_minimumSize = code->minimumSize;
-    if (!hasValidAtom() && m_specificPattern != Yarr::SpecificPattern::AnchoredWordList)
-        m_codeOfImage = { code->for8Bit, code->for16Bit };
-    return true;
-}
-#endif
 
 void RegExp::compile(VM* vm, Yarr::CharSize charSize, std::optional<StringView> sampleString)
 {
@@ -422,10 +397,6 @@ void RegExp::compile(VM* vm, Yarr::CharSize charSize, std::optional<StringView> 
 #if ENABLE(AOT)
     if (Options::useAOTOperationCounters() && vm->m_aotRuntimeTable) [[unlikely]]
         vm->m_aotRuntimeTable->countOperation("RegExp::compile");
-#endif
-#if ENABLE(AOT) && ENABLE(YARR_JIT)
-    if (takeCodeFromImage(*vm))
-        return;
 #endif
 #if USE(BUN_JSC_ADDITIONS)
     auto patternFromCreation = std::exchange(m_patternFromCreation, nullptr);
@@ -546,10 +517,6 @@ void RegExp::compileMatchOnly(VM* vm, Yarr::CharSize charSize, std::optional<Str
 #if ENABLE(AOT)
     if (Options::useAOTOperationCounters() && vm->m_aotRuntimeTable) [[unlikely]]
         vm->m_aotRuntimeTable->countOperation("RegExp::compile");
-#endif
-#if ENABLE(AOT) && ENABLE(YARR_JIT)
-    if (takeCodeFromImage(*vm))
-        return;
 #endif
 #if USE(BUN_JSC_ADDITIONS)
     // The bytecode wants the pattern with its subpatterns: see below. Where the expression goes to the interpreter, at first or for good, that one is parsed, or taken from the creation, and no other.
@@ -686,9 +653,6 @@ void RegExp::deleteCode()
         return;
     m_state = NotCompiled;
     m_minimumSize = 0;
-#if ENABLE(AOT) && ENABLE(YARR_JIT)
-    m_codeOfImage = { };
-#endif
     // m_atom and m_specificPattern stay: they describe the pattern (every compile sets them to the same values), the fast paths that
     // use them never run the code, and RegExpCachedResult needs the atom of a one-character match it has yet to reify.
 #if ENABLE(YARR_JIT)

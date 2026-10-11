@@ -3378,12 +3378,6 @@ void Heap::setMutatorShouldBeFenced(bool value)
 {
     m_mutatorShouldBeFenced = value;
     m_barrierThreshold = value ? tautologicalThreshold : blackThreshold;
-#if ENABLE(AOT)
-    for (AOT::Instance* instance : vm().m_aotInstances) {
-        instance->barrierThreshold = m_barrierThreshold;
-        instance->mutatorShouldBeFenced = value;
-    }
-#endif
 }
 
 void Heap::performIncrement(size_t bytes)

@@ -481,13 +481,10 @@ AssemblyHelpers::JumpList AssemblyHelpers::findMegamorphicCacheEntry(Megamorphic
         primaryFail.append(branchPtr(NotEqual, Address(scratch3GPR, Entry::offsetOfUid()), uidGPR));
     // We already hit StructureID and uid. And we get stale epoch for this entry.
     // Since all entries in the secondary cache has stale epoch for this StructureID and uid pair, we should just go to the slow case.
-    load16(Address(scratch3GPR, Entry::offsetOfEpoch()), scratch1GPR);
-    JumpList primaryHit;
-    primaryHit.append(branch32(Equal, scratch1GPR, scratch2GPR));
-    slowCases.append(branch32(NotEqual, scratch1GPR, TrustedImm32(MegamorphicCache::permanentEpoch)));
+    slowCases.append(branch32WithMemory16(NotEqual, Address(scratch3GPR, Entry::offsetOfEpoch()), scratch2GPR));
 
     // Primary hit: scratch3GPR points at the matching entry. Skip the secondary lookup.
-    primaryHit.append(jump());
+    Jump primaryHit = jump();
 
     // Secondary cache lookup. Now,
     //   1. scratch1GPR holds StructureID.
@@ -515,9 +512,7 @@ AssemblyHelpers::JumpList AssemblyHelpers::findMegamorphicCacheEntry(Megamorphic
         slowCases.append(branchPtr(NotEqual, Address(scratch3GPR, Entry::offsetOfUid()), TrustedImmPtr(uid)));
     else
         slowCases.append(branchPtr(NotEqual, Address(scratch3GPR, Entry::offsetOfUid()), uidGPR));
-    load16(Address(scratch3GPR, Entry::offsetOfEpoch()), scratch1GPR);
-    primaryHit.append(branch32(Equal, scratch1GPR, scratch2GPR));
-    slowCases.append(branch32(NotEqual, scratch1GPR, TrustedImm32(MegamorphicCache::permanentEpoch)));
+    slowCases.append(branch32WithMemory16(NotEqual, Address(scratch3GPR, Entry::offsetOfEpoch()), scratch2GPR));
 
     // Secondary hit falls through; the primary hit converges here. scratch3GPR points at the entry.
     primaryHit.link(this);

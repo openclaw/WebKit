@@ -79,10 +79,6 @@ const GlobalObjectMethodTable* JSAPIGlobalObject::globalObjectMethodTable()
         &codeForEval,
         &canCompileStrings,
         &trustedScriptStructure,
-#if USE(BUN_JSC_ADDITIONS)
-        nullptr, // requireBuiltinModule
-        nullptr, // nativeBinding
-#endif
     };
     return &table;
 };

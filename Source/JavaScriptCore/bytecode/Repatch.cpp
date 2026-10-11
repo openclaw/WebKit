@@ -232,11 +232,7 @@ void linkPolymorphicCall(VM& vm, JSCell* owner, CallFrame* callFrame, CallLinkIn
                         arityCheck = ArityCheckMode::MustCheckArity;
 
                 }
-                // A host function may have an entrypoint of its own: see NativeExecutable::setCallEntrypoint().
-                if (variant.executable()->isHostFunction())
-                    codePtr = variant.executable()->entrypointFor(CodeSpecializationKind::CodeForCall, ArityCheckMode::MustCheckArity);
-                else
-                    codePtr = variant.executable()->generatedJITCodeForCall()->addressForCall(arityCheck);
+                codePtr = variant.executable()->generatedJITCodeForCall()->addressForCall(arityCheck);
                 slot.m_arityCheckMode = arityCheck;
             }
         } else {
