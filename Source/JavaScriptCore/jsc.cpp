@@ -1708,6 +1708,8 @@ static SourceCode programSource(JSGlobalObject* globalObject, SourceCode&& sourc
     VM& vm = globalObject->vm();
     if (const char* path = byteCast<char>(Options::writeAOTImageTo())) {
         Vector<uint8_t> file = buildAOTFile(vm, singleElementSpan(source), isModule);
+        if (file.isEmpty())
+            jscExit(EXIT_FAILURE);
         FILE* output = fopen(path, "wb");
         bool ok = output && fwrite(file.span().data(), 1, file.size(), output) == file.size() && !fclose(output);
         jscExit(ok ? EXIT_SUCCESS : EXIT_FAILURE);

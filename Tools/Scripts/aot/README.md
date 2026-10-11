@@ -18,6 +18,9 @@ Pass `-m` to treat the file as a module. Anything else that gets loaded is inter
 realm (`createGlobalObject().load()`), on another thread (`$.agent.start()`), or by another module loader in the same realm
 (`importInNewLoader()`). `isAOTCompiled(f)` reports whether a function runs compiled code.
 
+If compilation fails, `--writeAOTImageTo` exits unsuccessfully without creating or overwriting the image.
+`check-compile-failure.py <jsc>` checks both cases.
+
 | Goal | Tool |
 | --- | --- |
 | Quick regression check (10 seconds) | `run-tests.py <jsc>` runs `JSTests/stress/aot-*.js` and `sound-types-*.js`, each with its own options and again with validation. |
