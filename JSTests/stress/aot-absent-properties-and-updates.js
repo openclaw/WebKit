@@ -55,13 +55,14 @@ for (let round = 0; round < 3; ++round) {
     check(coalesce({ n: 1, m: 2, k: 0 }), "1,2,0", "short-circuit assignments, not taken");
 }
 
-function escape(o) { return o; }
+// Bun: do not redeclare the immutable global escape function in this source test.
+function escapeObject(o) { return o; }
 function readsBoth(i) { let { a, b } = { a: i, b: i + 1 }; return a + b; }
 function readsAbsent(i) { let { a, b = 2 } = { a: i }; return a * b; }
 function readsToString(i) { let { a, toString } = { a: i }; return typeof toString + a; }
 function readsProto(i) { let o = { a: i }; return o.__proto__ === Object.prototype; }
 function readsComputed(i, k) { let o = { a: i }; return o[k]; }
-function escapes(i) { let o = { a: i }; escape(o); return o.a; }
+function escapes(i) { let o = { a: i }; escapeObject(o); return o.a; }
 function isReturned(i) { return { a: i }; }
 function isWritten(i) { let o = { a: i }; o.b = 1; return o.a + o.b; }
 function hasGetter(i) { let o = { get a() { return i; } }; return o.a; }

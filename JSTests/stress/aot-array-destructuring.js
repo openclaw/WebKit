@@ -99,11 +99,13 @@ for (let round = 0; round < 3; ++round) {
         check(prototype.return, undefined, "array iterators have no return method");
         check(Reflect.set(prototype, "return", method), false, "and cannot be given one");
         check(Reflect.defineProperty(prototype, "return", { value: method }), false, "nor by defining it");
-        Iterator.prototype.return = method;
     } else
         prototype.return = method;
     let closed = text => isImmutable ? "" : text;
     class Counting extends Iterator { count = 0; next() { return { done: false, value: ++this.count }; } }
+    // Bun: Iterator.prototype is immutable too; a user-defined iterator can still be closed.
+    if (isImmutable)
+        Counting.prototype.return = method;
     for (let round = 0; round < 2; ++round) {
         log.length = 0;
         check(two([1]), "1,undefined", "a short array, with a return method");
@@ -125,7 +127,7 @@ for (let round = 0; round < 3; ++round) {
             check(log.join(), "return, then 3", "other iterators are closed");
         }
     }
-    delete (isImmutable ? Iterator.prototype : prototype).return;
+    delete (isImmutable ? Counting.prototype : prototype).return;
     log.length = 0;
     check(two([1, 2, 3]), "1,2", "the return method is gone");
     check(log.join(), "", "nothing is called");

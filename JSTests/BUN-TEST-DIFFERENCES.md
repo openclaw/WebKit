@@ -163,6 +163,7 @@ Rules for an edit to an upstream test:
 - Built-in objects are immutable in these modes (`useAOT` implies `useImmutableIntrinsics`): ahead-of-time compiled code relies on it. The
   204 tests that change one are listed in `JSTests/bun-tests-that-change-builtins.txt`, which the runner reads, instead of each
   having a directive, so that they stay as upstream has them. They fail with `--useImmutableIntrinsics=1` in the plain interpreter too.
+- The AOT fixtures `stress/aot-absent-properties-and-updates.js` and `stress/aot-array-destructuring.js` use a non-conflicting helper name and a user-defined iterator prototype, respectively, so they exercise their original behavior without mutating immutable built-ins.
 - A program that is compiled ahead of time has no source text, so `Function.prototype.toString()` says of its functions what it says of
   native ones. The 20 tests of `JSTests/stress` that depend on the text are listed in `JSTests/bun-tests-that-read-function-text.txt`, likewise.
   They fail with `--hideFunctionSourceForTesting=1` in the plain interpreter too. `Tools/Scripts/aot/list-tests-that-read-function-text.py`
