@@ -3065,8 +3065,8 @@ void Node::dump(PrintStream& out) const
         case GuardKind::Callee:
             out.print("GuardCallee(bc#", bytecodeIndex.offset(), ")");
             break;
-        case GuardKind::KnownCallee:
-            out.print("GuardKnownCallee(bc#", bytecodeIndex.offset(), ")");
+        case GuardKind::CalleeIsInitialized:
+            out.print("GuardCalleeIsInitialized(bc#", bytecodeIndex.offset(), ")");
             break;
         case GuardKind::Uint8ArrayStorageIfAny:
             out.print("Uint8ArrayStorageIfAny");
@@ -3680,7 +3680,7 @@ private:
             return nullptr;
         auto bytecode = call->as<OpCall>();
         Node* guard = m_graph.addNode(NodeKind::Guard);
-        guard->guardKind = GuardKind::KnownCallee;
+        guard->guardKind = GuardKind::CalleeIsInitialized;
         guard->opcode = op_call;
         guard->instruction = call;
         guard->bytecodeIndex = BytecodeIndex(offset);
@@ -3689,7 +3689,8 @@ private:
         const KnownFunction* known = m_graph.knownCallee(guard, &isExact);
         if (!known || !isExact || !canBeInlined(known, bytecode.m_argc))
             return nullptr;
-        append(block, guard);
+        if (!known->isDeclaration)
+            append(block, guard);
 
         UnlinkedFunctionCodeBlock* callee = known->forCall;
         unsigned numParameters = callee->numParameters();

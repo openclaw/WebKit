@@ -273,23 +273,17 @@ void Lowering::emitGuard(Node* guard)
         m_out.appendTo(continuation);
         return;
     }
-    case GuardKind::KnownCallee: {
-        const KnownFunction* known = m_graph.knownCallee(guard);
-        if (m_graph.calleeIsExact(guard)) {
-            if (!known->isDeclaration) {
-                Node* calleeNode = guard->uses[0].node;
-                LValue callee = lowJSValue(calleeNode);
-                Node* lastOfExit = guard->block->successors.last()->terminal();
-                m_exitIsValidOnlyAfterFailure = lastOfExit && lastOfExit->isBytecode(op_unreachable);
-                if (isSubtype(calleeNode->type & TCell, TFunction))
-                    exitUnless(isCell(callee));
-                else
-                    exitUnless(isCellAnd(calleeNode, callee, [&](LValue cell) { return isCellOfType(cell, JSFunctionType); }));
-                m_exitIsValidOnlyAfterFailure = false;
-            }
-            return;
-        }
-        RELEASE_ASSERT_NOT_REACHED();
+    case GuardKind::CalleeIsInitialized: {
+        // Inlining already proved the callee identity; scope rewrites need not preserve that proof's representation.
+        Node* calleeNode = guard->uses[0].node;
+        LValue callee = lowJSValue(calleeNode);
+        Node* lastOfExit = guard->block->successors.last()->terminal();
+        m_exitIsValidOnlyAfterFailure = lastOfExit && lastOfExit->isBytecode(op_unreachable);
+        if (isSubtype(calleeNode->type & TCell, TFunction))
+            exitUnless(isCell(callee));
+        else
+            exitUnless(isCellAnd(calleeNode, callee, [&](LValue cell) { return isCellOfType(cell, JSFunctionType); }));
+        m_exitIsValidOnlyAfterFailure = false;
         return;
     }
     case GuardKind::Uint8ArrayStorageIfAny: {

@@ -83,7 +83,7 @@ enum class GuardKind : uint8_t {
     BeginSlotChecks,
     EndSlotChecks,
     Callee,
-    KnownCallee,
+    CalleeIsInitialized,
     TypedArrayStorage,
     Uint8ArrayStorageIfAny,
     IsArrayIntrinsic,

@@ -634,7 +634,7 @@ private:
         if (guardedIntrinsic || checksCalleeIsInitialized || likelyFunction) {
             Node* guard = m_graph.addNode(NodeKind::Guard);
             guard->graph = block->graph;
-            guard->guardKind = likelyFunction ? GuardKind::IsLikelyFunction : checksCalleeIsInitialized ? GuardKind::KnownCallee : skipsSpeciesConstructor ? GuardKind::IsOriginalArrayIntrinsic : isArraySpecialization ? GuardKind::IsArrayIntrinsic : GuardKind::IsIntrinsic;
+            guard->guardKind = likelyFunction ? GuardKind::IsLikelyFunction : checksCalleeIsInitialized ? GuardKind::CalleeIsInitialized : skipsSpeciesConstructor ? GuardKind::IsOriginalArrayIntrinsic : isArraySpecialization ? GuardKind::IsArrayIntrinsic : GuardKind::IsIntrinsic;
             guard->intrinsic = guardedIntrinsic;
             guard->likelyFunction = likelyFunction;
             guard->opcode = call->opcode;

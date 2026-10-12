@@ -595,7 +595,7 @@ private:
         for (BasicBlock* block : loop.blocks) {
             for (unsigned i = 0; i < block->nodes.size(); ++i) {
                 Node* node = block->nodes[i];
-                if (node->kind == NodeKind::Guard && node->guardKind == GuardKind::KnownCallee && isInvariant(loop, node->uses[0].node) && executesOnEveryIteration(loop, block)) {
+                if (node->kind == NodeKind::Guard && node->guardKind == GuardKind::CalleeIsInitialized && isInvariant(loop, node->uses[0].node) && executesOnEveryIteration(loop, block)) {
                     block->nodes.removeAt(i--);
                     addToPreHeader(loop, node);
                 }
