@@ -1318,8 +1318,8 @@ void clearDeadFrameSlots(Graph& graph)
         if (suspension.toClear.isEmpty())
             continue;
         Node* frameThere = suspension.lastSave->use(suspension.lastSave->as<OpPutToScope>().m_scope);
-        size_t index = block->nodes.find(suspension.lastSave);
-        RELEASE_ASSERT(index != notFound);
+        // The return value may still be loaded from a slot after the last save.
+        size_t index = block->nodes.size() - 1;
         for (unsigned slot : suspension.toClear) {
             Node* like = saveOfSlot.get(slot);
             if (!like)
@@ -1332,7 +1332,7 @@ void clearDeadFrameSlots(Graph& graph)
             store->uses.append({ like->as<OpPutToScope>().m_scope, frameThere });
             store->uses.append({ like->as<OpPutToScope>().m_value, graph.constant(jsUndefined()) });
             store->type = like->type;
-            block->nodes.insert(++index, store);
+            block->nodes.insert(index++, store);
             ++numberCleared;
         }
     }
