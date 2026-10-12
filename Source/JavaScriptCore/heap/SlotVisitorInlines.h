@@ -198,7 +198,7 @@ inline void SlotVisitor::reportExternalMemoryVisited(size_t size)
 inline void SlotVisitor::reportArrayBufferMemoryVisited(size_t size)
 {
     if (m_isFirstVisit)
-        heap()->reportArrayBufferMemoryVisited(0, size);
+        m_collector.heap().reportArrayBufferMemoryVisited(0, size);
 }
 #endif
 

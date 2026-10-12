@@ -116,6 +116,16 @@ public:
         }).iterator->value;
     }
 
+    static unsigned resumeSwitchOffset(UnlinkedCodeBlock* codeBlock)
+    {
+        unsigned tableIndex = codeBlock->numberOfUnlinkedSwitchJumpTables() - 1;
+        for (const auto& instruction : codeBlock->instructions()) {
+            if (instruction->opcodeID() == op_switch_imm && instruction->as<OpSwitchImm>().m_tableIndex == tableIndex)
+                return instruction.offset();
+        }
+        return 0;
+    }
+
     uint32_t makePositions(uint32_t index, UnlinkedCodeBlock* codeBlock, unsigned sourceOffset, LineStartTable& lineStarts)
     {
         Vector<uint8_t> stream;
@@ -124,7 +134,7 @@ public:
         if (size_t count = codeBlock->numberOfUnlinkedSwitchJumpTables(); count && isAsyncFunctionBodyParseMode(codeBlock->parseMode())) {
             auto& table = codeBlock->unlinkedSwitchJumpTable(count - 1);
             for (int32_t offset : table.m_branchOffsets)
-                offsets.append(std::max(offset ? offset : table.m_defaultOffset, 0));
+                offsets.append(resumeSwitchOffset(codeBlock) + std::max(offset ? offset : table.m_defaultOffset, 0));
             std::ranges::sort(offsets);
             offsets.shrink(std::ranges::unique(offsets).begin() - offsets.begin());
         }
@@ -175,13 +185,18 @@ public:
             while (nextConstruction < sites.constructions.size() && sites.constructions[nextConstruction].offset < offset)
                 ++nextConstruction;
             const auto* construction = nextConstruction < sites.constructions.size() && sites.constructions[nextConstruction].offset == offset ? &sites.constructions[nextConstruction] : nullptr;
-            LineColumn position = positionOf(sourceOffset + codeBlock->expressionInfoForBytecodeIndex(BytecodeIndex(offset)).divot);
+            auto syntaxPosition = codeBlock->callSitePositionForBytecodeIndex(BytecodeIndex(offset), true);
+            if (!syntaxPosition)
+                syntaxPosition = codeBlock->callSitePositionForBytecodeIndex(BytecodeIndex(offset), false);
+            LineColumn position = positionOf(sourceOffset + syntaxPosition.value_or(codeBlock->expressionInfoForBytecodeIndex(BytecodeIndex(offset)).divot));
             appendVarint(stream, static_cast<uint64_t>(offset - previousOffset) << 1 | !!construction);
             previousOffset = offset;
             appendPosition(position);
             if (construction) {
                 LineColumn start = position;
-                if (construction->linesUp) {
+                if (syntaxPosition) {
+                    start = position;
+                } else if (construction->linesUp) {
                     start.line = position.line > construction->linesUp ? position.line - construction->linesUp : 1;
                     start.column = construction->columnOrColumnDelta;
                 } else if (position.column > construction->columnOrColumnDelta)
@@ -290,7 +305,7 @@ public:
             auto& table = codeBlock->unlinkedSwitchJumpTable(count - 1);
             Vector<int32_t, 16> list { table.m_min, static_cast<int32_t>(table.m_branchOffsets.size()) };
             for (int32_t offset : table.m_branchOffsets)
-                list.append(offset ? offset : table.m_defaultOffset);
+                list.append(resumeSwitchOffset(codeBlock) + (offset ? offset : table.m_defaultOffset));
             words[0] |= Metadata::ResumePoints;
             words.append(append(list));
         }

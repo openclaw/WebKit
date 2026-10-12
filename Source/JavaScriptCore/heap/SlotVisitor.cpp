@@ -318,8 +318,8 @@ void SlotVisitor::noteLiveAuxiliaryCell(HeapCell* cell)
     size_t cellSize = container.cellSize();
     m_bytesVisited += cellSize;
 #if USE(BUN_JSC_ADDITIONS)
-    if (cell->subspace() == &heap()->typedArrayAuxiliarySpace)
-        heap()->reportArrayBufferMemoryVisited(cellSize, 0);
+    if (cell->subspace() == &m_collector.heap().typedArrayAuxiliarySpace)
+        m_collector.heap().reportArrayBufferMemoryVisited(cellSize, 0);
 #endif
     m_nonCellVisitCount += cellSize;
 }
@@ -761,7 +761,7 @@ SlotVisitor::SharedDrainResult SlotVisitor::drainInParallelPassively(MonotonicTi
 
         // A synchronous collector wait can begin after the entry check. Keep making
         // progress even when the process-wide helper pool is serving another heap.
-        if (m_heap.m_worldState.load() & Heap::mutatorWaitingBit) {
+        if (heap.m_worldState.load() & Heap::mutatorWaitingBit) {
             locker.unlockEarly();
             return drainInParallel(timeout);
         }

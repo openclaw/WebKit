@@ -51,10 +51,10 @@ WTF_EXPORT_PRIVATE MessageStatus sendMessageScoped(const ThreadSuspendLocker&, T
 // and returns TemporarilyUnavailable without invoking the message. This is for
 // optional sampling, never for deciding whether a thread has GC roots.
 // Platform errors return SuspensionFailed; they do not establish thread exit.
-WTF_EXPORT_PRIVATE MessageStatus trySendMessageScoped(const ThreadSuspendLocker&, Thread&, const ThreadMessage&);
+WTF_EXPORT_PRIVATE MessageStatus trySendMessageScoped(const ThreadSuspendLocker&, Thread&, NOESCAPE const ThreadMessage&);
 
 template<typename Functor>
-MessageStatus trySendMessage(const ThreadSuspendLocker& locker, Thread& targetThread, const Functor& func)
+MessageStatus trySendMessage(const ThreadSuspendLocker& locker, Thread& targetThread, NOESCAPE const Functor& func)
 {
     return trySendMessageScoped(locker, targetThread, func);
 }
