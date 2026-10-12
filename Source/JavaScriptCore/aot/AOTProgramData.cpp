@@ -602,6 +602,9 @@ public:
         UncheckedKeyHashMap<String, uint32_t> shared;
         for (auto& [executable, moduleIndex] : m_executables) {
             UnlinkedFunctionExecutable* unlinked = executable->unlinkedExecutable();
+            SourceCode classText = executable->isClass() ? executable->classSource() : SourceCode();
+            unsigned textStart = executable->isClass() ? classText.startOffset() : executable->functionStart();
+            unsigned textEnd = executable->isClass() ? classText.endOffset() : executable->parametersStartOffset() + executable->source().length();
             unlinked->clearCodegenOnlyData();
             bool hasCodeToCall = executable->aotEntryFor(CodeSpecializationKind::CodeForCall);
             bool hasCode = hasCodeToCall || (executable->aotEntryFor(CodeSpecializationKind::CodeForConstruct) && !executable->constructsViaCall());
@@ -635,6 +638,9 @@ public:
             row.isArrowFunctionContext = executable->isArrowFunctionContext();
             row.isInsideOrdinaryFunction = executable->isInsideOrdinaryFunction();
             if (row.isShort) {
+                // Shared unlinked templates lose source offsets; retain the exact toString span separately.
+                row.startOffset = textStart;
+                row.sourceLength = textEnd - textStart;
                 row.name = numberOfIdentifier(unlinked->ecmaName().impl());
                 row.parameterCount = unlinked->parameterCount();
                 auto what = unlinked->sharedTemplateKey();
@@ -642,6 +648,8 @@ public:
                     return numberOfUnlinkedFunction(unlinked);
                 }).iterator->value;
             } else {
+                if (!classText.isNull())
+                    unlinked->setClassSource(classText);
                 row.unlinkedFunction = numberOfUnlinkedFunction(unlinked);
                 row.startOffset = executable->source().startOffset();
                 row.sourceLength = executable->source().length();

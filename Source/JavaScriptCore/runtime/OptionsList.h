@@ -199,6 +199,7 @@ bool hasCapacityToUseLargeGigacage();
     v(Bool, dumpGeneratedBytecodes, false, Normal, nullptr) \
     v(Bool, useSharedRegExpLiteralObjects, true, Normal, "reuse one RegExpObject per literal site when the object provably cannot be observed"_s) \
     v(Bool, hideFunctionSourceForTesting, false, Normal, "Function.prototype.toString() behaves as if the program had been built without source text."_s) \
+    v(Bool, useAOTFunctionSource, false, Normal, "Expose the original function text when an AOT embedder retains the module source."_s) \
     v(Bool, useImmutableIntrinsics, false, Normal, "Freeze the initial properties of built-in objects such as Object.prototype, Array.prototype and Math when a realm is created. See JSGlobalObject::makeIntrinsicsImmutable()."_s) \
     v(Bool, useTypeTags, false, Normal, "Allow type tags in source text: a 0x01 byte followed by six characters that encode a number (Lexer::readTypeTag()), attached to the next token. The bundler emits them to convey static types."_s) \
     v(Bool, useSoundTypes, false, Normal, "Compile $$t(value, <integer literal mask>) to op_check_type instead of a call."_s) \

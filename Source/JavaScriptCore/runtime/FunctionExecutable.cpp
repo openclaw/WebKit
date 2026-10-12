@@ -319,7 +319,25 @@ JSString* FunctionExecutable::toStringSlow(JSGlobalObject* globalObject)
         return cacheIfNoException(jsMakeNontrivialString(globalObject, "function "_s, name().string(), "() { [native code] }"_s));
 
 #if USE(BUN_JSC_ADDITIONS)
-    if ((isClass() ? classSource().provider() : sourceProvider())->hasNoSourceText() || (Options::hideFunctionSourceForTesting() && !isBuiltinFunction())) [[unlikely]] {
+    SourceProvider* provider = sourceProvider();
+    bool hasRetainedAOTSource = Options::useAOTFunctionSource() && provider->aotModuleID() && !provider->source().isEmpty();
+#if ENABLE(AOT)
+    if (isShortForm() && hasRetainedAOTSource && !Options::hideFunctionSourceForTesting()) {
+        const auto& row = shortFormRow();
+        unsigned length = provider->source().length();
+        if (row.sourceLength && row.startOffset <= length && row.sourceLength <= length - row.startOffset)
+            return cache(jsString(vm, provider->getRange(row.startOffset, row.startOffset + row.sourceLength)));
+        hasRetainedAOTSource = false;
+    }
+#endif
+    if (isClass() && hasRetainedAOTSource && !Options::hideFunctionSourceForTesting()) {
+        SourceCode text = classSource();
+        unsigned length = provider->source().length();
+        if (text.startOffset() >= 0 && text.endOffset() > text.startOffset() && static_cast<unsigned>(text.endOffset()) <= length)
+            return cache(jsString(vm, provider->getRange(text.startOffset(), text.endOffset())));
+        hasRetainedAOTSource = false;
+    }
+    if (((isClass() ? classSource().provider() : provider)->hasNoSourceText() && !hasRetainedAOTSource) || (Options::hideFunctionSourceForTesting() && !isBuiltinFunction())) [[unlikely]] {
         if (isClass())
             return cacheIfNoException(jsMakeNontrivialString(globalObject, "class "_s, ecmaName().string(), " { [native code] }"_s));
         ASCIILiteral before = "function "_s;
