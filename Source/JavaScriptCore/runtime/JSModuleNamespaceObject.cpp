@@ -27,9 +27,11 @@
 #include "JSModuleNamespaceObject.h"
 
 #include "AbstractModuleRecord.h"
+#include "AOTProgramData.h"
 #include "CyclicModuleRecord.h"
 #include "JSCInlines.h"
 #include "JSModuleEnvironment.h"
+#include "JSModuleNamespaceObjectInlines.h"
 #include "JSModuleRecord.h"
 #if USE(BUN_JSC_ADDITIONS)
 #include "SyntheticModuleRecord.h"
@@ -42,6 +44,20 @@
 namespace JSC {
 
 const ClassInfo JSModuleNamespaceObject::s_info = { "ModuleNamespaceObject"_s, &Base::s_info, nullptr, nullptr, CREATE_METHOD_TABLE(JSModuleNamespaceObject) };
+
+JSModuleNamespaceObject* JSModuleNamespaceObject::create(JSGlobalObject* globalObject, AbstractModuleRecord* moduleRecord, Vector<std::pair<Identifier, AbstractModuleRecord::Resolution>>&& resolutions, bool shouldPreventExtensions, bool isDeferred)
+{
+    VM& vm = getVM(globalObject);
+    Structure* structure = globalObject->moduleNamespaceObjectStructure();
+#if ENABLE(AOT)
+    // AOT namespace caches bind an export's environment to its structure, including require() facades.
+    if (AOT::VMProgram::of(vm))
+        structure = createStructure(vm, globalObject, jsNull());
+#endif
+    JSModuleNamespaceObject* object = new (NotNull, allocateCell<JSModuleNamespaceObject>(vm)) JSModuleNamespaceObject(vm, structure, moduleRecord, WTF::move(resolutions), isDeferred);
+    object->finishCreation(globalObject, shouldPreventExtensions);
+    return object;
+}
 
 JSModuleNamespaceObject::JSModuleNamespaceObject(VM& vm, Structure* structure, AbstractModuleRecord* moduleRecord, Vector<std::pair<Identifier, AbstractModuleRecord::Resolution>>&& resolutions, bool isDeferred)
     : Base(vm, structure)
@@ -459,7 +475,7 @@ JSModuleNamespaceObject* JSModuleNamespaceObject::createNamespaceForRequire(JSGl
             AbstractModuleRecord::Resolution::Type::Resolved, entry.value.moduleRecord.get(), entry.value.localName,
         } });
     }
-    auto* result = create(globalObject, globalObject->moduleNamespaceObjectStructure(), m_moduleRecord.get(), WTF::move(resolutions));
+    auto* result = create(globalObject, m_moduleRecord.get(), WTF::move(resolutions));
     RETURN_IF_EXCEPTION(scope, nullptr);
     result->m_hasESModuleMarker = true;
     return result;

@@ -45,13 +45,7 @@ public:
         return vm.moduleNamespaceObjectSpace<mode>();
     }
 
-    static JSModuleNamespaceObject* create(JSGlobalObject* globalObject, Structure* structure, AbstractModuleRecord* moduleRecord, Vector<std::pair<Identifier, AbstractModuleRecord::Resolution>>&& resolutions, bool shouldPreventExtensions = true, bool isDeferred = false)
-    {
-        VM& vm = getVM(globalObject);
-        JSModuleNamespaceObject* object = new (NotNull, allocateCell<JSModuleNamespaceObject>(vm)) JSModuleNamespaceObject(vm, structure, moduleRecord, WTF::move(resolutions), isDeferred);
-        object->finishCreation(globalObject, shouldPreventExtensions);
-        return object;
-    }
+    JS_EXPORT_PRIVATE static JSModuleNamespaceObject* create(JSGlobalObject*, AbstractModuleRecord*, Vector<std::pair<Identifier, AbstractModuleRecord::Resolution>>&&, bool shouldPreventExtensions = true, bool isDeferred = false);
 
     JS_EXPORT_PRIVATE static bool getOwnPropertySlot(JSObject*, JSGlobalObject*, PropertyName, PropertySlot&);
     JS_EXPORT_PRIVATE static bool getOwnPropertySlotByIndex(JSObject*, JSGlobalObject*, unsigned propertyName, PropertySlot&);
