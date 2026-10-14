@@ -1,5 +1,7 @@
+//@ requireOptions("--useAsyncStackTrace=1", "--forceCodeBlockToJettisonDueToOldAge=true")
 //@ runDefault("--compileMainScriptAheadOfTime=1")
-//@ runDefault("--compileMainScriptAheadOfTime=1", "-m")
+//@ run("aot-module", "--compileMainScriptAheadOfTime=1", "-m")
+//@ run("jit", "--compileMainScriptAheadOfTime=0")
 function check(actual, expected, what) {
     if (actual !== expected)
         throw new Error(what + ": " + actual + " instead of " + expected);
@@ -8,6 +10,7 @@ const errors = [];
 function startsAsyncFunctions() {
     async function innerNameThatNothingElseUses() {
         await 1;
+        fullGC();
         errors.push(new Error("after an await"));
     }
     async function outerNameThatNothingElseUses() {
