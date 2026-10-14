@@ -3,12 +3,21 @@
 # the cap or its time is up. macOS does not enforce RLIMIT_AS or RLIMIT_DATA, so this polls.
 import sys,os,subprocess,time,signal,ctypes
 cap=float(sys.argv[1])*(1<<30); limit=float(sys.argv[2])
-lib=ctypes.CDLL('/usr/lib/libproc.dylib')
-class RUsage(ctypes.Structure): # rusage_info_v0 up to ri_phys_footprint
-    _fields_=[('uuid',ctypes.c_uint8*16)]+[(n,ctypes.c_uint64) for n in ('user','system','pkg_idle_wkups','interrupt_wkups','pageins','wired','resident','phys_footprint','start','exit')]
-def footprint(pid):
-    r=RUsage()
-    return r.phys_footprint if lib.proc_pid_rusage(pid,0,ctypes.byref(r))==0 else 0
+if sys.platform == 'linux':
+    page_size=os.sysconf('SC_PAGE_SIZE')
+    def footprint(pid):
+        try:
+            with open(f'/proc/{pid}/statm') as statm:
+                return int(statm.read().split()[1])*page_size
+        except (FileNotFoundError, ProcessLookupError):
+            return 0
+else:
+    lib=ctypes.CDLL('/usr/lib/libproc.dylib')
+    class RUsage(ctypes.Structure): # rusage_info_v0 up to ri_phys_footprint
+        _fields_=[('uuid',ctypes.c_uint8*16)]+[(n,ctypes.c_uint64) for n in ('user','system','pkg_idle_wkups','interrupt_wkups','pageins','wired','resident','phys_footprint','start','exit')]
+    def footprint(pid):
+        r=RUsage()
+        return r.phys_footprint if lib.proc_pid_rusage(pid,0,ctypes.byref(r))==0 else 0
 p=subprocess.Popen(sys.argv[3:],start_new_session=True)
 t0=time.time(); peak=0
 while p.poll() is None:

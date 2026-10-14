@@ -280,8 +280,10 @@ int main()
 {
     alarm(30);
     WTF::initializeMainThread();
+    JSC::installCompilers();
     JSC::initialize();
     RELEASE_ASSERT(Options::setOptions("usePollingTraps=false"));
+    RELEASE_ASSERT(Options::useJIT() && !Options::usePollingTraps());
     RELEASE_ASSERT(!sigaction(g_wtfConfig.sigThreadSuspendResume, nullptr, &previousSuspendAction));
     RELEASE_ASSERT(previousSuspendAction.sa_flags & SA_SIGINFO);
     auto action = previousSuspendAction;

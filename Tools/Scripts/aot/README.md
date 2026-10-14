@@ -38,7 +38,7 @@ separate frontend; the shell does not produce it. Keep source compilation availa
 | Check that the stubs return the way the processor predicts (a second, ARM64) | `check-paired-returns.py <jsc>` reads the machine code of the stubs and fails on one that computes its return address instead of being called, or that returns with `br`. With `--image` and `--map` it reads an executable without running it. |
 | Check that no stub changes a register it is declared to preserve (seconds, ARM64) | `check-stub-clobbers.py <jsc>` follows every path through the machine code of the stubs that compiled code keeps values in registers across (`registersChangedBy` in `AOTStubs.cpp`; the `K` lines of the map), their variants and thunks, and fails on one that changes another register, or that leaves by a tail jump. Run it after any change to such a stub. With `--image` and `--map` it reads an executable as it is. `--print [--stub <name>]` shows what any stub changes, and how it leaves. |
 | Find the checks of compiled code that no test covers (an hour) | `drop-guards.py <jsc>` leaves out one guard of the compiler at a time, with `--aotGuardToDropForTesting`, and runs the tests and the fuzzers. What survives lacks a test. |
-| Limit a runaway compile | `capped.py <GB> <seconds> <command...>` |
+| Limit a runaway compile | `capped.py <GB> <seconds> <command...>` uses physical footprint on macOS and resident set size on Linux. |
 
 ## Seeing what the compiler did
 
