@@ -314,7 +314,15 @@ public:
     Type load() const
     {
         uint64_t low = m_low.load(std::memory_order_acquire);
-        return static_cast<Type>(m_high.load(std::memory_order_relaxed)) << 64 | low;
+        Type result = static_cast<Type>(m_high.load(std::memory_order_relaxed)) << 64 | low;
+        // A concurrent join can publish high-word metadata before its low-word tag.
+        if (!(low & TFunctionTag))
+            result &= ~TAnyFunctionNumber;
+        if (!(low & TFinalObjectTag))
+            result &= ~TAnyLayoutNumber;
+        if (!(low & TArrayTag))
+            result &= ~TAnyArrayShape;
+        return result;
     }
     void store(Type type)
     {
