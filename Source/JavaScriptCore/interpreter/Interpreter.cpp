@@ -522,7 +522,9 @@ void Interpreter::appendAsyncStackFrame(VM& vm, JSCell* owner, Vector<StackFrame
                 BytecodeIndex bytecodeIndex = computeBytecodeIndex(codeBlock, currentGenerator);
                 results.append(StackFrame(vm, owner, asyncFunction, codeBlock, bytecodeIndex, /* isAsyncFrame */ true));
 #if ENABLE(AOT)
-            } else if (AOT::FunctionRef function = AOT::FunctionRef::of(vm, executable, CodeSpecializationKind::CodeForCall, AOT::tokenOf(&AOT::instanceOf(asyncFunction->scope())))) {
+            } else if (AOT::FunctionRef function = AOT::FunctionRef::of(vm, executable, CodeSpecializationKind::CodeForCall, nullptr)) {
+                if (!function.instance)
+                    function.instance = &AOT::instanceOf(asyncFunction->scope());
                 JSValue state = currentGenerator->internalField(static_cast<unsigned>(JSAsyncFunctionGenerator::Field::State)).get();
                 results.append(StackFrame(vm, owner, asyncFunction, executable, CodeSpecializationKind::CodeForCall, AOT::tokenOf(function.instance), function.resumePointOf(state.isInt32() ? state.asInt32() : 0), /* isAsyncFrame */ true));
 #endif
