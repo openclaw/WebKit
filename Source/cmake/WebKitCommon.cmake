@@ -355,6 +355,11 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
     include(OptionsCommon)
     include(Options${PORT})
 
+    if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND WTF_CPU_X86_64 AND ENABLE_FTL_JIT)
+        # AOT stack walks cross native frames to find the generated caller's return address.
+        WEBKIT_PREPEND_GLOBAL_COMPILER_FLAGS(-fno-omit-frame-pointer)
+    endif ()
+
     # This has to come after Options${PORT} to see any ENABLE_THREAD_SAFETY_WARNING.
     if (ENABLE_THREAD_SAFETY_WARNING)
         WEBKIT_PREPEND_GLOBAL_CXX_FLAGS(-Wthread-safety)
