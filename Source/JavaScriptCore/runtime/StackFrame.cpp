@@ -92,7 +92,8 @@ CodeBlock* StackFrame::makeCodeBlock() const
 #if ENABLE(AOT)
     auto& jsFrame = std::get<JSFrameData>(m_frameData);
     VM& vm = jsFrame.aotExecutable->vm();
-    if (vm.heap.mutatorState() != MutatorState::Running)
+    // The collector can format weak Error stacks while the parked mutator is still Running.
+    if (vm.heap.currentThreadIsDoingGCWork())
         return nullptr;
     if (AOT::FunctionRef function = AOT::FunctionRef::of(vm, jsFrame.aotExecutable.get(), jsFrame.aotKind, jsFrame.aotInstanceToken.get()); function && function.instance && function.codeType() == FunctionCode)
         return function.ensureCodeBlock();

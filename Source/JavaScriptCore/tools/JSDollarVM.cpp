@@ -76,11 +76,13 @@
 #include "Parser.h"
 #include "ProbeContext.h"
 #include "PropertyInlineCacheClearingWatchpoint.h"
+#include "ReleaseHeapAccessScope.h"
 #include "Scribble.h"
 #include "ShadowChicken.h"
 #include "Snippet.h"
 #include "SnippetParams.h"
 #include "Strong.h"
+#include "StackFrame.h"
 #include "StructureCreateInlines.h"
 #include "TopExceptionScope.h"
 #include "TerminationDeadline.h"
@@ -88,6 +90,7 @@
 #include "TypeProfilerLog.h"
 #include "VMEntryScopeInlines.h"
 #include "VMInspector.h"
+#include <wtf/Condition.h>
 #include "VMTrapsInlines.h"
 #include "WasmCapabilities.h"
 #if USE(BUN_JSC_ADDITIONS)
@@ -4882,6 +4885,45 @@ JSC_DEFINE_HOST_FUNCTION(functionIsAtomString, (JSGlobalObject*, CallFrame* call
 }
 
 #if ENABLE(AOT)
+#if USE(BUN_JSC_ADDITIONS)
+// Exercise an embedder's lazy stack formatter with the mutator parked, so the collector owns GC end.
+JSC_DEFINE_HOST_FUNCTION(functionCollectWithAOTStackFormatter, (JSGlobalObject* globalObject, CallFrame*))
+{
+    DollarVMAssertScope assertScope;
+    VM& vm = globalObject->vm();
+    auto previousFormatter = WTF::move(vm.onComputeErrorInfo());
+    unsigned formattedFrames = 0;
+    vm.setOnComputeErrorInfo([&](VM& vm, Vector<StackFrame>& frames, unsigned&, unsigned&, String&) {
+        RELEASE_ASSERT(Thread::mayBeGCThread());
+        RELEASE_ASSERT(vm.heap.mutatorState() == MutatorState::Running);
+        for (const auto& frame : frames) {
+            if (auto* executable = frame.ownerExecutable(); executable && executable->hasAOTEntry()) {
+                RELEASE_ASSERT(!frame.codeBlock());
+                ++formattedFrames;
+            }
+        }
+        return Interpreter::stackTraceAsString(vm, frames);
+    });
+    Lock lock;
+    Condition condition;
+    bool finished = false;
+    GCRequest request(CollectionScope::Full);
+    request.didFinishEndPhase = createSharedTask<void()>([&] {
+        Locker locker { lock };
+        finished = true;
+        condition.notifyOne();
+    });
+    vm.heap.collectAsync(request);
+    {
+        ReleaseHeapAccessScope releaseAccess(vm.heap);
+        Locker locker { lock };
+        condition.wait(lock, [&] { return finished; });
+    }
+    vm.setOnComputeErrorInfo(WTF::move(previousFormatter));
+    return JSValue::encode(jsNumber(formattedFrames));
+}
+#endif
+
 // dumpAOTTypedProgram(bytes: Uint8Array, stage: string): what the ahead-of-time compiler makes of the front end's program.
 JSC_DEFINE_HOST_FUNCTION(functionDumpAOTTypedProgram, (JSGlobalObject* globalObject, CallFrame* callFrame))
 {
@@ -6172,6 +6214,9 @@ void JSDollarVM::finishCreation(VM& vm)
     addFunction(vm, allowIfNotFuzz, "isAtomString"_s, functionIsAtomString, 1);
     addFunction(vm, allowIfNotFuzz, "dumpAndResetPasDebugSpectrum"_s, functionDumpAndResetPasDebugSpectrum, 0);
 #if ENABLE(AOT)
+#if USE(BUN_JSC_ADDITIONS)
+    addFunction(vm, allowIfNotFuzz, "collectWithAOTStackFormatter"_s, functionCollectWithAOTStackFormatter, 0);
+#endif
     addFunction(vm, allowIfNotFuzz, "dumpAOTTypedProgram"_s, functionDumpAOTTypedProgram, 2);
     addFunction(vm, allowIfNotFuzz, "buildAOTImageOfTypedProgram"_s, functionBuildAOTImageOfTypedProgram, 2);
 #endif
