@@ -29,6 +29,17 @@ function freshWithOneNewStructure(value) {
 }
 function structureID(o) { return /StructureID: (\d+)/.exec(describe(o))[1]; }
 
+// Keep the dead object out of the caller's registers when edenGC scans them.
+function fillCache(round) {
+    const o = fresh(round & 1 ? 40 : 5, round);
+    for (let i = 0; i < 3; i++) {
+        shouldBe(read(o), round);
+        write(o, round);
+    }
+    return structureID(o);
+}
+noInline(fillCache);
+
 read({ p: 1 });
 write({ p: 1 }, 1);
 fullGC();
@@ -36,14 +47,7 @@ fullGC();
 
 let reused = [0, 0];
 for (let round = 0; round < 40; round++) {
-    let id = (function () {
-        const o = fresh(round & 1 ? 40 : 5, round);
-        for (let i = 0; i < 3; i++) {
-            shouldBe(read(o), round);
-            write(o, round);
-        }
-        return structureID(o);
-    })();
+    let id = fillCache(round);
     edenGC();
     for (let i = 0; i < 4000; i++) {
         const o = freshWithOneNewStructure(i);

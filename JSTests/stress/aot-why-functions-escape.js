@@ -160,6 +160,16 @@ if (!isSealed)
     escapesBecause("sumWithBoth", "property-written:displayName");
 escapesOnlyThroughProperties("sumWithBoth", false);
 
+function hasOwnAccessor() {
+    function withOwnAccessor(value) { return value + 1; }
+    Object.defineProperty(withOwnAccessor, "tag", { get() { keep(this); return "own"; } });
+    return withOwnAccessor(1) + withOwnAccessor.tag;
+}
+check(hasOwnAccessor(), "2own", "an accessor on the function itself");
+check(kept("x"), "x1", "the accessor can expose the function to other argument types");
+escapesBecause("withOwnAccessor", "passed-to-unknown-call");
+escapesOnlyThroughProperties("withOwnAccessor", false);
+
 function changesItsChain() {
     function sumReparented(n) { return n <= 0 ? 0 : n + sumReparented(n - 1); }
     sumReparented.__proto__ = null;

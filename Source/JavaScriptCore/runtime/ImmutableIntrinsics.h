@@ -43,7 +43,8 @@ class ImmutableIntrinsics {
 public:
     static constexpr unsigned maximumCount = 1024;
     static constexpr unsigned globalObject = 0;
-    static constexpr bool functionPrototypesAreSealed = false;
+    // JSGlobalObject::makeIntrinsicImmutable makes intrinsic prototypes non-extensible.
+    static constexpr bool functionPrototypesAreSealed = true;
 
     struct Entry {
         String name;

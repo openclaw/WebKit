@@ -6,15 +6,36 @@
 #
 # How the list was made: these fail with --useImmutableIntrinsics=1 in the plain interpreter too (--useJIT=0, no AOT). To make it again:
 # run the aot-validate mode without this file's contents, then run what fails that way.
+# To refresh just the aot-* and sound-types-* suite, use Tools/Scripts/aot/list-tests-that-change-builtins.py <jsc> > /tmp/builtins.txt,
+# inspect every reported mutation, then replace this file with that output. Entries outside that suite are preserved.
 
 stress/Number-isNaN-basics.js
 stress/Number-isNumber-basic.js
 stress/Object_static_methods_Object.getOwnPropertyDescriptors.js
 stress/aggregate-error-constructor-broken-set.js
+stress/aot-array-callbacks-and-prototype-chains.js
+stress/aot-array-includes-and-index-of.js
+stress/aot-array-iterator-objects-without-operations.js
+stress/aot-array-prototype-as-array.js
+stress/aot-array-views-and-user-code.js
+stress/aot-arrays-made-with-a-size.js
+stress/aot-borrowed-allocations-and-inherited-accessors.js
+stress/aot-builtin-method-result-types.js
 stress/aot-constructors.js
-stress/aot-loop-guards.js
+stress/aot-get-by-val-names-getters-and-double-indices.js
+stress/aot-get-by-val-past-the-end-and-holes.js
+stress/aot-getters-and-typed-arrays.js
+stress/aot-length-of-arrays-without-elements.js
+stress/aot-methods-of-primitives.js
 stress/aot-object-literals.js
 stress/aot-objects-and-caches.js
+stress/aot-properties-added-to-immutable-prototypes.js
+stress/aot-ranges-follow-types.js
+stress/aot-reads-by-name-from-odd-receivers.js
+stress/aot-spread-calls.js
+stress/aot-spread-of-sparse-arrays.js
+stress/aot-typed-array-length-and-prototype-storage.js
+stress/aot-typed-array-loops.js
 stress/array-buffer-slice-species-constructor.js
 stress/array-copywithin.js
 stress/array-from-arguments-overwritten-length.js

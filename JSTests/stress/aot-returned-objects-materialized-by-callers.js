@@ -76,23 +76,25 @@ function doesNotApply(name, remark) {
         doesNotApply(name, "reads-returned-object-from-registers:makesPair");
     }
 
-    function makesEveryKind(x) { return { int32: work(x) | 0, double: x / 2 + 0.25, boolean: x > 1, string: "s" + x, object: [x] }; }
-    function readsEveryKind(x) { const all = makesEveryKind(x); return all.int32 + all.double + all.string + all.boolean + all.object.length; }
+    // AOT::FunctionSummary::maxReturnValues is four on x86-64 and eight on ARM64.
+    // Exercise every value kind in aggregates that fit both calling conventions.
+    function makesEveryKind(x) { return { int32: work(x) | 0, double: x / 2 + 0.25, boolean: x > 1, string: "s" + x }; }
+    function readsEveryKind(x) { const all = makesEveryKind(x); return all.int32 + all.double + all.string + all.boolean; }
     function keepsEveryKind(x) { kept = makesEveryKind(x); return kept.int32; }
-    check(readsEveryKind(2), (work(2) + 1.25) + "s2" + "true1", "values of every kind are read");
+    check(readsEveryKind(2), (work(2) + 1.25) + "s2" + "true", "values of every kind are read");
     keepsEveryKind(2);
-    check(JSON.stringify(kept), '{"int32":' + work(2) + ',"double":1.25,"boolean":true,"string":"s2","object":[2]}', "values of every kind are kept");
+    check(JSON.stringify(kept), '{"int32":' + work(2) + ',"double":1.25,"boolean":true,"string":"s2"}', "values of every kind are kept");
     keepsEveryKind(1);
-    check(JSON.stringify(kept), '{"int32":' + work(1) + ',"double":0.75,"boolean":false,"string":"s1","object":[1]}', "other values");
+    check(JSON.stringify(kept), '{"int32":' + work(1) + ',"double":0.75,"boolean":false,"string":"s1"}', "other values");
     applies("readsEveryKind", "reads-returned-object-from-registers:makesEveryKind");
     applies("keepsEveryKind", "materializes-returned-object:makesEveryKind");
 
-    function makesOtherKinds(x) { return { nothing: undefined, none: null, number: work(x) > 3 ? 1.5 : 1 }; }
-    function readsOtherKinds(x) { const all = makesOtherKinds(x); return "" + all.nothing + all.none + all.number; }
+    function makesOtherKinds(x) { return { nothing: undefined, none: null, number: work(x) > 3 ? 1.5 : 1, object: [x] }; }
+    function readsOtherKinds(x) { const all = makesOtherKinds(x); return "" + all.nothing + all.none + all.number + all.object.length; }
     function keepsOtherKinds(x) { kept = makesOtherKinds(x); return 0; }
-    check(readsOtherKinds(2), "undefinednull" + (work(2) > 3 ? 1.5 : 1), "undefined, null and a number are read");
+    check(readsOtherKinds(2), "undefinednull" + (work(2) > 3 ? 1.5 : 1) + "1", "undefined, null, a number and an object are read");
     keepsOtherKinds(2);
-    check(Object.keys(kept).join() + kept.nothing + kept.none + kept.number, "nothing,none,numberundefinednull" + (work(2) > 3 ? 1.5 : 1), "undefined, null and a number are kept");
+    check(Object.keys(kept).join() + kept.nothing + kept.none + kept.number + kept.object[0], "nothing,none,number,objectundefinednull" + (work(2) > 3 ? 1.5 : 1) + "2", "undefined, null, a number and an object are kept");
     keepsOtherKinds(0);
     check(kept.number, work(0) > 3 ? 1.5 : 1, "the other number");
     applies("readsOtherKinds", "reads-returned-object-from-registers:makesOtherKinds");

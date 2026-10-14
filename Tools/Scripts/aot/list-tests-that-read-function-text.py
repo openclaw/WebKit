@@ -3,6 +3,10 @@
 Function.prototype.toString() no longer gives the text of the program's functions.
 
     list-tests-that-read-function-text.py <jsc> [--jobs N] > JSTests/bun-tests-that-read-function-text.txt
+
+Use --aot-only to refresh just the aot-* and sound-types-* entries, preserving
+entries outside that suite. Tests explicitly retaining AOT source are not skipped.
+Write a slice refresh to a temporary file before replacing the original list.
 """
 import argparse
 import concurrent.futures
@@ -19,10 +23,20 @@ HEADER = """# Tests that are skipped in the aot and aot-validate modes of run-js
 #
 # How the list was made: Tools/Scripts/aot/list-tests-that-read-function-text.py. These pass with --useImmutableIntrinsics=1 --useJIT=0 and
 # fail with --hideFunctionSourceForTesting=1 as well, in the plain interpreter (no AOT).
+# Use --aot-only to refresh just the AOT suite. Tests explicitly using --useAOTFunctionSource=1 are not candidates.
 """
 
 
+def interpreter_options(text):
+    options = re.findall(r'"(--?[^"]*)"', " ".join(line for line in text.split("\n")[:6] if line.startswith("//@ ")))
+    if any(option in ("--useAOTFunctionSource=1", "--useAOTFunctionSource=true") for option in options):
+        return None
+    return [option for option in options if not option.startswith(("--compileMainScriptAheadOfTime=", "--aotImagePath=", "--writeAOTImageTo="))]
+
+
 def passes(jsc, options, test):
+    if "-m" in options:
+        options = [option for option in options if option != "-m"] + ["-m"]
     try:
         return not subprocess.run([jsc, *options, test], cwd=STRESS, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60).returncode
     except subprocess.TimeoutExpired:
@@ -33,6 +47,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("jsc")
     parser.add_argument("--jobs", type=int, default=3)
+    parser.add_argument("--aot-only", action="store_true", help="refresh the AOT-suite slice and preserve all other entries")
     arguments = parser.parse_args()
     jsc = os.path.abspath(arguments.jsc)
 
@@ -41,18 +56,25 @@ def main():
             text = file.read()
         if not re.search(r"toString|String\(|`|\+ *\"|\" *\+|' *\+|\+ *'", text):
             return False
-        options = re.findall(r'"(--[^"]*)"', " ".join(line for line in text.split("\n")[:6] if line.startswith("//@ ")))
-        base = ["--useImmutableIntrinsics=1", "--useJIT=0", *options]
+        options = interpreter_options(text)
+        if options is None:
+            return False
+        base = [*options, "--useImmutableIntrinsics=1", "--useJIT=0"]
         hidden = [*base, "--hideFunctionSourceForTesting=1"]
         # (Twice: on a busy machine a slow test may time out once.)
         return passes(jsc, base, test) and not passes(jsc, hidden, test) and not passes(jsc, hidden, test)
 
     tests = sorted(name for name in os.listdir(STRESS) if name.endswith(".js"))
+    preserved = set()
+    if arguments.aot_only:
+        tests = [name for name in tests if name.startswith(("aot-", "sound-types-"))]
+        with open(os.path.join(ROOT, "JSTests", "bun-tests-that-read-function-text.txt")) as file:
+            preserved = {line.strip() for line in file if line.startswith("stress/") and os.path.basename(line.strip()) not in tests}
     with concurrent.futures.ThreadPoolExecutor(arguments.jobs) as pool:
         found = [test for test, reads in zip(tests, pool.map(reads_text, tests)) if reads]
     print(HEADER)
-    for test in found:
-        print(f"stress/{test}")
+    for test in sorted(preserved | {f"stress/{test}" for test in found}):
+        print(test)
 
 
 if __name__ == "__main__":

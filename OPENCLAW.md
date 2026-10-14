@@ -149,6 +149,8 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+- Let AOT escape analysis use the runtime's sealed intrinsic prototypes so ordinary function-property reads and writes do not unnecessarily widen function inputs.
+- Honor the shared intrinsic-mutation and function-source skip lists and architecture directives in the quick AOT suite; regenerate its mutation entries and retain portable aggregate-return and young-structure cache coverage.
 - Run the AOT regression suite on Linux by measuring the capped subprocess's resident set size through procfs.
 - Clear dead match frames before testing weak regexp cache collection, keeping AOT compilation-count assertions portable across conservative stack layouts.
 - Preserve native frame pointers in Linux x64 FTL builds so AOT stack walks through native errors find the generated caller instead of interpreting its frame as a JavaScriptCore frame.

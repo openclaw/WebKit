@@ -98,6 +98,18 @@ value and runs the B3 and Air validators after every phase. In both modes built-
 source text, so tests that modify a built-in or read function source are skipped. `JSTests/bun-tests-that-change-builtins.txt` and
 `JSTests/bun-tests-that-read-function-text.txt` describe how those lists are generated.
 
+The quick `run-tests.py` runner honors these same lists and the suite's architecture
+skip headers. The lists exclude AOT configurations while retaining interpreter
+control runs in the same file. It reports skipped runs separately from passes. Use
+`--filter=<regular-expression>` for a focused check, `--architecture=<target>` when
+the shell's architecture differs from the host, and `--ignore-skip-lists` only when
+auditing or regenerating the lists. Unsupported skip conditions are errors.
+`list-tests-that-change-builtins.py` refreshes the AOT-suite slice by running the
+validation configuration and then its failures in the immutable interpreter; it
+preserves entries outside that slice. Inspect every candidate's actual mutation
+before installing the generated output. The selector's regressions run with
+`python3 -m unittest discover -s Tools/Scripts/aot/tests`.
+
 ## CI artifacts
 
 A cancelled or failed job still uploads its artifacts. `jsc-test-results-<platform>` contains the full test log (`jsc-tests.log`,

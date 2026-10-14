@@ -5,6 +5,7 @@
 #
 # How the list was made: Tools/Scripts/aot/list-tests-that-read-function-text.py. These pass with --useImmutableIntrinsics=1 --useJIT=0 and
 # fail with --hideFunctionSourceForTesting=1 as well, in the plain interpreter (no AOT).
+# Use --aot-only to refresh just the AOT suite. Tests explicitly using --useAOTFunctionSource=1 are not candidates.
 
 stress/8bit-resolve-can-encounter-16bit-string.js
 stress/arrowfunction-tostring.js
