@@ -2213,12 +2213,21 @@ void Graph::findArgumentLists()
                 auto bytecode = list->as<OpNewArrayWithSpread>();
                 if (bytecode.m_argc > maxListItems)
                     continue;
+                const BitVector& spreadMask = list->graph->codeBlock()->bitVector(bytecode.m_bitVector);
+                bool hasMergedSpread = false;
                 parts.append(list);
                 for (unsigned i = bytecode.m_argc; i--;) {
                     Node* element = list->use(VirtualRegister(bytecode.m_argv.offset() - static_cast<int>(i)));
+                    // A merged materialized spread still needs array expansion; it is not a scalar argument.
+                    if (spreadMask.get(i) && !element->isBytecode(op_spread)) {
+                        hasMergedSpread = true;
+                        break;
+                    }
                     if (element->isBytecode(op_spread))
                         parts.append(element);
                 }
+                if (hasMergedSpread)
+                    continue;
             } else
                 continue;
             bool immediatelyPrecedeCall = parts.size() <= index;

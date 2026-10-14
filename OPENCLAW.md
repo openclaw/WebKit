@@ -96,6 +96,10 @@ Keep every prior release. Revert the Bun manifest and WebKit source pin together
 then rebuild Bun against that matched engine. Never replace a published asset or
 use an old Bun executable with headers/libraries from another engine ABI.
 
+## Unreleased
+
+- Preserve materialized spread operands across merged guards in AOT calls, fixing argument flattening in memory search queries.
+
 ## Batch 1 (2026-10-04)
 
 - Fix Segmenter queries at surrogate-pair boundaries; thanks @steipete.
