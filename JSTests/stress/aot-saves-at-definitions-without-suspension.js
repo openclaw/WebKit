@@ -1,4 +1,5 @@
 //@ runDefault("--compileMainScriptAheadOfTime=1", "--validateAOTInferredTypes=1")
+//@ runDefault("--compileMainScriptAheadOfTime=1", "--validateAOTInferredTypes=1", "--numberOfAOTCompilerThreads=16")
 function check(actual, expected, what) {
     if (!Object.is(actual, expected))
         throw new Error(what + ": " + String(actual) + " instead of " + String(expected));
@@ -78,6 +79,7 @@ for (let name of ["suspensionIsFoldedAway", "oneOfTwoSuspensionsIsFoldedAway", "
     says(name, "inlined-call:never");
     says(name, "folds-branch-after-replacement");
 }
+says("get", "function-does-not-escape");
 says("suspensionStays", "saves-at-definition");
 doesNotSay("suspensionStays", "folds-branch-after-replacement");
 says("suspensionIsFoldedAway", "saves-at-definition-without-suspension");

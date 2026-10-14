@@ -1004,6 +1004,12 @@ private:
     {
         switch (user->kind) {
         case NodeKind::Phi:
+            // Match the incoming edges used to infer the phi's type.
+            for (unsigned i = 0; i < user->uses.size(); ++i) {
+                if (mayComeFrom(user->block, user->block->predecessors[i]))
+                    noteMergedInto(user->type, user->uses[i].node->type, FunctionSummary::MergedInPhi);
+            }
+            return;
         case NodeKind::Narrow:
             for (auto& use : user->uses)
                 noteMergedInto(user->type, use.node->type, FunctionSummary::MergedInPhi);
