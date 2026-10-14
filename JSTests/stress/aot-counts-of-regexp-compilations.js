@@ -37,6 +37,16 @@ function matchesOf(subject, pattern)
 }
 noInline(matchesOf);
 
+// Do not let dead match frames keep weakly cached RegExps alive on conservative stacks.
+function clobberStack(depth)
+{
+    const a = depth + 1, b = depth + 2, c = depth + 3, d = depth + 4;
+    if (!depth)
+        return 0;
+    return clobberStack(depth - 1) + a + b + c + d;
+}
+noInline(clobberStack);
+
 function test(length, collect, staysCompiled)
 {
     const patterns = [], subjects = [], rounds = 6;
@@ -50,6 +60,7 @@ function test(length, collect, staysCompiled)
     for (let i = 0; i < calls; ++i) {
         check(matchesOf(subjects[i % patterns.length], patterns[i % patterns.length]), 3, what);
         check(/noth(i)ng/.exec(subjects[0])[1], "i", "another expression in between");
+        clobberStack(200);
         collect();
     }
     if (!isCounting)

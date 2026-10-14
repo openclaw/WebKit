@@ -150,6 +150,7 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 ## Unreleased
 
 - Run the AOT regression suite on Linux by measuring the capped subprocess's resident set size through procfs.
+- Clear dead match frames before testing weak regexp cache collection, keeping AOT compilation-count assertions portable across conservative stack layouts.
 - Link the external-mimalloc shim into native stack-test executables and install compiler hooks before the foreign-stack regression requests signal-based traps, so Linux JSCOnly builds link and exercise their intended mode.
 - Preserve async error stacks after code collection in ordinary JIT VMs without initializing AOT state, while retaining AOT frame names.
 - Prevent lazy AOT CodeBlock allocation while the collector formats weak Error stacks.
