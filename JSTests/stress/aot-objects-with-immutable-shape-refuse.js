@@ -1,6 +1,7 @@
 //@ runDefault("--useDollarVM=1", "--compileMainScriptAheadOfTime=1")
 //@ runDefault("--useDollarVM=1", "--compileMainScriptAheadOfTime=1", "--useAOTInlining=0")
 //@ runDefault("--useDollarVM=1", "--compileMainScriptAheadOfTime=1", "--verifyGC=1", "--scribbleFreeCells=1", "--useZombieMode=1", "--slowPathAllocsBetweenGCs=50")
+//@ runDefault("--useDollarVM=1", "--compileMainScriptAheadOfTime=1", "--verifyGC=1", "--scribbleFreeCells=1", "--useZombieMode=1", "--slowPathAllocsBetweenGCs=50", "--validateAOTInferredTypes=1")
 //@ runDefault("--useDollarVM=1")
 //@ runDefault("--useDollarVM=1", "--useJIT=0")
 //@ runDefault("--useDollarVM=1", "--useJIT=0", "--validateExceptionChecks=1")

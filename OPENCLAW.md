@@ -98,6 +98,7 @@ use an old Bun executable with headers/libraries from another engine ABI.
 
 ## Unreleased
 
+- Keep a weakly cached AOT object Structure rooted across allocation, preventing GC stress from reclaiming it before the new object's header is initialized.
 - Preserve materialized spread operands across merged guards in AOT calls, fixing argument flattening in memory search queries.
 
 ## Batch 1 (2026-10-04)

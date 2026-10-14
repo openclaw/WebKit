@@ -44,6 +44,7 @@
 #include "ObjectPrototype.h"
 #include "RegExpObjectInlines.h"
 #include "ScopedArguments.h"
+#include "StrongInlines.h"
 #include "SymbolTableInlines.h"
 
 namespace JSC { namespace AOT {
@@ -52,8 +53,11 @@ JSC_DEFINE_JIT_OPERATION(operationAOTNewObject, JSObject*, (Instance* instance, 
 {
     AOT_OPERATION_BEGIN(instance);
     countOperationBySlotState(instance, __func__, cache);
-    if (StructureID structureID = cache[0].structureID)
-        OPERATION_RETURN(scope, constructEmptyObject(vm, structureID.decode()));
+    if (StructureID structureID = cache[0].structureID) {
+        // Allocation can collect the Structure held only by this weak cache.
+        Strong<Structure> structure(vm, structureID.decode());
+        OPERATION_RETURN(scope, constructEmptyObject(vm, structure.get()));
+    }
 
     ObjectAllocationProfile profile;
     profile.initializeProfile(vm, globalObject, globalObject, globalObject->objectPrototype(), inlineCapacity);
