@@ -12,6 +12,7 @@
 #if ENABLE(AOT)
 
 #include "AOTGraph.h"
+#include "AOTImage.h"
 #include "AOTInlineCaches.h"
 #include "AOTOperationHelpers.h"
 #include "ArrayConstructor.h"

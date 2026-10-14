@@ -21,6 +21,7 @@ class VM;
 
 namespace AOT {
 
+struct Data;
 struct Slot;
 
 #define FOR_EACH_AOT_OBJECT_OPERATION(v) \
