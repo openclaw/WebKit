@@ -26,6 +26,7 @@ bootstrap=$(command -v bun)
 python3 "$inputs/stage-local-artifact.py" "$ARTIFACT_DIR/bun-webkit-linux-amd64.tar.gz" --version "$SOURCE_SHA" --output "$QUALIFICATION_DIR/candidate-input"
 for arm in baseline candidate; do
   if test "$arm" = candidate; then
+    git apply "$inputs/patches/002-upstream-mimalloc.patch"
     for patch in "$inputs/patches/001-proxy.patch" "$inputs"/patches/00[3-7]-*.patch; do
       git apply --exclude=CHANGELOG.md --exclude='docs/*' --exclude='test/js/node/worker_threads/*' "$patch"
     done
@@ -73,21 +74,6 @@ unset BUN_WEBKIT_ARTIFACT_MANIFEST BUN_BUILD_CACHE_DIR BUN_BUILD_PREFETCH_DIR
 "$candidate" test test/js/node/process/process.test.js -t 'ArrayBuffer memory ownership' > "$QUALIFICATION_DIR/arraybuffer.log" 2>&1
 "$candidate" test test/js/node/worker_threads/worker_threads.test.ts -t 'getHeapStatistics' > "$QUALIFICATION_DIR/worker-statistics.log" 2>&1
 "$candidate" test test/js/node/worker_threads/openclaw-resource-limits.test.ts -t 'resourceLimits' > "$QUALIFICATION_DIR/resource-limits.log" 2>&1
-mkdir -p "$QUALIFICATION_DIR/worker-engine"
-tar -xzf "$ARTIFACT_DIR/bun-webkit-linux-amd64.tar.gz" -C "$QUALIFICATION_DIR/worker-engine"
-WK="$QUALIFICATION_DIR/worker-engine/bun-webkit"
-clang++-23 -std=c++23 -O2 -DNDEBUG -DBUILDING_WITH_CMAKE=1 -DHAVE_CONFIG_H=1 \
-  -I"$WK/include" -I"$WK/include/JavaScriptCore" -I"$WK/include/wtf" \
-  "$inputs/engine-limit-probe.cpp" "$QUALIFICATION_DIR/bun/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o" \
-  -Wl,--start-group "$WK"/lib/*.a -Wl,--end-group -lpthread -ldl -lm -latomic \
-  -o "$QUALIFICATION_DIR/engine-limit-probe" > "$QUALIFICATION_DIR/engine-limit-build.log" 2>&1
-"$QUALIFICATION_DIR/engine-limit-probe" > "$QUALIFICATION_DIR/engine-limits.log" 2>&1
-clang++-23 -std=c++23 -O2 -DNDEBUG -DBUILDING_WITH_CMAKE=1 -DHAVE_CONFIG_H=1 \
-  -I"$WK/include" -I"$WK/include/JavaScriptCore" -I"$WK/include/wtf" \
-  "$inputs/engine-gc-progress-probe.cpp" "$QUALIFICATION_DIR/bun/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o" \
-  -Wl,--start-group "$WK"/lib/*.a -Wl,--end-group -lpthread -ldl -lm -latomic \
-  -o "$QUALIFICATION_DIR/engine-gc-progress-probe" > "$QUALIFICATION_DIR/engine-gc-progress-build.log" 2>&1
-"$QUALIFICATION_DIR/engine-gc-progress-probe" > "$QUALIFICATION_DIR/engine-gc-progress.json" 2> "$QUALIFICATION_DIR/engine-gc-progress.log"
 "$candidate" "$inputs/module-context.mjs" matrix > "$QUALIFICATION_DIR/als-plugin.json"
 "$candidate" "$inputs/module-context.mjs" matrix --native-hooks > "$QUALIFICATION_DIR/als-native.json"
 python3 - "$QUALIFICATION_DIR" "$SOURCE_SHA" "$BUN_COMMIT" <<'PY'
@@ -105,12 +91,7 @@ for name,minimum in [('proxy',4),('resource-limits',16),('namespace',41),('array
  passes=re.search(r'(\d+) pass',text)
  assert passes and int(passes[1])>=minimum, name+' missing passing cases'
  assert re.search(r'\b0 fail\b',text),name+' failures'
-gc_progress=json.loads((root/'engine-gc-progress.json').read_text())
-assert all(gc_progress[key] is True for key in ['passed','passiveCollectorObserved','completedBeforeHelperRelease','rootsSurvived']),'passive collector did not progress'
-assert all(gc_progress[key] is False for key in ['lateWaitStallObserved','timedOut']),'passive collector stalled'
-assert type(gc_progress['helperCount']) is int and gc_progress['helperCount']>0,'GC helper precondition missing'
 (root/'gate.json').write_text(json.dumps({'passed':True,'source':sys.argv[2],'bun_commit':sys.argv[3],
  'selected_files':44,'result_files':46,'als_variants_per_mode':14,'proxy_minimum':4,'resource_minimum':16,
- 'gc_progress':gc_progress,
  'bun_adapter_sha256':hashlib.sha256((root/'bun-adapters.patch').read_bytes()).hexdigest()},indent=2)+'\n')
 PY

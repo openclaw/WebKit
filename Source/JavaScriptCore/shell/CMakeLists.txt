@@ -21,7 +21,10 @@ endif ()
 if (USE_EXTERNAL_MIMALLOC)
     # The shipped static archives intentionally leave mi_* unresolved so the
     # consumer links its own mimalloc. The jsc shell still needs a working
-    # allocator, so link the vendored mimalloc object library here only.
+    # allocator, so link the vendored mimalloc object library here only, plus
+    # the entry points the archives expect from the consumer's mimalloc that
+    # the vendored one does not have (ExternalMimallocShims.cpp).
+    list(APPEND jsc_SOURCES ExternalMimallocShims.cpp)
     list(APPEND jsc_LIBRARIES $<TARGET_OBJECTS:mimalloc-obj>)
 endif ()
 
@@ -112,6 +115,7 @@ if (USE_BUN_JSC_ADDITIONS)
         # Same as jsc above: the shipped static archives leave mi_* unresolved
         # under USE_EXTERNAL_MIMALLOC, so any executable that links the
         # framework must supply the vendored mimalloc objects itself.
+        list(APPEND testFFI_SOURCES ExternalMimallocShims.cpp)
         list(APPEND testFFI_LIBRARIES $<TARGET_OBJECTS:mimalloc-obj>)
     endif ()
 
@@ -304,6 +308,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86
     set(testVMEntryRecord_FRAMEWORKS ${jsc_FRAMEWORKS})
     set(testVMEntryRecord_LIBRARIES ${CMAKE_DL_LIBS})
     if (USE_EXTERNAL_MIMALLOC)
+        list(APPEND testVMEntryRecord_SOURCES ExternalMimallocShims.cpp)
         list(APPEND testVMEntryRecord_LIBRARIES $<TARGET_OBJECTS:mimalloc-obj>)
     endif ()
     WEBKIT_EXECUTABLE_DECLARE(testVMEntryRecord)
@@ -321,6 +326,7 @@ if (WIN32)
     list(APPEND testVMEntryScope_LIBRARIES Winmm)
 endif ()
 if (USE_EXTERNAL_MIMALLOC)
+    list(APPEND testVMEntryScope_SOURCES ExternalMimallocShims.cpp)
     list(APPEND testVMEntryScope_LIBRARIES $<TARGET_OBJECTS:mimalloc-obj>)
 endif ()
 if (TEST_VM_ENTRY_SCOPE_OPTIONAL_CONTROL)
@@ -347,6 +353,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND ENABLE_DFG_JIT AND (WTF_CPU_X86_64 OR
     set(testForeignStackSuspension_FRAMEWORKS ${jsc_FRAMEWORKS})
     set(testForeignStackSuspension_LIBRARIES ${CMAKE_DL_LIBS})
     if (USE_EXTERNAL_MIMALLOC)
+        list(APPEND testForeignStackSuspension_SOURCES ExternalMimallocShims.cpp)
         list(APPEND testForeignStackSuspension_LIBRARIES $<TARGET_OBJECTS:mimalloc-obj>)
     endif ()
     WEBKIT_EXECUTABLE_DECLARE(testForeignStackSuspension)

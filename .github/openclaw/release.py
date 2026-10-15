@@ -27,6 +27,17 @@ def assemble(inputs,out,source):
     gate=json.loads(gate_path.read_text())
     if gate.get('passed') is not True or gate['source']!=source or gate['bun_commit']!=config['bun_commit']:
         raise ValueError('missing or mismatched qualification gate')
+    sync=gate.get('upstream_sync',{})
+    engine=gate.get('engine',{})
+    if (sync.get('passed') is not True or any(sync.get(k)!=config['upstream_sync'][k] for k in ('base_commit','prepared_tree'))
+        or engine.get('passed') is not True or engine.get('source')!=source):
+        raise ValueError('missing or mismatched upstream-sync/engine qualification')
+    compatibility=gate.get('compatibility',{})
+    if (compatibility.get('passed') is not True or compatibility.get('source')!=source
+        or any(compatibility.get(k)!=config['upstream_sync'][k] for k in ('base_commit','prepared_tree','paired_tree','required_namespace_adapter_sha256'))
+        or compatibility.get('only_manifest_changed_after_pairing') is not True or compatibility.get('memory_tests')!=3
+        or compatibility.get('startup') is not True):
+        raise ValueError('missing or mismatched namespace-paired Bun compatibility gate')
     artifacts={}; lanes=[]
     for lane in config['lanes']:
         label=lane['label']; name=label+'.tar.gz'; directory=inputs/label
@@ -39,9 +50,17 @@ def assemble(inputs,out,source):
         shutil.copyfile(f,out/name)
         artifacts[name]={'url':f'https://github.com/{REPO}/releases/download/{tag}/{name}','sha256':sha(f),'size':f.stat().st_size}
         lanes.append(manifest)
+    windows=json.loads((inputs/'windows-arm64-qualification/gate.json').read_text())
+    if (windows.get('passed') is not True or windows.get('source')!=source
+        or windows.get('lane')!='bun-webkit-windows-arm64' or windows.get('architecture')!='arm64'
+        or windows.get('sha256')!=artifacts['bun-webkit-windows-arm64.tar.gz']['sha256']
+        or any(windows.get(k) is not True for k in ('startup','dfg','ffi','arraybuffer_accounting'))
+        or windows.get('arraybuffer_modes')!=5):
+        raise ValueError('missing or mismatched native Windows ARM64 qualification')
+    gate['windows_arm64']=windows
     # Retain low-level provenance and test logs as a separate archive.
     execute('tar','-czf',str(out/'provenance.tar.gz'),'-C',str(inputs),*[
-        item for lane in config['lanes'] for item in [lane['label']+'/provenance',lane['label']+'/'+lane['label']+'.manifest.json']], 'qualification')
+        item for lane in config['lanes'] for item in [lane['label']+'/provenance',lane['label']+'/'+lane['label']+'.manifest.json']], 'qualification', 'windows-arm64-qualification')
     license_text='OpenClaw WebKit source and licenses\n\n'+f'Source: https://github.com/{REPO}/tree/{source}\nSource archive: https://github.com/{REPO}/archive/{source}.tar.gz\n\n'
     for p in ['Source/JavaScriptCore/COPYING.LIB','Source/WTF/wtf/COPYING.LIB']:
         file=ROOT/p
@@ -75,13 +94,13 @@ def authorize(source,run_id):
     if not api('-H','Cache-Control: max-age=0',f'repos/{REPO}/immutable-releases')['enabled']:
         raise ValueError('immutable releases must be enabled')
     run=api('-H','Cache-Control: max-age=0',f'repos/{REPO}/actions/runs/{run_id}')
-    if (run['head_sha']!=source or run['head_branch'] not in ('openclaw/main','openclaw/batch-1')
+    if (run['head_sha']!=source or run['head_branch'] not in ('openclaw/main','openclaw/batch-1','openclaw/release-5718a6ec')
         or run['event']!='workflow_dispatch' or run['path'].split('@',1)[0]!='.github/workflows/openclaw-artifacts.yml'):
         raise ValueError('publication run does not match the reviewed source/workflow')
     jobs=api('-H','Cache-Control: max-age=0',f'repos/{REPO}/actions/runs/{run_id}/jobs?filter=latest&per_page=100')
     required=[j for j in jobs['jobs'] if j['name']!='publish']
     expected_builds={'build ('+l['label']+')' for l in json.loads((ROOT/'.github/openclaw/variants.json').read_text())['lanes']}
-    if ({j['name'] for j in required}!=expected_builds|{'preflight','test','assemble'}
+    if ({j['name'] for j in required}!=expected_builds|{'preflight','test','windows-arm64','assemble'}
         or any(j['conclusion']!='success' or j['run_attempt']!=run['run_attempt'] for j in required)):
         raise ValueError('all exact build, test and assembly jobs must pass')
     pending=api('-H','Cache-Control: max-age=0',f'repos/{REPO}/actions/runs/{run_id}/pending_deployments')
@@ -106,11 +125,11 @@ def validate_authorization(source):
 def publish(directory,source):
     manifest=verify(directory,source);tag=manifest['tag']
     validate_authorization(source)
-    if os.environ.get('GITHUB_REF') not in ('refs/heads/openclaw/main','refs/heads/openclaw/batch-1') or os.environ.get('GITHUB_SHA')!=source:
+    if os.environ.get('GITHUB_REF') not in ('refs/heads/openclaw/main','refs/heads/openclaw/batch-1','refs/heads/openclaw/release-5718a6ec') or os.environ.get('GITHUB_SHA')!=source:
         raise ValueError('publishing requires reviewed source on an explicitly permitted owned branch')
     # Tag creation fails atomically if the name exists. Neither existing drafts nor releases are resumed.
     api('-X','POST',f'repos/{REPO}/git/refs','-f','ref=refs/tags/'+tag,'-f','sha='+source)
-    body=f'OpenClaw-built WebKit at `{source}`. All selected lanes and Linux qualification passed.\n\nThis release wakes a passive garbage collector when its mutator starts waiting, so collection progresses while shared GC helpers are occupied elsewhere. Native qualification requires completion before helper release and survival of rooted objects.\n\nBatch 1: Segmenter surrogate boundaries; opt-in Proxy global prototypes; module-loader AsyncLocalStorage propagation; per-VM worker heap and stack budgets. Thanks @steipete and @robobun for the source changes and upstream work.\n\nSource and licenses: LICENSE-SOURCES.txt. Checksums: SHA256SUMS and manifest.json. Full build and test provenance: provenance.tar.gz.\n\nRollback by restoring the prior Bun manifest and WebKit pin together; prior releases remain available.\n'
+    body=f'OpenClaw-built WebKit at `{source}`. All {len(manifest["artifacts"])} lanes, Linux qualification and native Windows ARM64 engine probes passed.\n\n'+(ROOT/'.github/openclaw/release-notes.md').read_text()
     draft=api('-X','POST',f'repos/{REPO}/releases','-f','tag_name='+tag,'-f','name='+tag,'-f','body='+body,'-F','draft=true')
     release_id=draft['id']
     execute('gh','release','upload',tag,'-R',REPO,*[str(p) for p in sorted(directory.iterdir())])
