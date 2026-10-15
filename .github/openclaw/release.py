@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Assemble checked lane outputs, then create one immutable release without replacement."""
 import argparse
+import artifacts as artifact_source
+from qualification import consumer_identity
 import hashlib
 import json
 import os
@@ -19,34 +21,68 @@ def api(*args):return json.loads(subprocess.check_output(['gh','api',*args],text
 def execute(*args):subprocess.run(args,check=True)
 def save(p,x):p.write_text(json.dumps(x,indent=2)+'\n')
 
+def lane_patch_records(manifest,source):
+    patches=manifest.get('patches')
+    if (manifest.get('base')!=artifact_source.BASE or manifest.get('history_floor')!=artifact_source.HISTORY_FLOOR
+        or not isinstance(patches,list)):
+        raise ValueError('invalid lane history provenance')
+    seen=set()
+    for row in patches:
+        if (not isinstance(row,dict) or set(row)!={'commit','subject','patch_sha256'}
+            or not all(isinstance(row[key],str) for key in ('commit','subject','patch_sha256'))
+            or not re.fullmatch('[0-9a-f]{40}',row['commit']) or not re.fullmatch('[0-9a-f]{64}',row['patch_sha256'])
+            or row['commit'] in seen):
+            raise ValueError('invalid lane history provenance')
+        seen.add(row['commit'])
+    if (patches and patches[-1]['commit']!=source) or (not patches and source!=artifact_source.BASE):
+        raise ValueError('invalid lane history provenance')
+    return patches
+
 def assemble(inputs,out,source):
     out.mkdir(parents=True,exist_ok=False)
     config=json.loads((ROOT/'.github/openclaw/variants.json').read_text())
     tag='autobuild-'+source
     gate_path=inputs/'qualification/gate.json'
     gate=json.loads(gate_path.read_text())
-    if gate.get('passed') is not True or gate['source']!=source or gate['bun_commit']!=config['bun_commit']:
+    proof=inputs/'qualification';binaries=inputs/'linux-bun-executables'
+    identity_path=proof/'candidate-identity.json';baseline_path=proof/'baseline-identity.json'
+    identity=json.loads(identity_path.read_text());baseline=json.loads(baseline_path.read_text())
+    consumer_identity.validate(identity,source)
+    consumer_identity.validate_baseline_evidence(baseline,binaries,proof)
+    identity_sha=sha(identity_path)
+    if (gate.get('passed') is not True or gate['source']!=source
+        or gate.get('comparison')!='bun-plus-engine-upgrade'
+        or gate.get('candidate_identity_sha256')!=identity_sha
+        or gate.get('baseline_identity_sha256')!=sha(baseline_path)
+        or gate.get('selected_files')!=44 or gate.get('result_files')!=46):
         raise ValueError('missing or mismatched qualification gate')
-    sync=gate.get('upstream_sync',{})
-    engine=gate.get('engine',{})
-    if (sync.get('passed') is not True or any(sync.get(k)!=config['upstream_sync'][k] for k in ('base_commit','prepared_tree'))
-        or engine.get('passed') is not True or engine.get('source')!=source):
+    sync=gate.get('upstream_sync',{});engine=gate.get('engine',{})
+    if (sync.get('passed') is not True or sync.get('source')!=source
+        or sync.get('candidate_identity_sha256')!=identity_sha
+        or sync.get('historical_selected_files')!=82 or sync.get('selected_files')!=85
+        or sync.get('regressions')!=0 or engine.get('passed') is not True or engine.get('source')!=source):
         raise ValueError('missing or mismatched upstream-sync/engine qualification')
     compatibility=gate.get('compatibility',{})
     if (compatibility.get('passed') is not True or compatibility.get('source')!=source
-        or any(compatibility.get(k)!=config['upstream_sync'][k] for k in ('base_commit','prepared_tree','paired_tree','required_namespace_adapter_sha256'))
-        or compatibility.get('only_manifest_changed_after_pairing') is not True or compatibility.get('memory_tests')!=3
-        or compatibility.get('startup') is not True):
-        raise ValueError('missing or mismatched namespace-paired Bun compatibility gate')
+        or compatibility.get('candidate_identity_sha256')!=identity_sha
+        or compatibility.get('memory_tests')!=3 or compatibility.get('startup') is not True):
+        raise ValueError('missing or mismatched candidate compatibility gate')
     artifacts={}; lanes=[]
+    expected_patches=None
     for lane in config['lanes']:
         label=lane['label']; name=label+'.tar.gz'; directory=inputs/label
         manifest=json.loads((directory/(label+'.manifest.json')).read_text())
         if manifest['source']!=source or manifest['lane']['label']!=label:
             raise ValueError('mixed source or lane')
+        patches=lane_patch_records(manifest,source)
+        if expected_patches is None:expected_patches=patches
+        elif patches!=expected_patches:raise ValueError('lane patch provenance mismatch')
         f=directory/name
         if sha(f)!=manifest['files'][name]['sha256'] or f.stat().st_size!=manifest['files'][name]['size']:
             raise ValueError('lane digest mismatch')
+        if label==consumer_identity.LANE:
+            measured=consumer_identity.engine_input(f,directory/(label+'.manifest.json'),source)
+            consumer_identity.validate_evidence(identity,source,measured,binaries,proof)
         shutil.copyfile(f,out/name)
         artifacts[name]={'url':f'https://github.com/{REPO}/releases/download/{tag}/{name}','sha256':sha(f),'size':f.stat().st_size}
         lanes.append(manifest)

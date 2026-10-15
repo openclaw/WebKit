@@ -1,7 +1,6 @@
 {
   "bun_repository": "openclaw/bun",
-  "bun_commit": "b83b544ef744b6ab0dc1feadb59652261d64291d",
-  "base": "5718a6ec579b98362ea7276a426deedcc6281ef5",
+  "base": "3d3257150c40a1aabdc5f8b48d5b33d0413674cb",
   "lanes": [
     {
       "label": "bun-webkit-linux-amd64",
@@ -45,11 +44,19 @@
     }
   ],
   "excluded": "Android, FreeBSD, debug and ASAN are not selected by the fork's active OpenClaw workflows. Windows arm64 uses upstream's non-LTO lane because LLVM CodeView cannot encode its LTO register tuples. There is no separate x64 baseline WebKit archive.",
-  "upstream_sync": {
-    "base_commit": "d2d2a26ef973cdd97b37953f5dba58052acad74f",
-    "upstream_commit": "1878660bb47a6a87ebe518cea0581ef4bf9b71f8",
-    "prepared_tree": "d9ec052fccc81afbf43a5344e52bc980f439d587",
-    "paired_tree": "aee7cd52d7efcb9835b434a24fa47de06cc664f6",
-    "required_namespace_adapter_sha256": "6fdc093961584d2bd77176dcbaf487ab7ec07e14e5a19d11f881d751976a569d"
+  "baseline": {
+    "commit": "b83b544ef744b6ab0dc1feadb59652261d64291d",
+    "tree": "0cb8c8700ae8ec2a2da75487072ad690a5747f8b",
+    "engine": "1600131e46b5af48bbda3559af8d8a3327230b6e",
+    "patches": {
+      "000-checksums.patch": "1504e379c483135a6142e023a7c490173bd7249ceb1e7a947b4c298e260cd4b0",
+      "012-vm-finalization-fixture.patch": "67dec6cf7146f0a9fc8faefaf2c7f8ab6e13cb8377d9c77e68efe6e847ca98e9"
+    },
+    "manifest_sha256": "df16ba1dcaad70daa014fbc70c7005842fb2bf5099a1df00a83e1075ceef7462"
+  },
+  "candidate": {
+    "commit": "05e0989c468b58083d5293a4b304dd4c73c0b506",
+    "tree": "58dde9ebda7f84e5f996a775ac8e781fe5657471",
+    "manifest_blob": "8173f76b94d598ba292b71ebd3ffa7edd5be135d"
   }
 }

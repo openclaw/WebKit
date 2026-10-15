@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Require complete upstream-sync and patch evidence before release assembly."""
-import hashlib,json,re,sys
+import json,re,sys
+from consumer_identity import engine_input,verify,sha
 from pathlib import Path
 root=Path(sys.argv[1]);out=root/'sync'
 selected=json.loads((out/'selected.json').read_text())
 rows=json.loads((out/'results.json').read_text())
-assert selected and len(selected)==len(set(selected))
+historical=set(json.loads((Path(__file__).parent/'selected.json').read_text()))|set(json.loads((Path(__file__).parent/'sync/selected.json').read_text()))
+assert len(historical)==82 and len(selected)==len(set(selected))==85 and historical<=set(selected)
 assert set(selected)<={r['testPath'] for r in rows}
 assert rows and all(r['ok'] for r in rows),'sync CI failures'
 assert {'test/js/web/atomics.test.ts','test/js/bun/wasm/compile-rss.test.ts'}<=set(selected)
@@ -31,17 +33,19 @@ assert all(gc_progress[key] is False for key in ['lateWaitStallObserved','timedO
 assert type(gc_progress['helperCount']) is int and gc_progress['helperCount']>0,'GC helper precondition missing'
 engine=json.loads((root/'engine-gate.json').read_text())
 assert engine['passed'] and engine['source']==sys.argv[2]
+receipt=Path(sys.argv[4]);artifacts=Path(sys.argv[3])
+measured=engine_input(artifacts/'bun-webkit-linux-amd64.tar.gz',artifacts/'bun-webkit-linux-amd64.manifest.json',sys.argv[2])
+verify(root,measured,receipt,Path(sys.argv[5]))
+identity_sha=sha(receipt)
 compatibility=json.loads((root/'compatibility-gate.json').read_text())
 assert compatibility['passed'] and compatibility['source']==sys.argv[2]
-assert compatibility['base_commit']==sys.argv[3] and compatibility['prepared_tree']==sys.argv[4]
-config=json.loads((Path(__file__).resolve().parents[1]/'variants.json').read_text())['upstream_sync']
-assert compatibility['paired_tree']==config['paired_tree']
-assert compatibility['required_namespace_adapter_sha256']==config['required_namespace_adapter_sha256']
-assert compatibility['only_manifest_changed_after_pairing'] and compatibility['memory_tests']==3 and compatibility['startup'] is True
-record={'passed':True,'base_commit':sys.argv[3],'prepared_tree':sys.argv[4],
-        'selected_files':len(selected),'result_rows':len(rows),'regressions':0,'tests':counts,
-        'gc_progress':gc_progress,
-        'adapter_sha256':hashlib.sha256((root/'bun-sync-adapters.patch').read_bytes()).hexdigest()}
+assert compatibility['candidate_identity_sha256']==identity_sha
+assert compatibility['memory_tests']==3 and compatibility['startup'] is True
+record={'passed':True,'source':sys.argv[2],'candidate_identity_sha256':identity_sha,
+        'historical_selected_files':82,'selected_files':len(selected),'result_rows':len(rows),'regressions':0,'tests':counts,
+        'gc_progress':gc_progress}
 (root/'sync-gate.json').write_text(json.dumps(record,indent=2)+'\n')
-gate=json.loads((root/'gate.json').read_text());gate['upstream_sync']=record;gate['engine']=engine;gate['compatibility']=compatibility
+gate=json.loads((root/'gate.json').read_text())
+assert gate['candidate_identity_sha256']==identity_sha
+gate['upstream_sync']=record;gate['engine']=engine;gate['compatibility']=compatibility
 (root/'gate.json').write_text(json.dumps(gate,indent=2)+'\n')

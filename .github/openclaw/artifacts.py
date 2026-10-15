@@ -11,7 +11,8 @@ import subprocess
 import sys
 import time
 
-BASE = '5718a6ec579b98362ea7276a426deedcc6281ef5'
+BASE = '3d3257150c40a1aabdc5f8b48d5b33d0413674cb'
+HISTORY_FLOOR = '5718a6ec579b98362ea7276a426deedcc6281ef5'
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = json.loads((ROOT / '.github/openclaw/variants.json').read_text())
 RECIPE = ['.github/scripts/lanes.mjs', 'Dockerfile', 'Dockerfile.musl', 'Dockerfile.macos', 'Dockerfile.windows', 'icu', 'macos-cross']
@@ -30,19 +31,44 @@ def write(path, value):
     path.write_text(json.dumps(value, indent=2) + '\n')
 
 def source():
-    sha = capture('git', 'rev-parse', 'HEAD')
+    git = ('git', '-C', str(ROOT))
+    sha = capture(*git, 'rev-parse', '--verify', 'HEAD^{commit}')
     if not re.fullmatch('[0-9a-f]{40}', sha):
         raise ValueError('full source SHA required')
-    run('git', 'merge-base', '--is-ancestor', BASE, sha)
-    run('git', 'diff', '--exit-code', BASE, sha, '--', *RECIPE)
-    run('git', 'diff', '--exit-code', 'HEAD')
-    return sha
+    run(*git, 'merge-base', '--is-ancestor', HISTORY_FLOOR, BASE)
+    run(*git, 'merge-base', '--is-ancestor', BASE, sha)
+    run(*git, 'diff', '--exit-code', BASE, sha, '--', *RECIPE)
+    run(*git, 'diff', '--exit-code', 'HEAD')
+    commits = capture(*git, 'rev-list', '--reverse', BASE + '..' + sha).splitlines()
+    shallow = Path(capture(*git, 'rev-parse', '--git-path', 'shallow'))
+    if not shallow.is_absolute():
+        shallow = ROOT / shallow
+    boundaries = set(shallow.read_text().splitlines()) if shallow.exists() else set()
+    if boundaries:
+        # Excluded merge parents can hide patches even when the floor is reachable.
+        if boundaries.intersection(capture(*git, 'rev-list', HISTORY_FLOOR + '..' + sha).splitlines()):
+            raise ValueError('incomplete source history: shallow boundary above history floor')
+        # A bypass parent may expose older history without a boundary in that range.
+        for commit in commits:
+            try:
+                run(*git, 'merge-base', '--is-ancestor', HISTORY_FLOOR, commit)
+            except subprocess.CalledProcessError as error:
+                if error.returncode != 1:
+                    raise
+                raise ValueError('incomplete source history: patch commit is not a proven history-floor descendant: ' + commit) from error
+    patches = []
+    for commit in commits:
+        patch = subprocess.check_output([*git, 'show', '--format=', '--binary', commit])
+        patches.append({'commit': commit, 'subject': capture(*git, 'show', '-s', '--format=%s', commit),
+            'patch_sha256': hashlib.sha256(patch).hexdigest()})
+    return {'source': sha, 'base': BASE, 'history_floor': HISTORY_FLOOR, 'patches': patches}
 
 def lane_definitions():
     return json.loads(capture('node', '.github/scripts/lanes.mjs', '--json'))
 
 def preflight():
-    sha = source()
+    source_record = source()
+    sha = source_record['source']
     if sha != os.environ['INPUT_SHA'] or sha != os.environ['GITHUB_SHA']:
         raise ValueError('dispatch must use the same reviewed branch head and full input SHA')
     if os.environ['GITHUB_REF'] not in ('refs/heads/openclaw/main', 'refs/heads/openclaw/batch-1', 'refs/heads/openclaw/release-5718a6ec'):
@@ -55,7 +81,8 @@ def preflight():
         f.write('matrix=' + json.dumps({'include': [{'lane': l} for l in wanted]}, separators=(',', ':')) + '\n')
 
 def build(label, destination):
-    sha = source()
+    source_record = source()
+    sha = source_record['source']
     if label not in [l['label'] for l in CONFIG['lanes']]:
         raise ValueError('lane is outside the approved consumer matrix')
     lane = next(l for l in lane_definitions() if l['label'] == label)
@@ -88,11 +115,7 @@ def build(label, destination):
     archive = destination/(label+'.tar.gz')
     run('tar', '-czf', str(archive), '-C', str(destination), 'bun-webkit')
     paths = capture('git', 'ls-files', '--', *RECIPE).splitlines()
-    patches = []
-    for commit in capture('git','rev-list','--reverse',BASE+'..'+sha).splitlines():
-        patch = subprocess.check_output(['git','show','--format=','--binary',commit])
-        patches.append({'commit':commit,'subject':capture('git','show','-s','--format=%s',commit),'patch_sha256':hashlib.sha256(patch).hexdigest()})
-    manifest = {'schema_version':1,'source':sha,'base':BASE,'lane':lane,'patches':patches,
+    manifest = {'schema_version':1,**source_record,'lane':lane,
         'recipe_sha256':{p:digest(ROOT/p) for p in paths},'toolchain_image_id':image['Id'],
         'commands':{'base':base_command,'artifact':build_command},
         'tool_versions':tool_versions,'docker_version':capture('docker','version'),'buildx_version':capture('docker','buildx','version'),

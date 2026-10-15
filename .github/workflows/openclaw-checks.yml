@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 64
+          fetch-depth: 4096
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: |
@@ -100,7 +100,9 @@ jobs:
           node-version: '26.3.0'
       - name: Verify pipeline integrity and runner support
         run: |
+          python3 .github/openclaw/test_artifacts.py
           python3 .github/openclaw/test_release.py
+          python3 .github/openclaw/test_consumer_identity.py
           python3 .github/openclaw/test_verify_jsc_results.py
           bash .github/openclaw/preflight.sh
       - name: Build native Linux engine with the unchanged lane
@@ -119,13 +121,16 @@ jobs:
           curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o "$RUNNER_TEMP/bun.zip"
           unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bootstrap"
           echo "$RUNNER_TEMP/bootstrap/bun-linux-x64" >> "$GITHUB_PATH"
-      - name: Qualify the paired Bun adapter and fork selection
+      - name: Qualify the exact Bun candidate and fork selection
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/linux-artifact
           QUALIFICATION_DIR: ${{ runner.temp }}/qualification
         run: |
+          export INSPECTOR_RUNTIME="$(realpath "$(command -v bun)")"
           bash .github/openclaw/qualify-engine.sh
           bash .github/openclaw/qualify.sh
+          export CANDIDATE_BUN="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
+          export CANDIDATE_RECEIPT="$QUALIFICATION_DIR/candidate-identity.json"
           bash .github/openclaw/qualify-sync-compatibility.sh
           bash .github/openclaw/qualify-sync.sh
       - name: Retain qualified Linux Bun executables
@@ -134,10 +139,9 @@ jobs:
         with:
           name: linux-bun-executables
           path: |
-            ${{ runner.temp }}/qualification/bun/build/qualify-baseline/bun
+            ${{ runner.temp }}/qualification/bun-baseline/build/qualify-baseline/bun
             ${{ runner.temp }}/qualification/bun/build/qualify-candidate/bun
-            ${{ runner.temp }}/qualification/bun-sync/build/qualify-sync/bun
-            ${{ runner.temp }}/qualification/bun-sync-compatibility/build/qualify-sync-compatibility/bun
+            ${{ runner.temp }}/qualification/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
             ${{ runner.temp }}/qualification/*.sha256
           compression-level: 0
           if-no-files-found: error
@@ -151,6 +155,7 @@ jobs:
             ${{ runner.temp }}/qualification/*.log
             ${{ runner.temp }}/qualification/*.sha256
             ${{ runner.temp }}/qualification/*.patch
+            ${{ runner.temp }}/qualification/candidate-input/artifacts.json
             ${{ runner.temp }}/qualification/baseline/*.json
             ${{ runner.temp }}/qualification/baseline/*.log
             ${{ runner.temp }}/qualification/candidate/*.json

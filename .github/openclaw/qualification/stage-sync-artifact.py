@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Use the production resolver and checksum cache for an unpublished candidate."""
+"""Stage one measured lane through the production checksum resolver."""
 import argparse
-import hashlib
 import json
 import shutil
 from pathlib import Path
-p=argparse.ArgumentParser()
-p.add_argument('archive',type=Path)
-p.add_argument('--version',required=True)
-p.add_argument('--output',required=True,type=Path)
-a=p.parse_args()
-with a.archive.open('rb') as f:digest=hashlib.file_digest(f,'sha256').hexdigest()
-cache=a.output/'prefetch/by-sha256';cache.mkdir(parents=True,exist_ok=False)
-shutil.copyfile(a.archive,cache/digest)
-name=a.archive.name
-manifest={'version':a.version,'artifacts':{name:{'url':f'https://github.com/openclaw/WebKit/releases/download/autobuild-{a.version}/{name}','sha256':digest}}}
-(a.output/'artifacts.json').write_text(json.dumps(manifest,indent=2)+'\n')
+from consumer_identity import engine_input, overlay_manifest
+
+parser = argparse.ArgumentParser()
+parser.add_argument('archive', type=Path)
+parser.add_argument('--lane-manifest', required=True, type=Path)
+parser.add_argument('--version', required=True)
+parser.add_argument('--output', required=True, type=Path)
+args = parser.parse_args()
+engine = engine_input(args.archive, args.lane_manifest, args.version)
+cache = args.output / 'prefetch/by-sha256'
+cache.mkdir(parents=True, exist_ok=False)
+shutil.copyfile(args.archive, cache / engine['archive']['sha256'])
+(args.output / 'artifacts.json').write_text(json.dumps(overlay_manifest(engine), indent=2) + '\n')

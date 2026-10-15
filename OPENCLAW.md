@@ -1,8 +1,8 @@
 # OpenClaw WebKit artifacts
 
 This fork owns the WebKit artifacts consumed by `openclaw/bun`. The engine base is
-`5718a6ec579b98362ea7276a426deedcc6281ef5`; each engine change is a separate
-commit. Upstream `.github/scripts/lanes.mjs`, Dockerfiles, ICU inputs and macOS
+`3d3257150c40a1aabdc5f8b48d5b33d0413674cb`. Normal merges retain both the
+main and published fork histories. Upstream `.github/scripts/lanes.mjs`, Dockerfiles, ICU inputs and macOS
 cross tools remain unchanged. No workflow publishes toolchain images.
 
 ## Patch batch
@@ -41,9 +41,15 @@ commit patches, recipe hashes, locally built toolchain image ID, BuildKit
 metadata, tool versions, elapsed time and tarball SHA-256. These records and the
 tarball are workflow artifacts. SDKs and toolchain images are not redistributed.
 
-The Linux test job builds both baseline and candidate Bun with separate caches.
-Qualification-only Bun adapters live under `.github/openclaw/qualification`;
-they do not update or publish the Bun fork. The job runs the original 44-file
+The Linux test job builds exactly two Bun executables, with separate sources,
+dependencies, build directories and caches. The historical baseline is Bun
+`b83b544ef744b6ab0dc1feadb59652261d64291d` with engine
+`1600131e46b5af48bbda3559af8d8a3327230b6e` and the recorded checksum/VM fixture
+patches 000 and 012. The candidate is Bun
+`05e0989c468b58083d5293a4b304dd4c73c0b506`, tree
+`58dde9ebda7f84e5f996a775ac8e781fe5657471`, with only its tracked WebKit
+manifest replaced by the measured candidate Linux archive. This is a Bun-plus-engine
+upgrade comparison, not an isolated engine measurement. The job runs the original 44-file
 fork selector output plus its two dependency checks, requires identical all-pass
 results, and checks Segmenter, four Proxy regressions, both 14-variant ALS hook
 modes and at least 16 worker resource-limit cases. Other platforms are built;
@@ -104,13 +110,12 @@ use an old Bun executable with headers/libraries from another engine ABI.
 
 ## VM entry storage
 
-The paired qualifier keeps its frozen Bun source and applies the test-only fix
-from `4c8accdd045b84c942fe447348a31a7cba04cde4` to both arms. The feature-sync
-qualifier uses the same fixture; the compatibility-only source contract is
-unchanged. Each VM test file hash is retained with the existing proof logs.
-Both PR checks and artifact builds upload the baseline, candidate, feature-sync,
-and compatibility Bun executables in `linux-bun-executables`. A failed run retains
-the executables built before the failure, without retrying the qualifier.
+The historical baseline applies the test-only collected-realm fix from
+`4c8accdd045b84c942fe447348a31a7cba04cde4`; it is already in the candidate Bun.
+Each VM test file hash is retained. PR checks and artifact builds upload the two
+qualified executables and hashes in `linux-bun-executables`, including available
+executables after a failed run. Compatibility and feature checks reuse the exact
+candidate binary and never rebuild or rewrite its identity receipt.
 
 The Linux x64 `testVMEntryRecord` native target poisons the next entry record and
 checks all fixed-arity and generic entry stubs, locator purity, nested-entry
@@ -134,9 +139,11 @@ and requires both native executables to pass before accepting the artifact.
 
 ## Namespace interop qualification
 
-Pull requests run the read-only Linux engine check. It builds the unchanged native lane, verifies the JSC namespace stress results, and builds Bun with the matching qualification adapters before running the fork selection and namespace regressions. It has no publication job.
-
-The namespace adapter in `.github/openclaw/qualification/patches/008-namespace.patch` accompanies the engine facade API. Keep it in sync with the matching Bun integration until that integration becomes the qualification baseline. The native engine change and Bun consumer must be rebuilt together; a new engine release alone does not remove Bun's old namespace prototype.
+Pull requests run the read-only Linux engine check. It builds the unchanged native
+lane and verifies JSC namespace stress results before the exact candidate Bun runs
+the fork selection and namespace regressions. The facade, accounting, stack and
+worker counterparts are already in the pinned Bun candidate; no runtime adapter
+patch is reapplied. Engine and Bun must still be rebuilt together.
 
 ## Allocation sampling
 
@@ -164,14 +171,16 @@ entrypoint.
 
 ## ArrayBuffer ownership and worker snapshots
 
-The accounting adapter in `.github/openclaw/qualification/patches/010-arraybuffer-accounting.patch`
-uses the engine's allocation-origin and holder accounts for process, V8 and worker
-statistics. The qualification gate exercises its Node-compatible ownership cases
-and worker inspections in addition to the existing fork selection. Keep the adapter
-in sync with the Bun integration until that integration becomes the qualification
-baseline. Engine and Bun headers and libraries must be rebuilt together.
+The pinned Bun candidate uses the engine allocation-origin and holder accounts
+for process, V8 and worker statistics. Qualification retains ownership, transfer,
+worker inspection and external-buffer cases alongside the fork selection.
 
 ## Unreleased
+
+- Merge the main and published engine histories, then integrate upstream `3d3257150c40a1aabdc5f8b48d5b33d0413674cb` while preserving worker budgets, namespace facades, ALS, accounting, allocation sampling, traps, VM entry storage and all ten artifact lanes.
+- Port worker verification and passive-wait progress to upstream Collector ownership; preserve exactly-once ArrayBuffer accounting with the new allocation cadence.
+- Preserve syntax-selected stack positions through upstream parser and cache changes, including parenthesized optional calls and tags.
+- Qualify one exact Bun candidate across compatibility and feature gates, bind executable and archive bytes at assembly, and remove adapters already landed in Bun.
 
 - Require both native VM entry storage regressions in the Linux x64 artifact build and PR check.
 - Build and qualify Windows ARM64 at the exact PR head, matching the Linux and macOS source identity.
@@ -231,29 +240,29 @@ into engine main and explicitly included before the freeze enter this batch.
 Later main changes require a new source commit and qualification. The published
 release notes come from `.github/openclaw/release-notes.md`.
 
-The original W113 comparison retains its pinned Bun source and 44 selected files
-plus two dependency checks. Its candidate additionally takes the upstream
-mimalloc bump needed by `mi_on_thread_idle`. This is a matched engine/allocator
-comparison, not an engine-only performance measurement.
+The historical W113/W150 investigations remain useful dependency evidence, but
+their reconstructed trees and four-build adapter flow are retired. The current
+comparison retains the original 44-file selection and two dependency checks.
+The feature gate uses the sorted union of those 44 paths, the historical 56 sync
+paths, and the candidate selector: 82 historical paths and 85 total. Missing
+tracked paths fail qualification. Startup and all three unchanged memory-release
+tests remain mandatory.
 
-A separate qualification build reproduces W150's prepared upstream-sync tree
-`d9ec052fccc81afbf43a5344e52bc980f439d587` exactly from Bun
-`d2d2a26ef973cdd97b37953f5dba58052acad74f` before applying recorded qualification
-adapters and replacing the local checksum manifest. The production manifest
-resolver stays intact, using its SHA-256 prefetch cache. No Bun branch is pushed.
-This build runs the union of the original 56-file sync selection and the current
-engine/nightly selection, requires every result to pass, and explicitly executes
-the unchanged Atomics purge, notification-race and idle Wasm RSS tests without
-skips. Runtime source/engine identities, adapter bytes and results are retained
-in provenance. Release assembly requires this gate in addition to W113.
+A single post-build candidate receipt records the Bun commit, tree and index;
+engine source and lane archive bytes; manifest base blob, overlay and patch;
+executable bytes and measured runtime identities; and the separately copied,
+untracked worker fixture. Later gates validate the receipt without rewriting it.
+The one-lane manifest uses the production checksum resolver and SHA-256 prefetch
+cache; other lanes are unavailable until their real archives exist. Release
+assembly requires all ten lanes and checks the Linux archive and the separately
+uploaded executable/fixture bytes against that same receipt. Hosted CI revision
+variables are removed only for compilation so Bun reports its actual checkout.
 
-The shared test job also checks the namespace and Segmenter stress cases,
-promise/microtask stress and complete module manifest, allocation sampling in
-four execution tiers, seven worker heap counters, fourteen worker cases, the
-ALS hook/continuous-GC matrices, realm/retention probes, and Bun inspector tests.
-The upstream delta changes only waiting/compiler-thread allocator release and
-its bridge; module-loader, namespace, managed-heap and inspector patches remain
-patch-identical on the new base.
+The shared test job retains module/promise/namespace/Segmenter, allocation
+sampling, worker budgets, ALS, realm/retention, inspector and stack/cache gates.
+The candidate includes the landed counterparts; only historical baseline patches
+000 and 012 remain.
+
 ## Stack positions
 
 `CodeBlock::callSitePositionForBytecodeIndex` returns an optional absolute source offset for an exact instruction or async resume label. Stack readers use this position while exception expression ranges and debugger line tables retain their existing divots. RareData owns the two sparse vectors, including decoded cache entries; the bytecode cache revision prevents older layouts from being reused.
@@ -263,20 +272,12 @@ Bun must be rebuilt with its matching stack-reader adapter. It must also preserv
 The release gate includes the landed stack-position adapter, the complete CallSite/util/source-map and minifier regressions, live stack visitor, async positions, and owned/persistent JSC cache replay.
 
 
-The compatibility arm first reproduces that exact W150 tree, then applies only
-its required namespace API counterpart from `patches/008-namespace.patch`.
-The adapter SHA-256 and resulting tree `aee7cd52d7efcb9835b434a24fa47de06cc664f6`
-are pinned in `variants.json`. A manifest-only attempt against the original
-prepared tree failed to compile because it accessed the removed public
-`TriState` namespace marker. **Bun #106 (or this exact adapter) must accompany
-the manifest update.** No legacy marker shim is restored in the engine.
-
-After that explicit pairing, the index must retain the pinned paired tree
-before and after compilation, and the manifest must be the sole tracked
-worktree change. Startup and all three unchanged memory-release tests must pass.
-The separate feature build applies the remaining adapters for the full regression
-selection. Both gates are mandatory for assembly and publication; the failed
-manifest-only result is retained as dependency evidence.
+The historical manifest-only W150 attempt failed because it accessed the removed
+public `TriState` namespace marker. Its required Bun #106 counterpart is now
+landed in the pinned candidate. No legacy marker shim is restored in the engine.
+The current candidate index remains its pinned tree before and after compilation,
+with the manifest as the sole tracked worktree change. Compatibility and feature
+checks run that same executable and require its unchanged identity receipt.
 
 The ArrayBuffer patch is qualified in five interpreter/JIT/concurrent-GC modes,
 with process ownership, worker snapshot, native external-buffer and serializer

@@ -60,10 +60,18 @@ void SourceProvider::unlockUnderlyingBuffer()
         unlockUnderlyingBufferImpl();
 }
 
-CodeBlockHash SourceProvider::codeBlockHashConcurrently(int startOffset, int endOffset, CodeSpecializationKind kind)
+CodeBlockHash SourceProvider::codeBlockHashConcurrently(int startOffset, int endOffset, CodeSpecializationKind kind) const
 {
-    auto entireSourceCode = source();
-    return CodeBlockHash { entireSourceCode.substring(startOffset, endOffset - startOffset), entireSourceCode, kind };
+    CodeBlockHash result;
+    withSourceConcurrently([&](StringView entireSourceCode) {
+        result = CodeBlockHash { entireSourceCode.substring(startOffset, endOffset - startOffset), entireSourceCode, kind };
+    });
+    return result;
+}
+
+void SourceProvider::withSourceConcurrently(const ScopedLambda<void(StringView)>& function) const
+{
+    function(source());
 }
 
 void SourceProvider::lockUnderlyingBufferImpl() { }
@@ -238,16 +246,28 @@ Vector<unsigned> LineStartTable::build(std::span<const CharType> text)
     Vector<unsigned> lineStarts;
     lineStarts.append(0);
 
-    const CharType* const begin = text.data();
-    const CharType* const end = std::to_address(text.end());
+    // A line starts after every terminator except a CR that begins a CRLF pair, whose LF starts it.
+    auto addLineStartAfterTerminator = [&](size_t index) {
+        if (index + 1 < text.size() && isCRLFPair(text[index], text[index + 1]))
+            return;
+        lineStarts.append(static_cast<unsigned>(index + 1));
+    };
+
+    using UnsignedType = SameSizeUnsignedInteger<CharType>;
+    constexpr size_t stride = SIMD::stride<CharType>;
+    constexpr uint64_t laneBits = (uint64_t { 1 } << SIMD::bitsPerLaneInMask<CharType>) - 1;
     size_t index = 0;
-    while (index < text.size()) {
-        const CharType* found = findLineTerminator(text.subspan(index));
-        if (found == end)
-            break;
-        size_t next = lineStartAfterTerminator(text, static_cast<size_t>(found - begin));
-        lineStarts.append(static_cast<unsigned>(next));
-        index = next;
+    for (; index + stride <= text.size(); index += stride) {
+        auto lanes = lineTerminatorLanes<CharType>(SIMD::load(std::bit_cast<const UnsignedType*>(text.subspan(index, stride).data())));
+        for (uint64_t mask = SIMD::laneMask(lanes); mask; ) {
+            unsigned bit = std::countr_zero(mask);
+            addLineStartAfterTerminator(index + bit / SIMD::bitsPerLaneInMask<CharType>);
+            mask &= ~(laneBits << bit);
+        }
+    }
+    for (; index < text.size(); ++index) {
+        if (isLineTerminator(text[index]))
+            addLineStartAfterTerminator(index);
     }
 
     return lineStarts;
@@ -317,17 +337,6 @@ static unsigned lineEndFor(StringView text, const EncodedLineStarts& lineStarts,
     return lineEnd;
 }
 
-LineColumn LineStartTable::lineColumnForOffset(StringView text, unsigned offset)
-{
-    Locker locker { m_lock };
-    // Syntax-selected stack positions bypass the per-instruction expression cache.
-    // Cache provider-relative coordinates so document offsets remain applied by the caller.
-    return m_cachedLineColumns.ensure(offset, [&] {
-        auto line = EncodedLineStarts { ensureBuilt(text).bytes }.lineContaining(offset);
-        return LineColumn { line.line0Based, offset - line.start };
-    }).iterator->value;
-}
-
 LineStartTable::PositionInfo LineStartTable::positionInfoForOffset(StringView text, unsigned offset)
 {
     Locker locker { m_lock };
@@ -341,6 +350,23 @@ LineStartTable::PositionInfo LineStartTable::positionInfoForOffset(StringView te
     };
 }
 
+LineColumn LineStartTable::zeroBasedLineColumnForOffset(const SourceProvider& provider, unsigned offset)
+{
+    Locker locker { m_lock };
+    if (!m_lineStarts) {
+        provider.withSourceConcurrently([&](StringView text) {
+            assertIsHeld(m_lock);
+            ensureBuilt(text);
+        });
+    }
+    // Syntax-selected stack positions bypass the per-instruction expression cache.
+    // Cache provider-relative coordinates so document offsets remain applied by the caller.
+    return m_cachedLineColumns.ensure(offset, [&] {
+        auto line = EncodedLineStarts { m_lineStarts.bytes }.lineContaining(offset);
+        return LineColumn { line.line0Based, offset - line.start };
+    }).iterator->value;
+}
+
 unsigned LineStartTable::offsetForPosition(StringView text, unsigned line0Based, unsigned column0Based)
 {
     Locker locker { m_lock };
@@ -350,6 +376,17 @@ unsigned LineStartTable::offsetForPosition(StringView text, unsigned line0Based,
         return text.length();
 
     return std::min(lineStarts.startOfLine(line0Based) + column0Based, lineEndFor(text, lineStarts, line0Based));
+}
+
+// Upstream's SourceCharacters.h had this until the line start table was built in one pass (322425@main).
+template<typename CharType>
+static ALWAYS_INLINE size_t lineStartAfterTerminator(std::span<const CharType> text, size_t indexOfTerminator)
+{
+    ASSERT(indexOfTerminator < text.size());
+    ASSERT(isLineTerminator(text[indexOfTerminator]));
+    if (indexOfTerminator + 1 < text.size() && isCRLFPair(text[indexOfTerminator], text[indexOfTerminator + 1]))
+        return indexOfTerminator + 2;
+    return indexOfTerminator + 1;
 }
 
 LineColumn BuiltinsSourceProvider::lineColumnInTextForOffset(unsigned offset)
