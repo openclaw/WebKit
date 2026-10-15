@@ -54,6 +54,15 @@ class ConsumerIdentity(unittest.TestCase):
         manifest=self.repo/consumer.MANIFEST;manifest.parent.mkdir(parents=True);manifest.write_text('{}\n')
         (self.repo/'source.js').write_text('original\n');(self.repo/'.gitignore').write_text('/build/\n')
         generated=self.repo/'src/string-map.generated.rs';generated.parent.mkdir();generated.write_text('tracked generated source\n')
+        native=self.repo/'src/runtime/cli/main.cpp';native.parent.mkdir(parents=True);native.write_text('tracked native source\n')
+        for name,target in {
+            'src/cli':'runtime/cli', 'src/chain':'cli', 'src/parent':'../src/runtime/cli',
+            'alias-file.cpp':'src/runtime/cli/main.cpp', 'chain-file.cpp':'alias-file.cpp',
+            'tracked-to-untracked.cpp':'untracked.cpp', 'src/tracked-via-untracked':'untracked-alias',
+            'tracked-intermediate.cpp':'src/untracked-alias/main.cpp',
+            'escape.cpp':'../outside.cpp', 'dangling.cpp':'missing.cpp',
+            'cyclic-a.cpp':'cyclic-b.cpp', 'cyclic-b.cpp':'cyclic-a.cpp',
+        }.items():(self.repo/name).symlink_to(target)
         self.git('add','.');self.git('-c','commit.gpgsign=false','commit','--quiet','-m','fixture')
         commit=self.git('rev-parse','HEAD').strip();tree=self.git('rev-parse','HEAD^{tree}').strip();blob=self.git('rev-parse','HEAD:'+consumer.MANIFEST).strip()
         config={**consumer.CONFIG,'candidate':{'commit':commit,'tree':tree,'manifest_blob':blob}}
@@ -72,7 +81,7 @@ class ConsumerIdentity(unittest.TestCase):
         self.receipt=self.root/'candidate-identity.json'
         self.inspector=Path(sys.executable).resolve()
         self.inventory=['source.js','src/string-map.generated.rs']
-        self.discovery=patch.object(consumer,'discover_build_inputs',side_effect=lambda repo,runtime:[str((repo/path).resolve()) for path in self.inventory])
+        self.discovery=patch.object(consumer,'discover_build_inputs',side_effect=lambda repo,runtime:[str(repo/path) for path in self.inventory])
         self.discover_mock=self.discovery.start();self.addCleanup(self.discovery.stop)
 
     def git(self,*args):
@@ -214,15 +223,42 @@ class ConsumerIdentity(unittest.TestCase):
                 with patch.object(consumer,'discover_build_inputs',side_effect=subprocess.CalledProcessError(1,['inspector'])):
                     with self.assertRaises(subprocess.CalledProcessError):check()
 
-    def test_inventory_symlink_cannot_escape_checkout(self):
+    def test_both_arms_accept_tracked_aliases_and_chains(self):
+        paths=['src/cli/main.cpp','src/chain/main.cpp','src/parent/main.cpp','alias-file.cpp','chain-file.cpp']
+        for arm in ['candidate','baseline']:
+            with self.subTest(arm=arm),self.source_arm(arm) as check:
+                with patch.object(consumer,'discover_build_inputs',return_value=[str(self.repo/path) for path in paths]):check()
+
+    def test_both_arms_reject_untracked_aliases_and_targets(self):
+        for arm in ['candidate','baseline']:
+            with self.source_arm(arm) as check:
+                (self.repo/'untracked.cpp').write_text('untracked source\n')
+                (self.repo/'untracked-alias.cpp').symlink_to('source.js')
+                (self.repo/'src/untracked-alias').symlink_to('runtime/cli')
+                try:
+                    for path in ['untracked-alias.cpp','tracked-to-untracked.cpp','src/tracked-via-untracked/main.cpp','tracked-intermediate.cpp']:
+                        with self.subTest(arm=arm,path=path),patch.object(consumer,'discover_build_inputs',return_value=[str(self.repo/path)]):
+                            with self.assertRaisesRegex(ValueError,'untracked build input'):check()
+                finally:
+                    for path in ['untracked.cpp','untracked-alias.cpp','src/untracked-alias']:(self.repo/path).unlink()
+
+    def test_both_arms_reject_changed_tracked_alias_before_discovery(self):
+        for arm in ['candidate','baseline']:
+            with self.subTest(arm=arm),self.source_arm(arm) as check:
+                link=self.repo/'alias-file.cpp';target=os.readlink(link);link.unlink();link.symlink_to('source.js')
+                self.discover_mock.reset_mock()
+                try:
+                    with self.assertRaises(ValueError):check()
+                    self.discover_mock.assert_not_called()
+                finally:link.unlink();link.symlink_to(target)
+
+    def test_both_arms_reject_dangling_cyclic_and_escaping_aliases(self):
         outside=self.root/'outside.cpp';outside.write_text('outside\n')
         for arm in ['candidate','baseline']:
             with self.source_arm(arm) as check:
-                link=self.repo/'escape.cpp';link.symlink_to(outside)
-                try:
-                    with patch.object(consumer,'discover_build_inputs',return_value=[str(link)]):
-                        with self.assertRaisesRegex(ValueError,'escapes checkout'):check()
-                finally:link.unlink()
+                for path,message in [('escape.cpp','escapes checkout'),('dangling.cpp','invalid build source path'),('cyclic-a.cpp','cyclic build source alias')]:
+                    with self.subTest(arm=arm,path=path),patch.object(consumer,'discover_build_inputs',return_value=[str(self.repo/path)]):
+                        with self.assertRaisesRegex(ValueError,message):check()
 
     def test_discovery_uses_absolute_inspector_and_frozen_module(self):
         self.discovery.stop()

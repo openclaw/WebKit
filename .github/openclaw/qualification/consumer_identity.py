@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 
 INPUTS = Path(__file__).resolve().parent
@@ -71,16 +72,48 @@ def require_tracked_build_inputs(repo, inspector_runtime):
     require(isinstance(inventory, list) and inventory and all(isinstance(path, str) for path in inventory),
             'invalid build source inventory')
     root = repo.resolve()
-    tracked = set(git(repo, 'ls-files', '-z').decode().split('\0'))
+    tracked = {}
+    for entry in git(repo, 'ls-files', '--stage', '-z').decode().split('\0'):
+        if entry:
+            metadata, name = entry.split('\t', 1)
+            mode, _, stage = metadata.split()
+            require(stage == '0', 'unmerged build source index')
+            tracked[name] = mode
+
+    def walk(parts, current=(), links=frozenset()):
+        for part in parts:
+            require((root.joinpath(*current)).is_dir(), 'invalid build source path')
+            if part == '..':
+                require(current, 'build source escapes checkout')
+                current = current[:-1]
+                continue
+            path = root.joinpath(*current, part)
+            relative = path.relative_to(root).as_posix()
+            if stat.S_ISLNK(path.lstat().st_mode):
+                # A tracked alias can expose tracked source, but every link in its
+                # target must be reviewed too, including intermediate directories.
+                require(tracked.get(relative) == '120000', 'untracked build input: ' + relative)
+                require(relative not in links, 'cyclic build source alias')
+                target = Path(os.readlink(path))
+                if target.is_absolute():
+                    target = target.relative_to(root)
+                    current = ()
+                current = walk(target.parts, current, links | {relative})
+            else:
+                current = (*current, part)
+        return current
+
     for value in inventory:
         path = Path(value)
-        require(path.is_absolute() and path.is_file(), 'invalid build source path')
+        require(path.is_absolute(), 'invalid build source path')
         try:
-            relative = path.relative_to(root).as_posix()
-            canonical = path.resolve(strict=True).relative_to(root).as_posix()
-        except (ValueError, OSError) as error:
-            raise ValueError('build source escapes checkout') from error
-        require(relative in tracked and canonical in tracked, 'untracked build input: ' + relative)
+            parts = walk(path.relative_to(root).parts)
+            canonical = root.joinpath(*parts)
+            require(stat.S_ISREG(canonical.lstat().st_mode), 'invalid build source path')
+        except OSError as error:
+            raise ValueError('invalid build source path') from error
+        require(tracked.get(canonical.relative_to(root).as_posix()) in ('100644', '100755'),
+                'untracked build input: ' + str(path.relative_to(root)))
 
 
 def source_identity(repo, engine, inspector_runtime):
