@@ -17,7 +17,7 @@ const uninstantiated = (ns) => (ns.driver, ns.callCounts, $vm.uninstantiatedFunc
 const executableFor = (fn) => {
     const dump = $vm.codeBlockFor(fn);
     shouldBe(typeof dump, "string");
-    const owner = /->(0x[0-9a-f]+), /.exec(dump);
+    const owner = /->(0x[0-9a-f]+), /i.exec(dump);
     shouldBe(owner !== null, true);
     return owner[1];
 };
