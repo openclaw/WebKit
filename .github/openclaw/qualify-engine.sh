@@ -15,6 +15,7 @@ python3 .github/openclaw/check-stack-visitor.py "$jsc" > "$QUALIFICATION_DIR/sta
 WEBKIT_CHECKOUT="$PWD" JSC="$jsc" RESULT_DIR="$QUALIFICATION_DIR/jsc-stack" bash .github/openclaw/qualification/stack/check-jsc.sh
 Tools/Scripts/run-jsc-stress-tests JSTests/modules.yaml --jsc "$jsc" --child-processes 16 \
   --output-dir "$QUALIFICATION_DIR/jsc-modules" --no-retry > "$QUALIFICATION_DIR/jsc-modules.log" 2>&1
+python3 .github/openclaw/verify-jsc-results.py "$QUALIFICATION_DIR/jsc-modules" --require module-loaders-lazy-function-declarations.js
 "$jsc" --useDollarVM=true --useImportDefer=true .github/openclaw/qualification/als/jsc/module-context.js > "$QUALIFICATION_DIR/jsc-context.log" 2>&1
 fixture=JSTests/stress/heap-allocation-sampling.js
 common=(--useDollarVM=true --useGenerationalGC=true --forceMiniVMMode=false)

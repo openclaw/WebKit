@@ -181,6 +181,8 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+- Compare shared module function executables independently of concurrent JIT tier changes, and report failed module variants directly in the qualification log.
+
 - Qualify the synced Bun source against the replayed engine using checksum-pinned artifact staging, retaining the historical faithfulness control and all compatibility, feature and cache checks.
 
 - Rebase the sixteen retained engine patches onto `b1e30d08`; skip incomplete first-call compilation frames during allocation sampling, and make sampler and ArrayBuffer regression checks track explicit collection and actual liveness.
