@@ -80,20 +80,28 @@ function garbage() {
 noInline(garbage);
 garbage();
 equal(memoryUsage().arrayBuffers - liveBytes, 256000, "young vector allocation");
+var youngAllocations = temporary.map(view => ({ view: new WeakRef(view), bytes: view.byteLength }));
 temporary = null;
+$262.clearKeptObjects();
 edenGC();
-equal(memoryUsage().arrayBuffers, liveBytes, "young vector reclamation");
+// Continuous collection can promote these vectors while temporary still owns them.
+var remainingYoungBytes = liveTrackedBytes(youngAllocations);
+equal(memoryUsage().arrayBuffers, liveBytes + remainingYoungBytes, "young vector reclamation");
+$262.clearKeptObjects();
 fullGC();
-equal(memoryUsage().arrayBuffers, liveBytes, "oversize finalization");
+remainingYoungBytes = liveTrackedBytes(youngAllocations);
+equal(memoryUsage().arrayBuffers, liveBytes + remainingYoungBytes, "oversize finalization");
 
-var oldBefore = memoryUsage().arrayBuffers;
+// Keep earlier transient survivors in the oracle instead of freezing their charge in the baseline.
+var oldBefore = liveBytes;
 var oldViews = [];
 for (var i = 0; i < 128; ++i)
     oldViews.push(new Uint8Array(512));
-var trackedAllocations = oldViews.map(view => ({ view: new WeakRef(view), bytes: view.byteLength }));
-function liveTrackedBytes() {
+var oldViewAllocations = oldViews.map(view => ({ view: new WeakRef(view), bytes: view.byteLength }));
+var trackedAllocations = youngAllocations.concat(oldViewAllocations);
+function liveTrackedBytes(allocations) {
     var bytes = 0;
-    for (var entry of trackedAllocations) {
+    for (var entry of allocations) {
         if (entry.view.deref() || (entry.buffer && entry.buffer.deref()))
             bytes += entry.bytes;
     }
@@ -101,24 +109,24 @@ function liveTrackedBytes() {
 }
 fullGC();
 for (var round = 0; round < 8; ++round) {
-    trackedAllocations[round].buffer = new WeakRef(oldViews[round].buffer);
+    oldViewAllocations[round].buffer = new WeakRef(oldViews[round].buffer);
     temporary = [];
     garbage();
     for (var index = 0; index < temporary.length; ++index)
         trackedAllocations.push({ view: new WeakRef(temporary[index]), bytes: temporary[index].byteLength });
-    var trackedBytes = liveTrackedBytes();
+    var trackedBytes = liveTrackedBytes(trackedAllocations);
     equal(memoryUsage().arrayBuffers, oldBefore + trackedBytes, "old and young vectors");
     temporary = null;
     $262.clearKeptObjects();
     edenGC();
     // Compare with the collector's live targets, including any promoted temporaries.
-    trackedBytes = liveTrackedBytes();
+    trackedBytes = liveTrackedBytes(trackedAllocations);
     equal(memoryUsage().arrayBuffers, oldBefore + trackedBytes, "eden matches live old and young storage");
 }
 oldViews = null;
 $262.clearKeptObjects();
 fullGC();
-trackedBytes = liveTrackedBytes();
+trackedBytes = liveTrackedBytes(trackedAllocations);
 equal(memoryUsage().arrayBuffers, oldBefore + trackedBytes, "full collection prunes dead old views");
 equal(testArrayBufferInspectionWhileWaiting(), true, "inspection of a confirmed parked waiter");
 
