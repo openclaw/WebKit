@@ -78,19 +78,22 @@ for (const collect of [fullGC, edenGC]) {
     for (const [major, minor] of [[false, false], [false, true], [true, false], [true, true]]) {
         keep = null;
         fullGC();
-        startHeapAllocationSampling(512, major, minor);
-        allocateLeft(10000);
-        const before = sites(profile().head, "allocateLeft");
-        assert(before > 100000, "retained samples missing");
-        keep = null;
-        collect();
-        const after = sites(profile().head, "allocateLeft");
-        // Mini VM mode disables generational GC even for an explicit edenGC request.
-        const full = collect === fullGC || !$vm.useJIT();
-        const included = full ? major : minor;
-        assert(included ? after === before : after < before / 10, "collection inclusion flag " + JSON.stringify({ major, minor, full, before, after }));
-        validate(profile());
-        stopHeapAllocationSampling();
+        let before;
+        // Snapshot construction allocates too. Keep it, allocation, and root removal out of
+        // automatic GC so the flags are checked against the collection that actually runs.
+        withSynchronousGC(() => {
+            startHeapAllocationSampling(512, major, minor);
+            allocateLeft(10000);
+            before = sites(profile().head, "allocateLeft");
+            assert(before > 100000, "retained samples missing");
+            keep = null;
+        }, full => {
+            const after = sites(profile().head, "allocateLeft");
+            const included = full ? major : minor;
+            assert(included ? after === before : after < before / 10, "collection inclusion flag " + JSON.stringify({ major, minor, full, before, after }));
+            validate(profile());
+            stopHeapAllocationSampling();
+        }, collect === fullGC);
     }
 }
 // Large auxiliary allocations and growth must remain safe across reallocations and GC.

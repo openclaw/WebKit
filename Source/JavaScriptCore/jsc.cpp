@@ -35,6 +35,7 @@
 #include "CompilerTimingScope.h"
 #include "Completion.h"
 #include "ConfigFile.h"
+#include "DeferGCInlines.h"
 #include "DeferTermination.h"
 #include "DeferredWorkTimer.h"
 #include "Disassembler.h"
@@ -74,6 +75,7 @@
 #include "OSCheck.h"
 #include "ObjectConstructor.h"
 #include "ParserError.h"
+#include "PreventCollectionScope.h"
 #include "ProfilerDatabase.h"
 #include "ReleaseHeapAccessScope.h"
 #include "SamplingProfiler.h"
@@ -507,6 +509,7 @@ static JSC_DECLARE_HOST_FUNCTION(functionStartHeapAllocationSampling);
 static JSC_DECLARE_HOST_FUNCTION(functionGetHeapAllocationProfile);
 static JSC_DECLARE_HOST_FUNCTION(functionStopHeapAllocationSampling);
 static JSC_DECLARE_HOST_FUNCTION(functionFullGC);
+static JSC_DECLARE_HOST_FUNCTION(functionWithSynchronousGC);
 #if USE(BUN_JSC_ADDITIONS)
 static JSC_DECLARE_HOST_FUNCTION(functionIdleFullGC);
 #endif
@@ -883,6 +886,7 @@ private:
         addFunction(vm, "getHeapAllocationProfile"_s, functionGetHeapAllocationProfile, 0);
         addFunction(vm, "stopHeapAllocationSampling"_s, functionStopHeapAllocationSampling, 0);
         addFunction(vm, "fullGC"_s, functionFullGC, 0);
+        addFunction(vm, "withSynchronousGC"_s, functionWithSynchronousGC, 3);
 #if USE(BUN_JSC_ADDITIONS)
         addFunction(vm, "idleFullGC"_s, functionIdleFullGC, 0);
 #endif
@@ -2459,6 +2463,26 @@ JSC_DEFINE_HOST_FUNCTION(functionStopHeapAllocationSampling, (JSGlobalObject* gl
     if (auto* profiler = globalObject->vm().heapProfiler())
         profiler->stopAllocationSampling();
     return JSValue::encode(jsUndefined());
+}
+
+// Isolate exact collection-kind assertions from background collections and setup allocations.
+// Other parts of each stress fixture continue to run with the selected GC mode unchanged.
+JSC_DEFINE_HOST_FUNCTION(functionWithSynchronousGC, (JSGlobalObject* globalObject, CallFrame* callFrame))
+{
+    auto& vm = globalObject->vm();
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    PreventCollectionScope preventCollection(vm.heap);
+    {
+        DeferGCForAWhile deferGC(vm);
+        call(globalObject, callFrame->argument(0), jsUndefined(), ArgList { }, "Expected a GC setup function"_s);
+        RETURN_IF_EXCEPTION(scope, encodedJSValue());
+    }
+    vm.heap.collectSync(callFrame->argument(2).toBoolean(globalObject) ? CollectionScope::Full : CollectionScope::Eden);
+    MarkedArgumentBuffer arguments;
+    arguments.append(jsBoolean(vm.heap.lastCollectionScope() == CollectionScope::Full));
+    ASSERT(!arguments.hasOverflowed());
+    DeferGCForAWhile deferGC(vm);
+    RELEASE_AND_RETURN(scope, JSValue::encode(call(globalObject, callFrame->argument(1), jsUndefined(), ArgList { arguments }, "Expected a GC check function"_s)));
 }
 
 JSC_DEFINE_HOST_FUNCTION(functionFullGC, (JSGlobalObject* globalObject, CallFrame*))

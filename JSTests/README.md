@@ -21,3 +21,12 @@ New tests are *required* to adhere to the following rules:
 3. Tests fail by crashing or throwing an uncaught exception, so assertions must throw rather than print. Add `//@ mustCrash!` or `//@ requireOptions("--exception=<exception-name>")` to the top of the test file if testing expected crashes/exceptions, respectively.
 4. Don't print or log unless a test is about to fail. Test output goes straight to the terminal, so extra logging is noisy and disruptive.
 5. Make sure the test actually reproduces the bug. Run the test against a build without the fix and make sure it fails.
+
+Tests that assert the exact effects of one explicit collection can use the shell's
+`withSynchronousGC(setup, check, full)` helper. It drains pending background work,
+defers automatic GC during setup and snapshot construction, runs the requested
+collection, and calls `check` with whether that collection was full. The selected
+stress GC mode continues outside that controlled check. Reclamation tests should
+compare accounting with WeakRef liveness, since automatic GC may promote objects
+while their owners still retain them; dereference targets before taking the
+accounting snapshot so surviving targets remain alive through the measurement.
