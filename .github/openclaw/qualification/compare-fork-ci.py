@@ -25,8 +25,9 @@ right_selection, right = read(a.local)
 same = left_selection == right_selection and left == right
 result = {'identical_file_outcomes': same, 'selected_files': len(left_selection),
           'result_files': len(left), 'additional_runner_results': sorted(set(left) - set(left_selection)),
-          'all_passed': all(value[0] for values in left.values() for value in values),
+          'all_passed': all(value[0] and value[1] == 'pass' and value[2] in (None, 0) and value[3] is None
+                            for arm in (left, right) for values in arm.values() for value in values),
           'differences': sorted(name for name in set(left) | set(right) if left.get(name) != right.get(name))}
 a.output.write_text(json.dumps(result, indent=2) + '\n')
 print(json.dumps(result))
-raise SystemExit(0 if same else 1)
+raise SystemExit(0 if same and result['all_passed'] else 1)

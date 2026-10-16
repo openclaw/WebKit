@@ -43,6 +43,7 @@ jobs:
         run: |
           python3 .github/openclaw/test_release.py
           python3 .github/openclaw/test_verify_jsc_results.py
+          python3 .github/openclaw/test_faithfulness.py
       - name: Measure runner capacity and Docker support
         run: bash .github/openclaw/preflight.sh
       - name: Validate reviewed source and exact consumer matrix
@@ -159,8 +160,10 @@ jobs:
             ${{ runner.temp }}/qualification/*.patch
             ${{ runner.temp }}/qualification/baseline/*.json
             ${{ runner.temp }}/qualification/baseline/*.log
+            ${{ runner.temp }}/qualification/baseline/*.xml
             ${{ runner.temp }}/qualification/candidate/*.json
             ${{ runner.temp }}/qualification/candidate/*.log
+            ${{ runner.temp }}/qualification/candidate/*.xml
             ${{ runner.temp }}/qualification/compatibility/*.log
             ${{ runner.temp }}/qualification/sync/*.json
             ${{ runner.temp }}/qualification/sync/*.log

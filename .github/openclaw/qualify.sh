@@ -11,7 +11,7 @@ BUN_COMMIT=$(python3 -c 'import json;print(json.load(open(".github/openclaw/vari
 BASELINE_BUN=$(python3 -c 'import json;print(json.load(open(".github/openclaw/variants.json"))["baseline_bun_commit"])')
 BASE=$(python3 -c 'import json;print(json.load(open(".github/openclaw/variants.json"))["baseline_webkit_commit"])')
 bootstrap=$(command -v bun)
-export CI=1 PUPPETEER_SKIP_DOWNLOAD=1
+export CI=true PUPPETEER_SKIP_DOWNLOAD=1
 source "$inputs/build-matched.sh"
 # Keep the proven historical control intact. It also seeds the old cache format.
 repo="$QUALIFICATION_DIR/bun-baseline"
@@ -23,6 +23,10 @@ git apply "$inputs/patches/000-checksums.patch"
 git apply "$inputs/patches/012-vm-finalization-fixture.patch"
 # Match the IPv4 clients, as corrected in openclaw/bun#134; no assertion changes.
 git apply "$inputs/patches/013-ipv4-loopback-fixture.patch"
+# Backport the pinned candidate's isolated-stdio ownership fix (Bun #145 / upstream #38008).
+# The historical control otherwise fails between files before running their tests.
+git apply "$inputs/patches/014-baseline-isolated-stdio.patch"
+sha256sum "$inputs/patches/014-baseline-isolated-stdio.patch" > "$QUALIFICATION_DIR/baseline-isolated-stdio.sha256"
 sha256sum "$inputs/patches/013-ipv4-loopback-fixture.patch" > "$QUALIFICATION_DIR/net-loopback-fixture.sha256"
 sha256sum "$inputs/patches/012-vm-finalization-fixture.patch" > "$QUALIFICATION_DIR/vm-finalization-fixture.sha256"
 "$bootstrap" install --frozen-lockfile
@@ -55,9 +59,11 @@ for arm in baseline candidate; do
   cp "$inputs/selected.json" build/openclaw-ci/selected.json
   cp "$inputs/selected.json" "$results/selected.json"
   rm -f build/openclaw-ci/results.json
-  env HOME="$results/home" TMPDIR="$results/tmp" PATH="$results/bin:$PATH" OPENCLAW_CI_PLATFORM=linux \
-    "$candidate" scripts/openclaw-ci/tests.ts test > "$results/tests.log" 2>&1
+  python3 "$inputs/stage-fork-ci.py" "$repo" "$results"
+  env OPENCLAW_QUALIFICATION_RESULTS="$results" HOME="$results/home" TMPDIR="$results/tmp" PATH="$results/bin:$PATH" OPENCLAW_CI_PLATFORM=linux \
+    "$candidate" scripts/openclaw-ci/qualification-tests.ts test > "$results/tests.log" 2>&1
   cp build/openclaw-ci/results.json "$results/results.json"
+  python3 "$inputs/collect-fork-outcomes.py" "$results"
 done
 python3 "$inputs/compare-fork-ci.py" "$QUALIFICATION_DIR/baseline" "$QUALIFICATION_DIR/candidate" --output "$QUALIFICATION_DIR/faithfulness.json"
 candidate="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
