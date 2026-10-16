@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 spec=importlib.util.spec_from_file_location('release',Path(__file__).with_name('release.py'))
 release=importlib.util.module_from_spec(spec);spec.loader.exec_module(release)
+spec=importlib.util.spec_from_file_location('artifacts',Path(__file__).with_name('artifacts.py'))
+artifacts=importlib.util.module_from_spec(spec);spec.loader.exec_module(artifacts)
 SOURCE='a'*40
 
 class ReleaseIntegrity(unittest.TestCase):
@@ -158,5 +160,51 @@ class ReleaseIntegrity(unittest.TestCase):
         with patch.object(release,'api',side_effect=[{'enabled':True},run]),patch.object(release,'execute') as execute:
             with self.assertRaisesRegex(ValueError,'reviewed source'):release.authorize(SOURCE,42)
             execute.assert_not_called()
+
+    def test_new_base_release_branch_preflight_preserves_matrix(self):
+        output=self.root/'output'
+        environment={'GITHUB_REF':'refs/heads/openclaw/release-b1e30d08','INPUT_SHA':SOURCE,'GITHUB_SHA':SOURCE,'GITHUB_OUTPUT':str(output)}
+        lanes=artifacts.CONFIG['lanes']
+        with patch.dict('os.environ',environment),patch.object(artifacts,'source',return_value=SOURCE),patch.object(artifacts,'lane_definitions',return_value=lanes):
+            artifacts.preflight()
+        matrix=json.loads(output.read_text().removeprefix('matrix='))
+        self.assertEqual(matrix['include'],[{'lane':lane['label']} for lane in lanes])
+        self.assertEqual(len(matrix['include']),10)
+
+    def test_new_base_release_branch_authorization_requires_all_jobs(self):
+        run={'head_sha':SOURCE,'head_branch':'openclaw/release-b1e30d08','event':'workflow_dispatch','path':'.github/workflows/openclaw-artifacts.yml','run_attempt':1}
+        config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())
+        names=['preflight','test','windows-arm64','assemble']+['build ('+lane['label']+')' for lane in config['lanes']]
+        jobs={'jobs':[{'name':name,'conclusion':'success','run_attempt':1} for name in names]}
+        pending=[{'environment':{'name':'openclaw-artifacts','id':99},'current_user_can_approve':True}]
+        with patch.object(release,'api',side_effect=[{'enabled':True},run,jobs,pending,{}]),patch.object(release,'execute') as execute:
+            release.authorize(SOURCE,42)
+            self.assertEqual(execute.call_count,1)
+        jobs['jobs'][0]['conclusion']='failure'
+        with patch.object(release,'api',side_effect=[{'enabled':True},run,jobs]),patch.object(release,'execute') as execute:
+            with self.assertRaisesRegex(ValueError,'all exact build'):release.authorize(SOURCE,42)
+            execute.assert_not_called()
+
+    def test_new_base_release_branch_publisher_reaches_atomic_tag_creation(self):
+        self.assemble()
+        environment={**self.authorization(),'GITHUB_REF':'refs/heads/openclaw/release-b1e30d08'}
+        with patch.dict('os.environ',environment),patch.object(release,'api',side_effect=subprocess.CalledProcessError(1,['gh'])) as api,patch.object(release,'execute') as execute:
+            with self.assertRaises(subprocess.CalledProcessError):release.publish(self.out,SOURCE)
+            self.assertEqual(api.call_args.args[:3],('-X','POST',f'repos/{release.REPO}/git/refs'))
+            execute.assert_not_called()
+
+    def test_replay_work_branch_cannot_publish(self):
+        branch='sync/replay-b1e30d08'
+        environment={**self.authorization(),'GITHUB_REF':'refs/heads/'+branch,'INPUT_SHA':SOURCE,'GITHUB_OUTPUT':str(self.root/'output')}
+        with patch.dict('os.environ',environment),patch.object(artifacts,'source',return_value=SOURCE):
+            with self.assertRaisesRegex(ValueError,'permitted owned branch'):artifacts.preflight()
+        run={'head_sha':SOURCE,'head_branch':branch,'event':'workflow_dispatch','path':'.github/workflows/openclaw-artifacts.yml','run_attempt':1}
+        with patch.object(release,'api',side_effect=[{'enabled':True},run]),patch.object(release,'execute') as execute:
+            with self.assertRaisesRegex(ValueError,'reviewed source'):release.authorize(SOURCE,42)
+            execute.assert_not_called()
+        self.assemble()
+        with patch.dict('os.environ',environment),patch.object(release,'api') as api,patch.object(release,'execute') as execute:
+            with self.assertRaisesRegex(ValueError,'permitted owned branch'):release.publish(self.out,SOURCE)
+            api.assert_not_called();execute.assert_not_called()
 
 if __name__=='__main__':unittest.main()

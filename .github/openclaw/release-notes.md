@@ -1,3 +1,8 @@
+# Unreleased pipeline preparation
+- Update the source and recipe base to oven-sh/WebKit `b1e30d08cb1428688c5f24109fe4f534096ee2ad` and admit the exact `openclaw/release-b1e30d08` branch in code. Preserve all ten artifacts, qualification gates and immutable-release verification. Publication still requires the environment's separate exact-name policy and a fully qualified engine replay.
+
+## Previous release
+
 This release fixes two native stack storage paths that could conservatively retain otherwise unreachable objects, including cancellation reasons. Newly created VM entry records now initialize their callee-save scratch buffers and alignment padding. Deferred microtask entry scopes use two initialized pointers instead of an optional engagement byte with stale padding. Lazy entry, global-object updates, unwind state and teardown boundaries remain intact, without a new heap allocation. Native poisoned-storage regressions cover both owners. Thanks @robobun for the related whole-word-state remedy in [oven-sh/WebKit#694](https://github.com/oven-sh/WebKit/pull/694).
 
 This batch also fixes a Linux deadlock when a Worker waits in a native call on a foreign stack, as used by Koffi. Asynchronous VM trap sampling now makes one suspension attempt and releases the process-wide suspension lock before retrying a refused sample. This lets another VM finish collection and release the native call while termination remains pending. Blocking GC suspension still requires a valid stack/register snapshot; Mach suspension retains its existing operation. The native regression checks parent collection before native release, rooted-object survival, pending termination, temporary refusal and nested suspension. General same-VM foreign-stack scanning is outside this fix.
