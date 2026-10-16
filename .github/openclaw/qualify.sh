@@ -21,6 +21,9 @@ git fetch --depth=1 origin "$BASELINE_BUN"
 git checkout --detach "$BASELINE_BUN"
 git apply "$inputs/patches/000-checksums.patch"
 git apply "$inputs/patches/012-vm-finalization-fixture.patch"
+# Match the IPv4 clients, as corrected in openclaw/bun#134; no assertion changes.
+git apply "$inputs/patches/013-ipv4-loopback-fixture.patch"
+sha256sum "$inputs/patches/013-ipv4-loopback-fixture.patch" > "$QUALIFICATION_DIR/net-loopback-fixture.sha256"
 sha256sum "$inputs/patches/012-vm-finalization-fixture.patch" > "$QUALIFICATION_DIR/vm-finalization-fixture.sha256"
 "$bootstrap" install --frozen-lockfile
 (cd test && "$bootstrap" install --frozen-lockfile)
@@ -43,6 +46,7 @@ for arm in baseline candidate; do
     candidate="$baseline"
   fi
   sha256sum test/js/node/vm/vm.test.ts > "$QUALIFICATION_DIR/vm-test-$arm.sha256"
+  sha256sum test/js/node/net/node-net.test.ts > "$QUALIFICATION_DIR/net-test-$arm.sha256"
   results="$QUALIFICATION_DIR/$arm"
   mkdir -p "$results" "$results/home" "$results/tmp" "$results/bin"
   chmod 700 "$results/home" "$results/tmp"

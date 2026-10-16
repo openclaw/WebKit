@@ -111,7 +111,12 @@ use an old Bun executable with headers/libraries from another engine ABI.
 
 The historical control applies the checksums resolver and test-only VM fix
 from `4c8accdd045b84c942fe447348a31a7cba04cde4`. The matched source already
-contains both integrations, so no legacy patch is reapplied to it. Each VM test
+contains both integrations, so no legacy patch is reapplied to it. The control
+also takes only the IPv4 socket-read listener correction from
+[openclaw/bun#134](https://github.com/openclaw/bun/pull/134): its clients use IPv4,
+so the listener must bind to `127.0.0.1` rather than an ambiguously resolved
+`localhost`. All original assertions, skips, deadlines and allocator bounds stay
+unchanged. The matched source already contains that correction. Each VM test
 file hash is retained with the existing proof logs.
 Both PR checks and artifact builds upload the baseline, candidate, feature-sync,
 and compatibility Bun executables in `linux-bun-executables`. A failed run retains
