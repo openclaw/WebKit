@@ -5,46 +5,17 @@ inputs="$pipeline/.github/openclaw/qualification"
 : "${ARTIFACT_DIR:?}" "${QUALIFICATION_DIR:?}"
 QUALIFICATION_DIR=$(realpath "$QUALIFICATION_DIR")
 SOURCE_SHA=$(git rev-parse HEAD)
-BUN_BASE=d2d2a26ef973cdd97b37953f5dba58052acad74f
-SYNC_TREE=d9ec052fccc81afbf43a5344e52bc980f439d587
 bootstrap=$(command -v bun)
 export CI=1 PUPPETEER_SKIP_DOWNLOAD=1
+source "$inputs/build-matched.sh"
 repo="$QUALIFICATION_DIR/bun-sync"
 results="$QUALIFICATION_DIR/sync"
 mkdir -p "$results/home" "$results/tmp" "$results/bin"
 chmod 700 "$results/home" "$results/tmp"
-git clone --depth=1 --filter=blob:none --no-checkout https://github.com/openclaw/bun.git "$repo"
-cd "$repo"
-git fetch --depth=1 origin "$BUN_BASE"
-git checkout --detach "$BUN_BASE"
-git apply --index "$inputs/sync/upstream-sync.patch"
-test "$(git write-tree)" = "$SYNC_TREE"
-# The complete W150 prepared tree is verified before qualification-only adapters.
-for patch in "$inputs"/patches/00[3-7]-*.patch; do
-  git apply --index --exclude=CHANGELOG.md --exclude='docs/*' --exclude='test/js/node/worker_threads/*' "$patch"
-done
-for patch in 008-namespace.patch 009-allocation-sampling.patch 010-als-regressions.patch 009-stack-positions.patch 010-arraybuffer-accounting.patch; do
-  git apply --index --exclude=CHANGELOG.md --exclude='docs/*' "$inputs/patches/$patch"
-done
-git apply --index "$inputs/sync/inspect-stack-position.patch"
-git apply --index "$inputs/patches/011-bun-gc-timer-wake.patch"
-git apply --index "$inputs/patches/012-vm-finalization-fixture.patch"
+checkout_matched
+build_matched sync
 sha256sum test/js/node/vm/vm.test.ts > "$QUALIFICATION_DIR/vm-test-sync.sha256"
 cp "$inputs/worker-resource-limits.test.ts" test/js/node/worker_threads/openclaw-resource-limits.test.ts
-git add test/js/node/worker_threads/openclaw-resource-limits.test.ts
-python3 "$inputs/stage-sync-artifact.py" "$ARTIFACT_DIR/bun-webkit-linux-amd64.tar.gz" --version "$SOURCE_SHA" --output "$QUALIFICATION_DIR/sync-input"
-cp "$QUALIFICATION_DIR/sync-input/artifacts.json" scripts/build/deps/webkit-artifacts.json
-git add scripts/build/deps/webkit-artifacts.json
-git diff --check HEAD
-git diff --binary HEAD > "$QUALIFICATION_DIR/bun-sync-adapters.patch"
-"$bootstrap" install --frozen-lockfile
-(cd test && "$bootstrap" install --frozen-lockfile)
-export BUN_BUILD_PREFETCH_DIR="$QUALIFICATION_DIR/sync-input/prefetch"
-export BUN_BUILD_CACHE_DIR="$QUALIFICATION_DIR/cache-sync"
-env -u GITHUB_SHA -u BUILDKITE_COMMIT -u GIT_SHA "$bootstrap" run build:release --lto=off --buildDir="$repo/build/qualify-sync" --timings > "$QUALIFICATION_DIR/build-sync.log" 2>&1
-candidate="$repo/build/qualify-sync/bun"
-"$candidate" -e 'if(process.versions.webkit!==process.argv[1] || Bun.revision!==process.argv[2]) throw new Error("wrong engine or Bun source revision");' "$SOURCE_SHA" "$BUN_BASE"
-sha256sum "$candidate" > "$QUALIFICATION_DIR/bun-sync.sha256"
 "$candidate" --revision > "$results/revision.log"
 "$candidate" -e 'const server=Bun.serve({port:0,fetch(){return new Response("ready")}});try{if(await(await fetch(server.url)).text()!=="ready")throw Error("startup");console.log("build/startup/http passed")}finally{await server.stop(true)}' > "$results/startup.log" 2>&1
 unset BUN_BUILD_PREFETCH_DIR BUN_BUILD_CACHE_DIR BUN_WEBKIT_ARTIFACT_MANIFEST
@@ -66,7 +37,10 @@ if test "$selection_exit" -ne 0; then exit "$selection_exit"; fi
 "$candidate" test test/js/web/atomics.test.ts test/js/bun/wasm/compile-rss.test.ts -t 'Atomics.wait lets mimalloc|a notify that arrives while Atomics.wait|WebAssembly.compile does not retain' > "$results/memory-release.log" 2>&1
 "$candidate" test --expose-internals test/js/node/v8/capture-stack-trace.test.js test/js/node/util/util.test.js test/js/bun/sourcemap > "$results/stack-positions.log" 2>&1
 "$candidate" test test/bundler/bundler_minify.test.ts > "$results/stack-minifier.log" 2>&1
-python3 "$inputs/stack/check-runtime-cache.py" --baseline "$QUALIFICATION_DIR/bun/build/qualify-baseline/bun" --candidate "$candidate" --fixture "$inputs/stack/observe-regressions.js" --output "$results/runtime-cache" --expected-version 38 > "$results/stack-cache.json"
+cache_source=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["runtime_cache"]["source"])' "$pipeline/.github/openclaw/variants.json")
+cache_sha256=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["runtime_cache"]["sha256"])' "$pipeline/.github/openclaw/variants.json")
+cache_version=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["runtime_cache"]["version"])' "$pipeline/.github/openclaw/variants.json")
+python3 "$inputs/stack/check-runtime-cache.py" --baseline "$QUALIFICATION_DIR/bun-baseline/build/qualify-baseline/bun" --candidate "$candidate" --fixture "$inputs/stack/observe-regressions.js" --output "$results/runtime-cache" --expected-version "$cache_version" --cache-source "$repo/$cache_source" --cache-source-sha256 "$cache_sha256" > "$results/stack-cache.json"
 "$candidate" "$inputs/segmenter.js" > "$results/segmenter.log" 2>&1
 "$candidate" test test/js/node/vm/vm.test.ts -t 'a Proxy in the prototype chain' > "$results/proxy.log" 2>&1
 "$candidate" test test/js/node/worker_threads/openclaw-resource-limits.test.ts -t resourceLimits > "$results/resource-limits.log" 2>&1
@@ -96,4 +70,4 @@ clang++-23 -std=c++23 -O2 -DNDEBUG -DBUILDING_WITH_CMAKE=1 -DHAVE_CONFIG_H=1 \
   -Wl,--start-group "$WK"/lib/*.a -Wl,--end-group -lpthread -ldl -lm -latomic \
   -o "$results/engine-gc-progress-probe" > "$results/engine-gc-progress-build.log" 2>&1
 "$results/engine-gc-progress-probe" > "$results/engine-gc-progress.json" 2> "$results/engine-gc-progress.log"
-python3 "$inputs/verify-sync.py" "$QUALIFICATION_DIR" "$SOURCE_SHA" "$BUN_BASE" "$SYNC_TREE"
+python3 "$inputs/verify-sync.py" "$QUALIFICATION_DIR" "$SOURCE_SHA" "$matched_commit" "$matched_tree"

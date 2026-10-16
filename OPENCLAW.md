@@ -42,11 +42,13 @@ commit patches, recipe hashes, locally built toolchain image ID, BuildKit
 metadata, tool versions, elapsed time and tarball SHA-256. These records and the
 tarball are workflow artifacts. SDKs and toolchain images are not redistributed.
 
-The Linux test job builds both baseline and candidate Bun with separate caches.
-Qualification-only Bun adapters live under `.github/openclaw/qualification`;
-they do not update or publish the Bun fork. The job runs the original 44-file
-fork selector output plus its two dependency checks, requires identical all-pass
-results, and checks Segmenter, four Proxy regressions, both 14-variant ALS hook
+The Linux test job keeps an explicit historical control: Bun
+`b83b544ef744b6ab0dc1feadb59652261d64291d` with WebKit
+`1600131e46b5af48bbda3559af8d8a3327230b6e`. It builds the candidate from synced Bun
+`e165b6b0329069d58c1f7862c54d3bef228beeb6` with the new engine. This compares two
+matched runtime pairs, not the engine alone. Source, build and artifact caches
+are separate. Both arms rerun the original 44-file fork selector and its two
+dependency checks and must have identical all-pass results, and checks Segmenter, four Proxy regressions, both 14-variant ALS hook
 modes and at least 16 worker resource-limit cases. Other platforms are built;
 this gate does not claim native runtime qualification on every architecture. A
 Windows 11 ARM64 job verifies archive provenance and native ARM64 PE identity,
@@ -107,10 +109,10 @@ use an old Bun executable with headers/libraries from another engine ABI.
 
 ## VM entry storage
 
-The paired qualifier keeps its frozen Bun source and applies the test-only fix
-from `4c8accdd045b84c942fe447348a31a7cba04cde4` to both arms. The feature-sync
-qualifier uses the same fixture; the compatibility-only source contract is
-unchanged. Each VM test file hash is retained with the existing proof logs.
+The historical control applies the checksums resolver and test-only VM fix
+from `4c8accdd045b84c942fe447348a31a7cba04cde4`. The matched source already
+contains both integrations, so no legacy patch is reapplied to it. Each VM test
+file hash is retained with the existing proof logs.
 Both PR checks and artifact builds upload the baseline, candidate, feature-sync,
 and compatibility Bun executables in `linux-bun-executables`. A failed run retains
 the executables built before the failure, without retrying the qualifier.
@@ -174,6 +176,8 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+- Qualify the synced Bun source against the replayed engine using checksum-pinned artifact staging, retaining the historical faithfulness control and all compatibility, feature and cache checks.
+
 - Rebase the sixteen retained engine patches onto `b1e30d08`; skip incomplete first-call compilation frames during allocation sampling, and make sampler and ArrayBuffer regression checks track explicit collection and actual liveness.
 
 - Prepare the artifact pipeline for oven-sh/WebKit `b1e30d08cb1428688c5f24109fe4f534096ee2ad` and the exact `openclaw/release-b1e30d08` publication branch, preserving all ten consumer lanes, qualification gates and immutable publication checks.
@@ -184,8 +188,33 @@ names, not a release-branch wildcard. Code changes do not modify that repository
 setting. The old release branch's exact protection rule does not cover the new
 line either; retain its protection settings when creating the new branch's rule.
 Do not dispatch publication until the engine replay and qualification are complete.
-The historical paired Bun baseline and sync trees below remain frozen qualification
-inputs; this pipeline migration does not replace them or waive their gates.
+The historical control stays frozen. The two sync arms now use the exact matched
+Bun commit and tree in `variants.json`; all production integrations are already
+in that source. The compatibility arm verifies that only the tracked WebKit
+manifest changes, before and after compilation, and runs startup plus the three
+unchanged memory-release tests. The feature arm adds only the existing standalone
+worker fixture and retains the union of all 56 historical selected paths and the
+current engine/nightly selection. Historical adapter patches and sync-tree
+identities described below are retained for provenance, not applied by these arms.
+
+## Matched-source qualification maintenance
+
+The production resolver reads `scripts/build/deps/webkit-artifacts.json`. Stage
+the exact archive SHA-256 in a private `prefetch/by-sha256` directory and replace
+only that manifest with its full source SHA and canonical release URL. Do not
+bypass the resolver or reuse an ABI cache across arms. The matched source index
+must retain the committed tree before and after every build.
+
+When advancing the matched Bun, rerun the historical control and candidate from
+fresh source/build/cache directories. Keep both fixed selections, every explicit
+regression, and all pass/skip/count assertions. Retain the result files, fixture,
+manifest and executable hashes. A failing expected result is a blocker; candidate
+output alone is never a new oracle. The cache source hash and version must match
+the pinned implementation. The cache probe retains all 56 semantic coordinates,
+seeds an older format with the control, and proves candidate warm-cache execution
+by marking only cached output. Review a format change against the serializer
+before changing its layout reader. Do not rewrite expected coordinates from
+observed candidate output.
 
 ## Stack retention and Linux suspension (2026-10-09)
 

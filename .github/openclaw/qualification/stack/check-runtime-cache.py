@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import struct
+import re
 import subprocess
 
 p = argparse.ArgumentParser()
@@ -13,7 +14,14 @@ p.add_argument('--candidate', required=True)
 p.add_argument('--fixture', required=True, type=Path)
 p.add_argument('--output', required=True, type=Path)
 p.add_argument('--expected-version', required=True, type=int)
+p.add_argument('--cache-source', required=True, type=Path)
+p.add_argument('--cache-source-sha256', required=True)
 a = p.parse_args()
+cache_source = a.cache_source.read_bytes()
+assert hashlib.sha256(cache_source).hexdigest() == a.cache_source_sha256, 'cache source does not match pinned Bun'
+assert re.search(rb'const EXPECTED_VERSION: u32 = ' + str(a.expected_version).encode() + rb';', cache_source)
+# The exact source digest binds the layout, Wyhash seed, and encoder to this probe.
+
 a.output.mkdir(parents=True, exist_ok=False)
 source_marker = 'W152_CACHE_SOURCE'
 replay_marker = 'W152_CACHE_REPLAY'
@@ -74,7 +82,8 @@ for arm, repeat in [('baseline', 'cold'), ('baseline', 'warm'), ('candidate', 'o
         assert all(f['version'] == a.expected_version for f in files), files
     if marked_entry:
         assert files == before_warm, 'warm run replaced the marked cache instead of loading it'
-    receipt = {'arm': arm, 'repeat': repeat,
+    receipt = {'arm': arm, 'repeat': repeat, 'cache_version': a.expected_version,
+               'cache_source_sha256': a.cache_source_sha256,
                'matches': sum(v['actual'] == v['expected'] for v in rows), 'total': len(rows),
                'cacheFiles': files, 'cache_hit_proven': bool(marked_entry), 'marked_entry': marked_entry}
     receipts.append(receipt)

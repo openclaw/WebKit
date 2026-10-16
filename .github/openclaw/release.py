@@ -25,19 +25,21 @@ def assemble(inputs,out,source):
     tag='autobuild-'+source
     gate_path=inputs/'qualification/gate.json'
     gate=json.loads(gate_path.read_text())
-    if gate.get('passed') is not True or gate['source']!=source or gate['bun_commit']!=config['bun_commit']:
+    if gate.get('passed') is not True or gate['source']!=source or gate['bun_commit']!=config['bun_commit'] or gate.get('bun_tree')!=config['bun_tree']:
         raise ValueError('missing or mismatched qualification gate')
+    if any(gate.get(k)!=config[k] for k in ('baseline_bun_commit','baseline_webkit_commit')):
+        raise ValueError('missing or mismatched faithfulness control')
     sync=gate.get('upstream_sync',{})
     engine=gate.get('engine',{})
-    if (sync.get('passed') is not True or any(sync.get(k)!=config['upstream_sync'][k] for k in ('base_commit','prepared_tree'))
+    if (sync.get('passed') is not True or any(sync.get(k)!=config['upstream_sync'][k] for k in ('bun_commit','bun_tree'))
         or engine.get('passed') is not True or engine.get('source')!=source):
         raise ValueError('missing or mismatched upstream-sync/engine qualification')
     compatibility=gate.get('compatibility',{})
     if (compatibility.get('passed') is not True or compatibility.get('source')!=source
-        or any(compatibility.get(k)!=config['upstream_sync'][k] for k in ('base_commit','prepared_tree','paired_tree','required_namespace_adapter_sha256'))
-        or compatibility.get('only_manifest_changed_after_pairing') is not True or compatibility.get('memory_tests')!=3
+        or any(compatibility.get(k)!=config['upstream_sync'][k] for k in ('bun_commit','bun_tree'))
+        or compatibility.get('only_manifest_changed') is not True or compatibility.get('memory_tests')!=3
         or compatibility.get('startup') is not True):
-        raise ValueError('missing or mismatched namespace-paired Bun compatibility gate')
+        raise ValueError('missing or mismatched matched-source Bun compatibility gate')
     artifacts={}; lanes=[]
     for lane in config['lanes']:
         label=lane['label']; name=label+'.tar.gz'; directory=inputs/label

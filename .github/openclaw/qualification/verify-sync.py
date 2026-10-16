@@ -22,6 +22,8 @@ for name in ['als-plugin','als-native','als-gc']:
     assert len(matrix)==14 and all(r['exitCode']==0 for r in matrix),name
 assert json.loads((out/'als-retention.json').read_text())['passed'] is True
 cache=json.loads((out/'stack-cache.json').read_text())
+cache_config=json.loads((Path(__file__).resolve().parents[1]/'variants.json').read_text())['runtime_cache']
+assert all(r['cache_source_sha256']==cache_config['sha256'] and r['cache_version']==cache_config['version'] for r in cache)
 assert len(cache)==4 and all(r['matches']==r['total']==56 for r in cache if r['arm']=='candidate')
 assert cache[-1]['arm']=='candidate' and cache[-1]['repeat']=='warm' and cache[-1]['cache_hit_proven'] is True
 assert len((out/'engine-limits.log').read_text().splitlines())==9
@@ -33,15 +35,15 @@ engine=json.loads((root/'engine-gate.json').read_text())
 assert engine['passed'] and engine['source']==sys.argv[2]
 compatibility=json.loads((root/'compatibility-gate.json').read_text())
 assert compatibility['passed'] and compatibility['source']==sys.argv[2]
-assert compatibility['base_commit']==sys.argv[3] and compatibility['prepared_tree']==sys.argv[4]
+assert compatibility['bun_commit']==sys.argv[3] and compatibility['bun_tree']==sys.argv[4]
 config=json.loads((Path(__file__).resolve().parents[1]/'variants.json').read_text())['upstream_sync']
-assert compatibility['paired_tree']==config['paired_tree']
-assert compatibility['required_namespace_adapter_sha256']==config['required_namespace_adapter_sha256']
-assert compatibility['only_manifest_changed_after_pairing'] and compatibility['memory_tests']==3 and compatibility['startup'] is True
-record={'passed':True,'base_commit':sys.argv[3],'prepared_tree':sys.argv[4],
+assert compatibility['bun_commit']==config['bun_commit']
+assert compatibility['bun_tree']==config['bun_tree']
+assert compatibility['only_manifest_changed'] and compatibility['memory_tests']==3 and compatibility['startup'] is True
+record={'passed':True,'bun_commit':sys.argv[3],'bun_tree':sys.argv[4],
         'selected_files':len(selected),'result_rows':len(rows),'regressions':0,'tests':counts,
         'gc_progress':gc_progress,
-        'adapter_sha256':hashlib.sha256((root/'bun-sync-adapters.patch').read_bytes()).hexdigest()}
+        'manifest_sha256':hashlib.sha256((root/'bun-sync-manifest.patch').read_bytes()).hexdigest()}
 (root/'sync-gate.json').write_text(json.dumps(record,indent=2)+'\n')
 gate=json.loads((root/'gate.json').read_text());gate['upstream_sync']=record;gate['engine']=engine;gate['compatibility']=compatibility
 (root/'gate.json').write_text(json.dumps(gate,indent=2)+'\n')

@@ -3,54 +3,46 @@ set -euo pipefail
 umask 022
 pipeline=$(pwd)
 inputs="$pipeline/.github/openclaw/qualification"
-: "${ARTIFACT_DIR:?}"
-: "${QUALIFICATION_DIR:?}"
+: "${ARTIFACT_DIR:?}" "${QUALIFICATION_DIR:?}"
 mkdir -p "$QUALIFICATION_DIR"
 QUALIFICATION_DIR=$(realpath "$QUALIFICATION_DIR")
-BUN_COMMIT=$(python3 -c 'import json;print(json.load(open(".github/openclaw/variants.json"))["bun_commit"])')
-BASE=1600131e46b5af48bbda3559af8d8a3327230b6e
 SOURCE_SHA=$(git rev-parse HEAD)
+BUN_COMMIT=$(python3 -c 'import json;print(json.load(open(".github/openclaw/variants.json"))["bun_commit"])')
+BASELINE_BUN=$(python3 -c 'import json;print(json.load(open(".github/openclaw/variants.json"))["baseline_bun_commit"])')
+BASE=$(python3 -c 'import json;print(json.load(open(".github/openclaw/variants.json"))["baseline_webkit_commit"])')
+bootstrap=$(command -v bun)
 export CI=1 PUPPETEER_SKIP_DOWNLOAD=1
-# Separate source/build/cache directories prevent an old engine ABI from being reused.
-git clone --depth=1 --filter=blob:none --no-checkout https://github.com/openclaw/bun.git "$QUALIFICATION_DIR/bun"
-cd "$QUALIFICATION_DIR/bun"
-git fetch --depth=1 origin "$BUN_COMMIT"
-git checkout --detach "$BUN_COMMIT"
+source "$inputs/build-matched.sh"
+# Keep the proven historical control intact. It also seeds the old cache format.
+repo="$QUALIFICATION_DIR/bun-baseline"
+git clone --depth=1 --filter=blob:none --no-checkout https://github.com/openclaw/bun.git "$repo"
+cd "$repo"
+git fetch --depth=1 origin "$BASELINE_BUN"
+git checkout --detach "$BASELINE_BUN"
 git apply "$inputs/patches/000-checksums.patch"
-# Apply openclaw/bun#151 equally to both frozen-source arms.
 git apply "$inputs/patches/012-vm-finalization-fixture.patch"
 sha256sum "$inputs/patches/012-vm-finalization-fixture.patch" > "$QUALIFICATION_DIR/vm-finalization-fixture.sha256"
-bootstrap=$(command -v bun)
 "$bootstrap" install --frozen-lockfile
 (cd test && "$bootstrap" install --frozen-lockfile)
-python3 "$inputs/stage-local-artifact.py" "$ARTIFACT_DIR/bun-webkit-linux-amd64.tar.gz" --version "$SOURCE_SHA" --output "$QUALIFICATION_DIR/candidate-input"
+export BUN_WEBKIT_ARTIFACT_MANIFEST="$inputs/upstream-artifacts.json"
+export BUN_BUILD_PREFETCH_DIR="$QUALIFICATION_DIR/baseline-prefetch"
+export BUN_BUILD_CACHE_DIR="$QUALIFICATION_DIR/cache-baseline"
+env -u GITHUB_SHA -u BUILDKITE_COMMIT -u GIT_SHA "$bootstrap" run build:release --lto=off --webkit-version="$BASE" --buildDir="$repo/build/qualify-baseline" --timings > "$QUALIFICATION_DIR/build-baseline.log" 2>&1
+baseline="$repo/build/qualify-baseline/bun"
+"$baseline" -e 'if(process.versions.webkit!==process.argv[1] || Bun.revision!==process.argv[2]) throw new Error("wrong control engine or Bun source revision");' "$BASE" "$BASELINE_BUN"
+sha256sum "$baseline" > "$QUALIFICATION_DIR/bun-baseline.sha256"
+unset BUN_WEBKIT_ARTIFACT_MANIFEST BUN_BUILD_PREFETCH_DIR BUN_BUILD_CACHE_DIR
 for arm in baseline candidate; do
   if test "$arm" = candidate; then
-    git apply "$inputs/patches/002-upstream-mimalloc.patch"
-    for patch in "$inputs/patches/001-proxy.patch" "$inputs"/patches/00[3-7]-*.patch; do
-      git apply --exclude=CHANGELOG.md --exclude='docs/*' --exclude='test/js/node/worker_threads/*' "$patch"
-    done
-    git apply --exclude=CHANGELOG.md --exclude='docs/*' "$inputs/patches/008-namespace.patch"
-    git apply --exclude=CHANGELOG.md --exclude='docs/*' "$inputs/patches/009-stack-positions.patch"
-    git apply --exclude=CHANGELOG.md --exclude='docs/*' "$inputs/patches/010-arraybuffer-accounting.patch"
-    git apply "$inputs/patches/011-bun-gc-timer-wake.patch"
+    repo="$QUALIFICATION_DIR/bun"
+    checkout_matched
+    build_matched candidate
+    # All production adapters and the VM fixture are now in the pinned source.
     cp "$inputs/worker-resource-limits.test.ts" test/js/node/worker_threads/openclaw-resource-limits.test.ts
-    git diff --check
-    git diff --binary HEAD > "$QUALIFICATION_DIR/bun-adapters.patch"
-    export BUN_WEBKIT_ARTIFACT_MANIFEST="$QUALIFICATION_DIR/candidate-input/artifacts.json"
-    export BUN_BUILD_PREFETCH_DIR="$QUALIFICATION_DIR/candidate-input/prefetch"
-    revision="$SOURCE_SHA"
   else
-    export BUN_WEBKIT_ARTIFACT_MANIFEST="$inputs/upstream-artifacts.json"
-    export BUN_BUILD_PREFETCH_DIR="$QUALIFICATION_DIR/baseline-prefetch"
-    revision="$BASE"
+    candidate="$baseline"
   fi
   sha256sum test/js/node/vm/vm.test.ts > "$QUALIFICATION_DIR/vm-test-$arm.sha256"
-  export BUN_BUILD_CACHE_DIR="$QUALIFICATION_DIR/cache-$arm"
-  env -u GITHUB_SHA -u BUILDKITE_COMMIT -u GIT_SHA "$bootstrap" run build:release --lto=off --webkit-version="$revision" --buildDir="$QUALIFICATION_DIR/bun/build/qualify-$arm" --timings > "$QUALIFICATION_DIR/build-$arm.log" 2>&1
-  candidate="$QUALIFICATION_DIR/bun/build/qualify-$arm/bun"
-  "$candidate" -e 'if(process.versions.webkit!==process.argv[1] || Bun.revision!==process.argv[2]) throw new Error("wrong engine or Bun source revision");' "$revision" "$BUN_COMMIT"
-  sha256sum "$candidate" > "$QUALIFICATION_DIR/bun-$arm.sha256"
   results="$QUALIFICATION_DIR/$arm"
   mkdir -p "$results" "$results/home" "$results/tmp" "$results/bin"
   chmod 700 "$results/home" "$results/tmp"
@@ -59,8 +51,7 @@ for arm in baseline candidate; do
   cp "$inputs/selected.json" build/openclaw-ci/selected.json
   cp "$inputs/selected.json" "$results/selected.json"
   rm -f build/openclaw-ci/results.json
-  env -u BUN_WEBKIT_ARTIFACT_MANIFEST -u BUN_BUILD_CACHE_DIR -u BUN_BUILD_PREFETCH_DIR \
-    HOME="$results/home" TMPDIR="$results/tmp" PATH="$results/bin:$PATH" OPENCLAW_CI_PLATFORM=linux \
+  env HOME="$results/home" TMPDIR="$results/tmp" PATH="$results/bin:$PATH" OPENCLAW_CI_PLATFORM=linux \
     "$candidate" scripts/openclaw-ci/tests.ts test > "$results/tests.log" 2>&1
   cp build/openclaw-ci/results.json "$results/results.json"
 done
@@ -76,7 +67,7 @@ unset BUN_WEBKIT_ARTIFACT_MANIFEST BUN_BUILD_CACHE_DIR BUN_BUILD_PREFETCH_DIR
 "$candidate" test test/js/node/worker_threads/openclaw-resource-limits.test.ts -t 'resourceLimits' > "$QUALIFICATION_DIR/resource-limits.log" 2>&1
 "$candidate" "$inputs/module-context.mjs" matrix > "$QUALIFICATION_DIR/als-plugin.json"
 "$candidate" "$inputs/module-context.mjs" matrix --native-hooks > "$QUALIFICATION_DIR/als-native.json"
-python3 - "$QUALIFICATION_DIR" "$SOURCE_SHA" "$BUN_COMMIT" <<'PY'
+python3 - "$QUALIFICATION_DIR" "$SOURCE_SHA" "$BUN_COMMIT" "$BASELINE_BUN" "$BASE" "$matched_tree" <<'PY'
 import json,re,sys,hashlib
 from pathlib import Path
 root=Path(sys.argv[1])
@@ -92,6 +83,7 @@ for name,minimum in [('proxy',4),('resource-limits',16),('namespace',41),('array
  assert passes and int(passes[1])>=minimum, name+' missing passing cases'
  assert re.search(r'\b0 fail\b',text),name+' failures'
 (root/'gate.json').write_text(json.dumps({'passed':True,'source':sys.argv[2],'bun_commit':sys.argv[3],
- 'selected_files':44,'result_files':46,'als_variants_per_mode':14,'proxy_minimum':4,'resource_minimum':16,
- 'bun_adapter_sha256':hashlib.sha256((root/'bun-adapters.patch').read_bytes()).hexdigest()},indent=2)+'\n')
+ 'bun_tree':sys.argv[6], 'selected_files':44,'result_files':46,'als_variants_per_mode':14,'proxy_minimum':4,'resource_minimum':16,
+ 'baseline_bun_commit':sys.argv[4], 'baseline_webkit_commit':sys.argv[5],
+ 'bun_manifest_sha256':hashlib.sha256((root/'bun-candidate-manifest.patch').read_bytes()).hexdigest()},indent=2)+'\n')
 PY
