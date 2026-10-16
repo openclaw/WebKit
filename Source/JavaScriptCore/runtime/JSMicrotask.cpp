@@ -1194,6 +1194,10 @@ static void moduleLoadTopSettled(JSGlobalObject* globalObject, VM& vm, ThrowScop
         }
 #endif
 
+        // Pin the entry before downstream loading can reenter user code.
+        // A rejected fetch must not acquire another request's entry by key.
+        context->setEntry(vm, context->loader()->getRegisteredMayBeNull(specifier, type));
+
         JSPromise* statePromise = JSPromise::create(vm, globalObject->promiseStructure());
         statePromise->markAsHandled();
         AbstractModuleRecord::ModuleRequest request { specifier, context->moduleRequest().m_attributes };
@@ -1274,11 +1278,7 @@ static void moduleLoadTopRejected(JSGlobalObject* globalObject, VM& vm, std::spa
     if (status == JSPromise::Status::Fulfilled)
         resultPromise->fulfill(vm, arguments[1]);
     else {
-        const Identifier& specifier = context->moduleRequest().m_specifier;
-        auto type = context->moduleRequest().type();
-        // https://html.spec.whatwg.org/multipage/webappapis.html#fetch-a-single-module-script step 13.1
-        // Only set an error if the entry already exists.
-        if (ModuleRegistryEntry* entry = context->loader()->getRegisteredMayBeNull(specifier, type))
+        if (ModuleRegistryEntry* entry = context->entry())
             entry->setEvaluationError(globalObject, arguments[1]);
         resultPromise->reject(vm, arguments[1]);
     }
