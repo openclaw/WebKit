@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 
-BASE = '5718a6ec579b98362ea7276a426deedcc6281ef5'
+BASE = 'b1e30d08cb1428688c5f24109fe4f534096ee2ad'
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = json.loads((ROOT / '.github/openclaw/variants.json').read_text())
 RECIPE = ['.github/scripts/lanes.mjs', 'Dockerfile', 'Dockerfile.musl', 'Dockerfile.macos', 'Dockerfile.windows', 'icu', 'macos-cross']
@@ -45,7 +45,7 @@ def preflight():
     sha = source()
     if sha != os.environ['INPUT_SHA'] or sha != os.environ['GITHUB_SHA']:
         raise ValueError('dispatch must use the same reviewed branch head and full input SHA')
-    if os.environ['GITHUB_REF'] not in ('refs/heads/openclaw/main', 'refs/heads/openclaw/batch-1', 'refs/heads/openclaw/release-5718a6ec'):
+    if os.environ['GITHUB_REF'] not in ('refs/heads/openclaw/main', 'refs/heads/openclaw/batch-1', 'refs/heads/openclaw/release-5718a6ec', 'refs/heads/openclaw/release-b1e30d08'):
         raise ValueError('only an explicitly permitted owned branch may run this workflow')
     upstream = {l['label'] for l in lane_definitions()}
     wanted = [l['label'] for l in CONFIG['lanes']]

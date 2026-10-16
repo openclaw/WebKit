@@ -1,9 +1,10 @@
 # OpenClaw WebKit artifacts
 
 This fork owns the WebKit artifacts consumed by `openclaw/bun`. The engine base is
-`5718a6ec579b98362ea7276a426deedcc6281ef5`; each engine change is a separate
-commit. Upstream `.github/scripts/lanes.mjs`, Dockerfiles, ICU inputs and macOS
-cross tools remain unchanged. No workflow publishes toolchain images.
+`b1e30d08cb1428688c5f24109fe4f534096ee2ad`. The lane generator, Dockerfiles,
+ICU inputs and macOS cross tools must match that base exactly. No workflow
+publishes toolchain images. The ten consumer lanes and qualification gates remain
+the release contract; upstream fuzzing lanes are not selected for publication.
 
 ## Patch batch
 
@@ -34,7 +35,7 @@ base, then review the whole batch. Changing the upstream recipe requires a
 separate qualification and an explicit base/recipe update.
 
 Dispatch **OpenClaw WebKit artifacts** from `openclaw/main` (or the protected
-`openclaw/batch-1` or `openclaw/release-5718a6ec` publication branch) with its full current
+`openclaw/batch-1`, `openclaw/release-5718a6ec`, or `openclaw/release-b1e30d08` publication branch) with its full current
 commit SHA and `publish: false`. It builds the selected lanes on Linux x64 with
 Docker Buildx, at most two lanes at once. Each lane records the exact source,
 commit patches, recipe hashes, locally built toolchain image ID, BuildKit
@@ -169,6 +170,17 @@ in sync with the Bun integration until that integration becomes the qualificatio
 baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
+
+- Prepare the artifact pipeline for oven-sh/WebKit `b1e30d08cb1428688c5f24109fe4f534096ee2ad` and the exact `openclaw/release-b1e30d08` publication branch, preserving all ten consumer lanes, qualification gates and immutable publication checks.
+
+The new release line also requires adding its exact branch name to the existing
+`openclaw-artifacts` environment deployment policy. The old policy contains literal
+names, not a release-branch wildcard. Code changes do not modify that repository
+setting. The old release branch's exact protection rule does not cover the new
+line either; retain its protection settings when creating the new branch's rule.
+Do not dispatch publication until the engine replay and qualification are complete.
+The historical paired Bun baseline and sync trees below remain frozen qualification
+inputs; this pipeline migration does not replace them or waive their gates.
 
 ## Stack retention and Linux suspension (2026-10-09)
 

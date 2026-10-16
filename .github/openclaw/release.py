@@ -94,7 +94,7 @@ def authorize(source,run_id):
     if not api('-H','Cache-Control: max-age=0',f'repos/{REPO}/immutable-releases')['enabled']:
         raise ValueError('immutable releases must be enabled')
     run=api('-H','Cache-Control: max-age=0',f'repos/{REPO}/actions/runs/{run_id}')
-    if (run['head_sha']!=source or run['head_branch'] not in ('openclaw/main','openclaw/batch-1','openclaw/release-5718a6ec')
+    if (run['head_sha']!=source or run['head_branch'] not in ('openclaw/main','openclaw/batch-1','openclaw/release-5718a6ec','openclaw/release-b1e30d08')
         or run['event']!='workflow_dispatch' or run['path'].split('@',1)[0]!='.github/workflows/openclaw-artifacts.yml'):
         raise ValueError('publication run does not match the reviewed source/workflow')
     jobs=api('-H','Cache-Control: max-age=0',f'repos/{REPO}/actions/runs/{run_id}/jobs?filter=latest&per_page=100')
@@ -125,7 +125,7 @@ def validate_authorization(source):
 def publish(directory,source):
     manifest=verify(directory,source);tag=manifest['tag']
     validate_authorization(source)
-    if os.environ.get('GITHUB_REF') not in ('refs/heads/openclaw/main','refs/heads/openclaw/batch-1','refs/heads/openclaw/release-5718a6ec') or os.environ.get('GITHUB_SHA')!=source:
+    if os.environ.get('GITHUB_REF') not in ('refs/heads/openclaw/main','refs/heads/openclaw/batch-1','refs/heads/openclaw/release-5718a6ec','refs/heads/openclaw/release-b1e30d08') or os.environ.get('GITHUB_SHA')!=source:
         raise ValueError('publishing requires reviewed source on an explicitly permitted owned branch')
     # Tag creation fails atomically if the name exists. Neither existing drafts nor releases are resumed.
     api('-X','POST',f'repos/{REPO}/git/refs','-f','ref=refs/tags/'+tag,'-f','sha='+source)

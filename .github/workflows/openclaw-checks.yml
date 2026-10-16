@@ -1,7 +1,7 @@
 name: OpenClaw engine checks
 on:
   pull_request:
-    branches: [openclaw/main, openclaw/release-5718a6ec]
+    branches: [openclaw/main, openclaw/release-5718a6ec, openclaw/release-b1e30d08]
   workflow_dispatch:
 permissions:
   contents: read
@@ -9,6 +9,30 @@ concurrency:
   group: openclaw-engine-checks-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  pipeline-static:
+    if: github.repository == 'openclaw/WebKit'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            .github
+            Source/JavaScriptCore
+            Source/WTF
+            Source/bmalloc
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.3.0'
+      - name: Verify publication policy and script syntax
+        run: |
+          python3 .github/openclaw/test_release.py
+          python3 .github/openclaw/test_verify_jsc_results.py
+          node --check .github/scripts/lanes.mjs
+          for script in .github/openclaw/*.sh; do
+            bash -n "$script"
+          done
   windows-arm64-build:
     if: github.repository == 'openclaw/WebKit'
     runs-on: blacksmith-32vcpu-ubuntu-2404

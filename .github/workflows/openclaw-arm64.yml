@@ -1,7 +1,7 @@
 name: OpenClaw ARM64 regressions
 on:
   pull_request:
-    branches: [openclaw/main, openclaw/release-5718a6ec]
+    branches: [openclaw/main, openclaw/release-5718a6ec, openclaw/release-b1e30d08]
   workflow_dispatch:
 permissions:
   contents: read

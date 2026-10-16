@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'openclaw/WebKit' && (github.ref == 'refs/heads/openclaw/main' || github.ref == 'refs/heads/openclaw/batch-1' || github.ref == 'refs/heads/openclaw/release-5718a6ec')
+    if: github.repository == 'openclaw/WebKit' && (github.ref == 'refs/heads/openclaw/main' || github.ref == 'refs/heads/openclaw/batch-1' || github.ref == 'refs/heads/openclaw/release-5718a6ec' || github.ref == 'refs/heads/openclaw/release-b1e30d08')
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 10
     outputs:
@@ -225,7 +225,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
   publish:
-    if: inputs.publish == true && (github.ref == 'refs/heads/openclaw/main' || github.ref == 'refs/heads/openclaw/batch-1' || github.ref == 'refs/heads/openclaw/release-5718a6ec')
+    if: inputs.publish == true && (github.ref == 'refs/heads/openclaw/main' || github.ref == 'refs/heads/openclaw/batch-1' || github.ref == 'refs/heads/openclaw/release-5718a6ec' || github.ref == 'refs/heads/openclaw/release-b1e30d08')
     needs: [build, test, windows-arm64, assemble]
     environment: openclaw-artifacts
     permissions:
