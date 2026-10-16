@@ -1,0 +1,64 @@
+name: OpenClaw ARM64 regressions
+on:
+  pull_request:
+    branches: [openclaw/main, openclaw/release-5718a6ec, openclaw/release-b1e30d08]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: openclaw-arm64-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux-arm64:
+    if: github.repository == 'openclaw/WebKit'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/LayoutTests/
+            !/JSTests/*
+            !/PerformanceTests/
+            !/Websites/
+            !/ManualTests/
+            !/WebDriverTests/
+            /JSTests/stress/
+            /JSTests/modules/
+            /JSTests/*.yaml
+            /JSTests/BUN-TEST-DIFFERENCES.md
+      - name: Install native build and regression tools
+        run: |
+          curl -fsSL --retry 5 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake ninja-build clang-23 lld-23 libicu-dev ruby ruby-highline libjson-pp-perl
+      - name: Build native ARM64 JSC and assembler tests
+        run: |
+          test "$(uname -m)" = aarch64
+          cmake -S . -B "$RUNNER_TEMP/jsc-build" -G Ninja \
+            -DPORT=JSCOnly -DCMAKE_BUILD_TYPE=Release -DDEVELOPER_MODE=ON -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF \
+            -DENABLE_STATIC_JSC=ON -DUSE_BUN_JSC_ADDITIONS=ON -DUSE_BUN_EVENT_LOOP=ON \
+            -DUSE_MIMALLOC=ON -DUSE_EXTERNAL_MIMALLOC=OFF -DENABLE_FTL_JIT=ON \
+            -DENABLE_BUN_SKIP_FAILING_ASSERTIONS=ON -DALLOW_LINE_AND_COLUMN_NUMBER_IN_BUILTINS=ON \
+            -DENABLE_REMOTE_INSPECTOR=ON -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23
+          cmake --build "$RUNNER_TEMP/jsc-build" --target jsc testmasm testFFI -j4
+      - name: Qualify assembler and all JIT tiers
+        env:
+          ENGINE_BUILD_DIR: ${{ runner.temp }}/jsc-build
+          QUALIFICATION_DIR: ${{ runner.temp }}/arm64-proof
+        run: bash .github/openclaw/qualify-arm64.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: linux-arm64-proof
+          path: |
+            ${{ runner.temp }}/arm64-proof/*.json
+            ${{ runner.temp }}/arm64-proof/*.log
+            ${{ runner.temp }}/arm64-proof/jsc-*/results
+          if-no-files-found: warn
+          retention-days: 7

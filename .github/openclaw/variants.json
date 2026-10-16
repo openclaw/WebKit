@@ -1,0 +1,55 @@
+{
+  "bun_repository": "openclaw/bun",
+  "bun_commit": "b83b544ef744b6ab0dc1feadb59652261d64291d",
+  "base": "b1e30d08cb1428688c5f24109fe4f534096ee2ad",
+  "lanes": [
+    {
+      "label": "bun-webkit-linux-amd64",
+      "consumer": "openclaw-build-test.yml linux-x64: build:release --lto=off"
+    },
+    {
+      "label": "bun-webkit-macos-arm64",
+      "consumer": "openclaw-build-test.yml darwin-arm64: build:release --lto=off"
+    },
+    {
+      "label": "bun-webkit-linux-amd64-lto",
+      "consumer": "openclaw-release.yml default linux-x64"
+    },
+    {
+      "label": "bun-webkit-linux-arm64-lto",
+      "consumer": "openclaw-release.yml default linux-arm64"
+    },
+    {
+      "label": "bun-webkit-macos-arm64-lto",
+      "consumer": "openclaw-release.yml default darwin-arm64"
+    },
+    {
+      "label": "bun-webkit-macos-amd64-lto",
+      "consumer": "openclaw-release.yml default darwin-x64"
+    },
+    {
+      "label": "bun-webkit-linux-amd64-musl-lto",
+      "consumer": "openclaw-release.yml optional linux-x64-musl"
+    },
+    {
+      "label": "bun-webkit-linux-arm64-musl-lto",
+      "consumer": "openclaw-release.yml optional linux-arm64-musl"
+    },
+    {
+      "label": "bun-webkit-windows-amd64-lto",
+      "consumer": "openclaw-release.yml optional windows-x64"
+    },
+    {
+      "label": "bun-webkit-windows-arm64",
+      "consumer": "openclaw-release.yml windows-arm64: release without LTO"
+    }
+  ],
+  "excluded": "Android, FreeBSD, debug and ASAN are not selected by the fork's active OpenClaw workflows. Windows arm64 uses upstream's non-LTO lane because LLVM CodeView cannot encode its LTO register tuples. There is no separate x64 baseline WebKit archive.",
+  "upstream_sync": {
+    "base_commit": "d2d2a26ef973cdd97b37953f5dba58052acad74f",
+    "upstream_commit": "1878660bb47a6a87ebe518cea0581ef4bf9b71f8",
+    "prepared_tree": "d9ec052fccc81afbf43a5344e52bc980f439d587",
+    "paired_tree": "aee7cd52d7efcb9835b434a24fa47de06cc664f6",
+    "required_namespace_adapter_sha256": "6fdc093961584d2bd77176dcbaf487ab7ec07e14e5a19d11f881d751976a569d"
+  }
+}
