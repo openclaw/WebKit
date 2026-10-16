@@ -22,7 +22,8 @@ unset BUN_BUILD_PREFETCH_DIR BUN_BUILD_CACHE_DIR BUN_WEBKIT_ARTIFACT_MANIFEST
 ln -s "$candidate" "$results/bin/bun"
 export HOME="$results/home" TMPDIR="$results/tmp" PATH="$results/bin:$PATH" OPENCLAW_CI_PLATFORM=linux
 # Recompute the engine/nightly selection and retain every W150 upstream-sync case.
-"$candidate" --eval 'import {selectTests} from "./scripts/openclaw-ci/tests.ts"; import{execFileSync}from"node:child_process";import{readFileSync,writeFileSync,mkdirSync}from"node:fs";const tracked=execFileSync("git",["ls-files","-z","test"],{encoding:"utf8"}).split("\0").filter(Boolean);const original=JSON.parse(readFileSync(process.argv[1],"utf8"));const selected=[...new Set([...original,...selectTests(["scripts/build/deps/webkit.ts"],tracked,true,"linux")])].sort();for(const file of selected)if(!tracked.includes(file))throw Error("missing selected test "+file);mkdirSync("build/openclaw-ci",{recursive:true});writeFileSync("build/openclaw-ci/selected.json",JSON.stringify(selected,null,2)+"\n");' "$inputs/sync/selected.json"
+git ls-files -z test > "$results/tracked-tests.list"
+"$candidate" --eval 'import {selectTests} from "./scripts/openclaw-ci/tests.ts"; import{readFileSync,writeFileSync,mkdirSync}from"node:fs";const tracked=readFileSync(process.argv[2],"utf8").split("\0").filter(Boolean);const original=JSON.parse(readFileSync(process.argv[1],"utf8"));const selected=[...new Set([...original,...selectTests(["scripts/build/deps/webkit.ts"],tracked,true,"linux")])].sort();for(const file of selected)if(!tracked.includes(file))throw Error("missing selected test "+file);mkdirSync("build/openclaw-ci",{recursive:true});writeFileSync("build/openclaw-ci/selected.json",JSON.stringify(selected,null,2)+"\n");' "$inputs/sync/selected.json" "$results/tracked-tests.list"
 cp build/openclaw-ci/selected.json "$results/selected.json"
 if "$candidate" scripts/openclaw-ci/tests.ts test > "$results/tests.log" 2>&1; then
   selection_exit=0
