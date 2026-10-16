@@ -166,14 +166,19 @@ void HeapProfiler::sampleAllocation(void* cell, size_t size)
 {
     auto& profile = *m_allocationSampling;
     Vector<AllocationSampling::Frame, 128> frames;
+    auto* topFrame = m_vm.topCallFrame;
+    // First-call compilation can allocate after installing a CodeBlock but before
+    // it has executable code or a valid call-site index. Attribute that work to its caller.
+    bool skipFirstFrame = topFrame && !topFrame->isNativeCalleeFrame() && topFrame->codeBlock()
+        && topFrame->codeBlock()->jitType() == JITType::None;
     // No JS objects or executable references are retained by the profiler.
-    StackVisitor::visit(m_vm.topCallFrame, m_vm, [&](StackVisitor& visitor) {
+    StackVisitor::visit(topFrame, m_vm, [&](StackVisitor& visitor) {
         if (auto* codeBlock = visitor->codeBlock()) {
             auto* executable = codeBlock->ownerExecutable();
             frames.append({ String::fromUTF8(codeBlock->inferredName().span()), visitor->sourceURL(), visitor->sourceID(), executable->firstLine() - 1, static_cast<int>(executable->startColumn()) - 1 });
         }
         return visitor->index() >= 127 ? IterationStatus::Done : IterationStatus::Continue;
-    });
+    }, skipFirstFrame);
     unsigned parent = 0;
     for (size_t i = frames.size(); i--;) {
         auto& frame = frames[i];

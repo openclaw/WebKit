@@ -57,6 +57,21 @@ for (let i = 0; i < 100; ++i) {
 }
 keep = null;
 fullGC();
+// With LLInt disabled, first-call compilation materializes nested executables
+// while the callee's CodeBlock still has no executable code. Sample every allocation.
+function allocateFromColdCodeBlock() {
+    function nested() { return new Array(64).fill(1); }
+    keep = nested();
+}
+noInline(allocateFromColdCodeBlock);
+startHeapAllocationSampling(1, true, true);
+allocateFromColdCodeBlock();
+const coldProfile = profile();
+validate(coldProfile);
+assert(coldProfile.samples.length > 0, "cold compilation allocations missing");
+stopHeapAllocationSampling();
+keep = null;
+fullGC();
 for (let repeat = 0; repeat < 3; ++repeat) {
     startHeapAllocationSampling(512, true, true);
     allocateLeft(10000);
