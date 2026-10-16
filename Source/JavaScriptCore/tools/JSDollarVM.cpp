@@ -4288,6 +4288,18 @@ JSC_DEFINE_HOST_FUNCTION(functionGlobalObjectForObject, (JSGlobalObject*, CallFr
 }
 
 #if USE(BUN_JSC_ADDITIONS)
+JSC_DEFINE_HOST_FUNCTION(functionModuleNamespaceForRequire, (JSGlobalObject* globalObject, CallFrame* callFrame))
+{
+    DollarVMAssertScope assertScope;
+    auto scope = DECLARE_THROW_SCOPE(globalObject->vm());
+    auto* namespaceObject = dynamicDowncast<JSModuleNamespaceObject>(callFrame->argument(0));
+    if (!namespaceObject)
+        return throwVMTypeError(globalObject, scope, "expected a module namespace"_s);
+    auto* result = namespaceObject->createNamespaceForRequire(globalObject);
+    RETURN_IF_EXCEPTION(scope, { });
+    return JSValue::encode(result);
+}
+
 // The embedder's AsyncLocalStorage frame slot (JSGlobalObject::m_asyncContextData
 // field 0), which promise reactions and async continuations capture and restore.
 JSC_DEFINE_HOST_FUNCTION(functionAsyncContext, (JSGlobalObject* globalObject, CallFrame*))
@@ -4938,6 +4950,33 @@ JSC_DEFINE_HOST_FUNCTION(functionHeapExtraMemorySize, (JSGlobalObject* globalObj
 }
 
 #if USE(BUN_JSC_ADDITIONS)
+JSC_DEFINE_HOST_FUNCTION(functionSetWorkerHeapLimits, (JSGlobalObject* globalObject, CallFrame* callFrame))
+{
+    DollarVMAssertScope assertScope;
+    auto scope = DECLARE_THROW_SCOPE(globalObject->vm());
+    auto oldBytes = callFrame->argument(0);
+    auto youngBytes = callFrame->argument(1);
+    if (!oldBytes.isInt32() || !youngBytes.isInt32() || oldBytes.asInt32() < 0 || youngBytes.asInt32() < 0) {
+        throwTypeError(globalObject, scope, "heap limits must be nonnegative int32 byte counts"_s);
+        return encodedJSValue();
+    }
+    globalObject->vm().heap.setWorkerHeapLimits(oldBytes.asInt32(), youngBytes.asInt32());
+    return JSValue::encode(jsUndefined());
+}
+
+JSC_DEFINE_HOST_FUNCTION(functionLastGCWasFull, (JSGlobalObject* globalObject, CallFrame*))
+{
+    DollarVMAssertScope assertScope;
+    auto scope = globalObject->vm().heap.lastCollectionScope();
+    return JSValue::encode(scope ? jsBoolean(*scope == CollectionScope::Full) : jsUndefined());
+}
+
+JSC_DEFINE_HOST_FUNCTION(functionWorkerHeapLimitExceeded, (JSGlobalObject* globalObject, CallFrame*))
+{
+    DollarVMAssertScope assertScope;
+    return JSValue::encode(jsBoolean(globalObject->vm().heap.heapLimitExceeded()));
+}
+
 // Everything the heap counted as allocated so far, cells and reported extra memory. Collections are paced on it.
 JSC_DEFINE_HOST_FUNCTION(functionHeapTotalBytesAllocated, (JSGlobalObject* globalObject, CallFrame*))
 {
@@ -6034,6 +6073,7 @@ void JSDollarVM::finishCreation(VM& vm)
     addFunction(vm, alwaysAllow, "decommittedMarkedBlockPagePoison"_s, functionDecommittedMarkedBlockPagePoison, 0);
 #if USE(BUN_JSC_ADDITIONS)
     addFunction(vm, alwaysAllow, "evacuateAuxiliaryBlocks"_s, functionEvacuateAuxiliaryBlocks, 2);
+    addFunction(vm, allowIfNotFuzz, "moduleNamespaceForRequire"_s, functionModuleNamespaceForRequire, 1);
 #endif
 
     addFunction(vm, allowIfNotFuzz, "globalObjectCount"_s, functionGlobalObjectCount, 0);
@@ -6105,6 +6145,9 @@ void JSDollarVM::finishCreation(VM& vm)
 
     addFunction(vm, alwaysAllow, "heapExtraMemorySize"_s, functionHeapExtraMemorySize, 0);
 #if USE(BUN_JSC_ADDITIONS)
+    addFunction(vm, alwaysAllow, "setWorkerHeapLimits"_s, functionSetWorkerHeapLimits, 2);
+    addFunction(vm, alwaysAllow, "lastGCWasFull"_s, functionLastGCWasFull, 0);
+    addFunction(vm, alwaysAllow, "workerHeapLimitExceeded"_s, functionWorkerHeapLimitExceeded, 0);
     addFunction(vm, alwaysAllow, "heapTotalBytesAllocated"_s, functionHeapTotalBytesAllocated, 0);
 #endif
     addFunction(vm, alwaysAllow, "codeBlockCensus"_s, functionCodeBlockCensus, 0);

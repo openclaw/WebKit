@@ -50,6 +50,7 @@
 #include <wtf/ApproximateTime.h>
 #include <wtf/AutomaticThread.h>
 #include <wtf/Box.h>
+#include <wtf/CheckedArithmetic.h>
 #include <wtf/ConcurrentPtrHashSet.h>
 #include <wtf/Deque.h>
 #include <wtf/DoublyLinkedList.h>
@@ -64,6 +65,7 @@
 #include <wtf/Threading.h>
 
 #if USE(BUN_JSC_ADDITIONS)
+#include "ArrayBufferMemoryAccounting.h"
 #include "WeakSet.h"
 #endif
 
@@ -90,6 +92,7 @@ class IncrementalSweeper;
 class JITStubRoutine;
 class JITStubRoutineSet;
 class JSCell;
+class JSArrayBufferView;
 class JSCellButterfly;
 class JSRopeString;
 class JSString;
@@ -342,6 +345,7 @@ class Heap {
     WTF_MAKE_NONCOPYABLE(Heap);
 public:
     friend class JIT;
+    friend class StopIfNecessaryTimer;
     friend class DFG::SpeculativeJIT;
     static JSC::Heap* heap(const JSValue); // 0 for immediate values
     static JSC::Heap* heap(const HeapCell*);
@@ -469,20 +473,21 @@ public:
     // after the rope string is completely resolved.
     void reportExtraMemoryAllocated(const JSCell* cell, size_t size)
     {
-        if (size > minExtraMemory)
+        if (size > m_extraMemoryReportThreshold)
             reportExtraMemoryAllocatedSlowCase(nullptr, cell, size);
     }
     void reportExtraMemoryAllocated(GCDeferralContext* deferralContext, const JSCell* cell, size_t size)
     {
-        if (size > minExtraMemory)
+        if (size > m_extraMemoryReportThreshold)
             reportExtraMemoryAllocatedSlowCase(deferralContext, cell, size);
     }
+    void setExtraMemoryAllocationSampling(bool enabled) { m_extraMemoryReportThreshold = enabled ? 0 : minExtraMemory; }
     JS_EXPORT_PRIVATE void reportExtraMemoryVisited(size_t);
 
 #if ENABLE(RESOURCE_USAGE)
     // Use this API to report the subset of extra memory that lives outside this process.
     JS_EXPORT_PRIVATE void reportExternalMemoryVisited(size_t);
-    size_t externalMemorySize() { return m_externalMemorySize; }
+    size_t externalMemorySize() { return m_externalMemorySize.loadRelaxed(); }
 #endif
 
     // Use this API to report non-GC memory if you can't use the better API above.
@@ -526,6 +531,12 @@ public:
     size_t sizeAfterLastEdenCollection() const { return m_sizeAfterLastEdenCollect; }
     size_t sizeBeforeLastFullCollection() const { return m_sizeBeforeLastFullCollect; }
     size_t sizeAfterLastFullCollection() const { return m_sizeAfterLastFullCollect; }
+#if USE(BUN_JSC_ADDITIONS)
+    // The embedder must terminate only its owning VM when this limit is exceeded.
+    JS_EXPORT_PRIVATE void setWorkerHeapLimits(size_t heapBytes, size_t edenBytes);
+    bool heapLimitExceeded() const { return m_heapLimitExceeded; }
+    size_t sizeAfterLastFullCollectionExcludingArrayBuffers() const { return m_sizeAfterLastFullCollectExcludingArrayBuffers; }
+#endif
 
     void deleteAllCodeBlocks(DeleteAllCodeEffort, bool keepWhatNeedsParsing = false);
     void deleteAllUnlinkedCodeBlocks(DeleteAllCodeEffort, OptionSet<UnlinkedCodeToDelete> = UnlinkedCodeToDelete::Generated);
@@ -575,6 +586,31 @@ public:
     // buffer adopted storage that reportExtraMemoryAllocated() had reported. The first reference counts only the rest
     // as allocated. The size of the heap (extraMemorySize()) gets the whole buffer either way.
     void addReference(JSCell*, ArrayBuffer*, size_t bytesAlreadyReported = 0);
+
+#if USE(BUN_JSC_ADDITIONS)
+    size_t allocatedArrayBufferSize() const { return m_arrayBufferMemoryAccount->allocatedBytes(); }
+    size_t heldArrayBufferSize() const { return m_arrayBufferMemoryAccount->externalBytes(); }
+    size_t arrayBufferPayloadSize() const { return heldArrayBufferSize() + m_unmaterializedArrayBufferBytes; }
+    size_t arrayBufferObjectSize() const { return m_arrayBufferMemoryAccount->objectBytes(); }
+    JS_EXPORT_PRIVATE void addUnmaterializedArrayBufferView(JSArrayBufferView*);
+    void materializeArrayBufferView(size_t bytes) { m_unmaterializedArrayBufferBytes -= bytes; }
+    JSArrayBufferView** addressOfUnmaterializedArrayBufferViews() { return &m_unmaterializedArrayBufferViews; }
+    size_t* addressOfUnmaterializedArrayBufferBytes() { return &m_unmaterializedArrayBufferBytes; }
+    void didAllocateArrayBufferMemory(size_t bytes) { m_arrayBufferBytesAllocated += bytes; }
+    void reportArrayBufferMemoryAllocated(size_t, const JSCell* = nullptr);
+    ArrayBufferMemoryAccount& arrayBufferMemoryAccount() { return m_arrayBufferMemoryAccount.get(); }
+    void didAllocateArrayBufferAuxiliaryMemory(Subspace*, size_t);
+    void addArrayBufferAuxiliaryCapacity(Subspace*, size_t);
+    void removeArrayBufferAuxiliaryCapacity(Subspace*, size_t);
+    void reportArrayBufferMemoryVisited(size_t fast, size_t external)
+    {
+        m_fastArrayBufferBytesVisited.fetch_add(fast, std::memory_order_relaxed);
+        m_externalArrayBufferBytesVisited.fetch_add(external, std::memory_order_relaxed);
+    }
+    JS_EXPORT_PRIVATE size_t externalMemorySizeForReporting();
+    JS_EXPORT_PRIVATE size_t jsHeapSizeForReporting();
+    JS_EXPORT_PRIVATE size_t jsHeapCapacityForReporting();
+#endif
     
     bool isDeferred() const { return !!m_deferralDepth; }
 
@@ -747,7 +783,7 @@ private:
 
     Lock& lock() LIFETIME_BOUND { return m_lock; }
 
-    void reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(const JSCell*, size_t);
+    bool reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(const JSCell*, size_t);
     JS_EXPORT_PRIVATE void reportExtraMemoryAllocatedSlowCase(GCDeferralContext*, const JSCell*, size_t);
     JS_EXPORT_PRIVATE void deprecatedReportExtraMemorySlowCase(size_t);
     
@@ -794,6 +830,10 @@ private:
     
     void waitForMembershipChange(uint64_t ticket);
     void waitForCollection(GCRequest::Ticket);
+#if USE(BUN_JSC_ADDITIONS)
+    void scheduleWorkerHeapVerification(GCRequest::Ticket);
+    void finishWorkerHeapVerification();
+#endif
     void waitForAllCollections();
     
     void willStartCollection(CollectionScope);
@@ -918,6 +958,22 @@ private:
     size_t m_maxEdenSize;
     size_t m_maxEdenSizeWhenCritical;
     size_t m_maxHeapSize;
+#if USE(BUN_JSC_ADDITIONS)
+    void updateWorkerHeapAccounting(bool isFullCollection);
+    size_t remainingWorkerAllocationBudget() const;
+    bool workerRequiresFullCollection() const;
+    void applyWorkerAllocationLimits();
+    size_t arrayBufferGCMemorySize() const;
+    size_t m_embedderMaxHeapSize { 0 };
+    size_t m_embedderMaxEdenSize { 0 };
+    size_t m_sizeAfterLastFullCollectExcludingArrayBuffers { 0 };
+    size_t m_workerHeapSizeUpperBound { 0 };
+    CheckedSize m_workerBufferBytesAfterFullCollection { 0 };
+    uint64_t m_workerAllocatedAtLastCollection { 0 };
+    bool m_workerHasFullAccounting { false };
+    std::atomic<GCRequest::Ticket> m_workerVerificationTicket { 0 };
+    bool m_heapLimitExceeded { false };
+#endif
 
     // The old generation's cells, in bytes: those the last Full collection marked, plus those each later
     // Eden collection marked. Old cells that die stay counted until the next Full collection.
@@ -940,7 +996,25 @@ private:
 
     MarkedSpace m_objectSpace;
     GCIncomingRefCountedSet<ArrayBuffer> m_arrayBuffers;
-    size_t m_extraMemorySize { 0 };
+#if USE(BUN_JSC_ADDITIONS)
+    Ref<ArrayBufferMemoryAccount> m_arrayBufferMemoryAccount { ArrayBufferMemoryAccount::create() };
+    JSArrayBufferView* m_unmaterializedArrayBufferViews { nullptr };
+    JSArrayBufferView* m_oldUnmaterializedArrayBufferViews { nullptr };
+    size_t m_unmaterializedArrayBufferBytes { 0 };
+    uint64_t m_arrayBufferBytesAllocated { 0 };
+    uint64_t m_arrayBufferBytesAllocatedAtLastCollection { 0 };
+    uint64_t m_bytesAllocatedAtLastReportingCollection { 0 };
+    size_t m_jsHeapSizeAfterLastCollection { 0 };
+    size_t m_nonArrayBufferExtraMemoryAfterLastCollection { 0 };
+    size_t m_nativeExternalMemoryAfterLastCollection { 0 };
+    uint64_t m_nonArrayBufferBytesAllocated { 0 };
+    uint64_t m_nonArrayBufferBytesAllocatedAtLastCollection { 0 };
+    std::atomic<size_t> m_fastArrayBufferBytesVisited { 0 };
+    std::atomic<size_t> m_externalArrayBufferBytesVisited { 0 };
+    std::atomic<size_t> m_arrayBufferAuxiliaryCapacity { 0 };
+#endif
+    Atomic<size_t> m_extraMemorySize { 0 };
+    size_t m_extraMemoryReportThreshold { minExtraMemory };
     size_t m_deprecatedExtraMemorySize { 0 };
     size_t m_extraMemoryBytesSinceLastCollectionCheck { 0 };
 
@@ -1033,7 +1107,7 @@ private:
 
 #if ENABLE(RESOURCE_USAGE)
     size_t m_blockBytesAllocated { 0 };
-    size_t m_externalMemorySize { 0 };
+    Atomic<size_t> m_externalMemorySize { 0 };
 #endif
     
     static constexpr unsigned mutatorHasConnBit = 1u << 0u; // Must also be protected by threadLock.
@@ -1134,6 +1208,9 @@ public:
 
     // Subspaces
     CompleteSubspace primitiveGigacageAuxiliarySpace; // Typed arrays, strings, bitvectors, etc go here.
+#if USE(BUN_JSC_ADDITIONS)
+    CompleteSubspace typedArrayAuxiliarySpace;
+#endif
     CompleteSubspace auxiliarySpace; // Butterflies, arrays of JSValues, etc go here.
     CompleteSubspace immutableButterflyAuxiliarySpace; // JSCellButterfly goes here.
 

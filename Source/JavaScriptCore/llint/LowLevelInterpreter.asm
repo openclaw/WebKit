@@ -1085,6 +1085,15 @@ macro vmEntryRecord(entryFramePointer, resultReg)
     subp entryFramePointer, VMEntryTotalFrameSize, resultReg
 end
 
+macro initializeVMEntryRecordTail(record, scratch)
+    # Unwritten callee-save slots and alignment padding are conservative GC roots.
+    move VMEntryTotalFrameSize - CalleeRegisterSaveSize - VMEntryRecord::calleeSaveRegistersBuffer, scratch
+.clear:
+    subp PtrSize, scratch
+    storep 0, VMEntryRecord::calleeSaveRegistersBuffer[record, scratch, 1]
+    btpnz scratch, .clear
+end
+
 macro getFrameRegisterSizeForCodeBlock(codeBlock, size)
     loadi CodeBlock::m_numCalleeLocals[codeBlock], size
     lshiftp 3, size
@@ -1315,7 +1324,7 @@ macro loadTypedArrayVector(base, index, typeLimit, setLargeTypedArray, vector, s
     subi FirstTypedArrayType, t2
     biaeq t2, typeLimit, slowPath
 
-    btbnz JSArrayBufferView::m_mode[base], (constexpr isResizableOrGrowableSharedMode), slowPath
+    btbnz (constexpr (JSArrayBufferView::offsetOfMode()))[base], (constexpr isResizableOrGrowableSharedMode), slowPath
     if LARGE_TYPED_ARRAYS
         bqaeq index, JSArrayBufferView::m_length[base], slowPath
         bqbeq index, SmallTypedArrayMaxLength, .smallTypedArray
@@ -1712,10 +1721,12 @@ if ((ARM64E or ARM64) or X86_64) and ADDRESS64 and not C_LOOP
         functionPrologue()
         vmEntryRecord(cfr, sp)
         if ARM64 or ARM64E
+            initializeVMEntryRecordTail(sp, t8)
             storepairq a1, a5, VMEntryRecord::m_vm[sp]
             loadpairq VM::topCallFrame[a1], t8, t9 # topCallFrame and topEntryFrame
             storepairq t8, t9, VMEntryRecord::m_prevTopCallFrame[sp]
         else
+            initializeVMEntryRecordTail(sp, t0)
             storeq a1, VMEntryRecord::m_vm[sp]
             storeq a5, VMEntryRecord::m_context[sp]
             loadq VM::topCallFrame[a1], t0

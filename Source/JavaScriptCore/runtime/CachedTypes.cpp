@@ -2651,6 +2651,8 @@ public:
         m_unlinkedStringSwitchJumpTables.encode(encoder, rareData.m_unlinkedStringSwitchJumpTables);
         m_typeProfilerInfoMap.encode(encoder, rareData.m_typeProfilerInfoMap);
         m_opProfileControlFlowBytecodeOffsets.encode(encoder, rareData.m_opProfileControlFlowBytecodeOffsets);
+        m_callSitePositions.encode(encoder, rareData.m_callSitePositions);
+        m_asyncResumePositions.encode(encoder, rareData.m_asyncResumePositions);
         m_bitVectors.encode(encoder, rareData.m_bitVectors);
         m_constantIdentifierSets.encode(encoder, rareData.m_constantIdentifierSets);
         m_needsClassFieldInitializer = rareData.m_needsClassFieldInitializer;
@@ -2666,6 +2668,8 @@ public:
         m_unlinkedStringSwitchJumpTables.decode(decoder, rareData->m_unlinkedStringSwitchJumpTables);
         m_typeProfilerInfoMap.decode(decoder, rareData->m_typeProfilerInfoMap);
         m_opProfileControlFlowBytecodeOffsets.decode(decoder, rareData->m_opProfileControlFlowBytecodeOffsets);
+        m_callSitePositions.decode(decoder, rareData->m_callSitePositions);
+        m_asyncResumePositions.decode(decoder, rareData->m_asyncResumePositions);
         m_bitVectors.decode(decoder, rareData->m_bitVectors);
         m_constantIdentifierSets.decode(decoder, rareData->m_constantIdentifierSets);
         rareData->m_needsClassFieldInitializer = m_needsClassFieldInitializer;
@@ -2680,6 +2684,8 @@ private:
     CachedVector<CachedStringJumpTable> m_unlinkedStringSwitchJumpTables;
     CachedHashMap<unsigned, UnlinkedCodeBlock::RareData::TypeProfilerExpressionRange> m_typeProfilerInfoMap;
     CachedVector<JSInstructionStream::Offset> m_opProfileControlFlowBytecodeOffsets;
+    CachedVector<CachedPair<unsigned, unsigned>> m_callSitePositions;
+    CachedVector<CachedPair<unsigned, unsigned>> m_asyncResumePositions;
     CachedVector<CachedBitVector> m_bitVectors;
     CachedVector<CachedHashSet<CachedRefPtr<CachedUniquedStringImpl>, IdentifierRepHash>> m_constantIdentifierSets;
     unsigned m_needsClassFieldInitializer : 1;
@@ -5320,7 +5326,9 @@ protected:
     // 12: a global code block and the entry of a builtin function have the line starts of their source.
     // 13: upstream's op_iterator_close_check (with metadata) replaces the fork's, and op_iterator_open / op_iterator_next
     // keep a String's iteration state in their registers too (321765@main, 322172@main; opcode numbering).
-    static constexpr uint32_t cachedTypesFormatRevision = 13;
+    // 14-16: fork call-site and async resume positions, including bytecode rewrites.
+    // 17: combine these position tables with upstream revision 13; reject both older layouts.
+    static constexpr uint32_t cachedTypesFormatRevision = 17;
     static uint32_t currentCacheVersion() { return computeJSCBytecodeCacheVersion() ^ (cachedTypesFormatRevision * 0x9E3779B9u); }
 
     GenericCacheEntry(Encoder& encoder, CachedCodeBlockTag tag)
@@ -5948,7 +5956,7 @@ static_assert(sizeof(CachedBigInt) == 12);
 static_assert(sizeof(CachedBitVector) == 8);
 static_assert(sizeof(CachedClassElementDefinition) == 16);
 static_assert(sizeof(CachedCodeBlockExtras) == 4);
-static_assert(sizeof(CachedCodeBlockRareData) == 68);
+static_assert(sizeof(CachedCodeBlockRareData) == 84);
 static_assert(sizeof(CachedCompactTDZEnvironment) == 12);
 static_assert(sizeof(CachedCompactTDZEnvironmentMapHandle) == 4);
 static_assert(sizeof(CachedEvalCodeBlock) == 40);

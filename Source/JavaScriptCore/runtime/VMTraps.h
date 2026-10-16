@@ -30,11 +30,13 @@
 #include <wtf/AutomaticThread.h>
 #include <wtf/Box.h>
 #include <wtf/Condition.h>
+#include <wtf/Function.h>
 #include <wtf/Lock.h>
 #include <wtf/Locker.h>
 #include <wtf/RefPtr.h>
 #include <wtf/StackBounds.h>
 #include <wtf/WorkQueue.h>
+#include <wtf/Vector.h>
 
 namespace JSC {
 
@@ -153,6 +155,7 @@ public:
     v(NeedWatchdogCheck) \
     v(NeedDebuggerBreak) \
     v(NeedStopTheWorld) \
+    v(NeedVMInspection) \
     v(NeedExceptionHandling)
 
 #define DECLARE_VMTRAPS_EVENT_BIT_SHIFT(event__)  event__##BitShift,
@@ -201,6 +204,11 @@ public:
 
     void willDestroyVM();
 
+    // Callers keep the VM alive during registration. Inspections run on its owning
+    // thread and must not execute JavaScript or initiate a collection.
+    JS_EXPORT_PRIVATE void requestVMInspection(Function<void(VM&)>&&);
+    JS_EXPORT_PRIVATE void runVMInspections();
+
     ALWAYS_INLINE bool needHandling(BitField mask) const
     {
         return m_trapBits.loadRelaxed() & mask;
@@ -219,7 +227,7 @@ public:
     inline void deferTermination(DeferAction);
     inline void undoDeferTermination(DeferAction);
 
-    inline void notifyGrabAllLocks();
+    inline void invalidateCodeBlocksForPendingTraps();
 
     bool hasTrapBit(Event event)
     {
@@ -249,12 +257,11 @@ public:
         // Trap bit must be set before we update the thread stop request.
         if (isAsyncEvent(event))
             updateThreadStopRequestIfNeeded();
-        // A thread parked in Atomics.wait / memory.atomic.wait handles no traps; wake it so it sees this one.
-        if (event == NeedTermination)
-            notifySyncWaiterOfTermination();
+        if (event == NeedTermination || event == NeedVMInspection)
+            notifySyncWaiterOfVMTrap();
     }
 
-    JS_EXPORT_PRIVATE CONCURRENT_SAFE void notifySyncWaiterOfTermination();
+    JS_EXPORT_PRIVATE CONCURRENT_SAFE void notifySyncWaiterOfVMTrap();
 
     // The following returns true if a trap was handled.
     bool handleTraps(BitField mask = AsyncEvents);
@@ -342,6 +349,7 @@ private:
 
     Box<Lock> m_trapSignalingLock;
     Box<Condition> m_condition;
+    Vector<Function<void(VM&)>> m_vmInspections WTF_GUARDED_BY_LOCK(m_trapSignalingLock);
 
 #if ENABLE(SIGNAL_BASED_VM_TRAPS)
     RefPtr<SignalSender> m_signalSender;

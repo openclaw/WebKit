@@ -200,6 +200,15 @@ inline void SlotVisitor::reportExternalMemoryVisited(size_t size)
 }
 #endif
 
+#if USE(BUN_JSC_ADDITIONS)
+inline void SlotVisitor::reportArrayBufferMemoryVisited(size_t size)
+{
+    if (m_isFirstVisit)
+        m_currentCell->heap()->reportArrayBufferMemoryVisited(0, size);
+}
+#endif
+
+
 template<typename Func>
 IterationStatus SlotVisitor::forEachMarkStack(NOESCAPE const Func& func)
 {

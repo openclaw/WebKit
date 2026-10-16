@@ -452,7 +452,7 @@ RegisterID* TaggedTemplateNode::emitBytecode(BytecodeGenerator& generator, Regis
     for (TemplateExpressionListNode* templateExpression = m_templateLiteral->templateExpressions(); templateExpression; templateExpression = templateExpression->next())
         generator.emitNode(callArguments.argumentRegister(argumentIndex++), templateExpression->value());
 
-    return generator.emitCallInTailPosition(generator.finalDestination(dst, tag.get()), tag.get(), expectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+    return generator.emitCallInTailPosition(generator.finalDestination(dst, tag.get()), tag.get(), expectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
 }
 
 // ------------------------------ ArrayNode ------------------------------------
@@ -1072,10 +1072,12 @@ RegisterID* BracketAccessorNode::emitBytecode(BytecodeGenerator& generator, Regi
         if (isNonIndexStringElement(*m_subscript)) {
             const Identifier& id = static_cast<StringNode*>(m_subscript)->value();
             generator.emitExpressionInfo(divot(), divotStart(), divotEnd());
+            generator.emitCallSitePosition(propertyAccessPosition());
             generator.emitGetById(finalDest.get(), superBase.get(), thisValue.get(), id);
         } else  {
             RefPtr<RegisterID> subscript = generator.emitNodeForProperty(m_subscript);
             generator.emitExpressionInfo(divot(), divotStart(), divotEnd());
+            generator.emitCallSitePosition(propertyAccessPosition());
             generator.emitGetByVal(finalDest.get(), superBase.get(), thisValue.get(), subscript.get());
         }
 
@@ -1096,10 +1098,12 @@ RegisterID* BracketAccessorNode::emitBytecode(BytecodeGenerator& generator, Regi
 
     if (subscriptIsNonIndexString) {
         generator.emitExpressionInfo(divot(), divotStart(), divotEnd());
+        generator.emitCallSitePosition(propertyAccessPosition());
         ret = generator.emitGetById(finalDest.get(), base.get(), static_cast<StringNode*>(m_subscript)->value());
     } else {
         RegisterID* property = generator.emitNodeForProperty(m_subscript);
         generator.emitExpressionInfo(divot(), divotStart(), divotEnd());
+        generator.emitCallSitePosition(propertyAccessPosition());
         ret = generator.emitGetByVal(finalDest.get(), base.get(), property);
     }
 
@@ -1188,9 +1192,11 @@ RegisterID* BaseDotNode::emitGetPropertyValue(BytecodeGenerator& generator, Regi
     if (m_base->isSuperNode()) {
         if (!thisValue)
             thisValue = generator.ensureThis();
+        generator.emitCallSitePosition(propertyAccessPosition());
         return generator.emitGetById(dst, base, thisValue.get(), m_ident);
     }
 
+    generator.emitCallSitePosition(propertyAccessPosition());
     return generator.emitGetById(dst, base, m_ident);
 }
 
@@ -1283,7 +1289,7 @@ RegisterID* NewExprNode::emitBytecode(BytecodeGenerator& generator, RegisterID* 
     func = generator.emitNode(func.get(), m_expr);
     RefPtr<RegisterID> returnValue = generator.finalDestination(dst, func.get());
     CallArguments callArguments(generator, m_args);
-    return generator.emitConstruct(returnValue.get(), func.get(), func.get(), expectedFunction, callArguments, divot(), divotStart(), divotEnd());
+    return generator.emitConstruct(returnValue.get(), func.get(), func.get(), expectedFunction, callArguments, divot(), divotStart(), divotEnd(), callSitePosition());
 }
 
 CallArguments::CallArguments(BytecodeGenerator& generator, ArgumentsNode* argumentsNode, unsigned additionalArguments)
@@ -1374,12 +1380,12 @@ RegisterID* EvalFunctionCallNode::emitBytecode(BytecodeGenerator& generator, Reg
             CallArguments directEvalArguments(generator, nullptr, 1);
             generator.move(directEvalArguments.thisRegister(), callArguments.thisRegister());
             generator.emitGetByVal(directEvalArguments.argumentRegister(0), spreadRegister.get(), generator.emitLoad(nullptr, jsNumber(0)));
-            generator.emitCallDirectEval(returnValue.get(), func.get(), directEvalArguments, divot(), divotStart(), divotEnd(), DebuggableCall::No);
+            generator.emitCallDirectEval(returnValue.get(), func.get(), directEvalArguments, divot(), divotStart(), divotEnd(), DebuggableCall::No, callSitePosition());
             generator.emitJump(done.get());
         }
 
         generator.emitLabel(notEvalFunction.get());
-        generator.emitCallInTailPosition(returnValue.get(), func.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+        generator.emitCallInTailPosition(returnValue.get(), func.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
         generator.emitLabel(done.get());
     } else if (generator.allowsTailCallOptimization()) {
         // A callee named "eval" is a direct eval only if it really is the built-in eval function.
@@ -1388,14 +1394,14 @@ RegisterID* EvalFunctionCallNode::emitBytecode(BytecodeGenerator& generator, Reg
         Ref<Label> done = generator.newLabel();
         generator.emitJumpIfNotEvalFunction(func.get(), notEvalFunction.get());
 
-        generator.emitCallDirectEval(returnValue.get(), func.get(), callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::No);
+        generator.emitCallDirectEval(returnValue.get(), func.get(), callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::No, callSitePosition());
         generator.emitJump(done.get());
 
         generator.emitLabel(notEvalFunction.get());
-        generator.emitCallInTailPosition(returnValue.get(), func.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+        generator.emitCallInTailPosition(returnValue.get(), func.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
         generator.emitLabel(done.get());
     } else
-        generator.emitCallDirectEval(returnValue.get(), func.get(), callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::No);
+        generator.emitCallDirectEval(returnValue.get(), func.get(), callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::No, callSitePosition());
 
     return returnValue.unsafeGet();
 }
@@ -1465,7 +1471,7 @@ RegisterID* FunctionCallValueNode::emitBytecode(BytecodeGenerator& generator, Re
 
     CallArguments callArguments(generator, m_args);
     generator.emitLoad(callArguments.thisRegister(), jsUndefined());
-    RegisterID* ret = generator.emitCallInTailPosition(returnValue.get(), func.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+    RegisterID* ret = generator.emitCallInTailPosition(returnValue.get(), func.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
     generator.emitProfileType(returnValue.get(), divotStart(), divotEnd());
     return ret;
 }
@@ -1533,7 +1539,7 @@ RegisterID* FunctionCallResolveNode::emitBytecode(BytecodeGenerator& generator, 
     if (isOptionalCall())
         generator.emitOptionalCheck(func.get());
 
-    RegisterID* ret = generator.emitCallInTailPosition(returnValue.get(), func.get(), expectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+    RegisterID* ret = generator.emitCallInTailPosition(returnValue.get(), func.get(), expectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
     generator.emitProfileType(returnValue.get(), divotStart(), divotEnd());
     return ret;
 }
@@ -2265,6 +2271,7 @@ RegisterID* FunctionCallBracketNode::emitBytecode(BytecodeGenerator& generator, 
     }
     if (subscriptIsNonIndexString) {
         generator.emitExpressionInfo(subexpressionDivot(), subexpressionStart(), subexpressionEnd());
+        generator.emitCallSitePosition(propertyAccessPosition());
         if (baseIsSuper)
             generator.emitGetById(function.get(), base.get(), thisRegister.get(), static_cast<StringNode*>(m_subscript)->value());
         else
@@ -2272,6 +2279,7 @@ RegisterID* FunctionCallBracketNode::emitBytecode(BytecodeGenerator& generator, 
     } else {
         RefPtr<RegisterID> property = generator.emitNodeForProperty(m_subscript);
         generator.emitExpressionInfo(subexpressionDivot(), subexpressionStart(), subexpressionEnd());
+        generator.emitCallSitePosition(propertyAccessPosition());
         if (baseIsSuper)
             generator.emitGetByVal(function.get(), base.get(), thisRegister.get(), property.get());
         else
@@ -2286,7 +2294,7 @@ RegisterID* FunctionCallBracketNode::emitBytecode(BytecodeGenerator& generator, 
         generator.move(callArguments.thisRegister(), thisRegister.get());
     } else
         generator.move(callArguments.thisRegister(), base.get());
-    RegisterID* ret = generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+    RegisterID* ret = generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
     generator.emitProfileType(returnValue.get(), divotStart(), divotEnd());
     return ret;
 }
@@ -2323,7 +2331,7 @@ RegisterID* FunctionCallDotNode::emitBytecode(BytecodeGenerator& generator, Regi
     if (isOptionalCall())
         generator.emitOptionalCheck(function.get());
 
-    RegisterID* ret = generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+    RegisterID* ret = generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
     generator.emitProfileType(returnValue.get(), divotStart(), divotEnd());
     return ret;
 }
@@ -2344,9 +2352,12 @@ RegisterID* CallFunctionCallDotNode::emitBytecode(BytecodeGenerator& generator, 
     auto makeFunction = [&] {
         if (m_base->isSuperNode()) {
             RefPtr<RegisterID> thisValue = generator.ensureThis();
+            generator.emitCallSitePosition(propertyAccessPosition());
             function = generator.emitGetById(generator.tempDestination(dst), base.get(), thisValue.get(), generator.propertyNames().builtinNames().callPublicName());
-        } else
+        } else {
+            generator.emitCallSitePosition(propertyAccessPosition());
             function = generator.emitGetById(generator.tempDestination(dst), base.get(), generator.propertyNames().builtinNames().callPublicName());
+        }
 
         if (isOptionalCall())
             generator.emitOptionalCheck(function.get());
@@ -2357,7 +2368,7 @@ RegisterID* CallFunctionCallDotNode::emitBytecode(BytecodeGenerator& generator, 
         makeFunction();
         CallArguments callArguments(generator, m_args);
         generator.move(callArguments.thisRegister(), base.get());
-        generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+        generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
         generator.move(dst, returnValue.get());
         return returnValue.unsafeGet();
     }
@@ -2377,7 +2388,7 @@ RegisterID* CallFunctionCallDotNode::emitBytecode(BytecodeGenerator& generator, 
             argumentsRegister = generator.emitNode(subject);
             generator.emitExpressionInfo(spread->divot(), spread->divotStart(), spread->divotEnd());
             RefPtr<RegisterID> thisRegister = generator.emitGetByVal(generator.newTemporary(), argumentsRegister.get(), generator.emitLoad(nullptr, jsNumber(0)));
-            generator.emitCallVarargsInTailPosition(returnValue.get(), base.get(), thisRegister.get(), argumentsRegister.get(), generator.newTemporary(), 1, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+            generator.emitCallVarargsInTailPosition(returnValue.get(), base.get(), thisRegister.get(), argumentsRegister.get(), generator.newTemporary(), 1, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
         } else if (m_args->m_listNode && m_args->m_listNode->m_expr) {
             ArgumentListNode* oldList = m_args->m_listNode;
             m_args->m_listNode = m_args->m_listNode->m_next;
@@ -2385,13 +2396,13 @@ RegisterID* CallFunctionCallDotNode::emitBytecode(BytecodeGenerator& generator, 
             RefPtr<RegisterID> realFunction = generator.move(generator.tempDestination(dst), base.get());
             CallArguments callArguments(generator, m_args);
             generator.emitNode(callArguments.thisRegister(), oldList->m_expr);
-            generator.emitCallInTailPosition(returnValue.get(), realFunction.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+            generator.emitCallInTailPosition(returnValue.get(), realFunction.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
             m_args->m_listNode = oldList;
         } else {
             RefPtr<RegisterID> realFunction = generator.move(generator.tempDestination(dst), base.get());
             CallArguments callArguments(generator, m_args);
             generator.emitLoad(callArguments.thisRegister(), jsUndefined());
-            generator.emitCallInTailPosition(returnValue.get(), realFunction.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+            generator.emitCallInTailPosition(returnValue.get(), realFunction.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
         }
     }
     if (emitCallCheck) {
@@ -2400,7 +2411,7 @@ RegisterID* CallFunctionCallDotNode::emitBytecode(BytecodeGenerator& generator, 
         {
             CallArguments callArguments(generator, m_args);
             generator.move(callArguments.thisRegister(), base.get());
-            generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+            generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
         }
         generator.emitLabel(end.get());
     }
@@ -2418,6 +2429,7 @@ RegisterID* HasOwnPropertyFunctionCallDotNode::emitBytecode(BytecodeGenerator& g
 
     generator.emitExpressionInfo(subexpressionDivot(), subexpressionStart(), subexpressionEnd());
 
+    generator.emitCallSitePosition(propertyAccessPosition());
     RefPtr<RegisterID> function = generator.emitGetById(generator.newTemporary(), base.get(), generator.propertyNames().hasOwnProperty);
     if (isOptionalCall())
         generator.emitOptionalCheck(function.get());
@@ -2461,7 +2473,7 @@ RegisterID* HasOwnPropertyFunctionCallDotNode::emitBytecode(BytecodeGenerator& g
         {
             CallArguments callArguments(generator, m_args);
             generator.move(callArguments.thisRegister(), base.get());
-            generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+            generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
         }
 
         generator.emitLabel(end.get());
@@ -2470,7 +2482,7 @@ RegisterID* HasOwnPropertyFunctionCallDotNode::emitBytecode(BytecodeGenerator& g
     } else {
         CallArguments callArguments(generator, m_args);
         generator.move(callArguments.thisRegister(), base.get());
-        generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+        generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
     }
 
     generator.emitProfileType(returnValue.get(), divotStart(), divotEnd());
@@ -2500,9 +2512,12 @@ RegisterID* ApplyFunctionCallDotNode::emitBytecode(BytecodeGenerator& generator,
     auto makeFunction = [&] {
         if (m_base->isSuperNode()) {
             RefPtr<RegisterID> thisValue = generator.ensureThis();
+            generator.emitCallSitePosition(propertyAccessPosition());
             function = generator.emitGetById(generator.tempDestination(dst), base.get(), thisValue.get(), generator.propertyNames().builtinNames().applyPublicName());
-        } else
+        } else {
+            generator.emitCallSitePosition(propertyAccessPosition());
             function = generator.emitGetById(generator.tempDestination(dst), base.get(), generator.propertyNames().builtinNames().applyPublicName());
+        }
 
         if (isOptionalCall())
             generator.emitOptionalCheck(function.get());
@@ -2513,7 +2528,7 @@ RegisterID* ApplyFunctionCallDotNode::emitBytecode(BytecodeGenerator& generator,
         makeFunction();
         CallArguments callArguments(generator, m_args);
         generator.move(callArguments.thisRegister(), base.get());
-        generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+        generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
         generator.move(dst, returnValue.get());
         return returnValue.unsafeGet();
     }
@@ -2551,7 +2566,7 @@ RegisterID* ApplyFunctionCallDotNode::emitBytecode(BytecodeGenerator& generator,
                     generator.emitLabel(end.get());
                 };
                 generator.emitEnumeration(this, spread->expression(), extractor);
-                generator.emitCallVarargsInTailPosition(returnValue.get(), realFunction.get(), thisRegister.get(), argumentsRegister.get(), generator.newTemporary(), 0, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+                generator.emitCallVarargsInTailPosition(returnValue.get(), realFunction.get(), thisRegister.get(), argumentsRegister.get(), generator.newTemporary(), 0, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
             } else if (m_args->m_listNode->m_next) {
                 ASSERT(m_args->m_listNode->m_next->m_expr->isSimpleArray());
                 ASSERT(!m_args->m_listNode->m_next->m_next);
@@ -2559,20 +2574,20 @@ RegisterID* ApplyFunctionCallDotNode::emitBytecode(BytecodeGenerator& generator,
                 RefPtr<RegisterID> realFunction = generator.move(generator.tempDestination(dst), base.get());
                 CallArguments callArguments(generator, m_args);
                 generator.emitNode(callArguments.thisRegister(), oldList->m_expr);
-                generator.emitCallInTailPosition(returnValue.get(), realFunction.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+                generator.emitCallInTailPosition(returnValue.get(), realFunction.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
             } else {
                 m_args->m_listNode = m_args->m_listNode->m_next;
                 RefPtr<RegisterID> realFunction = generator.move(generator.tempDestination(dst), base.get());
                 CallArguments callArguments(generator, m_args);
                 generator.emitNode(callArguments.thisRegister(), oldList->m_expr);
-                generator.emitCallInTailPosition(returnValue.get(), realFunction.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+                generator.emitCallInTailPosition(returnValue.get(), realFunction.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
             }
             m_args->m_listNode = oldList;
         } else {
             RefPtr<RegisterID> realFunction = generator.move(generator.tempDestination(dst), base.get());
             CallArguments callArguments(generator, m_args);
             generator.emitLoad(callArguments.thisRegister(), jsUndefined());
-            generator.emitCallInTailPosition(returnValue.get(), realFunction.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+            generator.emitCallInTailPosition(returnValue.get(), realFunction.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
         }
     } else {
         ASSERT(m_args->m_listNode && m_args->m_listNode->m_next);
@@ -2587,14 +2602,14 @@ RegisterID* ApplyFunctionCallDotNode::emitBytecode(BytecodeGenerator& generator,
         while ((args = args->m_next))
             generator.emitNode(args->m_expr);
 
-        generator.emitCallVarargsInTailPosition(returnValue.get(), realFunction.get(), thisRegister.get(), argsRegister.get(), generator.newTemporary(), 0, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+        generator.emitCallVarargsInTailPosition(returnValue.get(), realFunction.get(), thisRegister.get(), argsRegister.get(), generator.newTemporary(), 0, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
     }
     if (emitCallCheck) {
         generator.emitJump(end.get());
         generator.emitLabel(realCall.get());
         CallArguments callArguments(generator, m_args);
         generator.move(callArguments.thisRegister(), base.get());
-        generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+        generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
         generator.emitLabel(end.get());
     }
     generator.emitProfileType(returnValue.get(), divotStart(), divotEnd());
@@ -2619,6 +2634,7 @@ RegisterID* ReflectConstructFunctionCallDotNode::emitBytecode(BytecodeGenerator&
     if (m_base->isOptionalChainBase())
         generator.emitOptionalCheck(callArguments.thisRegister());
     generator.emitExpressionInfo(subexpressionDivot(), subexpressionStart(), subexpressionEnd());
+    generator.emitCallSitePosition(propertyAccessPosition());
     generator.emitGetById(function.get(), callArguments.thisRegister(), generator.propertyNames().construct);
     if (isOptionalCall())
         generator.emitOptionalCheck(function.get());
@@ -2652,18 +2668,18 @@ RegisterID* ReflectConstructFunctionCallDotNode::emitBytecode(BytecodeGenerator&
     if (newTargetNode)
         generator.emitJumpIfFalse(generator.emitIsConstructor(generator.newTemporary(), newTarget), realCall.get());
     if (constructArguments)
-        generator.emitConstruct(returnValue.get(), target, newTarget, NoExpectedFunction, *constructArguments, divot(), divotStart(), divotEnd());
+        generator.emitConstruct(returnValue.get(), target, newTarget, NoExpectedFunction, *constructArguments, divot(), divotStart(), divotEnd(), callSitePosition());
     else {
         if (!argumentsListNode->m_expr->isArrayLiteral())
             generator.emitJumpIfFalse(generator.emitIsObject(generator.newTemporary(), argumentsList), realCall.get());
-        generator.emitConstructVarargs(returnValue.get(), target, newTarget, argumentsList, generator.newTemporary(), 0, divot(), divotStart(), divotEnd(), DebuggableCall::No);
+        generator.emitConstructVarargs(returnValue.get(), target, newTarget, argumentsList, generator.newTemporary(), 0, divot(), divotStart(), divotEnd(), DebuggableCall::No, callSitePosition());
     }
     generator.emitJump(end.get());
 
     generator.emitLabel(realCall.get());
     if (constructArguments)
         generator.emitNewArrayByReversingArguments(argumentsList, *constructArguments);
-    RegisterID* ret = generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes);
+    RegisterID* ret = generator.emitCallInTailPosition(returnValue.get(), function.get(), NoExpectedFunction, callArguments, divot(), divotStart(), divotEnd(), DebuggableCall::Yes, callSitePosition());
     generator.emitLabel(end.get());
     generator.emitProfileType(returnValue.get(), divotStart(), divotEnd());
     return ret;

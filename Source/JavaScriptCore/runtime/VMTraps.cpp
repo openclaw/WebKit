@@ -307,7 +307,10 @@ private:
         if (optionalOwnerThread) {
             auto expectedUID = optionalOwnerThread.value()->uid();
             ThreadSuspendLocker locker;
-            sendMessage(locker, *optionalOwnerThread.value().get(), [&] (PlatformRegisters& registers) -> void {
+            // Foreign native stacks may wait for another VM to run. Leave the
+            // trap pending and release the global suspension lock before the
+            // scheduled retry, so that VM's collector can make progress.
+            WTF::trySendMessage(locker, *optionalOwnerThread.value().get(), [&] (PlatformRegisters& registers) -> void {
                 auto signalContext = SignalContext::tryCreate(registers);
                 if (!signalContext)
                     return;
@@ -327,7 +330,7 @@ private:
         }
 
         if (vm.traps().hasTrapBit(NeedTermination))
-            vm.syncWaiter()->notifyOfTerminationRequest();
+            vm.syncWaiter()->notifyOfVMTrap();
 
         {
             Locker locker { *m_lock };
@@ -373,6 +376,11 @@ void VMTraps::initializeSignals()
 void VMTraps::willDestroyVM()
 {
     m_isShuttingDown = true;
+    Vector<Function<void(VM&)>> inspections;
+    {
+        Locker locker { *m_trapSignalingLock };
+        inspections = std::exchange(m_vmInspections, { });
+    }
 #if ENABLE(SIGNAL_BASED_VM_TRAPS)
     if (m_signalSender) {
         {
@@ -383,6 +391,29 @@ void VMTraps::willDestroyVM()
         m_signalSender = nullptr;
     }
 #endif
+}
+
+void VMTraps::requestVMInspection(Function<void(VM&)>&& inspection)
+{
+    {
+        Locker locker { *m_trapSignalingLock };
+        m_vmInspections.append(WTF::move(inspection));
+    }
+    fireTrap(NeedVMInspection);
+}
+
+void VMTraps::runVMInspections()
+{
+    ASSERT(vm().currentThreadIsHoldingAPILock());
+    Vector<Function<void(VM&)>> inspections;
+    {
+        Locker locker { *m_trapSignalingLock };
+        inspections = std::exchange(m_vmInspections, { });
+        clearTrapWithoutCancellingThreadStop(NeedVMInspection);
+    }
+    updateThreadStopRequestIfNeeded();
+    for (auto& inspection : inspections)
+        inspection(vm());
 }
 
 CONCURRENT_SAFE void VMTraps::cancelThreadStopIfNeeded()
@@ -418,9 +449,9 @@ CONCURRENT_SAFE void VMTraps::requestThreadStopIfNeeded(Locker<Lock>& locker)
     m_threadStopRequested = true;
 }
 
-CONCURRENT_SAFE void VMTraps::notifySyncWaiterOfTermination()
+CONCURRENT_SAFE void VMTraps::notifySyncWaiterOfVMTrap()
 {
-    vm().syncWaiter()->notifyOfTerminationRequest();
+    vm().syncWaiter()->notifyOfVMTrap();
 }
 
 CONCURRENT_SAFE void VMTraps::updateThreadStopRequestIfNeeded()
@@ -509,6 +540,11 @@ bool VMTraps::handleTraps(VMTraps::BitField mask)
 
         case NeedStopTheWorld:
             VMManager::singleton().notifyVMStop(vm, StopTheWorldEvent::VMStopped);
+            didHandleTrap = true;
+            break;
+
+        case NeedVMInspection:
+            runVMInspections();
             didHandleTrap = true;
             break;
 

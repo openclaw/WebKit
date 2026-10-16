@@ -1,5 +1,5 @@
 //@ requireOptions("--useAsyncStackTrace=1")
-
+// Stack columns name syntax tokens, not call parentheses.
 const source = "async-stack-trace-promise-any-basic.js";
 
 function nop() {}
@@ -78,12 +78,12 @@ function shouldThrowAsync(run, errorType) {
     shouldBe(aggregateError.errors.length, 1);
     testStack(aggregateError.errors[0],
       [
-        ["thrower", "68:59"],
-        ["async run", "69:43"],
-        ["async test", "74:18"],
+        ["thrower", "68:50"],
+        ["async run", "69:26"],
+        ["async test", "74:9"],
         ["drainMicrotasks", "[native code]"],
-        ["shouldThrowAsync", "56:18"],
-        ["global code", "72:44"]
+        ["shouldThrowAsync", "56:3"],
+        ["global code", "72:28"]
       ]
     );
   }
@@ -116,32 +116,32 @@ function shouldThrowAsync(run, errorType) {
     shouldBe(aggregateError.errors.length, 3);
     testStack(aggregateError.errors[0],
       [
-        ["task1", "97:20"],
-        ["async run", "107:43"],
-        ["async test", "112:18"],
+        ["task1", "97:11"],
+        ["async run", "107:26"],
+        ["async test", "112:9"],
         ["drainMicrotasks", "[native code]"],
-        ["shouldThrowAsync", "56:18"],
-        ["global code", "110:44"]
+        ["shouldThrowAsync", "56:3"],
+        ["global code", "110:28"]
       ]
     );
     testStack(aggregateError.errors[1],
       [
-        ["task2", "104:20"],
-        ["async run", "107:43"],
-        ["async test", "112:18"],
+        ["task2", "104:11"],
+        ["async run", "107:26"],
+        ["async test", "112:9"],
         ["drainMicrotasks", "[native code]"],
-        ["shouldThrowAsync", "56:18"],
-        ["global code", "110:44"]
+        ["shouldThrowAsync", "56:3"],
+        ["global code", "110:28"]
       ]
     );
     testStack(aggregateError.errors[2],
       [
-        ["task3", "106:52"],
-        ["async run", "107:43"],
-        ["async test", "112:18"],
+        ["task3", "106:43"],
+        ["async run", "107:26"],
+        ["async test", "112:9"],
         ["drainMicrotasks", "[native code]"],
-        ["shouldThrowAsync", "56:18"],
-        ["global code", "110:44"]
+        ["shouldThrowAsync", "56:3"],
+        ["global code", "110:28"]
       ]
     );
   }

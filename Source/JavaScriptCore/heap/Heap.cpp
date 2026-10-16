@@ -61,6 +61,7 @@
 #include "JITStubRoutineSet.h"
 #include "JITWorklistInlines.h"
 #include "JSAsyncFunctionGenerator.h"
+#include "JSArrayBufferView.h"
 #include "JSAsyncGenerator.h"
 #include "JSFinalizationRegistry.h"
 #include "JSFunctionInlines.h"
@@ -108,6 +109,7 @@
 #include "TypeProfilerLog.h"
 #include "UnlinkedEvalCodeBlock.h"
 #include "VM.h"
+#include "VMTrapsInlines.h"
 #include "VerifierSlotVisitor.h"
 #include "WasmCallee.h"
 #include "WeakMapImplInlines.h"
@@ -377,6 +379,9 @@ Heap::Heap(VM& vm, HeapType heapType)
 
     // Subspaces
     , primitiveGigacageAuxiliarySpace("Primitive Gigacage Auxiliary"_s, *this, auxiliaryHeapCellType, primitiveGigacageAllocator.get()) // Hash:0x3e7cd762
+#if USE(BUN_JSC_ADDITIONS)
+    , typedArrayAuxiliarySpace("Typed Array Auxiliary"_s, *this, auxiliaryHeapCellType, primitiveGigacageAllocator.get())
+#endif
     , auxiliarySpace("Auxiliary"_s, *this, auxiliaryHeapCellType, fastMallocAllocator.get()) // Hash:0x96255ba1
     , immutableButterflyAuxiliarySpace("ImmutableButterfly JSCellWithIndexingHeader"_s, *this, immutableButterflyHeapCellType, fastMallocAllocator.get()) // Hash:0xaadcb3c1
     , cellSpace("JSCell"_s, *this, cellHeapCellType, fastMallocAllocator.get()) // Hash:0xadfb5a79
@@ -526,7 +531,7 @@ void Heap::releaseDelayedReleasedObjects()
 #endif
 }
 
-void Heap::reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(const JSCell* cell, size_t size)
+bool Heap::reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(const JSCell* cell, size_t size)
 {
     ASSERT(cell);
 
@@ -539,7 +544,7 @@ void Heap::reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(const JSCell*
         // not black. But we can't know for sure until we fire off a fence.
         WTF::storeLoadFence();
         if (cell->cellState() != CellState::PossiblyBlack)
-            return;
+            return false;
 
         WTF::loadLoadFence();
         if (!isMarked(cell)) {
@@ -549,7 +554,7 @@ void Heap::reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(const JSCell*
             // path. So, we don't have to remember this object. We could return here. But we go
             // further and attempt to re-white the object.
             ASSERT(m_collectionScope && m_collectionScope.value() == CollectionScope::Full);
-            return;
+            return false;
         }
     } else
         ASSERT(isMarked(cell));
@@ -560,14 +565,41 @@ void Heap::reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(const JSCell*
     // get scanned again. If we lose then someone else will barrier the object again. That would
     // be unfortunate but not the end of the world.
     reportExtraMemoryVisited(size);
+    return true;
 }
+
+#if USE(BUN_JSC_ADDITIONS)
+void Heap::reportArrayBufferMemoryAllocated(size_t bytes, const JSCell* cell)
+{
+    if (bytes <= minExtraMemory)
+        return;
+    didAllocateArrayBufferMemory(bytes);
+    didAllocate(bytes);
+    if (cell && isWithinThreshold(cell->cellState(), barrierThreshold())) {
+        if (reportExtraMemoryAllocatedPossiblyFromAlreadyMarkedCell(cell, bytes))
+            reportArrayBufferMemoryVisited(0, bytes);
+    }
+    collectIfNecessaryOrDefer();
+}
+#endif
 
 void Heap::reportExtraMemoryAllocatedSlowCase(GCDeferralContext* deferralContext, const JSCell* cell, size_t size)
 {
+    if (cell && cell->isString()) {
+        if (auto* profiler = vm().heapProfiler())
+            profiler->samplePreciseAllocation(const_cast<JSCell*>(cell), size);
+    }
+    // Sampling includes short storage without changing the collector's reporting threshold.
+    if (size <= minExtraMemory)
+        return;
+
     ASSERT(deferralContext || isDeferred() || !AssertNoGC::isInEffectOnCurrentThread());
     if constexpr (validateDFGDoesGC)
         vm().verifyCanGC();
 
+#if USE(BUN_JSC_ADDITIONS)
+    m_nonArrayBufferBytesAllocated += size;
+#endif
     m_extraMemoryBytesSinceLastCollectionCheck += size;
     bool shouldCheckForCollection = m_extraMemoryBytesSinceLastCollectionCheck >= MarkedBlock::blockSize;
     if (shouldCheckForCollection) {
@@ -666,10 +698,17 @@ bool Heap::unprotect(JSValue k)
 void Heap::addReference(JSCell* cell, ArrayBuffer* buffer, size_t bytesAlreadyReported)
 {
     ASSERT(cell->heap() == this);
+#if USE(BUN_JSC_ADDITIONS)
+    buffer->accountMemory(m_arrayBufferMemoryAccount);
+#endif
     if (m_arrayBuffers.addReference(cell, buffer)) {
         size_t size = buffer->gcSizeEstimateInBytes();
         ASSERT(bytesAlreadyReported <= size);
+#if USE(BUN_JSC_ADDITIONS)
+        reportArrayBufferMemoryAllocated(size - std::min(size, bytesAlreadyReported), nullptr);
+#else
         reportExtraMemoryAllocatedSlowCase(nullptr, nullptr, size - std::min(size, bytesAlreadyReported));
+#endif
     }
 }
 
@@ -689,6 +728,8 @@ void Heap::reconcileWeakReferencesInMarkedCells(CellSet& cellSet, CollectionScop
 void Heap::reconcileWeakReferencesAtGCEnd()
 {
     CollectionScope collectionScope = this->collectionScope().value_or(CollectionScope::Full);
+    if (auto* profiler = vm().heapProfiler())
+        profiler->reconcileSampledAllocations(collectionScope);
 
     {
         // Executables go before CodeBlock, since CodeBlock::reconcileWeakReferencesAtGCEnd looks at the owner executable's installed CodeBlock.
@@ -983,6 +1024,21 @@ void Heap::prepareForAllocation()
     m_objectSpace.prepareForAllocation();
     updateAllocationLimits();
 
+#if USE(BUN_JSC_ADDITIONS)
+    size_t extraBuffers = m_arrayBuffers.size() + m_externalArrayBufferBytesVisited.load(std::memory_order_relaxed);
+    size_t extra = extraMemorySize();
+    m_nonArrayBufferExtraMemoryAfterLastCollection = extra - std::min(extra, extraBuffers);
+    m_nativeExternalMemoryAfterLastCollection = m_nonArrayBufferExtraMemoryAfterLastCollection;
+#if ENABLE(RESOURCE_USAGE)
+    m_nativeExternalMemoryAfterLastCollection += externalMemorySize();
+#endif
+    size_t buffers = arrayBufferGCMemorySize();
+    m_jsHeapSizeAfterLastCollection = m_sizeAfterLastCollect - std::min(m_sizeAfterLastCollect, buffers);
+    m_bytesAllocatedAtLastReportingCollection = totalBytesAllocated();
+    m_arrayBufferBytesAllocatedAtLastCollection = m_arrayBufferBytesAllocated;
+    m_nonArrayBufferBytesAllocatedAtLastCollection = m_nonArrayBufferBytesAllocated;
+#endif
+
     if (m_verifier) [[unlikely]] {
         m_verifier->trimDeadCells();
         m_verifier->verify(HeapVerifier::Phase::AfterGC);
@@ -996,14 +1052,67 @@ size_t Heap::objectCount()
 
 size_t Heap::arrayBufferSize()
 {
+#if USE(BUN_JSC_ADDITIONS)
+    return allocatedArrayBufferSize() + m_unmaterializedArrayBufferBytes;
+#else
     return m_arrayBuffers.size();
+#endif
 }
+
+#if USE(BUN_JSC_ADDITIONS)
+void Heap::addUnmaterializedArrayBufferView(JSArrayBufferView* view)
+{
+    ASSERT(!view->hasArrayBuffer());
+    view->setNextUnmaterializedView(m_unmaterializedArrayBufferViews);
+    m_unmaterializedArrayBufferViews = view;
+    m_unmaterializedArrayBufferBytes += view->byteLengthRaw();
+}
+
+void Heap::didAllocateArrayBufferAuxiliaryMemory(Subspace* subspace, size_t bytes)
+{
+    if (subspace == &typedArrayAuxiliarySpace)
+        didAllocateArrayBufferMemory(bytes);
+}
+
+void Heap::addArrayBufferAuxiliaryCapacity(Subspace* subspace, size_t bytes)
+{
+    if (subspace == &typedArrayAuxiliarySpace)
+        m_arrayBufferAuxiliaryCapacity.fetch_add(bytes, std::memory_order_relaxed);
+}
+
+void Heap::removeArrayBufferAuxiliaryCapacity(Subspace* subspace, size_t bytes)
+{
+    if (subspace == &typedArrayAuxiliarySpace)
+        m_arrayBufferAuxiliaryCapacity.fetch_sub(bytes, std::memory_order_relaxed);
+}
+
+size_t Heap::externalMemorySizeForReporting()
+{
+    return m_nativeExternalMemoryAfterLastCollection
+        + (m_nonArrayBufferBytesAllocated - m_nonArrayBufferBytesAllocatedAtLastCollection)
+        + heldArrayBufferSize() + m_unmaterializedArrayBufferBytes + arrayBufferObjectSize();
+}
+
+size_t Heap::jsHeapSizeForReporting()
+{
+    uint64_t allocated = totalBytesAllocated() - m_bytesAllocatedAtLastReportingCollection;
+    uint64_t buffers = m_arrayBufferBytesAllocated - m_arrayBufferBytesAllocatedAtLastCollection;
+    return m_jsHeapSizeAfterLastCollection + allocated - std::min(allocated, buffers);
+}
+
+size_t Heap::jsHeapCapacityForReporting()
+{
+    size_t buffers = m_arrayBufferAuxiliaryCapacity.load(std::memory_order_relaxed);
+    size_t total = m_objectSpace.capacity();
+    return std::max(total - std::min(total, buffers) + m_nonArrayBufferExtraMemoryAfterLastCollection, jsHeapSizeForReporting());
+}
+#endif
 
 size_t Heap::extraMemorySize()
 {
     // FIXME: Change this to use SaturatingArithmetic when available.
     // https://bugs.webkit.org/show_bug.cgi?id=170411
-    CheckedSize checkedTotal = m_extraMemorySize;
+    CheckedSize checkedTotal = m_extraMemorySize.loadRelaxed();
     checkedTotal += m_deprecatedExtraMemorySize;
     checkedTotal += m_arrayBuffers.size();
     size_t total = std::numeric_limits<size_t>::max();
@@ -1744,6 +1853,8 @@ Heap::AuxiliaryEvacuationResult Heap::evacuateSparseAuxiliaryBlocks(double maxim
             RELEASE_ASSERT(MarkedBlock::blockFor(newCell)->handle().cellSize() == cellSize);
             Butterfly* oldButterfly = owner->butterfly();
             memcpySpan(unsafeMakeSpan(static_cast<uint8_t*>(newCell), cellSize), unsafeMakeSpan(std::bit_cast<const uint8_t*>(oldCell), cellSize));
+            if (auto* profiler = vm.heapProfiler())
+                profiler->reallocateSampledCell(oldCell, newCell, 0);
             owner->setButterfly(vm, std::bit_cast<Butterfly*>(std::bit_cast<char*>(oldButterfly) + (std::bit_cast<char*>(newCell) - std::bit_cast<char*>(oldCell))));
             if (isTesting) [[unlikely]] {
                 // As a JSValue this is a cell at an address that is never mapped; as a length it is out of bounds.
@@ -2053,6 +2164,13 @@ void Heap::waitForCollector(NOESCAPE const Func& func)
             }
         }
         
+        if (!done) {
+            // The collector may already be waiting passively for helper threads. Pair its
+            // predicate and wait with this notification, without holding m_threadLock.
+            Locker locker { m_collector->m_markingMutex };
+            m_collector->m_markingConditionVariable.notifyAll();
+        }
+
         // If we're in a stop-the-world scenario, we need to wait for that even if done is true.
         unsigned oldState = m_worldState.load();
         if (stopIfNecessarySlow(oldState))
@@ -2272,6 +2390,12 @@ void Heap::runCollectionEpilogue()
     if (shouldSweepSynchronously())
         sweepSynchronously();
 
+#if USE(BUN_JSC_ADDITIONS)
+    // A capped worker may spend nearly all its time in GC, starving signal-based trap delivery.
+    if (m_heapLimitExceeded)
+        vm().traps().invalidateCodeBlocksForPendingTraps();
+#endif
+
     if (Options::logGC()) [[unlikely]] {
         MonotonicTime after = MonotonicTime::now();
         dataLog((after - before).milliseconds(), "ms]\n");
@@ -2302,6 +2426,28 @@ void Heap::waitForAllCollections()
         });
 }
 
+#if USE(BUN_JSC_ADDITIONS)
+void Heap::scheduleWorkerHeapVerification(GCRequest::Ticket ticket)
+{
+    if (!m_isSafeToCollect || m_isShuttingDown || m_collector->m_threadShouldStop)
+        return;
+    auto previous = m_workerVerificationTicket.load(std::memory_order_acquire);
+    do {
+        if (previous >= ticket)
+            return;
+    } while (!m_workerVerificationTicket.compare_exchange_weak(previous, ticket, std::memory_order_acq_rel));
+    m_stopIfNecessaryTimer->scheduleWorkerHeapVerification();
+}
+
+void Heap::finishWorkerHeapVerification()
+{
+    while (auto ticket = m_workerVerificationTicket.load(std::memory_order_acquire)) {
+        waitForCollection(ticket);
+        m_workerVerificationTicket.compare_exchange_strong(ticket, 0, std::memory_order_acq_rel);
+    }
+}
+#endif
+
 void Heap::sweepEagerlyInEpilogue()
 {
     m_objectSpace.sweepPreciseAllocations();
@@ -2322,15 +2468,23 @@ void Heap::willStartCollection(CollectionScope scope)
 
     dataLogIf(Options::logGC(), "=> ");
     
+#if USE(BUN_JSC_ADDITIONS)
+    if (workerRequiresFullCollection())
+        scheduleWorkerHeapVerification(m_collector->m_lastServedTicket + 1);
+#endif
     m_collectionScope = scope;
     if (scope == CollectionScope::Full) {
         m_shouldDoFullCollection = false;
         dataLogIf(Options::logGC(), "FullCollection, ");
         m_sizeBeforeLastFullCollect = m_sizeAfterLastCollect + totalBytesAllocatedThisCycle();
-        m_extraMemorySize = 0;
+        m_extraMemorySize.storeRelaxed(0);
         m_deprecatedExtraMemorySize = 0;
+#if USE(BUN_JSC_ADDITIONS)
+        m_fastArrayBufferBytesVisited.store(0, std::memory_order_relaxed);
+        m_externalArrayBufferBytesVisited.store(0, std::memory_order_relaxed);
+#endif
 #if ENABLE(RESOURCE_USAGE)
-        m_externalMemorySize = 0;
+        m_externalMemorySize.storeRelaxed(0);
 #endif
         m_shouldDoOpportunisticFullCollection = false;
         if (m_fullActivityCallback)
@@ -2391,6 +2545,26 @@ void Heap::reconcileWeakGCHashTables()
 void Heap::sweepArrayBuffers()
 {
     m_arrayBuffers.sweep(vm(), collectionScope().value_or(CollectionScope::Full));
+#if USE(BUN_JSC_ADDITIONS)
+    JSArrayBufferView* previous = nullptr;
+    // Surviving views are old after each sweep. Eden cannot reclaim that suffix.
+    auto* end = collectionScope() == CollectionScope::Full ? nullptr : m_oldUnmaterializedArrayBufferViews;
+    auto* view = m_unmaterializedArrayBufferViews;
+    while (view != end) {
+        auto* next = view->nextUnmaterializedView();
+        if (view->hasArrayBuffer() || !isMarked(view)) {
+            if (!view->hasArrayBuffer())
+                m_unmaterializedArrayBufferBytes -= view->byteLengthRaw();
+            if (previous)
+                previous->setNextUnmaterializedView(next);
+            else
+                m_unmaterializedArrayBufferViews = next;
+        } else
+            previous = view;
+        view = next;
+    }
+    m_oldUnmaterializedArrayBufferViews = m_unmaterializedArrayBufferViews;
+#endif
 }
 
 void Heap::snapshotUnswept()
@@ -2404,6 +2578,71 @@ void Heap::pruneUnusedSourceProviderCaches()
     if (m_lastCollectionScope && m_lastCollectionScope.value() == CollectionScope::Full)
         vm().pruneUnusedSourceProviderCaches();
 }
+
+#if USE(BUN_JSC_ADDITIONS)
+size_t Heap::arrayBufferGCMemorySize() const
+{
+    return m_arrayBuffers.size() + m_fastArrayBufferBytesVisited.load(std::memory_order_relaxed) + m_externalArrayBufferBytesVisited.load(std::memory_order_relaxed);
+}
+
+void Heap::setWorkerHeapLimits(size_t heapBytes, size_t edenBytes)
+{
+    m_embedderMaxHeapSize = heapBytes;
+    m_embedderMaxEdenSize = edenBytes;
+    m_workerHasFullAccounting = false;
+    updateWorkerHeapAccounting(false);
+    applyWorkerAllocationLimits();
+}
+
+void Heap::updateWorkerHeapAccounting(bool isFullCollection)
+{
+    if (isFullCollection) {
+        m_workerBufferBytesAfterFullCollection = CheckedSize(m_fastArrayBufferBytesVisited.load(std::memory_order_relaxed));
+        m_workerBufferBytesAfterFullCollection += m_externalArrayBufferBytesVisited.load(std::memory_order_relaxed);
+        m_workerHasFullAccounting = true;
+    }
+    // Eden preserves these old-generation charges. Only the preceding full's
+    // typed-vector deduction stays paired with them; ArrayBuffer bytes stay out.
+    CheckedSize accounted = m_oldGenerationCellBytes;
+    accounted += m_extraMemorySize.loadRelaxed();
+    accounted += m_deprecatedExtraMemorySize;
+    if (accounted.hasOverflowed() || (m_workerHasFullAccounting && m_workerBufferBytesAfterFullCollection.hasOverflowed()))
+        m_workerHeapSizeUpperBound = std::numeric_limits<size_t>::max();
+    else {
+        size_t vectors = m_workerHasFullAccounting ? m_workerBufferBytesAfterFullCollection.value() : 0;
+        ASSERT(accounted.value() >= vectors);
+        m_workerHeapSizeUpperBound = accounted.value() >= vectors
+            ? accounted.value() - vectors : std::numeric_limits<size_t>::max();
+    }
+    m_workerAllocatedAtLastCollection = totalBytesAllocated();
+}
+
+size_t Heap::remainingWorkerAllocationBudget() const
+{
+    if (!m_embedderMaxHeapSize)
+        return std::numeric_limits<size_t>::max();
+    size_t remaining = m_embedderMaxHeapSize > m_workerHeapSizeUpperBound
+        ? m_embedderMaxHeapSize - m_workerHeapSizeUpperBound : 0;
+    uint64_t total = totalBytesAllocated();
+    if (total < m_workerAllocatedAtLastCollection)
+        return 0;
+    uint64_t allocated = total - m_workerAllocatedAtLastCollection;
+    return allocated >= remaining ? 0 : remaining - static_cast<size_t>(allocated);
+}
+
+bool Heap::workerRequiresFullCollection() const
+{
+    return m_embedderMaxHeapSize && (!m_workerHasFullAccounting || !remainingWorkerAllocationBudget());
+}
+
+void Heap::applyWorkerAllocationLimits()
+{
+    if (m_embedderMaxEdenSize)
+        m_maxEdenSize = std::min(m_maxEdenSize, m_embedderMaxEdenSize);
+    if (m_embedderMaxHeapSize)
+        m_maxEdenSize = std::min(m_maxEdenSize, std::max<size_t>(1, remainingWorkerAllocationBudget()));
+}
+#endif
 
 void Heap::updateAllocationLimits()
 {
@@ -2446,7 +2685,8 @@ void Heap::updateAllocationLimits()
         // the new allocation limit based on the current size of the heap, with a
         // fixed minimum.
         size_t lastMaxHeapSize = m_maxHeapSize;
-        m_maxHeapSize = std::max(minHeapSize(m_heapType, m_ramSize), proportionalHeapSize(currentHeapSize, m_ramSize));
+        size_t minimumHeapSize = minHeapSize(m_heapType, m_ramSize);
+        m_maxHeapSize = std::max(minimumHeapSize, proportionalHeapSize(currentHeapSize, m_ramSize));
         m_maxEdenSize = m_maxHeapSize - currentHeapSize;
         if (m_isInOpportunisticTask && !isCritical) {
             // After an Opportunistic Full GC, we allow eden to occupy all the space we recovered.
@@ -2455,6 +2695,16 @@ void Heap::updateAllocationLimits()
             // Eden GC to ensure that eden can grow to at least m_maxHeapSize.
             m_maxHeapSize = std::max(m_maxHeapSize, lastMaxHeapSize);
         }
+#if USE(BUN_JSC_ADDITIONS)
+        if (m_embedderMaxHeapSize) {
+            // Each budgeted worker shares the machine's RAM with other VMs.
+            CheckedSize workerGrowthCeiling = currentHeapSize;
+            workerGrowthCeiling += currentHeapSize;
+            if (!workerGrowthCeiling.hasOverflowed())
+                m_maxHeapSize = std::min(m_maxHeapSize, std::max(minimumHeapSize, workerGrowthCeiling.value()));
+            m_maxEdenSize = std::min(m_maxEdenSize, m_maxHeapSize - currentHeapSize);
+        }
+#endif
         dataLogLnIf(verbose, "Full: maxHeapSize = ", m_maxHeapSize);
         dataLogLnIf(verbose, "Full: maxEdenSize = ", m_maxEdenSize);
         m_sizeAfterLastFullCollect = currentHeapSize;
@@ -2483,6 +2733,15 @@ void Heap::updateAllocationLimits()
 
     m_sizeAfterLastCollect = currentHeapSize;
 #if USE(BUN_JSC_ADDITIONS)
+    if (m_embedderMaxHeapSize && m_collectionScope == CollectionScope::Full) {
+        size_t buffers = arrayBufferGCMemorySize();
+        m_sizeAfterLastFullCollectExcludingArrayBuffers = currentHeapSize > buffers ? currentHeapSize - buffers : 0;
+        m_heapLimitExceeded = m_embedderMaxHeapSize && m_sizeAfterLastFullCollectExcludingArrayBuffers > m_embedderMaxHeapSize;
+    }
+    if (m_embedderMaxHeapSize)
+        updateWorkerHeapAccounting(m_collectionScope == CollectionScope::Full);
+    if (m_embedderMaxHeapSize || m_embedderMaxEdenSize)
+        applyWorkerAllocationLimits();
     if (std::exchange(m_reenableEdenActivityCallback, false) && m_edenActivityCallback)
         m_edenActivityCallback->setEnabled(true);
     if (std::exchange(m_reenableFullActivityCallback, false) && m_fullActivityCallback)
@@ -2779,10 +3038,9 @@ bool Heap::currentThreadIsDoingGCWork()
 
 void Heap::reportExtraMemoryVisited(size_t size)
 {
-    size_t* counter = &m_extraMemorySize;
-    
+    // These byte totals do not publish objects; GC phase transitions provide ordering.
     for (;;) {
-        size_t oldSize = *counter;
+        size_t oldSize = m_extraMemorySize.loadRelaxed();
         // FIXME: Change this to use SaturatingArithmetic when available.
         // https://bugs.webkit.org/show_bug.cgi?id=170411
         CheckedSize checkedNewSize = oldSize;
@@ -2790,7 +3048,7 @@ void Heap::reportExtraMemoryVisited(size_t size)
         size_t newSize = std::numeric_limits<size_t>::max();
         if (!checkedNewSize.hasOverflowed()) [[likely]]
             newSize = checkedNewSize.value();
-        if (WTF::atomicCompareExchangeWeakRelaxed(counter, oldSize, newSize))
+        if (m_extraMemorySize.compareExchangeWeakRelaxed(oldSize, newSize))
             return;
     }
 }
@@ -2798,11 +3056,9 @@ void Heap::reportExtraMemoryVisited(size_t size)
 #if ENABLE(RESOURCE_USAGE)
 void Heap::reportExternalMemoryVisited(size_t size)
 {
-    size_t* counter = &m_externalMemorySize;
-
     for (;;) {
-        size_t oldSize = *counter;
-        if (WTF::atomicCompareExchangeWeakRelaxed(counter, oldSize, oldSize + size))
+        size_t oldSize = m_externalMemorySize.loadRelaxed();
+        if (m_externalMemorySize.compareExchangeWeakRelaxed(oldSize, oldSize + size))
             return;
     }
 }
@@ -2854,6 +3110,10 @@ void Heap::collectIfNecessaryOrDefer(GCDeferralContext* deferralContext)
 
         ASSERT(m_maxHeapSize > m_sizeAfterLastCollect);
         size_t bytesAllowedThisCycle = m_maxHeapSize - m_sizeAfterLastCollect;
+#if USE(BUN_JSC_ADDITIONS)
+        if (m_embedderMaxHeapSize || m_embedderMaxEdenSize)
+            bytesAllowedThisCycle = std::min(bytesAllowedThisCycle, m_maxEdenSize);
+#endif
 
         bool isCritical = overCriticalMemoryThreshold();
         if (isCritical)
@@ -2877,7 +3137,11 @@ void Heap::collectIfNecessaryOrDefer(GCDeferralContext* deferralContext)
         //  that object is still live and doesn't give us much indication about how much memory we could actually reclaim. That said,
         // if the system is cricital or we have a small heap we want to be very agressive about reclaiming memory to reduce overall
         // pressure on the system.
-        if (!isCritical && m_heapType == HeapType::Large) {
+        if (!isCritical && m_heapType == HeapType::Large
+#if USE(BUN_JSC_ADDITIONS)
+            && !m_embedderMaxHeapSize
+#endif
+        ) {
             if (static_cast<double>(m_lastOversizedAllocationThisCycle) / bytesAllocatedThisCycle > 1.0 / 3.0)
                 return false;
         }

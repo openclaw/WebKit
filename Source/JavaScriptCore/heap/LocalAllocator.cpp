@@ -30,6 +30,7 @@
 #include "AllocatingScope.h"
 #include "FreeListInlines.h"
 #include "GCDeferralContext.h"
+#include "HeapProfiler.h"
 #include "LocalAllocatorInlines.h"
 #include "MarkedBlockInlines.h"
 #include "Options.h"
@@ -48,6 +49,7 @@ LocalAllocator::LocalAllocator(BlockDirectory* directory)
 
 void LocalAllocator::reset()
 {
+    restoreAllocationSampleLimit();
     m_freeList.clear();
     m_currentBlock = nullptr;
     m_lastActiveBlock = nullptr;
@@ -93,6 +95,7 @@ LocalAllocator::~LocalAllocator()
 
 void LocalAllocator::stopAllocating(MarkedBlock::Handle::StopAllocatingMode mode)
 {
+    restoreAllocationSampleLimit();
     ASSERT(!m_lastActiveBlock);
     if (!m_currentBlock) {
         ASSERT(m_freeList.allocationWillFail());
@@ -113,6 +116,8 @@ void LocalAllocator::resumeAllocating()
     m_lastActiveBlock->resumeAllocating(m_freeList);
     m_currentBlock = m_lastActiveBlock;
     m_lastActiveBlock = nullptr;
+    if (m_samplingConfigured)
+        m_freeList.setAllocationSampleLimit(m_cellsUntilSample);
 }
 
 void LocalAllocator::prepareForAllocation()
@@ -128,32 +133,90 @@ void LocalAllocator::stopAllocatingForGood()
 
 void* LocalAllocator::allocateSlowCase(JSC::Heap& heap, size_t cellSize, GCDeferralContext* deferralContext, AllocationFailureMode failureMode)
 {
+    auto* profiler = heap.vm().heapProfiler();
+    void* result;
+    if (!profiler || !profiler->isSamplingAllocations()) [[likely]]
+        result = allocateSlowCaseWithoutSampling(heap, cellSize, deferralContext, failureMode);
+    else {
+        if (!m_samplingConfigured)
+            configureAllocationSampling(true);
+        restoreAllocationSampleLimit();
+        result = m_freeList.allocateWithCellSize([&] {
+            return static_cast<HeapCell*>(allocateSlowCaseWithoutSampling(heap, cellSize, deferralContext, failureMode));
+        }, cellSize);
+    }
+    // A collection callback can start, stop, or replace the sampling session.
+    profiler = heap.vm().heapProfiler();
+    if (!profiler || !profiler->isSamplingAllocations())
+        return result;
+    if (!m_samplingConfigured)
+        configureAllocationSampling(true);
+    restoreAllocationSampleLimit();
+    if (result) {
+        if (!m_cellsUntilSample) {
+            profiler->sampleAllocation(result, cellSize);
+            m_cellsUntilSample = profiler->nextAllocationSample(cellSize);
+        } else
+            --m_cellsUntilSample;
+    }
+    m_freeList.setAllocationSampleLimit(m_cellsUntilSample);
+    return result;
+}
+
+void LocalAllocator::restoreAllocationSampleLimit()
+{
+    auto consumed = m_freeList.clearAllocationSampleLimit();
+    ASSERT(consumed <= m_cellsUntilSample);
+    m_cellsUntilSample -= consumed;
+}
+
+void LocalAllocator::configureAllocationSampling(bool enabled)
+{
+    restoreAllocationSampleLimit();
+    m_samplingConfigured = enabled;
+    if (enabled) {
+        m_cellsUntilSample = m_directory->markedSpace().heap().vm().heapProfiler()->nextAllocationSample(cellSize());
+        m_freeList.setAllocationSampleLimit(m_cellsUntilSample);
+    }
+}
+
+void* LocalAllocator::allocateSlowCaseWithoutSampling(JSC::Heap& heap, size_t cellSize, GCDeferralContext* deferralContext, AllocationFailureMode failureMode)
+{
     SuperSamplerScope superSamplerScope(false);
     ASSERT(heap.vm().currentThreadIsHoldingAPILock());
     doTestCollectionsIfNeeded(heap, deferralContext);
 
     ASSERT(!m_directory->markedSpace().isIterating());
     heap.didAllocate(m_freeList.originalSize());
+#if USE(BUN_JSC_ADDITIONS)
+    heap.didAllocateArrayBufferAuxiliaryMemory(m_directory->subspace(), m_freeList.originalSize());
+#endif
     
     didConsumeFreeList();
 
 #if USE(BUN_JSC_ADDITIONS)
     if (Options::evacuateAuxiliaryBlocksAfterEveryFullCollection() && !deferralContext) [[unlikely]] {
         heap.evacuateAuxiliaryBlocksIfDue();
+        restoreAllocationSampleLimit();
         // The evacuation may have allocated from this allocator.
         if (m_currentBlock)
-            return allocate(heap, cellSize, deferralContext, failureMode);
+            return m_freeList.allocateWithCellSize([&] {
+                return static_cast<HeapCell*>(allocateSlowCaseWithoutSampling(heap, cellSize, deferralContext, failureMode));
+            }, cellSize);
     }
 #endif
     
     AllocatingScope helpingHeap(heap);
 
     heap.collectIfNecessaryOrDefer(deferralContext);
+    restoreAllocationSampleLimit();
     
     // Goofy corner case: the GC called a callback and now this directory has a currentBlock. This only
     // happens when running WebKit tests, which inject a callback into the GC's finalization.
     if (m_currentBlock) [[unlikely]]
-        return allocate(heap, cellSize, deferralContext, failureMode);
+        return m_freeList.allocateWithCellSize([&] {
+            return static_cast<HeapCell*>(allocateSlowCaseWithoutSampling(heap, cellSize, deferralContext, failureMode));
+        }, cellSize);
     
     void* result = tryAllocateWithoutCollecting(cellSize);
     
@@ -302,4 +365,3 @@ void LocalAllocator::doTestCollectionsIfNeeded(JSC::Heap& heap, GCDeferralContex
 }
 
 } // namespace JSC
-

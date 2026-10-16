@@ -1408,6 +1408,14 @@ static void preCommitStackMemory(void* stackLimit)
 }
 #endif
 
+#if USE(BUN_JSC_ADDITIONS)
+void VM::setWorkerStackUsage(size_t bytes)
+{
+    m_workerStackUsage = bytes;
+    updateStackLimits();
+}
+#endif
+
 void VM::updateStackLimits()
 {
     void* lastSoftStackLimit = traps().softStackLimit();
@@ -1423,8 +1431,13 @@ void VM::updateStackLimits()
     void* newSoftStackLimit = 0;
     if (m_stackPointerAtVMEntry) {
         char* startOfStack = reinterpret_cast<char*>(m_stackPointerAtVMEntry);
-        newSoftStackLimit = stack.recursionLimit(startOfStack, Options::maxPerThreadStackUsage(), m_currentSoftReservedZoneSize);
-        m_stackLimit = stack.recursionLimit(startOfStack, Options::maxPerThreadStackUsage(), reservedZoneSize);
+        size_t maxStackUsage = Options::maxPerThreadStackUsage();
+#if USE(BUN_JSC_ADDITIONS)
+        if (m_workerStackUsage)
+            maxStackUsage = m_workerStackUsage;
+#endif
+        newSoftStackLimit = stack.recursionLimit(startOfStack, maxStackUsage, m_currentSoftReservedZoneSize);
+        m_stackLimit = stack.recursionLimit(startOfStack, maxStackUsage, reservedZoneSize);
     } else {
         newSoftStackLimit = stack.recursionLimit(m_currentSoftReservedZoneSize);
         m_stackLimit = stack.recursionLimit(reservedZoneSize);
@@ -1719,14 +1732,14 @@ void VM::drainMicrotasks()
     if (executionForbidden()) [[unlikely]]
         m_defaultMicrotaskQueue->clear();
     else {
-        std::optional<VMEntryScope> entryScope;
+        VMEntryScope entryScope;
         if (!m_defaultMicrotaskQueue->isEmpty())
-            entryScope.emplace(*this, nullptr);
+            entryScope.enter(*this, nullptr);
         while (true) {
             m_defaultMicrotaskQueue->performMicrotaskCheckpoint</* useCallOnEachMicrotask */ true>(*this,
                 [&](JSGlobalObject*, JSGlobalObject* nextGlobalObject) {
                     if (entryScope && nextGlobalObject)
-                        entryScope->setGlobalObject(nextGlobalObject);
+                        entryScope.setGlobalObject(nextGlobalObject);
                 });
             if (hasPendingTerminationException()) [[unlikely]]
                 return;
@@ -1736,7 +1749,7 @@ void VM::drainMicrotasks()
             if (m_defaultMicrotaskQueue->isEmpty())
                 break;
             if (!entryScope)
-                entryScope.emplace(*this, nullptr);
+                entryScope.enter(*this, nullptr);
         }
     }
     finalizeSynchronousJSExecution();

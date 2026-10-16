@@ -67,6 +67,24 @@ endif ()
 
 WEBKIT_EXECUTABLE_DECLARE(jsc)
 
+if (USE_MIMALLOC AND UNIX)
+    find_package(Threads REQUIRED)
+    add_executable(testMimallocExit ../../bmalloc/mimalloc/test-exit.c)
+    target_link_libraries(testMimallocExit PRIVATE mimalloc-obj Threads::Threads ${CMAKE_DL_LIBS})
+    add_library(mimallocExitTestHooks OBJECT ../../bmalloc/mimalloc/mimalloc/src/static.c)
+    target_include_directories(mimallocExitTestHooks PUBLIC $<TARGET_PROPERTY:mimalloc-obj,INCLUDE_DIRECTORIES>)
+    target_compile_options(mimallocExitTestHooks PRIVATE $<TARGET_PROPERTY:mimalloc-obj,COMPILE_OPTIONS>)
+    target_compile_definitions(mimallocExitTestHooks PRIVATE
+        $<TARGET_PROPERTY:mimalloc-obj,COMPILE_DEFINITIONS>
+        MI_TEST_THREAD_KEY_WAIT=1
+        pthread_setspecific=mimalloc_test_setspecific
+        pthread_key_delete=mimalloc_test_key_delete
+    )
+    add_executable(testMimallocExitInFlight ../../bmalloc/mimalloc/test-exit-in-flight.c)
+    target_link_libraries(testMimallocExitInFlight PRIVATE mimallocExitTestHooks Threads::Threads ${CMAKE_DL_LIBS})
+    add_dependencies(jsc testMimallocExit testMimallocExitInFlight)
+endif ()
+
 if (USE_BUN_JSC_ADDITIONS)
     # bun:ffi (JSC FFI) C++ unit / ABI test executable, modeled on the
     # testmasm_* variables below. Build and run it with:
@@ -274,4 +292,79 @@ if (DEVELOPER_MODE)
         DESTINATION
         ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
     )
+endif ()
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$" AND NOT ENABLE_C_LOOP)
+    enable_language(ASM)
+    set(testVMEntryRecord_SOURCES
+        ../API/tests/VMEntryRecordProbeX86_64.S
+        ../API/tests/testVMEntryRecord.cpp
+    )
+    set(testVMEntryRecord_DEFINITIONS ${jsc_PRIVATE_DEFINITIONS})
+    set(testVMEntryRecord_PRIVATE_INCLUDE_DIRECTORIES ${jsc_PRIVATE_INCLUDE_DIRECTORIES})
+    set(testVMEntryRecord_FRAMEWORKS ${jsc_FRAMEWORKS})
+    set(testVMEntryRecord_LIBRARIES ${CMAKE_DL_LIBS})
+    if (USE_EXTERNAL_MIMALLOC)
+        list(APPEND testVMEntryRecord_SOURCES ExternalMimallocShims.cpp)
+        list(APPEND testVMEntryRecord_LIBRARIES $<TARGET_OBJECTS:mimalloc-obj>)
+    endif ()
+    WEBKIT_EXECUTABLE_DECLARE(testVMEntryRecord)
+    WEBKIT_EXECUTABLE(testVMEntryRecord)
+endif ()
+
+# Scope retention regression: same source before and after the production fix.
+option(TEST_VM_ENTRY_SCOPE_OPTIONAL_CONTROL "Test the historical std::optional owner" OFF)
+set(testVMEntryScope_SOURCES ../API/tests/testVMEntryScope.cpp)
+set(testVMEntryScope_DEFINITIONS ${jsc_PRIVATE_DEFINITIONS})
+set(testVMEntryScope_PRIVATE_INCLUDE_DIRECTORIES ${jsc_PRIVATE_INCLUDE_DIRECTORIES})
+set(testVMEntryScope_FRAMEWORKS ${jsc_FRAMEWORKS})
+set(testVMEntryScope_LIBRARIES ${CMAKE_DL_LIBS})
+if (WIN32)
+    list(APPEND testVMEntryScope_LIBRARIES Winmm)
+endif ()
+if (USE_EXTERNAL_MIMALLOC)
+    list(APPEND testVMEntryScope_SOURCES ExternalMimallocShims.cpp)
+    list(APPEND testVMEntryScope_LIBRARIES $<TARGET_OBJECTS:mimalloc-obj>)
+endif ()
+if (TEST_VM_ENTRY_SCOPE_OPTIONAL_CONTROL)
+    list(APPEND testVMEntryScope_DEFINITIONS TEST_VM_ENTRY_SCOPE_OPTIONAL_CONTROL=1)
+endif ()
+WEBKIT_EXECUTABLE_DECLARE(testVMEntryScope)
+WEBKIT_EXECUTABLE(testVMEntryScope)
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND ENABLE_DFG_JIT AND (WTF_CPU_X86_64 OR WTF_CPU_ARM64 OR WTF_CPU_RISCV64))
+    include(CheckCXXSymbolExists)
+    check_cxx_symbol_exists(getcontext "ucontext.h" HAVE_FOREIGN_STACK_TEST_GETCONTEXT)
+    check_cxx_symbol_exists(makecontext "ucontext.h" HAVE_FOREIGN_STACK_TEST_MAKECONTEXT)
+    check_cxx_symbol_exists(swapcontext "ucontext.h" HAVE_FOREIGN_STACK_TEST_SWAPCONTEXT)
+endif ()
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND ENABLE_DFG_JIT AND (WTF_CPU_X86_64 OR WTF_CPU_ARM64 OR WTF_CPU_RISCV64)
+    AND HAVE_FOREIGN_STACK_TEST_GETCONTEXT AND HAVE_FOREIGN_STACK_TEST_MAKECONTEXT AND HAVE_FOREIGN_STACK_TEST_SWAPCONTEXT)
+    set(testForeignStackSuspension_SOURCES ../API/tests/testForeignStackSuspension.cpp)
+    set(testForeignStackSuspension_DEFINITIONS ${jsc_PRIVATE_DEFINITIONS})
+    set(testForeignStackSuspension_PRIVATE_INCLUDE_DIRECTORIES ${jsc_PRIVATE_INCLUDE_DIRECTORIES})
+    set(testForeignStackSuspension_FRAMEWORKS ${jsc_FRAMEWORKS})
+    set(testForeignStackSuspension_LIBRARIES ${CMAKE_DL_LIBS})
+    if (USE_EXTERNAL_MIMALLOC)
+        list(APPEND testForeignStackSuspension_SOURCES ExternalMimallocShims.cpp)
+        list(APPEND testForeignStackSuspension_LIBRARIES $<TARGET_OBJECTS:mimalloc-obj>)
+    endif ()
+    WEBKIT_EXECUTABLE_DECLARE(testForeignStackSuspension)
+    WEBKIT_EXECUTABLE(testForeignStackSuspension)
+    add_dependencies(jsc testForeignStackSuspension)
+endif ()
+
+if (USE_BUN_JSC_ADDITIONS)
+    set(testGlobalProxyPrototype_SOURCES ../API/tests/testGlobalProxyPrototype.cpp)
+    set(testGlobalProxyPrototype_DEFINITIONS ${jsc_PRIVATE_DEFINITIONS})
+    set(testGlobalProxyPrototype_PRIVATE_INCLUDE_DIRECTORIES ${jsc_PRIVATE_INCLUDE_DIRECTORIES})
+    set(testGlobalProxyPrototype_FRAMEWORKS ${jsc_FRAMEWORKS})
+    set(testGlobalProxyPrototype_LIBRARIES ${CMAKE_DL_LIBS})
+    if (USE_EXTERNAL_MIMALLOC)
+        list(APPEND testGlobalProxyPrototype_SOURCES ExternalMimallocShims.cpp)
+        list(APPEND testGlobalProxyPrototype_LIBRARIES $<TARGET_OBJECTS:mimalloc-obj>)
+    endif ()
+    WEBKIT_EXECUTABLE_DECLARE(testGlobalProxyPrototype)
+    WEBKIT_EXECUTABLE(testGlobalProxyPrototype)
 endif ()

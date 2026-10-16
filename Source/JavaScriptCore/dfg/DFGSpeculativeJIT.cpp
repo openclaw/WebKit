@@ -11644,7 +11644,7 @@ void SpeculativeJIT::emitNewTypedArrayWithSizeInRegister(Node* node, TypedArrayT
         }
     }
     emitAllocateVariableSized(
-        storageGPR, vm().primitiveGigacageAuxiliarySpace(), scratchGPR, scratchGPR,
+        storageGPR, vm().typedArrayAuxiliarySpace(), scratchGPR, scratchGPR,
         scratchGPR2, slowCases);
     
     constexpr unsigned zeroFillUnrollWordLimit = 16;
@@ -11692,9 +11692,19 @@ void SpeculativeJIT::emitNewTypedArrayWithSizeInRegister(Node* node, TypedArrayT
     store32(sizeGPR, Address(resultGPR, JSArrayBufferView::offsetOfLength()));
     store32(TrustedImm32(0), Address(resultGPR, JSArrayBufferView::offsetOfByteOffset()));
 #endif
-    store8(
-        TrustedImm32(FastTypedArray),
-        Address(resultGPR, JSArrayBufferView::offsetOfMode()));
+#if USE(BUN_JSC_ADDITIONS)
+    move(TrustedImmPtr(vm().heap.addressOfUnmaterializedArrayBufferViews()), scratchGPR2);
+    loadPtr(Address(scratchGPR2), scratchGPR);
+    or64(TrustedImm64(JSArrayBufferView::fastModeBits()), scratchGPR);
+    store64(scratchGPR, Address(resultGPR, JSArrayBufferView::offsetOfModeAndNext()));
+    storePtr(resultGPR, Address(scratchGPR2));
+    move(sizeGPR, scratchGPR);
+    lshiftPtr(TrustedImm32(logElementSize(typedArrayType)), scratchGPR);
+    move(TrustedImmPtr(vm().heap.addressOfUnmaterializedArrayBufferBytes()), scratchGPR2);
+    add64(scratchGPR, Address(scratchGPR2));
+#else
+    store8(TrustedImm32(FastTypedArray), Address(resultGPR, JSArrayBufferView::offsetOfMode()));
+#endif
     
     mutatorFence(vm());
     

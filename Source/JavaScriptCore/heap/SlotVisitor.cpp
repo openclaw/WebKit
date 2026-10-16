@@ -325,6 +325,11 @@ void SlotVisitor::noteLiveAuxiliaryCell(HeapCell* cell)
 
     size_t cellSize = container.cellSize();
     noteBytesMarked(container.vm().heap, cellSize);
+#if USE(BUN_JSC_ADDITIONS)
+    JSC::Heap& heap = container.vm().heap;
+    if (cell->subspace() == &heap.typedArrayAuxiliarySpace)
+        heap.reportArrayBufferMemoryVisited(cellSize, 0);
+#endif
     m_nonCellVisitCount += cellSize;
 }
 
@@ -750,6 +755,11 @@ SlotVisitor::SharedDrainResult SlotVisitor::drainInParallelPassively(MonotonicTi
             return SharedDrainResult::Done;
         }
 
+        // A mutator can start waiting after the entry check while helpers serve another heap.
+        if (heap.m_worldState.load() & Heap::mutatorWaitingBit) {
+            locker.unlockEarly();
+            return drainInParallel(timeout);
+        }
         collector().m_markingConditionVariable.waitUntil(collector().m_markingMutex, timeout);
     }
 }
