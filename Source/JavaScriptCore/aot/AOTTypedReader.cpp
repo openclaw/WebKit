@@ -30,7 +30,7 @@ public:
             return "this is not a program written by the front end"_s;
         if (m_header->version != Format::version || m_header->opcodeNamesHash != Format::opcodeNamesHash || m_header->builtinsHash != builtinsHash)
             return "the front end and the engine have different versions"_s;
-        if (m_header->sizeInBytes != m_buffer.size())
+        if (m_header->sizeInBytes.value() != m_buffer.size())
             return "the program's length does not match its header"_s;
         for (unsigned i = 0; i < std::size(Format::recordSizes); ++i) {
             if (m_header->recordSizes[i] != Format::recordSizes[i])
@@ -524,11 +524,12 @@ private:
     template<typename T>
     std::span<const T> section(Format::Section section)
     {
-        if (section.offsetInBytes % alignof(T) || static_cast<uint64_t>(section.offsetInBytes) + static_cast<uint64_t>(section.count) * sizeof(T) > m_buffer.size()) {
+        uint64_t offset = section.offsetInBytes.value();
+        if (offset % alignof(T) || offset > m_buffer.size() || section.count > (m_buffer.size() - offset) / sizeof(T)) {
             m_failed = true;
             return { };
         }
-        return { reinterpret_cast<const T*>(m_buffer.data() + section.offsetInBytes), section.count };
+        return { reinterpret_cast<const T*>(m_buffer.data() + offset), section.count };
     }
 
     template<typename T>

@@ -12,11 +12,20 @@
 namespace JSC { namespace AOT { namespace Typed { namespace Format {
 
 static constexpr uint32_t magic = 0x52495442;
-static constexpr uint32_t version = 37;
+static constexpr uint32_t version = 38;
 static constexpr uint32_t none = UINT32_MAX;
 
+// The wire format stays aligned to 32-bit words, including its wide byte offsets.
+struct UInt64 {
+    uint32_t low;
+    uint32_t high;
+
+    uint64_t value() const { return static_cast<uint64_t>(high) << 32 | low; }
+};
+static_assert(sizeof(UInt64) == 2 * sizeof(uint32_t) && alignof(UInt64) == alignof(uint32_t));
+
 struct Section {
-    uint32_t offsetInBytes;
+    UInt64 offsetInBytes;
     uint32_t count;
 };
 
@@ -404,7 +413,7 @@ static constexpr uint32_t programLogsTypeErrors = 1;
 struct Header {
     uint32_t magic;
     uint32_t version;
-    uint32_t sizeInBytes;
+    UInt64 sizeInBytes;
     uint32_t opcodeNamesHash;
     uint32_t builtinsHash;
     uint32_t flags;
@@ -433,6 +442,7 @@ struct Header {
     Span webAssemblyModules;
     uint32_t recordSizes[12];
 };
+static_assert(sizeof(Header) == (7 + 14 * 3 + 18 + 12) * sizeof(uint32_t));
 
 static constexpr uint32_t recordSizes[12] = {
     sizeof(String), sizeof(DeclaredType), sizeof(ObjectPart), sizeof(Shape), sizeof(Field), sizeof(Method),
