@@ -22,10 +22,11 @@ chmod 700 "$results/home" "$results/tmp"
 ln -s "$candidate" "$results/bin/bun"
 export HOME="$results/home" TMPDIR="$results/tmp" PATH="$results/bin:$PATH" OPENCLAW_CI_PLATFORM=linux
 # Retain all 82 historical cases and the three additions selected by the frozen candidate.
-"$candidate" --eval 'import {selectTests} from "./scripts/openclaw-ci/tests.ts"; import{execFileSync}from"node:child_process";import{readFileSync,writeFileSync,mkdirSync}from"node:fs";const tracked=execFileSync("git",["ls-files","-z","test"],{encoding:"utf8"}).split("\0").filter(Boolean);const historical=[...new Set(process.argv.slice(1).flatMap(path=>JSON.parse(readFileSync(path,"utf8"))))];if(historical.length!==82)throw Error("historical selection drift");const selected=[...new Set([...historical,...selectTests(["scripts/build/deps/webkit.ts"],tracked,true,"linux")])].sort();for(const file of selected)if(!tracked.includes(file))throw Error("missing historical/current selected test "+file);if(selected.length!==85)throw Error("frozen candidate selection drift");mkdirSync("build/openclaw-ci",{recursive:true});writeFileSync("build/openclaw-ci/selected.json",JSON.stringify(selected,null,2)+"\n");' "$inputs/selected.json" "$inputs/sync/selected.json"
+"$candidate" --eval 'import {selectTests} from "./scripts/openclaw-ci/tests.ts"; import{$}from"bun";import{readFileSync,writeFileSync,mkdirSync}from"node:fs";const tracked=(await $`git ls-files -z test`.text()).split("\0").filter(Boolean);const historical=[...new Set(process.argv.slice(1).flatMap(path=>JSON.parse(readFileSync(path,"utf8"))))];if(historical.length!==82)throw Error("historical selection drift");const selected=[...new Set([...historical,...selectTests(["scripts/build/deps/webkit.ts"],tracked,true,"linux")])].sort();for(const file of selected)if(!tracked.includes(file))throw Error("missing historical/current selected test "+file);if(selected.length!==85)throw Error("frozen candidate selection drift");mkdirSync("build/openclaw-ci",{recursive:true});writeFileSync("build/openclaw-ci/selected.json",JSON.stringify(selected,null,2)+"\n");' "$inputs/selected.json" "$inputs/sync/selected.json"
 cp build/openclaw-ci/selected.json "$results/selected.json"
 rm -f build/openclaw-ci/results.json
-if "$candidate" scripts/openclaw-ci/tests.ts test > "$results/tests.log" 2>&1; then
+junit_prefix="openclaw-sync-junit-$(python3 -c 'import uuid;print(uuid.uuid4().hex)')-"
+if "$candidate" scripts/openclaw-ci/tests.ts test --junit-prefix "$junit_prefix" > "$results/tests.log" 2>&1; then
   selection_exit=0
 else
   selection_exit=$?
@@ -34,6 +35,8 @@ if test -f build/openclaw-ci/results.json; then
   cp build/openclaw-ci/results.json "$results/results.json"
 fi
 if test "$selection_exit" -ne 0; then exit "$selection_exit"; fi
+# The native runner uses agent.tmpdir(), which selects /tmp on this Linux lane.
+python3 "$inputs/compile_cache.py" /tmp "$junit_prefix" "$results/module-junit.xml"
 # Run these unchanged upstream tests explicitly as well, so skips cannot satisfy the gate.
 "$candidate" test test/js/web/atomics.test.ts test/js/bun/wasm/compile-rss.test.ts -t 'Atomics.wait lets mimalloc|a notify that arrives while Atomics.wait|WebAssembly.compile does not retain' > "$results/memory-release.log" 2>&1
 "$candidate" test --expose-internals test/js/node/v8/capture-stack-trace.test.js test/js/node/util/util.test.js test/js/bun/sourcemap > "$results/stack-positions.log" 2>&1

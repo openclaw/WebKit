@@ -162,6 +162,7 @@ jobs:
             ${{ runner.temp }}/qualification/candidate/*.log
             ${{ runner.temp }}/qualification/compatibility/*.log
             ${{ runner.temp }}/qualification/sync/*.json
+            ${{ runner.temp }}/qualification/sync/*.xml
             ${{ runner.temp }}/qualification/sync/*.log
             ${{ runner.temp }}/qualification/jsc-*/results
             ${{ runner.temp }}/qualification/jsc-stack/*.log

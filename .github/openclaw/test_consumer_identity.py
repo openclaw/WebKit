@@ -9,7 +9,8 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-from qualification import consumer_identity as consumer
+from qualification import consumer_identity as consumer, compile_cache
+import xml.etree.ElementTree as ET
 
 
 def release_fixture(inputs, source):
@@ -34,9 +35,14 @@ def release_fixture(inputs, source):
         'runtime':{'bun_revision':consumer.CONFIG['baseline']['commit'],'webkit':consumer.CONFIG['baseline']['engine'],'platform':'linux','architecture':'x64'}}
     consumer.write_once(proof/'candidate-identity.json',identity);consumer.write_once(proof/'baseline-identity.json',baseline)
     digest=consumer.sha(proof/'candidate-identity.json')
+    report=proof/'sync/module-junit.xml';report.parent.mkdir()
+    suites=ET.Element('testsuites');suite=ET.SubElement(suites,'testsuite',name=compile_cache.MODULE)
+    for classname,name in compile_cache.CASES:
+        ET.SubElement(suite,'testcase',classname=classname,name=name,file=compile_cache.MODULE)
+    ET.ElementTree(suites).write(report,encoding='utf-8',xml_declaration=True)
     gate={'passed':True,'source':source,'comparison':'bun-plus-engine-upgrade','selected_files':44,'result_files':46,
         'candidate_identity_sha256':digest,'baseline_identity_sha256':consumer.sha(proof/'baseline-identity.json'),
-        'upstream_sync':{'passed':True,'source':source,'candidate_identity_sha256':digest,'historical_selected_files':82,'selected_files':85,'regressions':0},
+        'upstream_sync':{'passed':True,'source':source,'candidate_identity_sha256':digest,'historical_selected_files':82,'selected_files':85,'regressions':0,'compile_cache':compile_cache.evidence(report)},
         'engine':{'passed':True,'source':source},'compatibility':{'passed':True,'source':source,'candidate_identity_sha256':digest,'memory_tests':3,'startup':True}}
     (proof/'gate.json').write_text(json.dumps(gate))
 

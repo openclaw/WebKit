@@ -1,5 +1,8 @@
 import importlib.util
 import json
+import base64
+import hashlib
+import xml.etree.ElementTree as ET
 from pathlib import Path
 import subprocess
 import tempfile
@@ -229,6 +232,53 @@ class ReleaseIntegrity(unittest.TestCase):
     def test_wrong_engine_gate_source_rejected(self):
         p=self.inputs/'qualification/gate.json';m=json.loads(p.read_text());m['engine']['source']='b'*40;p.write_text(json.dumps(m))
         with self.assertRaisesRegex(ValueError,'upstream-sync'):self.assemble()
+    def test_compile_cache_case_and_digest_binding(self):
+        report=self.inputs/'qualification/sync/module-junit.xml';original=report.read_bytes()
+        cases=[('missing',lambda r,s:s.remove(r)),
+               ('skipped',lambda r,s:ET.SubElement(r,'skipped')),
+               ('failure',lambda r,s:ET.SubElement(r,'failure')),
+               ('error',lambda r,s:ET.SubElement(r,'error')),
+               ('duplicate',lambda r,s:s.append(ET.fromstring(ET.tostring(r)))),
+               ('wrong-file',lambda r,s:r.set('file','other.test.js')),
+               ('wrong-class',lambda r,s:r.set('classname','other')),
+               ('other-failure',lambda r,s:ET.SubElement(ET.SubElement(s,'testcase',name='other'),'failure')),
+               ('digest',lambda r,s:r.set('assertions','1'))]
+        for name,change in cases:
+            with self.subTest(name=name):
+                try:
+                    root=ET.fromstring(original);suite=root.find('testsuite');row=suite.find('testcase');change(row,suite)
+                    ET.ElementTree(root).write(report,encoding='utf-8',xml_declaration=True)
+                    with self.assertRaises(ValueError):release.assemble(self.inputs,self.root/('cache-'+name),SOURCE)
+                finally:report.write_bytes(original)
+        report.unlink()
+        with self.assertRaises(FileNotFoundError):release.assemble(self.inputs,self.root/'cache-no-report',SOURCE)
+
+    def test_compile_cache_receipt_required(self):
+        p=self.inputs/'qualification/gate.json';gate=json.loads(p.read_text())
+        del gate['upstream_sync']['compile_cache'];p.write_text(json.dumps(gate))
+        with self.assertRaisesRegex(ValueError,'compile-cache'):self.assemble()
+
+    def test_compile_cache_collection_requires_this_runs_native_report(self):
+        temp=self.root/'native-junit';temp.mkdir();prefix='openclaw-sync-junit-'+'1'*32+'-'
+        output=self.root/'module-junit.xml';gate=release.compile_cache
+        fixture=(self.inputs/'qualification/sync/module-junit.xml').read_bytes()
+        hashed=base64.urlsafe_b64encode(hashlib.sha1(gate.MODULE.encode()).digest()).decode().rstrip('=')
+        filename='test-'+hashed+'.xml'
+        stale=temp/('openclaw-sync-junit-'+'0'*32+'-old');stale.mkdir();(stale/filename).write_bytes(fixture)
+        with self.assertRaisesRegex(ValueError,'current-run'):gate.collect(temp,prefix,output)
+        current=temp/(prefix+'native');current.mkdir()
+        with self.assertRaisesRegex(ValueError,'report missing'):gate.collect(temp,prefix,output)
+        report=current/filename;report.symlink_to(stale/filename)
+        with self.assertRaisesRegex(ValueError,'report missing'):gate.collect(temp,prefix,output)
+        report.unlink();report.write_bytes(fixture)
+        duplicate=temp/(prefix+'duplicate');duplicate.mkdir()
+        with self.assertRaisesRegex(ValueError,'current-run'):gate.collect(temp,prefix,output)
+        duplicate.rmdir();gate.collect(temp,prefix,output)
+        self.assertEqual(output.read_bytes(),fixture)
+        self.assertEqual(gate.evidence(output),gate.evidence(report))
+        with self.assertRaises(FileExistsError):gate.collect(temp,prefix,output)
+        with self.assertRaisesRegex(ValueError,'prefix'):gate.collect(temp,'../',self.root/'invalid.xml')
+
     def test_authorization_accepts_rebased_release_branch(self):
         run={'head_sha':SOURCE,'head_branch':'openclaw/release-5718a6ec','event':'workflow_dispatch','path':'.github/workflows/openclaw-artifacts.yml','run_attempt':1}
         config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())

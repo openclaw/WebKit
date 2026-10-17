@@ -46,8 +46,8 @@ dependencies, build directories and caches. The historical baseline is Bun
 `b83b544ef744b6ab0dc1feadb59652261d64291d` with engine
 `1600131e46b5af48bbda3559af8d8a3327230b6e` and the recorded checksum/VM fixture
 patches 000 and 012. The candidate is Bun
-`05e0989c468b58083d5293a4b304dd4c73c0b506`, tree
-`58dde9ebda7f84e5f996a775ac8e781fe5657471`, with only its tracked WebKit
+`ac9a670feaafe7623564b51e0257c3de583fe9ef`, tree
+`77decc869e3e0da3305e11cb3059e0e35a3a8be3`, with only its tracked WebKit
 manifest replaced by the measured candidate Linux archive. This is a Bun-plus-engine
 upgrade comparison, not an isolated engine measurement. The job runs the original 44-file
 fork selector output plus its two dependency checks, requires identical all-pass
@@ -247,6 +247,14 @@ The feature gate uses the sorted union of those 44 paths, the historical 56 sync
 paths, and the candidate selector: 82 historical paths and 85 total. Missing
 tracked paths fail qualification. Startup and all three unchanged memory-release
 tests remain mandatory.
+
+The existing x64 Linux consumer uses Release with LTO disabled. Its 85-file run
+requires exactly one passing native JUnit result for each of the eight original
+compile-cache exit modes and deferred idle loading. Assembly revalidates those
+case identities and the archived XML digest. This is not final ThinLTO shipping
+qualification. ARM64 JSC proof is separate: the ARM64 Debug/ASAN natural-exit and
+deferred-idle controls exceeded their existing deadlines and remain unresolved
+until matched-profile evidence is available.
 
 A single post-build candidate receipt records the Bun commit, tree and index;
 engine source and lane archive bytes; manifest base blob, overlay and patch;

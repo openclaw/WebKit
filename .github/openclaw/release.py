@@ -2,7 +2,7 @@
 """Assemble checked lane outputs, then create one immutable release without replacement."""
 import argparse
 import artifacts as artifact_source
-from qualification import consumer_identity
+from qualification import consumer_identity, compile_cache
 import hashlib
 import json
 import os
@@ -62,6 +62,8 @@ def assemble(inputs,out,source):
         or sync.get('historical_selected_files')!=82 or sync.get('selected_files')!=85
         or sync.get('regressions')!=0 or engine.get('passed') is not True or engine.get('source')!=source):
         raise ValueError('missing or mismatched upstream-sync/engine qualification')
+    if sync.get('compile_cache')!=compile_cache.evidence(proof/'sync/module-junit.xml'):
+        raise ValueError('missing or mismatched compile-cache qualification')
     compatibility=gate.get('compatibility',{})
     if (compatibility.get('passed') is not True or compatibility.get('source')!=source
         or compatibility.get('candidate_identity_sha256')!=identity_sha

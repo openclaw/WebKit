@@ -2,6 +2,7 @@
 """Require complete upstream-sync and patch evidence before release assembly."""
 import json,re,sys
 from consumer_identity import engine_input,verify,sha
+from compile_cache import evidence as compile_cache_evidence
 from pathlib import Path
 root=Path(sys.argv[1]);out=root/'sync'
 selected=json.loads((out/'selected.json').read_text())
@@ -43,7 +44,7 @@ assert compatibility['candidate_identity_sha256']==identity_sha
 assert compatibility['memory_tests']==3 and compatibility['startup'] is True
 record={'passed':True,'source':sys.argv[2],'candidate_identity_sha256':identity_sha,
         'historical_selected_files':82,'selected_files':len(selected),'result_rows':len(rows),'regressions':0,'tests':counts,
-        'gc_progress':gc_progress}
+        'gc_progress':gc_progress,'compile_cache':compile_cache_evidence(out/'module-junit.xml')}
 (root/'sync-gate.json').write_text(json.dumps(record,indent=2)+'\n')
 gate=json.loads((root/'gate.json').read_text())
 assert gate['candidate_identity_sha256']==identity_sha
