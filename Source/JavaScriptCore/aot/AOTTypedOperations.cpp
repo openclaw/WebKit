@@ -4322,9 +4322,7 @@ UniquedStringImpl* nameInStructureDescriptor(VM& vm, unsigned number, unsigned i
     auto& data = *image->at<Typed::Data>(image->header().typedDataOffset);
     uint32_t facts = data.stringFacts(data.row(number)[1 + index]);
     RELEASE_ASSERT(facts & Typed::Data::stringHasIdentifierNumber);
-    const Identifier* name = VMProgram::of(vm)->identifierIfCreated(facts & Typed::Data::stringHashMask);
-    RELEASE_ASSERT(name);
-    return name->impl();
+    return VMProgram::of(vm)->identifier(facts & Typed::Data::stringHashMask);
 }
 
 static JSObject* newObjectWithFields(Instance* instance, JSGlobalObject* globalObject, VM& vm, Data* data, Slot* cache, Structure* empty, JSCell* constructor, uint32_t count, const EncodedJSValue* values, const uint32_t* nameIndicesOf, uint32_t numberInRegisters, uint32_t structureDescriptorPlusOne = 0)
