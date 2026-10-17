@@ -37,6 +37,7 @@
 #include "MegamorphicCache.h"
 #include "ObjectInitializationScope.h"
 #include "SparseArrayValueMap.h"
+#include "StructureCreateInlines.h"
 #include "StructureInlines.h"
 #include "TypedArrayType.h"
 #include "VM.h"
@@ -1062,7 +1063,7 @@ inline void JSObject::setPrivateBrand(JSGlobalObject* globalObject, JSValue bran
 // Function forEachOwnIndexedProperty should only used in the fast path
 // for copying own non-GetterSetter indexed properties.
 template<JSObject::SortMode mode, typename Functor>
-void JSObject::forEachOwnIndexedProperty(JSGlobalObject* globalObject, const Functor& functor)
+void JSObject::forEachOwnIndexedProperty(JSGlobalObject* globalObject, NOESCAPE const Functor& functor)
 {
     ASSERT(structure()->canPerformFastPropertyEnumerationCommon());
     ASSERT(canHaveExistingOwnIndexedProperties() && !canHaveExistingOwnIndexedGetterSetterProperties());

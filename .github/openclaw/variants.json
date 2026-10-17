@@ -1,17 +1,62 @@
 {
   "bun_repository": "openclaw/bun",
-  "bun_commit": "b83b544ef744b6ab0dc1feadb59652261d64291d",
-  "base": "1600131e46b5af48bbda3559af8d8a3327230b6e",
+  "base": "3d3257150c40a1aabdc5f8b48d5b33d0413674cb",
   "lanes": [
-    {"label":"bun-webkit-linux-amd64","consumer":"openclaw-build-test.yml linux-x64: build:release --lto=off"},
-    {"label":"bun-webkit-macos-arm64","consumer":"openclaw-build-test.yml darwin-arm64: build:release --lto=off"},
-    {"label":"bun-webkit-linux-amd64-lto","consumer":"openclaw-release.yml default linux-x64"},
-    {"label":"bun-webkit-linux-arm64-lto","consumer":"openclaw-release.yml default linux-arm64"},
-    {"label":"bun-webkit-macos-arm64-lto","consumer":"openclaw-release.yml default darwin-arm64"},
-    {"label":"bun-webkit-macos-amd64-lto","consumer":"openclaw-release.yml default darwin-x64"},
-    {"label":"bun-webkit-linux-amd64-musl-lto","consumer":"openclaw-release.yml optional linux-x64-musl"},
-    {"label":"bun-webkit-linux-arm64-musl-lto","consumer":"openclaw-release.yml optional linux-arm64-musl"},
-    {"label":"bun-webkit-windows-amd64-lto","consumer":"openclaw-release.yml optional windows-x64"}
+    {
+      "label": "bun-webkit-linux-amd64",
+      "consumer": "openclaw-build-test.yml linux-x64: build:release --lto=off"
+    },
+    {
+      "label": "bun-webkit-macos-arm64",
+      "consumer": "openclaw-build-test.yml darwin-arm64: build:release --lto=off"
+    },
+    {
+      "label": "bun-webkit-linux-amd64-lto",
+      "consumer": "openclaw-release.yml default linux-x64"
+    },
+    {
+      "label": "bun-webkit-linux-arm64-lto",
+      "consumer": "openclaw-release.yml default linux-arm64"
+    },
+    {
+      "label": "bun-webkit-macos-arm64-lto",
+      "consumer": "openclaw-release.yml default darwin-arm64"
+    },
+    {
+      "label": "bun-webkit-macos-amd64-lto",
+      "consumer": "openclaw-release.yml default darwin-x64"
+    },
+    {
+      "label": "bun-webkit-linux-amd64-musl-lto",
+      "consumer": "openclaw-release.yml optional linux-x64-musl"
+    },
+    {
+      "label": "bun-webkit-linux-arm64-musl-lto",
+      "consumer": "openclaw-release.yml optional linux-arm64-musl"
+    },
+    {
+      "label": "bun-webkit-windows-amd64-lto",
+      "consumer": "openclaw-release.yml optional windows-x64"
+    },
+    {
+      "label": "bun-webkit-windows-arm64",
+      "consumer": "openclaw-release.yml windows-arm64: release without LTO"
+    }
   ],
-  "excluded": "Windows arm64, Android, FreeBSD, debug and ASAN are not selected by the fork's active OpenClaw workflows. There is no separate x64 baseline WebKit archive."
+  "excluded": "Android, FreeBSD, debug and ASAN are not selected by the fork's active OpenClaw workflows. Windows arm64 uses upstream's non-LTO lane because LLVM CodeView cannot encode its LTO register tuples. There is no separate x64 baseline WebKit archive.",
+  "baseline": {
+    "commit": "b83b544ef744b6ab0dc1feadb59652261d64291d",
+    "tree": "0cb8c8700ae8ec2a2da75487072ad690a5747f8b",
+    "engine": "1600131e46b5af48bbda3559af8d8a3327230b6e",
+    "patches": {
+      "000-checksums.patch": "1504e379c483135a6142e023a7c490173bd7249ceb1e7a947b4c298e260cd4b0",
+      "012-vm-finalization-fixture.patch": "67dec6cf7146f0a9fc8faefaf2c7f8ab6e13cb8377d9c77e68efe6e847ca98e9"
+    },
+    "manifest_sha256": "df16ba1dcaad70daa014fbc70c7005842fb2bf5099a1df00a83e1075ceef7462"
+  },
+  "candidate": {
+    "commit": "ac9a670feaafe7623564b51e0257c3de583fe9ef",
+    "tree": "77decc869e3e0da3305e11cb3059e0e35a3a8be3",
+    "manifest_blob": "8173f76b94d598ba292b71ebd3ffa7edd5be135d"
+  }
 }
