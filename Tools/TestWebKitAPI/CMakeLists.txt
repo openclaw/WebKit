@@ -220,6 +220,7 @@ if (ENABLE_JAVASCRIPTCORE)
     set(TestJavaScriptCore_SOURCES
         Runner/TestsController.cpp
 
+        Tests/JavaScriptCore/AOTConvention.cpp
         Tests/JavaScriptCore/DisallowVMEntry.cpp
         Tests/JavaScriptCore/InspectorConsoleMessage.cpp
         Tests/JavaScriptCore/MarkedVector.cpp
