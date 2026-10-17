@@ -2398,8 +2398,10 @@ Vector<uint8_t> ImageBuilder::finish()
                 if (((from > to ? from - to : to - from) <= reach && !Options::forceAOTVeneers()) || farCallees[index].contains(farCalleeOf(*target, call)))
                     continue;
                 farCallees[index].append(farCalleeOf(*target, call));
-                sizeOfVeneers += sizeOfVeneer + sizeof(uint32_t) + imageStubsAlignment;
             }
+            // Veneers share the alignment padding at the end of their caller.
+            if (!farCallees[index].isEmpty())
+                sizeOfVeneers += farCallees[index].size() * sizeOfVeneer + sizeof(uint32_t) + imageStubsAlignment;
         });
         if (sizeOfVeneers + sizeOfStubs + imageStubsAlignment >= stubCallReachSlack) {
             m_failureReason = makeString("the program has too much machine code: what is laid beside every copy of the runtime's stubs must stay under "_s, stubCallReachSlack, " bytes: the stubs are "_s, stubs.bytes.size(), " bytes, the thunks that set the arguments of calls "_s, argumentThunks.bytes.size(), ", the code that several functions share "_s, sharedBodies.bytes.size(), ", and calls between functions that are too far apart need "_s, sizeOfVeneers.load());

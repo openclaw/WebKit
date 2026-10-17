@@ -1556,7 +1556,8 @@ void BytecodeGenerator::emitElementReadAudit(RegisterID* base, RegisterID* subsc
     Ref<Label> done = newLabel();
     if (m_auditsAreOff)
         emitJumpIfTrue(m_auditsAreOff.get(), done.get());
-    emitJumpIfTrue(emitIsCellWithType(newTemporary(), base, ArrayType), done.get());
+    if (m_vm.useImmutableIntrinsics)
+        emitJumpIfTrue(emitIsCellWithType(newTemporary(), base, ArrayType), done.get());
     RefPtr<RegisterID> function = moveLinkTimeConstant(nullptr, LinkTimeConstant::auditFunction);
     RefPtr<RegisterID> result = newTemporary();
     CallArguments arguments(*this, nullptr, 4);
