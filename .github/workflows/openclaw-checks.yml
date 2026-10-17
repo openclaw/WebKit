@@ -101,6 +101,7 @@ jobs:
       - name: Verify pipeline integrity and runner support
         run: |
           python3 .github/openclaw/test_artifacts.py
+          python3 .github/openclaw/test_compare_fork_ci.py
           python3 .github/openclaw/test_release.py
           python3 .github/openclaw/test_consumer_identity.py
           python3 .github/openclaw/test_verify_jsc_results.py

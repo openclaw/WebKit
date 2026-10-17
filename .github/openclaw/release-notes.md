@@ -44,3 +44,5 @@ The existing x64 Linux consumer uses Release with LTO disabled. Its 85-file run 
 Source and licenses: LICENSE-SOURCES.txt. Checksums: SHA256SUMS and manifest.json. Build and qualification evidence: provenance.tar.gz.
 
 Rollback by restoring the prior Bun manifest and WebKit pin together, then rebuilding. Prior releases remain available.
+
+Consumer comparison now validates both arms, rejects incomplete or contradictory per-file evidence, and preserves optional process-exit metadata. Identical failed outcomes cannot qualify. The historical grouped baseline failure remains unresolved; this reporting repair does not establish first-attempt equivalence.
