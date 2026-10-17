@@ -71,7 +71,9 @@ class ReleaseIntegrity(unittest.TestCase):
                     p.write_text(original_text)
 
     def test_lane_patch_provenance_must_match_exactly(self):
-        p=next(self.inputs.glob('*/*.manifest.json'));original_text=p.read_text();original=json.loads(original_text)
+        label=sorted(lane['label'] for lane in release.consumer_identity.CONFIG['lanes']
+            if lane['label']!=release.consumer_identity.LANE)[0]
+        p=self.inputs/label/(label+'.manifest.json');original_text=p.read_text();original=json.loads(original_text)
         records=[
             [{**PATCHES[0],'subject':'different'},*PATCHES[1:]],
             [{**PATCHES[0],'patch_sha256':'f'*64},*PATCHES[1:]],
@@ -87,6 +89,12 @@ class ReleaseIntegrity(unittest.TestCase):
                         release.assemble(self.inputs,self.root/('mismatched-history-'+str(index)),SOURCE)
                 finally:
                     p.write_text(original_text)
+
+    def test_candidate_lane_patch_provenance_is_bound_to_receipt(self):
+        label=release.consumer_identity.LANE
+        p=self.inputs/label/(label+'.manifest.json');manifest=json.loads(p.read_text())
+        manifest['patches'][0]['subject']='different';p.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError,'candidate archive identity mismatch'):self.assemble()
 
     def test_base_source_allows_empty_patch_history(self):
         manifest={'base':release.artifact_source.BASE,'history_floor':release.artifact_source.HISTORY_FLOOR,'patches':[]}
