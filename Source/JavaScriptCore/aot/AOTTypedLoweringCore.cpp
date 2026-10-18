@@ -1228,6 +1228,21 @@ bool Lowering::run()
     m_out.appendTo(prologue);
     m_out.initializeConstants(m_proc, prologue);
     findPinnedRegisters();
+    if (Options::countAOTNativeEntries()) {
+        auto* count = m_out.patchpoint(Void);
+        count->effects = Effects::none();
+        m_heaps.decoratePatchpointRead(&m_heaps.root, count);
+        m_heaps.decoratePatchpointWrite(&m_heaps.root, count);
+        count->numGPScratchRegisters = 1;
+        count->clobber(RegisterSet::macroClobberedGPRs());
+        count->setGenerator([references = &m_context.indexReferences](CCallHelpers& jit, const StackmapGenerationParams& params) {
+            AllowMacroScratchRegisterUsage allowScratch(jit);
+            GPRReg scratch = params.gpScratch(0);
+            jit.loadPtr(CCallHelpers::Address(instanceGPR, Instance::offsetOfNativeEntryCounters()), scratch);
+            references->load(jit, scratch, scratch, 0, sizeof(uint64_t*), true);
+            jit.add64(CCallHelpers::TrustedImm32(1), CCallHelpers::Address(scratch));
+        });
+    }
     if (!lowerEntryParameters())
         return false;
     findTruthinessPhis();
@@ -3560,6 +3575,14 @@ static bool compilePart(const Program& program, FunctionID id, const Function& f
     info.typedFunction = function.isValueEntryClone ? function.valueEntryTarget.index() : id.index();
     info.isGenericEntrypoint = function.isGenericEntrypoint();
     info.kindByte = kindByteOf(program, function);
+    if (Options::countAOTNativeEntries()) {
+        if (function.isSharedOutlinedBody || function.isGuardedPreludeEntry || function.isRampForClosures || (function.isValueEntry && !function.isValueEntryClone))
+            info.nativeEntryKind = NativeEntryKind::Generated;
+        else if (function.isGenericEntrypoint())
+            info.nativeEntryKind = function.isTyped() ? NativeEntryKind::GenericTyped : NativeEntryKind::GenericUntyped;
+        else
+            info.nativeEntryKind = function.isTyped() ? NativeEntryKind::Typed : NativeEntryKind::Untyped;
+    }
     Vector<ModuleID, 2> sources;
     constexpr ModuleID builtinsModule { UINT32_MAX - 1 };
     auto builtinsSource = [&] {

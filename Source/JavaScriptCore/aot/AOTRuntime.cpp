@@ -74,8 +74,11 @@
 #include "UnlinkedModuleProgramCodeBlock.h"
 #include <mutex>
 #include <wtf/FilePrintStream.h>
+#include <wtf/FileSystem.h>
+#include <atomic>
 #include <wtf/HexNumber.h>
 #include <wtf/ProcessID.h>
+#include <wtf/SHA1.h>
 #include <wtf/StackTrace.h>
 #include <wtf/StringPrintStream.h>
 #include <wtf/TZoneMallocInlines.h>
@@ -202,7 +205,10 @@ struct CountedOperation<entry, operation> {
 };
 #endif
 
+static std::atomic<uint64_t> nextRuntimeTableID { 1 };
+
 RuntimeTable::RuntimeTable(VM& vm)
+    : m_vmID(nextRuntimeTableID.fetch_add(1, std::memory_order_relaxed))
 {
     using namespace DFG;
 #define AOT_FILL_OPERATION(name) \
@@ -277,7 +283,7 @@ RuntimeTable::RuntimeTable(VM& vm)
 
 RuntimeTable::~RuntimeTable()
 {
-    writeOperationCounts();
+    writeOperationCounts(true);
 }
 
 void RuntimeTable::countOperationBySlotState(const char* name, const Slot* slot)
@@ -399,32 +405,87 @@ void RuntimeTable::removeDeadFilledPairs(VM& vm)
     });
 }
 
-void RuntimeTable::writeOperationCounts() const
+uint64_t** RuntimeTable::nativeEntryCounters()
+{
+    if (!m_nativeEntryImage) {
+        Image* image = Image::withCode();
+        if (!image || !image->header().nativeEntriesOffset)
+            return nullptr;
+        m_nativeEntryImage = image;
+        m_nativeEntryCounts.fill(0, image->header().numberOfFunctions);
+        m_nativeEntryPointers.reserveInitialCapacity(m_nativeEntryCounts.size());
+        for (auto& count : m_nativeEntryCounts)
+            m_nativeEntryPointers.append(&count);
+    }
+    return m_nativeEntryPointers.mutableSpan().data();
+}
+
+void RuntimeTable::writeOperationCounts(bool isFinal) const
 {
     const char* path = byteCast<char>(Options::aotTypeCoverageCountsPath());
-    if (!Options::useAOTOperationCounters() || !path)
+    if ((!Options::useAOTOperationCounters() && !m_nativeEntryImage) || !path)
         return;
     String name = makeStringByReplacingAll(String::fromUTF8(path), "%p"_s, String::number(getCurrentProcessID()));
-    if (auto file = FilePrintStream::open(makeString(name, ".operations"_s).utf8(), "w"_s))
-        dumpOperationCounts(*file);
-    if (auto file = FilePrintStream::open(makeString(name, ".allocations"_s).utf8(), "w"_s)) {
-        file->println("ANCHOR\t", RawPointer(reinterpret_cast<void*>(&WTFGetBacktrace)));
-        for (auto& [stack, entry] : m_allocatedBytesByStack)
-            file->println(entry.first, "\t", entry.second, "\t", byteCast<char>(stack.data()));
-    }
-    if (m_samples.isEmpty())
-        return;
-    if (auto file = FilePrintStream::open(makeString(name, ".guests"_s).utf8(), "w"_s)) {
-        auto onOneLine = [](StringView text) {
-            String result = text.toString();
-            for (auto [character, written] : { std::pair { "\\"_s, "\\\\"_s }, std::pair { "\t"_s, "\\t"_s }, std::pair { "\n"_s, "\\n"_s }, std::pair { "\r"_s, "\\r"_s } })
-                result = makeStringByReplacingAll(result, character, written);
-            return result;
-        };
-        for (auto& [guest, entry] : m_samples) {
-            size_t endOfKind = guest.find('\t');
-            file->println(entry.first, "\t", StringView(guest).left(endOfKind), "\t", onOneLine(StringView(guest).substring(endOfKind + 1)), "\t", onOneLine(entry.second));
+    name = name.contains("%v"_s) ? makeStringByReplacingAll(name, "%v"_s, String::number(m_vmID)) : makeString(name, "-vm-"_s, m_vmID);
+    uint64_t sequence = ++m_snapshotSequence;
+    auto write = [&](ASCIILiteral suffix, const auto& contents) {
+        String destination = makeString(name, suffix);
+        String temporary = makeString(destination, ".tmp"_s);
+        auto file = FilePrintStream::open(temporary.utf8(), "w"_s);
+        if (!file)
+            return;
+        file->println("# AOT-SNAPSHOT\t1\t", getCurrentProcessID(), "\t", m_vmID, "\t", sequence, "\t", isFinal ? "final" : "partial");
+        contents(*file);
+        file->println("# END\t", sequence);
+        bool succeeded = !fflush(file->file()) && !ferror(file->file());
+        file.reset();
+        // Same-directory replacement is atomic on POSIX; markers also detect an interrupted copy on other platforms.
+        if (!succeeded || !FileSystem::moveFile(temporary, destination))
+            FileSystem::deleteFile(temporary);
+    };
+    if (Options::useAOTOperationCounters()) {
+        write(".operations"_s, [&](PrintStream& file) { dumpOperationCounts(file); });
+        write(".allocations"_s, [&](PrintStream& file) {
+            file.println("ANCHOR\t", RawPointer(reinterpret_cast<void*>(&WTFGetBacktrace)));
+            for (auto& [stack, entry] : m_allocatedBytesByStack)
+                file.println(entry.first, "\t", entry.second, "\t", byteCast<char>(stack.data()));
+        });
+        if (!m_samples.isEmpty()) {
+            write(".guests"_s, [&](PrintStream& file) {
+                auto onOneLine = [](StringView text) {
+                    String result = text.toString();
+                    for (auto [character, written] : { std::pair { "\\"_s, "\\\\"_s }, std::pair { "\t"_s, "\\t"_s }, std::pair { "\n"_s, "\\n"_s }, std::pair { "\r"_s, "\\r"_s } })
+                        result = makeStringByReplacingAll(result, character, written);
+                    return result;
+                };
+                for (auto& [guest, entry] : m_samples) {
+                    size_t endOfKind = guest.find('\t');
+                    file.println(entry.first, "\t", StringView(guest).left(endOfKind), "\t", onOneLine(StringView(guest).substring(endOfKind + 1)), "\t", onOneLine(entry.second));
+                }
+            });
         }
+    }
+    if (m_nativeEntryImage) {
+        write(".native-entries"_s, [&](PrintStream& file) {
+            auto& header = m_nativeEntryImage->header();
+            const auto* metadata = m_nativeEntryImage->at<NativeEntryMetadata>(header.nativeEntriesOffset);
+            bool complete = true;
+            for (unsigned i = 0; i < m_nativeEntryCounts.size(); ++i)
+                complete &= metadata[i].kind != NativeEntryKind::Uninstrumented;
+            file.println("image\t", SHA1::hexDigest(header.nativeEntriesDigest).data(), "\t", header.stamp, "\t", m_nativeEntryCounts.size(), "\t", complete ? "complete" : "incomplete");
+            for (unsigned i = 0; i < m_nativeEntryCounts.size(); ++i) {
+                ASCIILiteral kind;
+                switch (metadata[i].kind) {
+                case NativeEntryKind::Uninstrumented: kind = "uninstrumented"_s; break;
+                case NativeEntryKind::Typed: kind = "typed"_s; break;
+                case NativeEntryKind::GenericTyped: kind = "generic-typed"_s; break;
+                case NativeEntryKind::Untyped: kind = "untyped"_s; break;
+                case NativeEntryKind::GenericUntyped: kind = "generic-untyped"_s; break;
+                case NativeEntryKind::Generated: kind = "generated"_s; break;
+                }
+                file.println(i, "\t", kind, "\t", metadata[i].bodyBytes, "\t", m_nativeEntryCounts[i]);
+            }
+        });
     }
 }
 
@@ -714,6 +775,7 @@ Instance& Instance::ensure(JSModuleLoader* loader)
     while (madvise(reinterpret_cast<char*>(instance) - environmentsSize, environmentsSize + size, MADV_NOHUGEPAGE) == -1 && errno == EAGAIN) { }
 #endif
     instance->runtimeTable = AOT::runtimeTable(vm).entries();
+    instance->nativeEntryCounters = AOT::runtimeTable(vm).nativeEntryCounters();
     instance->globalObject = globalObject;
     instance->vm = &vm;
     instance->powersOfTen = AOT::powersOfTen.data();
@@ -3336,7 +3398,7 @@ void Instance::finalizeUnconditionally(bool newOnly)
 {
     if (Options::validateAOTTypedFacts()) [[unlikely]]
         validateUnwatchedSlots(nullptr, true);
-    if (Options::useAOTOperationCounters()) [[unlikely]] {
+    if (Options::useAOTOperationCounters() || nativeEntryCounters) [[unlikely]] {
         AOT::runtimeTable(*vm).countOperation("Heap::collection", newOnly ? "eden" : "full");
         AOT::runtimeTable(*vm).removeDeadFilledPairs(*vm);
         AOT::writeOperationCounts(*vm);

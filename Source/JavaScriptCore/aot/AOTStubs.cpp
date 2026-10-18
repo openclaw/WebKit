@@ -22393,13 +22393,13 @@ ArgumentThunks generateArgumentThunks(const Vector<const ArgumentMoves*>& all)
 
 #endif // CPU(ARM64) || CPU(X86_64)
 
-void IndexReferences::load(CCallHelpers& jit, GPRReg base, GPRReg dest, uint32_t addend, uint32_t scale)
+void IndexReferences::load(CCallHelpers& jit, GPRReg base, GPRReg dest, uint32_t addend, uint32_t scale, bool usesImageIndex)
 {
     bool isHalfWord = scale == sizeof(uint32_t);
     RELEASE_ASSERT(isHalfWord ? !(addend % sizeof(uint32_t)) : !(addend % sizeof(void*)) && !(scale % sizeof(void*)));
     RELEASE_ASSERT(scale <= std::numeric_limits<uint16_t>::max());
 #if CPU(ARM64)
-    m_references.append({ jit.label(), addend, scale });
+    m_references.append({ jit.label(), addend, scale, usesImageIndex });
     jit.m_assembler.add<64>(dest, base, UInt12(0), 12);
     if (isHalfWord)
         jit.m_assembler.ldr<32>(dest, dest, 0u);
@@ -22410,7 +22410,7 @@ void IndexReferences::load(CCallHelpers& jit, GPRReg base, GPRReg dest, uint32_t
         jit.m_assembler.movl_mr_disp32(0, base, dest);
     else
         jit.m_assembler.movq_mr_disp32(0, base, dest);
-    m_references.append({ jit.label(), addend, scale });
+    m_references.append({ jit.label(), addend, scale, usesImageIndex });
 #else
     UNUSED_PARAM(base);
     UNUSED_PARAM(dest);
@@ -22440,7 +22440,7 @@ Vector<IndexReference> IndexReferences::link(LinkBuffer& linkBuffer)
     auto* start = static_cast<uint8_t*>(linkBuffer.entrypoint<JSEntryPtrTag>().untaggedPtr());
     Vector<IndexReference> result;
     for (auto& reference : m_references)
-        result.append({ static_cast<uint32_t>(static_cast<uint8_t*>(linkBuffer.locationOf<JSEntryPtrTag>(reference.instructions).untaggedPtr()) - start), reference.addend, static_cast<uint16_t>(reference.scale) });
+        result.append({ static_cast<uint32_t>(static_cast<uint8_t*>(linkBuffer.locationOf<JSEntryPtrTag>(reference.instructions).untaggedPtr()) - start), reference.addend, static_cast<uint16_t>(reference.scale), reference.usesImageIndex });
     return result;
 }
 

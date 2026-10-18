@@ -1054,10 +1054,11 @@ struct IndexReference {
     uint32_t offset;
     uint32_t addend;
     uint16_t scale;
+    bool usesImageIndex { false };
 };
 class IndexReferences {
 public:
-    void load(CCallHelpers&, GPRReg base, GPRReg dest, uint32_t addend, uint32_t scale);
+    void load(CCallHelpers&, GPRReg base, GPRReg dest, uint32_t addend, uint32_t scale, bool usesImageIndex = false);
     void load16(CCallHelpers&, GPRReg base, GPRReg dest, uint32_t addend, uint32_t scale);
     Vector<IndexReference> link(LinkBuffer&);
     static void fill(uint8_t* code, const IndexReference&, uint32_t index);
@@ -1067,6 +1068,7 @@ private:
         CCallHelpers::Label instructions;
         uint32_t addend;
         uint32_t scale;
+        bool usesImageIndex { false };
     };
     Vector<Reference, 2> m_references;
 };

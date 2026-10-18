@@ -209,6 +209,8 @@ struct VirtualCallInfo {
 
 struct Slot;
 
+class Image;
+
 class RuntimeTable {
     WTF_MAKE_TZONE_ALLOCATED(RuntimeTable);
     WTF_MAKE_NONCOPYABLE(RuntimeTable);
@@ -252,10 +254,16 @@ public:
     void recordSample(const char* kind, StringView group, String&& sample);
     uint64_t operationCount(StringView nameAndDetail) const;
     void dumpOperationCounts(PrintStream&) const;
-    void writeOperationCounts() const;
+    void writeOperationCounts(bool isFinal = false) const;
+    uint64_t** nativeEntryCounters();
 
 private:
     void* m_entries[numberOfEntries];
+    uint64_t m_vmID;
+    mutable uint64_t m_snapshotSequence { 0 };
+    Image* m_nativeEntryImage { nullptr };
+    Vector<uint64_t> m_nativeEntryCounts;
+    Vector<uint64_t*> m_nativeEntryPointers;
     Vector<std::unique_ptr<VirtualCallInfo>> m_callLinkInfos;
     UncheckedKeyHashMap<std::pair<const char*, const char*>, uint64_t> m_operationCounts;
     UncheckedKeyHashMap<std::tuple<const char*, const void*, size_t>, UTF8CString> m_allocatedBytesDetails;
@@ -599,6 +607,7 @@ struct Instance {
     void clearNewTarget();
 
     static constexpr ptrdiff_t offsetOfRuntimeTable() { return OBJECT_OFFSETOF(Instance, runtimeTable); }
+    static constexpr ptrdiff_t offsetOfNativeEntryCounters() { return OBJECT_OFFSETOF(Instance, nativeEntryCounters); }
     static constexpr ptrdiff_t offsetOfVM() { return OBJECT_OFFSETOF(Instance, vm); }
     static constexpr ptrdiff_t offsetOfSoftStackLimit() { return OBJECT_OFFSETOF(Instance, stackMirror) + StackManager::Mirror::offsetOfSoftStackLimit(); }
     static constexpr ptrdiff_t offsetOfTrapAwareSoftStackLimit() { return OBJECT_OFFSETOF(Instance, stackMirror) + StackManager::Mirror::offsetOfTrapAwareSoftStackLimit(); }
@@ -1014,6 +1023,7 @@ struct Instance {
     VMProgram* program;
     const ProgramData* programData;
     void** runtimeTable;
+    uint64_t** nativeEntryCounters;
     static constexpr unsigned maxVectorLengthGrownByStub = 31;
     uint8_t nextVectorLengths[maxVectorLengthGrownByStub + 1] { };
     static constexpr ptrdiff_t offsetOfNextVectorLengths() { return OBJECT_OFFSETOF(Instance, nextVectorLengths); }
@@ -2199,7 +2209,10 @@ struct Quote {
     UTF8CString text;
 };
 
+enum class NativeEntryKind : uint8_t { Uninstrumented, Typed, GenericTyped, Untyped, GenericUntyped, Generated };
+
 struct CompiledFunctionInfo {
+    NativeEntryKind nativeEntryKind { NativeEntryKind::Uninstrumented };
     unsigned codeSize { 0 };
     Convention convention;
     Vector<IndexReference> indexReferences;

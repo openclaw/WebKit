@@ -3152,6 +3152,12 @@ Vector<uint8_t> ImageBuilder::finish()
     header.numberOfRegExps = imageRegExps.size();
     header.regExpSourceOffset = place(regExpSourceBytes.size());
     header.functionStartsOffset = place(functionStarts.sizeInBytes());
+    Vector<NativeEntryMetadata> nativeEntries;
+    if (Options::countAOTNativeEntries()) {
+        for (auto& function : m_functions)
+            nativeEntries.append({ safeCast<uint32_t>(function.code.bytes.size()), function.code.info.nativeEntryKind, { } });
+    }
+    header.nativeEntriesOffset = nativeEntries.isEmpty() ? 0 : place(nativeEntries.sizeInBytes());
     header.codeGranulesOffset = place(codeGranules.sizeInBytes());
     header.codeGranuleShift = codeGranuleShift;
     header.callSitesOffset = place(callSites.size());
@@ -3211,6 +3217,8 @@ Vector<uint8_t> ImageBuilder::finish()
     memcpy(base + header.regExpsOffset, imageRegExps.span().data(), imageRegExps.sizeInBytes());
     memcpy(base + header.regExpSourceOffset, regExpSourceBytes.span().data(), regExpSourceBytes.size());
     memcpy(base + header.functionStartsOffset, functionStarts.span().data(), functionStarts.sizeInBytes());
+    if (header.nativeEntriesOffset)
+        memcpy(base + header.nativeEntriesOffset, nativeEntries.span().data(), nativeEntries.sizeInBytes());
     memcpy(base + header.codeGranulesOffset, codeGranules.span().data(), codeGranules.sizeInBytes());
     memcpy(base + header.callSitesOffset, callSites.span().data(), callSites.size());
     memcpy(base + header.faultingAccessesOffset, faultingAccesses.span().data(), faultingAccesses.sizeInBytes());
@@ -3452,7 +3460,7 @@ Vector<uint8_t> ImageBuilder::finish()
         auto [codeAt, stubsForFunction] = placement[index];
         memcpy(code + codeAt, function.code.bytes.span().data(), function.code.bytes.size());
         for (auto& reference : info.indexReferences)
-            IndexReferences::fill(code + codeAt, reference, info.stateNumber);
+            IndexReferences::fill(code + codeAt, reference, reference.usesImageIndex ? index : info.stateNumber);
         for (auto& call : info.stubCalls) {
             if (call.body) {
                 uint32_t indexWithinKind = bodyIndexWithinKind[call.body - 1];
@@ -3515,6 +3523,13 @@ Vector<uint8_t> ImageBuilder::finish()
     recordWriterThread->waitForCompletion();
     if (!m_failureReason.isNull())
         return { };
+    if (header.nativeEntriesOffset) {
+        SHA1 digest;
+        digest.addBytes(image.span().first(header.size));
+        SHA1::Digest identity;
+        digest.computeHash(identity);
+        memcpy(base + OBJECT_OFFSETOF(ImageHeader, nativeEntriesDigest), identity.data(), identity.size());
+    }
     endStep("the records of the functions"_s);
     endStep("the records of entries inside functions, and the states"_s);
     m_reportableSites = reportableSites();
