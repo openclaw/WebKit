@@ -4,6 +4,8 @@ This release advances the engine base to oven-sh/WebKit `87ee10da087b63e011bd1ad
 
 Native engine qualification passed on Linux x64 and ARM64. Publication additionally requires the complete Linux matched-Bun job, all ten artifact builds and the native Windows ARM64 gate. The qualification harness compares stable module executable owners across JIT tier changes, preserves first-attempt batch evidence, refuses fallback retries and requires both faithfulness arms to pass. Its historical control retains the isolated-stdio ownership repair. Existing test selections, assertions and bounds remain intact.
 
+Linux qualification coordinates the partial-write fixture's peer so it starts draining only after a native remainder exists. This removes a race with fast CI loopback readers without changing the byte-count, ordering or duplication assertions, test limits, or runtime sources. The same fixture repair applies after the control, candidate and sync builds; the compatibility build remains manifest-only.
+
 ## Previous release: b1e30d08
 
 ### Rebased engine and allocation-sampling correctness

@@ -14,6 +14,10 @@ mkdir -p "$results/home" "$results/tmp" "$results/bin"
 chmod 700 "$results/home" "$results/tmp"
 checkout_matched
 build_matched sync
+# Apply only after the manifest-only build and source checks have passed.
+git apply "$inputs/patches/015-net-writev-backpressure-fixture.patch"
+sha256sum "$inputs/patches/015-net-writev-backpressure-fixture.patch" > "$QUALIFICATION_DIR/net-backpressure-fixture.sha256"
+git diff -- test/js/node/net/node-net.test.ts > "$QUALIFICATION_DIR/net-fixture-sync.patch"
 sha256sum test/js/node/vm/vm.test.ts > "$QUALIFICATION_DIR/vm-test-sync.sha256"
 cp "$inputs/worker-resource-limits.test.ts" test/js/node/worker_threads/openclaw-resource-limits.test.ts
 "$candidate" --revision > "$results/revision.log"

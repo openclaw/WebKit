@@ -49,6 +49,10 @@ for arm in baseline candidate; do
   else
     candidate="$baseline"
   fi
+  # Establish native backpressure before letting the peer drain, on both engines.
+  git apply "$inputs/patches/015-net-writev-backpressure-fixture.patch"
+  sha256sum "$inputs/patches/015-net-writev-backpressure-fixture.patch" > "$QUALIFICATION_DIR/net-backpressure-fixture.sha256"
+  git diff -- test/js/node/net/node-net.test.ts > "$QUALIFICATION_DIR/net-fixture-$arm.patch"
   sha256sum test/js/node/vm/vm.test.ts > "$QUALIFICATION_DIR/vm-test-$arm.sha256"
   sha256sum test/js/node/net/node-net.test.ts > "$QUALIFICATION_DIR/net-test-$arm.sha256"
   results="$QUALIFICATION_DIR/$arm"

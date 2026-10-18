@@ -1,0 +1,93 @@
+--- a/test/js/node/net/node-net.test.ts
++++ b/test/js/node/net/node-net.test.ts
+@@ -3289,12 +3289,20 @@
+         console.log(JSON.stringify({ total, counts, runs }));
+         c.destroy();
+         server.close();
++        if (process.connected) process.disconnect();
+       };
+       c.on("end", done);
+       c.on("close", done);
+       c.on("error", done);
+       if (process.env.STALL_ON_ACCEPT === "1") {
+         Bun.sleepSync(1500);
++      } else {
++        // Do not race a draining peer when establishing the native remainder.
++        c.pause();
++        process.on("message", message => {
++          if (message === "drain") c.resume();
++        });
++        process.send("paused");
+       }
+     });
+     server.listen(0, "127.0.0.1", () => {
+@@ -3309,7 +3317,14 @@
+     import net from "node:net";
+     const phase = process.argv[2]; // "loss" | "dup"
+     const port = Number(process.argv[3]);
+-    const sock = net.connect(port, "127.0.0.1", () => {
++    const start = new Promise(resolve => process.on("message", message => {
++      if (message === "start") resolve();
++    }));
++    const sock = net.connect(port, "127.0.0.1", async () => {
++      if (phase === "dup") {
++        process.send("connected");
++        await start;
++      }
+       sock.setNoDelay(true);
+       const writeDirect = chunk => {
+         let fired = false;
+@@ -3340,7 +3355,10 @@
+         }
+         // ...then block the loop while the peer drains, so the next writev takes
+         // the whole remainder plus a prefix of the new chunk (written > buffered.len).
+-        if (sawPartial) Bun.sleepSync(1500);
++        if (sawPartial) {
++          process.send("buffered");
++          Bun.sleepSync(1500);
++        }
+         finalChunk = Buffer.alloc(32 * 1024 * 1024, 0x69);
+         sent.i = finalChunk.length;
+       }
+@@ -3358,6 +3376,7 @@
+       flushed.then(() => {
+         console.log(JSON.stringify(sent));
+         sock.end();
++        if (process.connected) process.disconnect();
+       });
+     });
+     sock.on("error", err => {
+@@ -3390,8 +3409,13 @@
+         "client-fixture.mjs": clientFixture,
+       });
+ 
++      const { promise: paused, resolve: onPaused } = Promise.withResolvers<void>();
++      const { promise: connected, resolve: onConnected } = Promise.withResolvers<void>();
+       await using server = Bun.spawn({
+         cmd: [bunExe(), "server-fixture.mjs"],
++        ipc(message) {
++          if (message === "paused") onPaused();
++        },
+         env: phase === "loss" ? { ...bunEnv, STALL_ON_ACCEPT: "1" } : bunEnv,
+         cwd: String(dir),
+         stdout: "pipe",
+@@ -3405,11 +3429,19 @@
+ 
+       await using client = Bun.spawn({
+         cmd: [bunExe(), "client-fixture.mjs", phase, String(port)],
++        ipc(message) {
++          if (message === "connected") onConnected();
++          if (message === "buffered") server.send("drain");
++        },
+         env: bunEnv,
+         cwd: String(dir),
+         stdout: "pipe",
+         stderr: "pipe",
+       });
++      if (phase === "dup") {
++        await Promise.all([paused, connected]);
++        client.send("start");
++      }
+       const [clientOut, clientErr, clientExit] = await Promise.all([
+         client.stdout.text(),
+         client.stderr.text(),
