@@ -722,7 +722,7 @@ Cause tryDecode(const Code& code, const Functor& functor)
     constexpr size_t never = std::numeric_limits<size_t>::max();
     size_t nextCall = calls.isEmpty() ? never : calls[0].offset;
     size_t nextFault = faults.isEmpty() ? never : faults[0].codeOffset;
-    size_t nextReference = references.isEmpty() ? never : references[0].offset;
+    size_t nextReference = references.isEmpty() ? never : references[0].patchBegin();
     const bool hasRanges = !ranges.isEmpty();
     auto isStartOfData = [&](uint32_t offset) {
         auto found = std::ranges::lower_bound(ranges, offset, { }, [](auto& data) {
@@ -776,20 +776,13 @@ Cause tryDecode(const Code& code, const Functor& functor)
             nextFault = fault < faults.size() ? faults[fault].codeOffset : never;
             isKey = true;
         }
-#if CPU(X86_64)
-        if (nextReference == at + instruction.length) {
-            ++reference;
-            nextReference = reference < references.size() ? references[reference].offset : never;
+        if (nextReference < at + instruction.length && at < references[reference].patchEnd()) {
             isKey = true;
+            if (references[reference].patchEnd() <= at + instruction.length) {
+                ++reference;
+                nextReference = reference < references.size() ? references[reference].patchBegin() : never;
+            }
         }
-#else
-        if (nextReference != never && nextReference + sizeof(uint32_t) == at) {
-            ++reference;
-            nextReference = reference < references.size() ? references[reference].offset : never;
-            isKey = true;
-        } else if (nextReference == at)
-            isKey = true;
-#endif
         if (isKey && instruction.kind != Kind::End) {
             if (instruction.kind != Kind::Plain && instruction.kind != Kind::Pinned && instruction.kind != Kind::StubCall)
                 return Cause::KeyOnABranch;

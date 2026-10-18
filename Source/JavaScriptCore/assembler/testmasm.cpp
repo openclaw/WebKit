@@ -26,6 +26,8 @@
 #include "config.h"
 
 #if ENABLE(AOT)
+#include "AOTInstructionsInCode.h"
+#include "AOTOutliner.h"
 #include "AOTStubs.h"
 #include "AllowMacroScratchRegisterUsage.h"
 #endif
@@ -1028,6 +1030,44 @@ void testAOTImageIndexLoad()
     test(1u << 21, 0, sizeof(uint64_t*));
     test(std::numeric_limits<uint32_t>::max(), 0, sizeof(uint64_t*));
     test(std::numeric_limits<uint32_t>::max(), 0xfffffff8u, 0xfff8u);
+}
+
+void testAOTImageIndexOutlining()
+{
+    CCallHelpers jit;
+    AOT::IndexReferences references;
+    emitFunctionPrologue(jit);
+    {
+        AllowMacroScratchRegisterUsage allowScratch(jit);
+        references.load(jit, GPRInfo::argumentGPR0, GPRInfo::returnValueGPR, 0, sizeof(uint64_t*), true);
+    }
+    for (unsigned i = 0; i < 20; ++i)
+        jit.add64(CCallHelpers::TrustedImm32(1), GPRInfo::returnValueGPR);
+    emitFunctionEpilogue(jit);
+    jit.ret();
+    LinkBuffer linkBuffer(jit, nullptr);
+    AOT::CompiledCode code;
+    code.bytes.append(std::span { static_cast<const uint8_t*>(linkBuffer.entrypoint<JSEntryPtrTag>().untaggedPtr()), linkBuffer.size() });
+    code.info.indexReferences = references.link(linkBuffer);
+    code.hasCodeAnnotations = true;
+    code.rareCodeMayBeOutlined = true;
+    code.allCodeMayBeOutlined = true;
+#if CPU(X86_64)
+    code.instructions = AOT::instructionRecords(code.bytes.span(), code.dataInCode.span());
+#endif
+    const auto& reference = code.info.indexReferences[0];
+    Vector<const AOT::CompiledCode*> functions;
+    functions.fill(&code, 32);
+    auto outlining = AOT::chooseWindows(functions, { });
+    CHECK_EQ(outlining.bodies.isEmpty(), false);
+    for (const auto& places : outlining.places) {
+        for (const auto& place : places)
+            CHECK_EQ(place.offset >= reference.patchEnd() || place.offset + place.length <= reference.patchBegin(), true);
+    }
+    AOT::forEachInstructionInCode(code, [&](const AOT::InstructionInCode& instruction) {
+        if (instruction.offset < reference.patchEnd() && instruction.offset + instruction.length > reference.patchBegin())
+            CHECK_EQ(static_cast<unsigned>(instruction.kind), static_cast<unsigned>(AOT::InstructionInCode::Kind::Pinned));
+    });
 }
 #endif
 
@@ -8934,6 +8974,7 @@ void run(const char* filter) WTF_IGNORES_THREAD_SAFETY_ANALYSIS
     RUN(testLoad64ExtendedAddress());
 #if ENABLE(AOT)
     RUN(testAOTImageIndexLoad());
+    RUN(testAOTImageIndexOutlining());
 #endif
 
     RUN(testAdd32Imm());

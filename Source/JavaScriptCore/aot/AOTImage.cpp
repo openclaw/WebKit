@@ -2147,9 +2147,14 @@ Vector<uint8_t> ImageBuilder::finish()
             auto stands = [&](uint32_t oldOffset, uint32_t newOffset) {
                 return isUnmoved(code.bytes, comparableAt, bodyCalls, bytes, places, oldOffset, newOffset);
             };
-            auto referenceIsUnmoved = [&](uint32_t oldOffset, uint32_t newOffset) {
-                if (isARM64())
-                    return stands(oldOffset, newOffset) && stands(oldOffset + sizeof(uint32_t), newOffset + sizeof(uint32_t));
+            auto referenceIsUnmoved = [&](uint32_t oldOffset, uint32_t newOffset, uint32_t patchSize) {
+                if (isARM64()) {
+                    for (uint32_t offset = 0; offset < patchSize; offset += sizeof(uint32_t)) {
+                        if (!stands(oldOffset + offset, newOffset + offset))
+                            return false;
+                    }
+                    return true;
+                }
                 for (uint32_t length = 1; length <= 15 && length <= oldOffset && length <= newOffset; ++length) {
                     if (comparableAt[oldOffset - length] == length)
                         return stands(oldOffset - length, newOffset - length);
@@ -2172,7 +2177,7 @@ Vector<uint8_t> ImageBuilder::finish()
                 RELEASE_ASSERT(!placeWith(places, reference.patchBegin(), reference.patchEnd() - 1));
                 uint32_t was = reference.offset;
                 reference.offset = breaks("reference") ? reference.offset : map(reference.offset);
-                RELEASE_ASSERT(referenceIsUnmoved(was, reference.offset));
+                RELEASE_ASSERT(referenceIsUnmoved(was, reference.offset, reference.patchEnd() - reference.patchBegin()));
             }
             for (auto& access : info.faultingAccesses) {
                 RELEASE_ASSERT(!placeWith(places, access.codeOffset, access.codeOffset));
