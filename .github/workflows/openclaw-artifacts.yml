@@ -1,0 +1,256 @@
+name: OpenClaw WebKit artifacts
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full reviewed owned-branch commit to build
+        required: true
+        type: string
+      publish:
+        description: Publish only after every build and qualification gate passes
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: openclaw-artifacts-${{ inputs.sha }}
+  cancel-in-progress: false
+jobs:
+  preflight:
+    if: github.repository == 'openclaw/WebKit' && (github.ref == 'refs/heads/openclaw/main' || github.ref == 'refs/heads/openclaw/batch-1' || github.ref == 'refs/heads/openclaw/release-5718a6ec' || github.ref == 'refs/heads/openclaw/release-b1e30d08' || github.ref == 'refs/heads/openclaw/release-87ee10da')
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.source.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 64
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/LayoutTests/
+            !/JSTests/*
+            !/PerformanceTests/
+            !/Websites/
+            !/ManualTests/
+            !/WebDriverTests/
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.3.0'
+      - name: Test publication integrity gates
+        run: |
+          python3 .github/openclaw/test_release.py
+          python3 .github/openclaw/test_verify_jsc_results.py
+          python3 .github/openclaw/test_faithfulness.py
+      - name: Measure runner capacity and Docker support
+        run: bash .github/openclaw/preflight.sh
+      - name: Validate reviewed source and exact consumer matrix
+        id: source
+        env:
+          INPUT_SHA: ${{ inputs.sha }}
+        run: python3 .github/openclaw/artifacts.py preflight
+  build:
+    needs: preflight
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 64
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/LayoutTests/
+            !/JSTests/*
+            !/PerformanceTests/
+            !/Websites/
+            !/ManualTests/
+            !/WebDriverTests/
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.3.0'
+      - name: Build unchanged upstream lane and record provenance
+        env:
+          LANE: ${{ matrix.lane }}
+          BUILDX_METADATA_PROVENANCE: max
+        run: python3 .github/openclaw/artifacts.py build --lane "$LANE" --output "$RUNNER_TEMP/lane"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ${{ matrix.lane }}
+          path: ${{ runner.temp }}/lane
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+  test:
+    needs: build
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.github/
+            /Tools/
+            /JSTests/stress/
+            /JSTests/modules/
+            /JSTests/*.yaml
+            /JSTests/BUN-TEST-DIFFERENCES.md
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.3.0'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: bun-webkit-linux-amd64
+          path: ${{ runner.temp }}/linux-artifact
+      - name: Verify artifact bytes
+        working-directory: ${{ runner.temp }}/linux-artifact
+        run: sha256sum -c SHA256SUMS
+      - name: Install pinned Bun build tools
+        run: |
+          curl -fsSL --retry 5 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake ninja-build nasm ccache golang-go clang-23 lld-23 llvm-23 unzip ruby ruby-highline libjson-pp-perl
+          rustup toolchain install nightly-2026-09-15 --profile minimal --component rust-src
+          echo 'RUSTUP_TOOLCHAIN=nightly-2026-09-15' >> "$GITHUB_ENV"
+          echo '/usr/lib/llvm-23/bin' >> "$GITHUB_PATH"
+          curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o "$RUNNER_TEMP/bun.zip"
+          unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bootstrap"
+          echo "$RUNNER_TEMP/bootstrap/bun-linux-x64" >> "$GITHUB_PATH"
+      - name: Build matched Bun and run faithfulness and batch regressions
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/linux-artifact
+          QUALIFICATION_DIR: ${{ runner.temp }}/qualification
+        run: |
+          bash .github/openclaw/qualify-engine.sh
+          bash .github/openclaw/qualify.sh
+          bash .github/openclaw/qualify-sync-compatibility.sh
+          bash .github/openclaw/qualify-sync.sh
+      - name: Retain qualified Linux Bun executables
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: linux-bun-executables
+          path: |
+            ${{ runner.temp }}/qualification/bun-baseline/build/qualify-baseline/bun
+            ${{ runner.temp }}/qualification/bun/build/qualify-candidate/bun
+            ${{ runner.temp }}/qualification/bun-sync/build/qualify-sync/bun
+            ${{ runner.temp }}/qualification/bun-sync-compatibility/build/qualify-sync-compatibility/bun
+            ${{ runner.temp }}/qualification/*.sha256
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: qualification
+          path: |
+            ${{ runner.temp }}/qualification/*.json
+            ${{ runner.temp }}/qualification/*.log
+            ${{ runner.temp }}/qualification/*.sha256
+            ${{ runner.temp }}/qualification/*.patch
+            ${{ runner.temp }}/qualification/baseline/*.json
+            ${{ runner.temp }}/qualification/baseline/*.log
+            ${{ runner.temp }}/qualification/baseline/*.xml
+            ${{ runner.temp }}/qualification/candidate/*.json
+            ${{ runner.temp }}/qualification/candidate/*.log
+            ${{ runner.temp }}/qualification/candidate/*.xml
+            ${{ runner.temp }}/qualification/compatibility/*.log
+            ${{ runner.temp }}/qualification/sync/*.json
+            ${{ runner.temp }}/qualification/sync/*.log
+            ${{ runner.temp }}/qualification/jsc-*/results
+            ${{ runner.temp }}/qualification/jsc-stack/*.log
+            ${{ runner.temp }}/qualification/jsc-stack/*.json
+            ${{ runner.temp }}/qualification/sync/runtime-cache/*.json
+          if-no-files-found: error
+          retention-days: 7
+  windows-arm64:
+    needs: build
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github
+            JSTests/stress
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: bun-webkit-windows-arm64
+          path: ${{ runner.temp }}/windows-artifact
+      - name: Qualify native ARM64 engine
+        shell: pwsh
+        run: ./.github/openclaw/qualify-windows-arm64.ps1 -ArtifactDirectory "$env:RUNNER_TEMP/windows-artifact" -OutputDirectory "$env:RUNNER_TEMP/windows-proof" -Source $env:GITHUB_SHA
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: windows-arm64-qualification
+          path: |
+            ${{ runner.temp }}/windows-proof/gate.json
+            ${{ runner.temp }}/windows-proof/accounting-*.log
+          if-no-files-found: error
+          retention-days: 7
+  assemble:
+    needs: [build, test, windows-arm64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github
+            Source/JavaScriptCore/COPYING.LIB
+            Source/WTF/wtf/COPYING.LIB
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          path: ${{ runner.temp }}/inputs
+      - name: Assemble complete release and verify checksums
+        run: |
+          python3 .github/openclaw/release.py assemble --source "$GITHUB_SHA" --inputs "$RUNNER_TEMP/inputs" --directory "$RUNNER_TEMP/release"
+          python3 .github/openclaw/release.py verify --source "$GITHUB_SHA" --directory "$RUNNER_TEMP/release"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    if: inputs.publish == true && (github.ref == 'refs/heads/openclaw/main' || github.ref == 'refs/heads/openclaw/batch-1' || github.ref == 'refs/heads/openclaw/release-5718a6ec' || github.ref == 'refs/heads/openclaw/release-b1e30d08' || github.ref == 'refs/heads/openclaw/release-87ee10da')
+    needs: [build, test, windows-arm64, assemble]
+    environment: openclaw-artifacts
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
+      - name: Create immutable release and download every asset for verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMMUTABILITY_RECEIPT: ${{ vars.OPENCLAW_IMMUTABILITY_RECEIPT }}
+        run: python3 .github/openclaw/release.py publish --source "$GITHUB_SHA" --directory "$RUNNER_TEMP/release"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: publication-receipt
+          path: ${{ runner.temp }}/published-release.json
+          if-no-files-found: error

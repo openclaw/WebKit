@@ -12,6 +12,15 @@ const own = 16, imported = 8;
 const expected = (i, x) => i < own ? x * 10 + i : x * 100 + (i - own);
 // (Not counting the two exports the test itself reads to get going.)
 const uninstantiated = (ns) => (ns.driver, ns.callCounts, $vm.uninstantiatedFunctionDeclarations(ns));
+// The current CodeBlock may change tiers between two queries. Its owner executable
+// is the identity shared by loaders, and is the last pointer before the tier in the dump.
+const executableFor = (fn) => {
+    const dump = $vm.codeBlockFor(fn);
+    shouldBe(typeof dump, "string");
+    const owner = /->(0x[0-9a-f]+), /i.exec(dump);
+    shouldBe(owner !== null, true);
+    return owner[1];
+};
 
 // The first loader only ever reaches half of the functions.
 const a = await load();
@@ -53,9 +62,10 @@ if (lazy) {
 // has not read to this day, is what a gets its code from.
 shouldBe(a.f0 === b.f0, false);
 shouldBe(typeof $vm.codeBlockFor(a.f0), "string");
-shouldBe($vm.codeBlockFor(a.f0) === $vm.codeBlockFor(b.f0), true);
+shouldBe(executableFor(a.f0), executableFor(b.f0));
 shouldBe(typeof $vm.codeBlockFor(b.f15), "string");
-shouldBe($vm.codeBlockFor(a.f15) === $vm.codeBlockFor(b.f15), true);
+shouldBe(executableFor(a.f15), executableFor(b.f15));
+shouldBe(executableFor(a.f0) === executableFor(a.f15), false);
 shouldBe(a.f15(1), 25);
 shouldBe(JSON.stringify(b.callCounts()), `[${own},${imported}]`);
 
@@ -78,6 +88,6 @@ for (let i = 0; i < own + imported; ++i)
     shouldBe(c.driver(i, 3), expected(i, 3));
 shouldBe(JSON.stringify(c.callCounts()), `[${3 * own / 2 + own},${3 * imported / 2 + imported}]`);
 shouldBe(c.f0 === a.f0 || c.f0 === b.f0, false);
-shouldBe($vm.codeBlockFor(c.f0) === $vm.codeBlockFor(a.f0), true);
+shouldBe(executableFor(c.f0), executableFor(a.f0));
 fullGC();
 shouldBe(warm(c, 2), warm(b, 2));

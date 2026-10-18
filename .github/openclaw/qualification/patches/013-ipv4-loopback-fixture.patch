@@ -1,0 +1,12 @@
+diff --git a/test/js/node/net/node-net.test.ts b/test/js/node/net/node-net.test.ts
+--- a/test/js/node/net/node-net.test.ts
++++ b/test/js/node/net/node-net.test.ts
+@@ -165,7 +165,7 @@ describe("net.Socket read", () => {
+                 },
+               })
+             : Bun.listen({
+-                hostname: "localhost",
++                hostname: "127.0.0.1",
+                 port: 0,
+                 socket: {
+                   open(socket) {
