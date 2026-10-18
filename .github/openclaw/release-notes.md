@@ -6,7 +6,7 @@ Native engine qualification passed on Linux x64 and ARM64. Publication additiona
 
 ## Previous release: b1e30d08
 
-# Rebased engine and allocation-sampling correctness
+### Rebased engine and allocation-sampling correctness
 
 This engine rebases the sixteen retained OpenClaw patches onto oven-sh/WebKit `b1e30d08cb1428688c5f24109fe4f534096ee2ad`. It preserves the opt-in Proxy globals, module-loader async context, worker budgets and collection cadence, namespace interop, allocation sampling, stack positions, ArrayBuffer accounting, allocator teardown, and native suspension fixes. The upstream base already includes the Segmenter boundary correction.
 
@@ -16,7 +16,7 @@ Native Linux x64 and ARM64 qualification of engine source `f34b5797f9d404443df87
 
 Linux faithfulness qualification now uses the runner's explicit CI mode and retains first-attempt batch status and individual test outcomes. The historical control includes the matched Bun's isolated-stdio teardown fix, preventing stale standard-stream polls from failing later test files. Failed batches stop qualification without fallback retries; both control and candidate must pass. Engine code and test bounds are unchanged.
 
-## Previous release
+### Earlier releases
 
 This release fixes two native stack storage paths that could conservatively retain otherwise unreachable objects, including cancellation reasons. Newly created VM entry records now initialize their callee-save scratch buffers and alignment padding. Deferred microtask entry scopes use two initialized pointers instead of an optional engagement byte with stale padding. Lazy entry, global-object updates, unwind state and teardown boundaries remain intact, without a new heap allocation. Native poisoned-storage regressions cover both owners. Thanks @robobun for the related whole-word-state remedy in [oven-sh/WebKit#694](https://github.com/oven-sh/WebKit/pull/694).
 
