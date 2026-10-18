@@ -3,7 +3,8 @@
   "origins": {
     "reporter": "420f48ac7551c8ed451c174326124ff775cc5a53",
     "logger": "dce637b9cdf1faff06c01e0df6a5b263d4cb7c1c",
-    "termination": "a7947a2a2f82cb002137f68e321654491acee6b9"
+    "termination": "a7947a2a2f82cb002137f68e321654491acee6b9",
+    "remapper": "083b5bedaa50c35e2dde537ab6b9b8e899de18b9"
   },
   "arms": {
     "baseline": {
@@ -23,7 +24,7 @@
       },
       "test": {
         "patch": "harness-adapters/baseline-test.patch",
-        "sha256": "333ca49a2274a76058f139a9b8081f63b4fc33f808119c058ddcd170289ad04d",
+        "sha256": "9eab877feb2e6a499a68497467486d10a9ea94d197fcd451a9b46f097b86d393",
         "files": {
           "scripts/buildkite.ts": {
             "before": "6bb50c957cf09fddcffc43b8035ff4a5d29734835fac0891e8b30297714d241d",
@@ -34,9 +35,9 @@
           },
           "scripts/runner.node.ts": {
             "before": "e35c7acbf5094720822d6e0caa5ae1ae0d165fc2f4b5f9b80107002437f0bffb",
-            "after": "d6abe5033208fccefc9a4ada01f88cd886bb9926af97cd5ca6bfdbd005c42fab",
+            "after": "bd0f555cb0290f2cf384a4a05528a0982a286eedb950dc5610dc67ccf222d258",
             "base_blob": "798d1d3b066d828498a6a3284e30ba5e164ba289",
-            "adapted_blob": "0a0943d3baadc5e7382f96dec5794300b6915919",
+            "adapted_blob": "fc986fd0b5d81f31d3070efc04f2c3e857c879ae",
             "mode": "100755"
           },
           "scripts/openclaw-ci/tests.ts": {
@@ -66,7 +67,7 @@
       },
       "test": {
         "patch": "harness-adapters/candidate-test.patch",
-        "sha256": "2ab74059314dce2db7325e344183d99465de4fd9a981ac7f8a1aef819c868556",
+        "sha256": "3c68e053f6488e54095ceefb62ddda0b2c1adf4ead3294de2dd915187c60d840",
         "files": {
           "scripts/buildkite.ts": {
             "before": "ad64e48173ea294a63a2ddcebacce42ee93ad0076c0839db6c533f9ad31b0120",
@@ -77,9 +78,9 @@
           },
           "scripts/runner.node.ts": {
             "before": "b7fffe85af08f19d0156ff84a8934d4915049f9368102de41f453372002060fb",
-            "after": "cd304350ed147f4b4fe30fd66f992279f4eb722eb2903ea1ed425f73045194c2",
+            "after": "6f1ae7a66a292073beda46e32696ef6bb4cc134ebed85a08267ac3b71a2b080c",
             "base_blob": "30fc1930e72e8b50a7611fa0fe871e798295ce62",
-            "adapted_blob": "d8f39c3a8bc988362391b5f3da469710572de8c5",
+            "adapted_blob": "1fdc71cc9ee6145cbfac4a2dc53886e1c6c671fc",
             "mode": "100755"
           },
           "scripts/openclaw-ci/tests.ts": {

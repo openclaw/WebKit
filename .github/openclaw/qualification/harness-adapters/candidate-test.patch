@@ -103,7 +103,7 @@ index c31bf247ea334395250f9925ee605af72096e79a..86062fa3c475ac22c1f4d3a6d6182dda
        startGroup(title, () => {
          const shell = which(shells);
 diff --git a/scripts/runner.node.ts b/scripts/runner.node.ts
-index 30fc1930e72e8b50a7611fa0fe871e798295ce62..d8f39c3a8bc988362391b5f3da469710572de8c5 100755
+index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1c6c671fc 100755
 --- a/scripts/runner.node.ts
 +++ b/scripts/runner.node.ts
 @@ -765,6 +765,7 @@
@@ -575,7 +575,18 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..d8f39c3a8bc988362391b5f3da469710
      duration,
    };
  }
-@@ -2855,11 +2851,8 @@
+@@ -2233,7 +2229,9 @@
+  */
+ async function installCiRemapServer(execPath: string): Promise<boolean> {
+   const title = relative(cwd, join(ciRemapServerPath, "package.json")).replaceAll(sep, "/");
+-  const { ok, error } = await startGroup(title, () => spawnBunInstall(execPath, { cwd: ciRemapServerPath }));
++  const { ok, error } = await startGroup(title, () =>
++    spawnBunInstall(execPath, { cwd: ciRemapServerPath, args: ["install", "--frozen-lockfile"] }),
++  );
+   if (!ok) console.warn(`ci-remap server not installed (${title}: ${error}), crash reports will not be remapped`);
+   return ok;
+ }
+@@ -2855,11 +2853,8 @@
    if (outcome === "pass") {
      return 0;
    }
