@@ -2,7 +2,7 @@
 """Assemble checked lane outputs, then create one immutable release without replacement."""
 import argparse
 import artifacts as artifact_source
-from qualification import consumer_identity, compile_cache
+from qualification import consumer_identity, compile_cache, compare_fork_ci
 import hashlib
 import json
 import os
@@ -56,12 +56,26 @@ def assemble(inputs,out,source):
         or gate.get('baseline_identity_sha256')!=sha(baseline_path)
         or gate.get('selected_files')!=44 or gate.get('result_files')!=46):
         raise ValueError('missing or mismatched qualification gate')
+    comparison=compare_fork_ci.compare(proof/'baseline',proof/'candidate')
+    if (not comparison['passed'] or gate.get('comparison_policy')!=compare_fork_ci.POLICY
+        or gate.get('faithfulness_sha256')!=sha(proof/'faithfulness.json')
+        or comparison!=compare_fork_ci.read_json(proof/'faithfulness.json')):
+        raise ValueError('missing or mismatched paired comparison evidence')
     sync=gate.get('upstream_sync',{});engine=gate.get('engine',{})
     if (sync.get('passed') is not True or sync.get('source')!=source
         or sync.get('candidate_identity_sha256')!=identity_sha
         or sync.get('historical_selected_files')!=82 or sync.get('selected_files')!=85
         or sync.get('regressions')!=0 or engine.get('passed') is not True or engine.get('source')!=source):
         raise ValueError('missing or mismatched upstream-sync/engine qualification')
+    selected=compare_fork_ci.selection(compare_fork_ci.read_json(proof/'sync/selected.json'))
+    historical=set(compare_fork_ci.read_json(consumer_identity.INPUTS/'selected.json'))|set(compare_fork_ci.read_json(consumer_identity.INPUTS/'sync/selected.json'))
+    if (len(historical)!=82 or len(selected)!=85 or not historical<=set(selected)
+        or not {'test/js/web/atomics.test.ts','test/js/bun/wasm/compile-rss.test.ts'}<=set(selected)):
+        raise ValueError('invalid frozen sync selection')
+    sync_observed=compare_fork_ci.validate_arm(proof/'sync',selected)
+    if (not sync_observed['all_passed'] or sync.get('invocation')!=sync_observed['invocation']
+        or sync.get('result_rows')!=len(sync_observed['rows'])):
+        raise ValueError('missing or mismatched sync invocation')
     if sync.get('compile_cache')!=compile_cache.evidence(proof/'sync/module-junit.xml'):
         raise ValueError('missing or mismatched compile-cache qualification')
     compatibility=gate.get('compatibility',{})

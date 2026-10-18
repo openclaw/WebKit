@@ -100,6 +100,41 @@ class ReleaseIntegrity(unittest.TestCase):
         manifest={'base':release.artifact_source.BASE,'history_floor':release.artifact_source.HISTORY_FLOOR,'patches':[]}
         self.assertEqual(release.lane_patch_records(manifest,release.artifact_source.BASE),[])
 
+
+    def test_baseline_gap_is_retained_without_requiring_first_attempt_equivalence(self):
+        from test_compare_fork_ci import failed_baseline
+        from test_consumer_identity import write_invocation
+        proof=self.inputs/'qualification'
+        write_invocation(proof,'baseline',failed_baseline(True))
+        comparison=release.compare_fork_ci.compare(proof/'baseline',proof/'candidate')
+        self.assertTrue(comparison['passed']);self.assertFalse(comparison['all_passed'])
+        self.assertEqual(len(comparison['baseline_unreported']),1)
+        (proof/'faithfulness.json').write_text(json.dumps(comparison))
+        gate=json.loads((proof/'gate.json').read_text());gate['faithfulness_sha256']=release.sha(proof/'faithfulness.json')
+        (proof/'gate.json').write_text(json.dumps(gate));self.assemble()
+
+    def test_assembly_rechecks_raw_facts_after_plausible_redigested_summaries(self):
+        from test_consumer_identity import write_invocation
+        proof=self.inputs/'qualification'
+        for name in ('baseline','candidate','sync'):
+            with self.subTest(name=name):
+                originals={str(path.relative_to(proof)):path.read_bytes() for path in proof.rglob('*.json')}
+                try:
+                    records={filename:json.loads((proof/name/filename).read_text()) for filename in
+                             ('selected.json','results.json','runner-terminal.json','wrapper-terminal.json')}
+                    records['results.json'][0]['groupedProcess']['timedOut']=True
+                    write_invocation(proof,name,records)
+                    gate=json.loads((proof/'gate.json').read_text())
+                    if name=='sync':gate['upstream_sync']['invocation']=release.consumer_identity.file_record(proof,'sync/invocation.json')
+                    else:
+                        value=json.loads((proof/'faithfulness.json').read_text())
+                        value['invocations'][name]=release.consumer_identity.file_record(proof,name+'/invocation.json')
+                        (proof/'faithfulness.json').write_text(json.dumps(value));gate['faithfulness_sha256']=release.sha(proof/'faithfulness.json')
+                    (proof/'gate.json').write_text(json.dumps(gate))
+                    with self.assertRaises(ValueError):release.assemble(self.inputs,self.root/('raw-tamper-'+name),SOURCE)
+                finally:
+                    for path,data in originals.items():(proof/path).write_bytes(data)
+
     def test_complete_set_roundtrip(self):
         self.assemble();self.assertEqual(len(release.verify(self.out,SOURCE)['artifacts']),10)
     def test_changed_lane_bytes_rejected(self):

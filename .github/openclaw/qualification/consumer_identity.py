@@ -11,6 +11,7 @@ import subprocess
 
 INPUTS = Path(__file__).resolve().parent
 CONFIG = json.loads((INPUTS.parent / 'variants.json').read_text())
+ADAPTERS = json.loads((INPUTS / 'harness-adapters.json').read_text())
 LANE = 'bun-webkit-linux-amd64'
 MANIFEST = 'scripts/build/deps/webkit-artifacts.json'
 EXECUTABLE = 'bun/build/qualify-candidate/bun'
@@ -158,9 +159,110 @@ def baseline_source(root, inspector_runtime):
     return hashlib.sha256(patch).hexdigest()
 
 
+def adapter_spec(arm, phase):
+    spec = ADAPTERS['arms'][arm]
+    require(spec['pin'] == CONFIG[arm]['commit'], 'harness adapter source pin drift')
+    selected = spec[phase]
+    require(sha(INPUTS / selected['patch']) == selected['sha256'], 'harness adapter bytes drift')
+    return selected
+
+
+def build_tool_record(root, arm, consumer):
+    path = arm + '-build-tools.json'
+    record = json.loads((root / path).read_text())
+    validate_build_tools(record, arm, consumer['executable'])
+    patch_sha256 = consumer['tracked_patch_sha256'] if arm == 'baseline' else consumer['overlay']['patch_sha256']
+    require(record['before']['other_patch_sha256'] == patch_sha256
+            and record['engine_source'] == consumer['runtime']['webkit'], 'build overlay/engine identity mismatch')
+    return file_record(root, path)
+
+
+def validate_build_tools(record, arm, executable):
+    require(record['schema_version'] == 1 and record['arm'] == arm and record['phase'] == 'build'
+            and record['source'] == CONFIG[arm] and record['adapter'] == adapter_spec(arm, 'build')
+            and record['restored'] is True and type(record['status']) is int and record['status'] == 0
+            and record['executable'] == executable
+            and record['before'] == record['after']
+            and record['before']['index_tree'] == CONFIG[arm]['tree']
+            and valid_digest(record['before']['other_patch_sha256'])
+            and valid_digest(record['compiled_inputs_sha256']), 'invalid restored build-tool provenance')
+
+    cwd = Path(record['cwd'])
+    require(cwd.is_absolute() and cwd.name == ('bun-baseline' if arm == 'baseline' else 'bun'), 'invalid build cwd')
+    require(isinstance(record['argv'], list) and len(record['argv']) == 7
+            and isinstance(record['argv'][0], str) and Path(record['argv'][0]).is_absolute(), 'invalid build argv')
+    revision = CONFIG['baseline']['engine'] if arm == 'baseline' else record['engine_source']
+    require(record['argv'][1:] == ['run', 'build:release', '--lto=off', '--webkit-version=' + revision,
+            '--buildDir=' + str(cwd / 'build' / ('qualify-' + arm)), '--timings'], 'build argv drift')
+    validate_file(record['bootstrap'], record['argv'][0])
+
+
+
+def validate_build_evidence(identity, arm, proof):
+    record = identity['build_tools']
+    require(file_record(proof, arm + '-build-tools.json') == record, 'build-tool receipt identity mismatch')
+    tools = json.loads((proof / record['path']).read_text())
+    validate_build_tools(tools, arm, identity['executable'])
+    expected = identity['tracked_patch_sha256'] if arm == 'baseline' else identity['overlay']['patch_sha256']
+    require(tools['before']['other_patch_sha256'] == expected
+            and tools['engine_source'] == identity['runtime']['webkit'], 'build overlay/engine identity mismatch')
+
+
+def validate_invocation(proof, name):
+    require(name in ('baseline', 'candidate', 'sync'), 'invalid invocation name')
+    arm = 'baseline' if name == 'baseline' else 'candidate'
+    path = name + '/invocation.json'
+    record = json.loads((proof / path).read_text())
+    require(record['schema_version'] == 1 and record['phase'] == 'test' and record['arm'] == arm
+            and record['source'] == CONFIG[arm] and record['adapter'] == adapter_spec(arm, 'test')
+            and record['restored'] is True and record['before'] == record['after']
+            and record['before']['index_tree'] == CONFIG[arm]['tree']
+            and valid_digest(record['before']['other_patch_sha256'])
+            and valid_digest(record['compiled_inputs_sha256']), 'invalid restored test invocation')
+    require(record['identity'] == file_record(proof, arm + '-identity.json'), 'invocation identity mismatch')
+    consumer = json.loads((proof / record['identity']['path']).read_text())
+    if arm == 'baseline':
+        validate_baseline(consumer)
+    else:
+        validate(consumer, consumer['engine']['source'])
+    validate_build_evidence(consumer, arm, proof)
+    require(record['executable'] == consumer['executable'], 'invocation binary mismatch')
+    require(record['selection'] == file_record(proof, name + '/selected.json'), 'invocation selection mismatch')
+    expected_patch = consumer['tracked_patch_sha256'] if arm == 'baseline' else consumer['overlay']['patch_sha256']
+    require(record['before']['other_patch_sha256'] == expected_patch, 'test overlay identity mismatch')
+    cwd = Path(record['cwd'])
+    require(cwd.is_absolute() and cwd.name == ('bun-baseline' if arm == 'baseline' else 'bun'), 'invalid test cwd')
+    argv = [str(cwd / 'build' / ('qualify-' + arm) / 'bun'), 'scripts/openclaw-ci/tests.ts', 'test']
+    if name == 'sync':
+        require(isinstance(record['argv'], list) and len(record['argv']) == 5
+                and record['argv'][3] == '--junit-prefix' and isinstance(record['argv'][4], str)
+                and re.fullmatch('openclaw-sync-junit-[0-9a-f]{32}-', record['argv'][4]), 'invalid sync invocation argv')
+        argv += record['argv'][3:]
+    require(record['argv'] == argv, 'invocation argv mismatch')
+    filenames = ('results.json', 'runner-terminal.json', 'wrapper-terminal.json', 'net-direct.json')
+    require(set(record['evidence']) == set(filenames), 'incomplete invocation evidence')
+    selected = json.loads((proof / record['selection']['path']).read_text())
+    direct = arm == 'candidate' and 'test/js/node/net/node-net.test.ts' in selected
+    for filename in filenames:
+        if filename == 'net-direct.json' and not direct:
+            require(record['evidence'][filename] is None and not (proof / name / filename).exists(), 'unexpected direct-net evidence')
+        else:
+            require(record['evidence'][filename] == file_record(proof, name + '/' + filename), 'invocation evidence mismatch: ' + filename)
+    if direct:
+        observed = json.loads((proof / name / 'net-direct.json').read_text())
+        runtime = consumer['runtime']
+        require(observed['testPath'] == 'test/js/node/net/node-net.test.ts'
+                and observed['revision'] == runtime['bun_revision'] and observed['webkit'] == runtime['webkit']
+                and observed['platform'] == runtime['platform'] and observed['arch'] == runtime['architecture']
+                and type(observed['exitCode']) is int and observed['exitCode'] == 0
+                and observed['signalCode'] is None and observed.get('error') is None, 'direct-net qualification failed')
+    return file_record(proof, path)
+
+
 def capture_baseline(root, inspector_runtime):
     record = {'source': CONFIG['baseline'], 'tracked_patch_sha256': baseline_source(root, inspector_runtime),
               'executable': file_record(root, BASELINE_EXECUTABLE), 'runtime': runtime(root / BASELINE_EXECUTABLE)}
+    record['build_tools'] = build_tool_record(root, 'baseline', record)
     validate_baseline(record)
     return record
 
@@ -173,6 +275,7 @@ def capture(root, engine, inspector_runtime):
     record = {'schema_version': 1, 'candidate': source, 'engine': engine, 'overlay': overlay,
               'executable': file_record(root, EXECUTABLE), 'runtime': runtime(root / EXECUTABLE),
               'fixture': file_record(root, FIXTURE), 'baseline': CONFIG['baseline']}
+    record['build_tools'] = build_tool_record(root, 'candidate', record)
     validate(record, engine['source'])
     return record
 
@@ -190,6 +293,7 @@ def validate_baseline(record):
     require(record['source'] == CONFIG['baseline'], 'invalid baseline identity')
     require(valid_digest(record['tracked_patch_sha256']), 'invalid baseline identity')
     validate_file(record['executable'], BASELINE_EXECUTABLE)
+    validate_file(record['build_tools'], 'baseline-build-tools.json')
     require(record['runtime'] == {'bun_revision': CONFIG['baseline']['commit'], 'webkit': CONFIG['baseline']['engine'],
             'platform': 'linux', 'architecture': 'x64'}, 'invalid baseline runtime')
 
@@ -209,6 +313,7 @@ def validate(record, source, engine=None):
             and overlay['tracked_changed_paths'] == [MANIFEST]
             and valid_digest(overlay['sha256']) and valid_digest(overlay['patch_sha256']))
     validate_file(record['executable'], EXECUTABLE)
+    validate_file(record['build_tools'], 'candidate-build-tools.json')
     validate_file(record['fixture'], FIXTURE)
     require(record['fixture']['sha256'] == FIXTURE_SHA256)
     require(record['runtime'] == {'bun_revision': pin['commit'], 'webkit': source, 'platform': 'linux', 'architecture': 'x64'})
@@ -218,6 +323,7 @@ def validate(record, source, engine=None):
 
 def validate_evidence(record, source, engine, binaries, proof):
     validate(record, source, engine)
+    validate_build_evidence(record, 'candidate', proof)
     require(file_record(binaries, EXECUTABLE) == record['executable'], 'candidate executable identity mismatch')
     require(file_record(binaries, FIXTURE) == record['fixture'], 'candidate fixture identity mismatch')
     require(sha(proof / 'candidate-manifest.patch') == record['overlay']['patch_sha256'], 'candidate overlay patch mismatch')
@@ -227,6 +333,7 @@ def validate_evidence(record, source, engine, binaries, proof):
 
 def validate_baseline_evidence(record, binaries, proof):
     validate_baseline(record)
+    validate_build_evidence(record, 'baseline', proof)
     require(file_record(binaries, BASELINE_EXECUTABLE) == record['executable'], 'baseline executable identity mismatch')
     require(sha(proof / 'baseline-adapters.patch') == record['tracked_patch_sha256'], 'baseline patch identity mismatch')
 

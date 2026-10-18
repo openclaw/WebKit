@@ -24,15 +24,12 @@ export HOME="$results/home" TMPDIR="$results/tmp" PATH="$results/bin:$PATH" OPEN
 # Retain all 82 historical cases and the three additions selected by the frozen candidate.
 "$candidate" --eval 'import {selectTests} from "./scripts/openclaw-ci/tests.ts"; import{$}from"bun";import{readFileSync,writeFileSync,mkdirSync}from"node:fs";const tracked=(await $`git ls-files -z test`.text()).split("\0").filter(Boolean);const historical=[...new Set(process.argv.slice(1).flatMap(path=>JSON.parse(readFileSync(path,"utf8"))))];if(historical.length!==82)throw Error("historical selection drift");const selected=[...new Set([...historical,...selectTests(["scripts/build/deps/webkit.ts"],tracked,true,"linux")])].sort();for(const file of selected)if(!tracked.includes(file))throw Error("missing historical/current selected test "+file);if(selected.length!==85)throw Error("frozen candidate selection drift");mkdirSync("build/openclaw-ci",{recursive:true});writeFileSync("build/openclaw-ci/selected.json",JSON.stringify(selected,null,2)+"\n");' "$inputs/selected.json" "$inputs/sync/selected.json"
 cp build/openclaw-ci/selected.json "$results/selected.json"
-rm -f build/openclaw-ci/results.json
 junit_prefix="openclaw-sync-junit-$(python3 -c 'import uuid;print(uuid.uuid4().hex)')-"
-if "$candidate" scripts/openclaw-ci/tests.ts test --junit-prefix "$junit_prefix" > "$results/tests.log" 2>&1; then
+if python3 "$inputs/harness_adapters.py" test --name sync --root "$QUALIFICATION_DIR" \
+  --inspector-runtime "$INSPECTOR_RUNTIME" --source "$SOURCE_SHA" --artifacts "$ARTIFACT_DIR" --junit-prefix "$junit_prefix"; then
   selection_exit=0
 else
   selection_exit=$?
-fi
-if test -f build/openclaw-ci/results.json; then
-  cp build/openclaw-ci/results.json "$results/results.json"
 fi
 if test "$selection_exit" -ne 0; then exit "$selection_exit"; fi
 # The native runner uses agent.tmpdir(), which selects /tmp on this Linux lane.

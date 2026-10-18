@@ -30,7 +30,6 @@ for arm in baseline candidate; do
     git diff --binary HEAD > "$QUALIFICATION_DIR/baseline-adapters.patch"
     export BUN_WEBKIT_ARTIFACT_MANIFEST="$inputs/upstream-artifacts.json"
     export BUN_BUILD_PREFETCH_DIR="$QUALIFICATION_DIR/baseline-prefetch"
-    revision=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["baseline"]["engine"])' "$pipeline/.github/openclaw/variants.json")
   else
     unset BUN_WEBKIT_ARTIFACT_MANIFEST
     python3 "$inputs/stage-sync-artifact.py" "$ARTIFACT_DIR/bun-webkit-linux-amd64.tar.gz" \
@@ -38,14 +37,14 @@ for arm in baseline candidate; do
     cp "$QUALIFICATION_DIR/candidate-input/artifacts.json" scripts/build/deps/webkit-artifacts.json
     git diff --binary HEAD > "$QUALIFICATION_DIR/candidate-manifest.patch"
     export BUN_BUILD_PREFETCH_DIR="$QUALIFICATION_DIR/candidate-input/prefetch"
-    revision="$SOURCE_SHA"
   fi
   export BUN_BUILD_CACHE_DIR="$QUALIFICATION_DIR/cache-$arm"
   "$bootstrap" install --frozen-lockfile
   (cd test && "$bootstrap" install --frozen-lockfile)
   python3 "$inputs/consumer_identity.py" "check-$arm" --root "$QUALIFICATION_DIR" --inspector-runtime "$INSPECTOR_RUNTIME" --source "$SOURCE_SHA" --artifacts "$ARTIFACT_DIR"
   sha256sum test/js/node/vm/vm.test.ts > "$QUALIFICATION_DIR/vm-test-$arm.sha256"
-  env -u GITHUB_SHA -u BUILDKITE_COMMIT -u GIT_SHA "$bootstrap" run build:release --lto=off --webkit-version="$revision" --buildDir="$repo/build/qualify-$arm" --timings > "$QUALIFICATION_DIR/build-$arm.log" 2>&1
+  python3 "$inputs/harness_adapters.py" build --name "$arm" --root "$QUALIFICATION_DIR" \
+    --inspector-runtime "$INSPECTOR_RUNTIME" --source "$SOURCE_SHA" --artifacts "$ARTIFACT_DIR"
   python3 "$inputs/consumer_identity.py" "check-$arm" --root "$QUALIFICATION_DIR" --inspector-runtime "$INSPECTOR_RUNTIME" --source "$SOURCE_SHA" --artifacts "$ARTIFACT_DIR"
   candidate="$repo/build/qualify-$arm/bun"
   if test "$arm" = baseline; then
@@ -64,13 +63,16 @@ for arm in baseline candidate; do
   mkdir -p build/openclaw-ci
   cp "$inputs/selected.json" build/openclaw-ci/selected.json
   cp "$inputs/selected.json" "$results/selected.json"
-  rm -f build/openclaw-ci/results.json
-  env -u BUN_WEBKIT_ARTIFACT_MANIFEST -u BUN_BUILD_CACHE_DIR -u BUN_BUILD_PREFETCH_DIR \
-    HOME="$results/home" TMPDIR="$results/tmp" PATH="$results/bin:$PATH" OPENCLAW_CI_PLATFORM=linux \
-    "$candidate" scripts/openclaw-ci/tests.ts test > "$results/tests.log" 2>&1
-  cp build/openclaw-ci/results.json "$results/results.json"
+  if python3 "$inputs/harness_adapters.py" test --name "$arm" --root "$QUALIFICATION_DIR" \
+    --inspector-runtime "$INSPECTOR_RUNTIME" --source "$SOURCE_SHA" --artifacts "$ARTIFACT_DIR"; then
+    selection_exit=0
+  else
+    selection_exit=$?
+  fi
+  # Completed baseline test failures are evidence; setup, cancellation and signals still stop.
+  case "$selection_exit" in 0|2) ;; *) exit "$selection_exit" ;; esac
 done
-python3 "$inputs/compare-fork-ci.py" "$QUALIFICATION_DIR/baseline" "$QUALIFICATION_DIR/candidate" --output "$QUALIFICATION_DIR/faithfulness.json"
+python3 "$inputs/compare_fork_ci.py" "$QUALIFICATION_DIR/baseline" "$QUALIFICATION_DIR/candidate" --output "$QUALIFICATION_DIR/faithfulness.json"
 unset BUN_WEBKIT_ARTIFACT_MANIFEST BUN_BUILD_CACHE_DIR BUN_BUILD_PREFETCH_DIR
 "$candidate" test test/js/bun/resolve/esModule.test.ts test/js/bun/namespace-prototype-pollution.test.ts test/js/bun/resolve/require-esm-evaluating-cycle.test.ts test/js/bun/import-attributes/import-attributes.test.ts test/js/node/module/require-extensions.test.ts > "$QUALIFICATION_DIR/namespace.log" 2>&1
 "$candidate" test --expose-internals test/js/node/v8/capture-stack-trace.test.js test/js/bun/sourcemap/internal-sourcemap.test.ts > "$QUALIFICATION_DIR/stack-positions.log" 2>&1
@@ -86,9 +88,11 @@ PYTHONPATH="$inputs" python3 - "$QUALIFICATION_DIR" "$SOURCE_SHA" <<'PY'
 import json,re,sys
 from pathlib import Path
 from consumer_identity import sha,validate,validate_baseline
+from compare_fork_ci import compare,POLICY
 root=Path(sys.argv[1])
 faith=json.loads((root/'faithfulness.json').read_text())
-assert faith['identical_file_outcomes'] and faith['all_passed']
+assert faith==compare(root/'baseline',root/'candidate')
+assert faith['policy']==POLICY and faith['passed']
 assert faith['selected_files']==44 and faith['result_files']==46
 for name in ['als-plugin','als-native']:
  rows=json.loads((root/(name+'.json')).read_text())['results']
@@ -102,6 +106,7 @@ identity=validate(json.loads((root/'candidate-identity.json').read_text()),sys.a
 validate_baseline(json.loads((root/'baseline-identity.json').read_text()))
 (root/'gate.json').write_text(json.dumps({'passed':True,'source':sys.argv[2],
  'comparison':'bun-plus-engine-upgrade','selected_files':44,'result_files':46,
+ 'comparison_policy':POLICY,'faithfulness_sha256':sha(root/'faithfulness.json'),
  'als_variants_per_mode':14,'proxy_minimum':4,'resource_minimum':16,
  'candidate_identity_sha256':sha(root/'candidate-identity.json'),
  'baseline_identity_sha256':sha(root/'baseline-identity.json')},indent=2)+'\n')

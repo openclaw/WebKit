@@ -3,14 +3,15 @@
 import json,re,sys
 from consumer_identity import engine_input,verify,sha
 from compile_cache import evidence as compile_cache_evidence
+from compare_fork_ci import validate_arm
 from pathlib import Path
 root=Path(sys.argv[1]);out=root/'sync'
 selected=json.loads((out/'selected.json').read_text())
 rows=json.loads((out/'results.json').read_text())
 historical=set(json.loads((Path(__file__).parent/'selected.json').read_text()))|set(json.loads((Path(__file__).parent/'sync/selected.json').read_text()))
 assert len(historical)==82 and len(selected)==len(set(selected))==85 and historical<=set(selected)
-assert set(selected)<={r['testPath'] for r in rows}
-assert rows and all(r['ok'] for r in rows),'sync CI failures'
+observed=validate_arm(out,selected)
+assert observed['all_passed'],'sync CI failures'
 assert {'test/js/web/atomics.test.ts','test/js/bun/wasm/compile-rss.test.ts'}<=set(selected)
 counts={}
 for name,minimum in [('memory-release',3),('proxy',4),('resource-limits',16),('namespace',41),('inspector',78),('als-suites',223),('stack-positions',343),('stack-minifier',68),('arraybuffer',19),('worker-statistics',7),('arraybuffer-native',1),('arraybuffer-serializer',60),('inspection-idle',1)]:
@@ -44,7 +45,8 @@ assert compatibility['candidate_identity_sha256']==identity_sha
 assert compatibility['memory_tests']==3 and compatibility['startup'] is True
 record={'passed':True,'source':sys.argv[2],'candidate_identity_sha256':identity_sha,
         'historical_selected_files':82,'selected_files':len(selected),'result_rows':len(rows),'regressions':0,'tests':counts,
-        'gc_progress':gc_progress,'compile_cache':compile_cache_evidence(out/'module-junit.xml')}
+        'gc_progress':gc_progress,'compile_cache':compile_cache_evidence(out/'module-junit.xml'),
+        'invocation':observed['invocation']}
 (root/'sync-gate.json').write_text(json.dumps(record,indent=2)+'\n')
 gate=json.loads((root/'gate.json').read_text())
 assert gate['candidate_identity_sha256']==identity_sha

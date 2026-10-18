@@ -9,8 +9,78 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-from qualification import consumer_identity as consumer, compile_cache
+from qualification import consumer_identity as consumer, compile_cache, harness_adapters as harness
 import xml.etree.ElementTree as ET
+
+
+
+def seed_build_tools(root, arm, record):
+    """Synthetic fixed-command provenance; no build is executed by these fixtures."""
+    cwd = Path('/fixture') / ('bun-baseline' if arm == 'baseline' else 'bun')
+    before = {'index_tree': consumer.CONFIG[arm]['tree'], 'other_patch_sha256':
+              record['tracked_patch_sha256'] if arm == 'baseline' else record['overlay']['patch_sha256']}
+    tools = {'schema_version': 1, 'arm': arm, 'phase': 'build', 'source': consumer.CONFIG[arm],
+             'adapter': consumer.adapter_spec(arm, 'build'), 'restored': True, 'status': 0,
+             'before': before, 'after': before, 'compiled_inputs_sha256': '1'*64,
+             'engine_source': record['runtime']['webkit'], 'executable': record['executable'],
+             'cwd': str(cwd), 'argv': ['/fixture/bootstrap-bun', 'run', 'build:release', '--lto=off',
+             '--webkit-version='+record['runtime']['webkit'], '--buildDir='+str(cwd/'build'/('qualify-'+arm)), '--timings'],
+             'bootstrap': {'path': '/fixture/bootstrap-bun', 'size': 1, 'sha256': '2'*64}}
+    path = arm+'-build-tools.json'
+    consumer.write_once(root/path, tools)
+    record['build_tools'] = consumer.file_record(root, path)
+
+
+def seed_consumer(root, arm):
+    pin = consumer.CONFIG[arm]
+    executable = consumer.BASELINE_EXECUTABLE if arm == 'baseline' else consumer.EXECUTABLE
+    record = {'executable': {'path': executable, 'size': 1, 'sha256': '3'*64},
+              'runtime': {'bun_revision': pin['commit'], 'webkit': pin.get('engine', 'e'*40),
+                          'platform': 'linux', 'architecture': 'x64'}}
+    if arm == 'baseline':
+        record.update(source=pin, tracked_patch_sha256='4'*64)
+    else:
+        record.update(schema_version=1, candidate={'repository': consumer.CONFIG['bun_repository'],
+            'commit': pin['commit'], 'tree': pin['tree'], 'index_tree': pin['tree']},
+            engine={'source': 'e'*40, 'lane': consumer.LANE, 'archive':
+            {'path': consumer.LANE+'.tar.gz', 'size': 1, 'sha256': '5'*64}, 'lane_manifest_sha256': '6'*64},
+            overlay={'path': consumer.MANIFEST, 'base_blob': pin['manifest_blob'], 'sha256': '7'*64,
+                     'patch_sha256': '4'*64, 'tracked_changed_paths': [consumer.MANIFEST]},
+            fixture={'path': consumer.FIXTURE, 'size': 1, 'sha256': consumer.FIXTURE_SHA256},
+            baseline=consumer.CONFIG['baseline'])
+    seed_build_tools(root, arm, record)
+    consumer.write_once(root/(arm+'-identity.json'), record)
+    return record
+
+
+def write_invocation(root, name, records):
+    """Bind real fixture files so tests can distinguish byte custody from validation."""
+    arm = 'baseline' if name == 'baseline' else 'candidate'
+    identity_path = root/(arm+'-identity.json')
+    record = json.loads(identity_path.read_text()) if identity_path.exists() else seed_consumer(root, arm)
+    directory = root/name; directory.mkdir(exist_ok=True)
+    for filename, value in records.items():
+        (directory/filename).write_text(json.dumps(value))
+    selected = records['selected.json']
+    if arm == 'candidate' and 'test/js/node/net/node-net.test.ts' in selected:
+        runtime = record['runtime']
+        (directory/'net-direct.json').write_text(json.dumps({'testPath': 'test/js/node/net/node-net.test.ts',
+            'revision': runtime['bun_revision'], 'webkit': runtime['webkit'], 'platform': runtime['platform'],
+            'arch': runtime['architecture'], 'exitCode': 0, 'signalCode': None, 'error': None}))
+    before = {'index_tree': consumer.CONFIG[arm]['tree'], 'other_patch_sha256':
+              record['tracked_patch_sha256'] if arm == 'baseline' else record['overlay']['patch_sha256']}
+    cwd = Path('/fixture')/('bun-baseline' if arm == 'baseline' else 'bun')
+    argv = [str(cwd/'build'/('qualify-'+arm)/'bun'), 'scripts/openclaw-ci/tests.ts', 'test']
+    if name == 'sync': argv += ['--junit-prefix', 'openclaw-sync-junit-'+'1'*32+'-']
+    invocation = {'schema_version': 1, 'phase': 'test', 'arm': arm, 'source': consumer.CONFIG[arm],
+                  'adapter': consumer.adapter_spec(arm, 'test'), 'restored': True, 'before': before, 'after': before,
+                  'compiled_inputs_sha256': '1'*64, 'cwd': str(cwd), 'argv': argv,
+                  'identity': consumer.file_record(root, arm+'-identity.json'), 'executable': record['executable'],
+                  'selection': consumer.file_record(root, name+'/selected.json'), 'evidence': {}}
+    for filename in ('results.json', 'runner-terminal.json', 'wrapper-terminal.json', 'net-direct.json'):
+        invocation['evidence'][filename] = consumer.file_record(root, name+'/'+filename) if (directory/filename).is_file() else None
+    (directory/'invocation.json').write_text(json.dumps(invocation))
+    return invocation
 
 
 def release_fixture(inputs, source):
@@ -33,6 +103,7 @@ def release_fixture(inputs, source):
     baseline={'source':consumer.CONFIG['baseline'],'tracked_patch_sha256':consumer.sha(proof/'baseline-adapters.patch'),
         'executable':consumer.file_record(binaries,consumer.BASELINE_EXECUTABLE),
         'runtime':{'bun_revision':consumer.CONFIG['baseline']['commit'],'webkit':consumer.CONFIG['baseline']['engine'],'platform':'linux','architecture':'x64'}}
+    seed_build_tools(proof,'candidate',identity);seed_build_tools(proof,'baseline',baseline)
     consumer.write_once(proof/'candidate-identity.json',identity);consumer.write_once(proof/'baseline-identity.json',baseline)
     digest=consumer.sha(proof/'candidate-identity.json')
     report=proof/'sync/module-junit.xml';report.parent.mkdir()
@@ -40,9 +111,18 @@ def release_fixture(inputs, source):
     for classname,name in compile_cache.CASES:
         ET.SubElement(suite,'testcase',classname=classname,name=name,file=compile_cache.MODULE)
     ET.ElementTree(suites).write(report,encoding='utf-8',xml_declaration=True)
+    from test_compare_fork_ci import evidence
+    from qualification import compare_fork_ci as comparison
+    for name in ('baseline','candidate'):write_invocation(proof,name,evidence())
+    historical=set(json.loads((consumer.INPUTS/'selected.json').read_text()))|set(json.loads((consumer.INPUTS/'sync/selected.json').read_text()))
+    selected=historical|{'test/js/web/atomics.test.ts','test/js/bun/wasm/compile-rss.test.ts'}
+    for index in range(85-len(selected)):selected.add('test/fixture-added-'+str(index)+'.test.ts')
+    write_invocation(proof,'sync',evidence(selected=sorted(selected)))
+    (proof/'faithfulness.json').write_text(json.dumps(comparison.compare(proof/'baseline',proof/'candidate')))
     gate={'passed':True,'source':source,'comparison':'bun-plus-engine-upgrade','selected_files':44,'result_files':46,
+        'comparison_policy':comparison.POLICY,'faithfulness_sha256':consumer.sha(proof/'faithfulness.json'),
         'candidate_identity_sha256':digest,'baseline_identity_sha256':consumer.sha(proof/'baseline-identity.json'),
-        'upstream_sync':{'passed':True,'source':source,'candidate_identity_sha256':digest,'historical_selected_files':82,'selected_files':85,'regressions':0,'compile_cache':compile_cache.evidence(report)},
+        'upstream_sync':{'passed':True,'source':source,'candidate_identity_sha256':digest,'historical_selected_files':82,'selected_files':85,'result_rows':87,'regressions':0,'compile_cache':compile_cache.evidence(report),'invocation':consumer.file_record(proof,'sync/invocation.json')},
         'engine':{'passed':True,'source':source},'compatibility':{'passed':True,'source':source,'candidate_identity_sha256':digest,'memory_tests':3,'startup':True}}
     (proof/'gate.json').write_text(json.dumps(gate))
 
@@ -73,6 +153,8 @@ class ConsumerIdentity(unittest.TestCase):
         commit=self.git('rev-parse','HEAD').strip();tree=self.git('rev-parse','HEAD^{tree}').strip();blob=self.git('rev-parse','HEAD:'+consumer.MANIFEST).strip()
         config={**consumer.CONFIG,'candidate':{'commit':commit,'tree':tree,'manifest_blob':blob}}
         self.config=patch.object(consumer,'CONFIG',config);self.config.start();self.addCleanup(self.config.stop)
+        adapters=copy.deepcopy(consumer.ADAPTERS);adapters['arms']['candidate']['pin']=commit
+        self.adapters=patch.object(consumer,'ADAPTERS',adapters);self.adapters.start();self.addCleanup(self.adapters.stop)
         self.source='e'*40;self.artifacts=self.root/'artifacts';self.artifacts.mkdir()
         self.archive=self.artifacts/(consumer.LANE+'.tar.gz');self.archive.write_bytes(b'engine archive')
         self.lane_manifest=self.artifacts/(consumer.LANE+'.manifest.json')
@@ -89,6 +171,9 @@ class ConsumerIdentity(unittest.TestCase):
         self.inventory=['source.js','src/string-map.generated.rs']
         self.discovery=patch.object(consumer,'discover_build_inputs',side_effect=lambda repo,runtime:[str(repo/path) for path in self.inventory])
         self.discover_mock=self.discovery.start();self.addCleanup(self.discovery.stop)
+        _,overlay=consumer.source_identity(self.repo,self.engine,self.inspector)
+        seed_build_tools(self.root,'candidate',{'executable':consumer.file_record(self.root,consumer.EXECUTABLE),
+            'runtime':self.runtime,'overlay':overlay})
 
     def git(self,*args):
         return subprocess.check_output(['git','-c','gc.auto=0','-c','maintenance.auto=false','-C',str(self.repo),*args],text=True)
@@ -277,6 +362,185 @@ class ConsumerIdentity(unittest.TestCase):
             with self.assertRaises(ValueError):consumer.discover_build_inputs(self.repo,self.inspector)
         with self.assertRaisesRegex(ValueError,'absolute source inspector'):
             consumer.discover_build_inputs(self.repo,Path('bun'))
+
+
+
+class HarnessAdapters(unittest.TestCase):
+    git = ConsumerIdentity.git
+    write_binary = ConsumerIdentity.write_binary
+
+    def setUp(self):
+        previous_mask=os.umask(0o022)  # Match qualify.sh while Git recreates adapted files.
+        self.addCleanup(os.umask,previous_mask)
+        ConsumerIdentity.setUp(self)
+        self.file=self.repo/'harness.js';self.file.write_text('original harness\n')
+        self.git('add','harness.js');self.git('-c','commit.gpgsign=false','commit','--quiet','-m','harness fixture')
+        pin=consumer.CONFIG['candidate'];pin.update(commit=self.git('rev-parse','HEAD').strip(),tree=self.git('rev-parse','HEAD^{tree}').strip())
+        self.runtime['bun_revision']=pin['commit'];self.write_binary(self.runtime)
+        before=consumer.sha(self.file);self.file.write_text('adapted harness\n');after=consumer.sha(self.file)
+        self.adapter=self.root/'harness.patch';self.adapter.write_bytes(consumer.git(self.repo,'diff','--binary','HEAD','--','harness.js'))
+        self.file.write_text('original harness\n')
+        spec={'patch':str(self.adapter),'sha256':consumer.sha(self.adapter),
+              'files':{'harness.js':{'before':before,'after':after,'mode':'100644'}}}
+        consumer.ADAPTERS['arms']['candidate']={'pin':pin['commit'],'build':spec,'test':spec}
+        (self.root/'candidate-build-tools.json').unlink()
+        _,overlay=consumer.source_identity(self.repo,self.engine,self.inspector)
+        seed_build_tools(self.root,'candidate',{'executable':consumer.file_record(self.root,consumer.EXECUTABLE),
+            'runtime':self.runtime,'overlay':overlay})
+        consumer.write_once(self.receipt,consumer.capture(self.root,self.engine,self.inspector))
+        directory=self.root/'candidate';directory.mkdir()
+        for name in ('home','tmp','bin'):(directory/name).mkdir()
+        self.raw=self.repo/'build/openclaw-ci';self.raw.mkdir(parents=True)
+        for path in (self.raw/'selected.json',directory/'selected.json'):path.write_text('["test/fixture.test.ts"]')
+        self.final=directory/'invocation.json';self.pending=directory/'invocation.pending.json'
+        self.calls=[];self.child=None;self.real_run=subprocess.run
+        def dispatch(argv,*args,**kwargs):
+            if len(argv)>1 and argv[1] in ('scripts/openclaw-ci/tests.ts','run'):
+                self.calls.append((list(argv),kwargs))
+                if self.child:return self.child(argv,kwargs)
+                if argv[1]=='scripts/openclaw-ci/tests.ts':
+                    (self.raw/'results.json').write_text('[]')
+                    (self.raw/'runner-terminal.json').write_text('{"status":0,"signal":null,"spawnError":false}')
+                return subprocess.CompletedProcess(argv,0)
+            return self.real_run(argv,*args,**kwargs)
+        self.dispatch=dispatch
+
+    def run_owner(self,phase='test'):
+        with patch.object(harness.subprocess,'run',side_effect=self.dispatch):
+            return harness.run(self.root,'candidate',phase,self.engine,self.inspector)
+
+    def assert_restored(self,final=False,pending=False):
+        self.assertEqual(self.file.read_text(),'original harness\n')
+        consumer.source_identity(self.repo,self.engine,self.inspector)
+        self.assertEqual(self.final.exists(),final);self.assertEqual(self.pending.exists(),pending)
+
+    def test_fixed_test_command_environment_and_immutable_receipt(self):
+        with patch.dict(os.environ,{key:'build-only' for key in consumer.BUILD_ENV}):
+            self.assertEqual(self.run_owner(),0)
+            for key in consumer.BUILD_ENV:self.assertEqual(os.environ[key],'build-only')
+        self.assert_restored(final=True)
+        argv,options=self.calls[0]
+        self.assertEqual(argv,[str(self.binary),'scripts/openclaw-ci/tests.ts','test'])
+        self.assertEqual(options['cwd'],self.repo)
+        self.assertFalse(any(key in options['env'] for key in consumer.BUILD_ENV))
+        self.assertEqual(options['env']['HOME'],str(self.root/'candidate/home'))
+        self.assertEqual(options['env']['TMPDIR'],str(self.root/'candidate/tmp'))
+        record=json.loads(self.final.read_text())
+        self.assertEqual(record['argv'],argv);self.assertTrue(record['restored'])
+        self.assertEqual(record['before'],record['after'])
+        self.assertEqual(record['evidence']['results.json'],consumer.file_record(self.root,'candidate/results.json'))
+        original=self.final.read_bytes();(self.raw/'results.json').write_text('retained raw evidence')
+        with self.assertRaisesRegex(ValueError,'receipt already exists'):self.run_owner()
+        self.assertEqual(self.final.read_bytes(),original)
+        self.assertEqual((self.raw/'results.json').read_text(),'retained raw evidence');self.assertEqual(len(self.calls),1)
+
+    def test_fixed_build_command_keeps_parent_environment(self):
+        receipt=self.root/'candidate-build-tools.json';receipt.unlink()
+        values={key:'parent-only' for key in ('GITHUB_SHA','BUILDKITE_COMMIT','GIT_SHA')}
+        with patch.dict(os.environ,values):
+            self.assertEqual(self.run_owner('build'),0)
+            self.assertTrue(all(os.environ[key]==value for key,value in values.items()))
+        argv,options=self.calls[0]
+        self.assertEqual(argv,[str(self.inspector),'run','build:release','--lto=off','--webkit-version='+self.source,
+            '--buildDir='+str(self.repo/'build/qualify-candidate'),'--timings'])
+        self.assertFalse(any(key in options['env'] for key in values))
+        record=json.loads(receipt.read_text());self.assertEqual(record['argv'],argv)
+        consumer.validate_build_tools(record,'candidate',consumer.file_record(self.root,consumer.EXECUTABLE))
+        self.assertTrue((self.root/'build-candidate.log').exists());self.assert_restored()
+
+    def test_source_refusal_preserves_raw_output_and_does_not_execute(self):
+        (self.raw/'results.json').write_text('retained raw evidence')
+        (self.repo/'source.js').write_text('foreign edit\n')
+        with self.assertRaises(ValueError):self.run_owner()
+        self.assertEqual((self.raw/'results.json').read_text(),'retained raw evidence')
+        self.assertEqual(self.calls,[]);self.assertFalse(self.pending.exists());self.assertFalse(self.final.exists())
+
+    def test_post_apply_failure_restores_without_final_receipt(self):
+        original=harness.files;failed=False
+        def checked(repo,spec,stage):
+            nonlocal failed
+            if stage=='after' and not failed:failed=True;raise ValueError('post-apply fixture failure')
+            return original(repo,spec,stage)
+        with patch.object(harness,'files',side_effect=checked):
+            with self.assertRaisesRegex(ValueError,'post-apply fixture failure'):self.run_owner()
+        self.assertTrue(failed);self.assertEqual(self.calls,[]);self.assert_restored()
+
+    def test_atomic_apply_refusal_settles_original_source(self):
+        dispatch=self.dispatch
+        def fail(argv,*args,**kwargs):
+            if argv[:4]==['git','-C',str(self.repo),'apply'] and '--check' not in argv and '--reverse' not in argv:
+                raise subprocess.CalledProcessError(1,argv)
+            return dispatch(argv,*args,**kwargs)
+        self.dispatch=fail
+        with self.assertRaises(subprocess.CalledProcessError):self.run_owner()
+        self.assertEqual(self.calls,[]);self.assert_restored()
+
+    def test_unknown_adapted_edit_stays_visible_without_final_receipt(self):
+        def child(argv,kwargs):
+            self.file.write_text('unexpected edit\n')
+            return subprocess.CompletedProcess(argv,0)
+        self.child=child
+        with self.assertRaisesRegex(ValueError,'unexpected harness bytes'):self.run_owner()
+        self.assertEqual(self.file.read_text(),'unexpected edit\n')
+        self.assertTrue(self.pending.exists());self.assertFalse(self.final.exists())
+
+    def test_reverse_failure_retains_pending_and_adapted_source(self):
+        dispatch=self.dispatch
+        def fail(argv,*args,**kwargs):
+            if argv[:4]==['git','-C',str(self.repo),'apply'] and '--reverse' in argv:
+                raise subprocess.CalledProcessError(1,argv)
+            return dispatch(argv,*args,**kwargs)
+        self.dispatch=fail
+        with self.assertRaises(subprocess.CalledProcessError):self.run_owner()
+        self.assertEqual(self.file.read_text(),'adapted harness\n')
+        self.assertTrue(self.pending.exists());self.assertFalse(self.final.exists())
+
+    def test_post_restore_guard_failure_retains_pending_without_final(self):
+        original=harness.source;calls=0
+        def guarded(*args):
+            nonlocal calls
+            calls+=1
+            if calls==2:raise ValueError('post-restore fixture failure')
+            return original(*args)
+        with patch.object(harness,'source',side_effect=guarded):
+            with self.assertRaisesRegex(ValueError,'post-restore fixture failure'):self.run_owner()
+        self.assert_restored(pending=True)
+
+    def test_pending_cleanup_failure_cannot_leave_accepted_receipt(self):
+        original=Path.unlink
+        def unlink(path,*args,**kwargs):
+            if path==self.pending:raise OSError('pending cleanup fixture failure')
+            return original(path,*args,**kwargs)
+        with patch.object(Path,'unlink',unlink):
+            with self.assertRaisesRegex(OSError,'pending cleanup fixture failure'):self.run_owner()
+        self.assert_restored(pending=True)
+
+    def test_compiled_input_adapter_is_rejected_before_mutation(self):
+        self.inventory.append('harness.js')
+        with self.assertRaisesRegex(ValueError,'enters compiled source inventory'):self.run_owner()
+        self.assertEqual(self.calls,[]);self.assert_restored()
+
+
+    def test_spawn_error_records_unknown_status_and_restores_source(self):
+        def child(argv,kwargs):raise OSError('fixture spawn failure')
+        self.child=child
+        self.assertEqual(self.run_owner(),1);self.assert_restored(final=True)
+        self.assertEqual(json.loads((self.root/'candidate/wrapper-terminal.json').read_text()),{'status':None})
+        with self.assertRaises(ValueError):consumer.validate_invocation(self.root,'candidate')
+
+    def test_final_write_failure_leaves_no_acceptable_receipt(self):
+        original=consumer.write_once
+        def write(path,record):
+            if path==self.final:raise OSError('final receipt fixture failure')
+            return original(path,record)
+        with patch.object(consumer,'write_once',side_effect=write):
+            with self.assertRaisesRegex(OSError,'final receipt fixture failure'):self.run_owner()
+        self.assert_restored()
+
+    def test_package_and_cli_import_entrypoints(self):
+        result=subprocess.run([sys.executable,str(Path(harness.__file__)),'--help'],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('--inspector-runtime',result.stdout)
 
 
 if __name__=='__main__':unittest.main()
