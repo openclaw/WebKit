@@ -1882,11 +1882,8 @@ Vector<uint8_t> ImageBuilder::finish()
             for (uint32_t offset : entriesInsideOf[index])
                 isTarget.set(offset);
             for (auto& reference : info.indexReferences) {
-                if (isARM64()) {
-                    isNotOutlinable.set(reference.offset);
-                    isNotOutlinable.set(reference.offset + sizeof(uint32_t));
-                } else
-                    isNotOutlinable.set(reference.offset - 1);
+                for (uint32_t offset = reference.patchBegin(); offset < reference.patchEnd(); ++offset)
+                    isNotOutlinable.set(offset);
             }
             for (auto& access : info.faultingAccesses)
                 isNotOutlinable.set(access.codeOffset);
@@ -2172,7 +2169,7 @@ Vector<uint8_t> ImageBuilder::finish()
             std::ranges::sort(calls, { }, &StubCall::offset);
             info.stubCalls = WTF::move(calls);
             for (auto& reference : info.indexReferences) {
-                RELEASE_ASSERT(isARM64() ? !placeWith(places, reference.offset, reference.offset + 2 * sizeof(uint32_t) - 1) : !placeWith(places, reference.offset - sizeof(int32_t), reference.offset - 1));
+                RELEASE_ASSERT(!placeWith(places, reference.patchBegin(), reference.patchEnd() - 1));
                 uint32_t was = reference.offset;
                 reference.offset = breaks("reference") ? reference.offset : map(reference.offset);
                 RELEASE_ASSERT(referenceIsUnmoved(was, reference.offset));

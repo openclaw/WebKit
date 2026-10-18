@@ -22398,6 +22398,25 @@ void IndexReferences::load(CCallHelpers& jit, GPRReg base, GPRReg dest, uint32_t
     bool isHalfWord = scale == sizeof(uint32_t);
     RELEASE_ASSERT(isHalfWord ? !(addend % sizeof(uint32_t)) : !(addend % sizeof(void*)) && !(scale % sizeof(void*)));
     RELEASE_ASSERT(scale <= std::numeric_limits<uint16_t>::max());
+#if CPU(ARM64) || CPU(X86_64)
+    if (usesImageIndex) {
+        GPRReg scratch = jit.scratchRegister();
+        RELEASE_ASSERT(base != scratch && dest != scratch);
+#if CPU(ARM64)
+        auto label = jit.label();
+#endif
+        jit.moveWithPatch(CCallHelpers::TrustedImmPtr(nullptr), scratch);
+#if CPU(X86_64)
+        auto label = jit.label();
+#endif
+        m_references.append({ label, addend, scale, true });
+        if (isHalfWord)
+            jit.load32(CCallHelpers::BaseIndex(base, scratch, CCallHelpers::TimesOne), dest);
+        else
+            jit.loadPtr(CCallHelpers::BaseIndex(base, scratch, CCallHelpers::TimesOne), dest);
+        return;
+    }
+#endif
 #if CPU(ARM64)
     m_references.append({ jit.label(), addend, scale, usesImageIndex });
     jit.m_assembler.add<64>(dest, base, UInt12(0), 12);
@@ -22446,8 +22465,16 @@ Vector<IndexReference> IndexReferences::link(LinkBuffer& linkBuffer)
 
 void IndexReferences::fill(uint8_t* code, const IndexReference& reference, uint32_t index)
 {
-#if CPU(ARM64)
+#if CPU(ARM64) || CPU(X86_64)
     uint64_t distance = reference.addend + static_cast<uint64_t>(index) * reference.scale;
+    if (reference.usesImageIndex) {
+        // Image indices can exceed the compact ARM64 load's 24-bit displacement.
+        RELEASE_ASSERT(distance < (1ull << 48));
+        CCallHelpers::AssemblerType_T::linkPointer(code, AssemblerLabel(reference.offset), reinterpret_cast<void*>(static_cast<uintptr_t>(distance)));
+        return;
+    }
+#endif
+#if CPU(ARM64)
     RELEASE_ASSERT(distance < (1u << 24));
     auto* instructions = reinterpret_cast<uint32_t*>(code + reference.offset);
     constexpr uint32_t immediate = 0xfffu << 10;
@@ -22457,7 +22484,6 @@ void IndexReferences::fill(uint8_t* code, const IndexReference& reference, uint3
     RELEASE_ASSERT(!(distance & ((1u << log2BytesLoaded) - 1)));
     instructions[1] |= static_cast<uint32_t>((distance & 0xfff) >> log2BytesLoaded) << 10;
 #elif CPU(X86_64)
-    uint64_t distance = reference.addend + static_cast<uint64_t>(index) * reference.scale;
     RELEASE_ASSERT(distance <= static_cast<uint64_t>(std::numeric_limits<int32_t>::max()));
     uint8_t* displacement = code + reference.offset - sizeof(int32_t);
     int32_t encoded = 0;

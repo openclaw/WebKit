@@ -1055,6 +1055,24 @@ struct IndexReference {
     uint32_t addend;
     uint16_t scale;
     bool usesImageIndex { false };
+
+    uint32_t patchBegin() const
+    {
+#if CPU(ARM64)
+        return offset;
+#else
+        return offset - (usesImageIndex ? sizeof(uintptr_t) : sizeof(int32_t));
+#endif
+    }
+
+    uint32_t patchEnd() const
+    {
+#if CPU(ARM64)
+        return offset + (usesImageIndex ? ARM64Assembler::NUMBER_OF_ADDRESS_ENCODING_INSTRUCTIONS : 2) * sizeof(uint32_t);
+#else
+        return offset;
+#endif
+    }
 };
 class IndexReferences {
 public:
