@@ -4,6 +4,7 @@ These entries describe the experimental `openclaw/aot-typed` fork.
 
 ## Unreleased
 
+- Report final canonical function sizes for folded aliases in AOT maps after outlining and fall-through optimization.
 - Check final AOT branch distances instead of rejecting large images for the sum of caller-local far-call veneers.
 - Publish initial and final native-entry coverage snapshots without rewriting the full table during GC.
 - Reduce native-entry snapshot serialization overhead while preserving complete per-VM coverage records.

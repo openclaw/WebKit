@@ -1169,7 +1169,6 @@ Vector<uint8_t> ImageBuilder::finish()
     struct FoldedFunction {
         ImageKey key;
         ImageKey canonicalFunction;
-        size_t size;
         String nameForMap;
     };
     Vector<FoldedFunction> foldedFunctions;
@@ -1373,7 +1372,7 @@ Vector<uint8_t> ImageBuilder::finish()
             ImageKey canonicalFunction = keyOf[classOf[index]];
             bytes += function.code.bytes.size();
             entriesInsideFunctions.append({ function.key, function.code.info.convention, canonicalFunction, 0 });
-            foldedFunctions.append({ function.key, canonicalFunction, function.code.bytes.size(), WTF::move(function.nameForMap) });
+            foldedFunctions.append({ function.key, canonicalFunction, WTF::move(function.nameForMap) });
         }
         dataLogLnIf(Options::verboseAOTCompilation(), "AOT: ", foldedFunctions.size(), " functions have the code of another: ", bytes, " bytes");
         if (kept.size() < m_functions.size())
@@ -2781,7 +2780,8 @@ Vector<uint8_t> ImageBuilder::finish()
             for (unsigned bucket = folded.canonicalFunction.hash() & (capacity - 1); functionWithKey[bucket] != std::numeric_limits<uint32_t>::max(); bucket = (bucket + 1) & (capacity - 1)) {
                 if (!m_functions[functionWithKey[bucket]].key.sameFunction(folded.canonicalFunction))
                     continue;
-                out->println("A\t", functionStarts[functionWithKey[bucket]], "\t", folded.size, "\t", folded.key.module, "\t", folded.key.start, "\t", folded.key.kind, "\t", folded.nameForMap);
+                unsigned index = functionWithKey[bucket];
+                out->println("A\t", functionStarts[index], "\t", m_functions[index].code.bytes.size(), "\t", folded.key.module, "\t", folded.key.start, "\t", folded.key.kind, "\t", folded.nameForMap);
                 break;
             }
         }
