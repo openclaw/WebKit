@@ -2344,6 +2344,10 @@ Vector<uint8_t> ImageBuilder::finish()
     size_t sharedBodiesAt = WTF::roundUpToMultipleOf<sizeof(uint32_t)>(sizeOfStubs);
     if (!sharedBodies.bytes.isEmpty())
         sizeOfStubs = sharedBodiesAt + sharedBodies.bytes.size();
+    if (sizeOfStubs + imageStubsAlignment >= stubCallReachSlack) {
+        m_failureReason = makeString("the program has too much machine code: each copy of the runtime's stubs and shared code must stay under "_s, stubCallReachSlack, " bytes: the stubs are "_s, stubs.bytes.size(), " bytes, the thunks that set the arguments of calls "_s, argumentThunks.bytes.size(), ", and the code that several functions share "_s, sharedBodies.bytes.size());
+        return { };
+    }
     size_t reach = stubCallReach;
     if (unsigned copies = Options::numberOfAOTStubCopiesForTesting()) [[unlikely]] {
         size_t sizeOfFunctions = 0;
@@ -2388,7 +2392,6 @@ Vector<uint8_t> ImageBuilder::finish()
             at.append(end);
             end += function.code.bytes.size() + sizeOfOwnBodiesOf[at.size() - 1];
         }
-        std::atomic<size_t> sizeOfVeneers { 0 };
         Typed::forEachIndexInParallel(m_functions.size(), [&](unsigned index) {
             auto& info = m_functions[index].code.info;
             for (auto& call : info.stubCalls) {
@@ -2401,14 +2404,7 @@ Vector<uint8_t> ImageBuilder::finish()
                     continue;
                 farCallees[index].append(farCalleeOf(*target, call));
             }
-            // Veneers share the alignment padding at the end of their caller.
-            if (!farCallees[index].isEmpty())
-                sizeOfVeneers += farCallees[index].size() * sizeOfVeneer + sizeof(uint32_t) + imageStubsAlignment;
         });
-        if (sizeOfVeneers + sizeOfStubs + imageStubsAlignment >= stubCallReachSlack) {
-            m_failureReason = makeString("the program has too much machine code: what is laid beside every copy of the runtime's stubs must stay under "_s, stubCallReachSlack, " bytes: the stubs are "_s, stubs.bytes.size(), " bytes, the thunks that set the arguments of calls "_s, argumentThunks.bytes.size(), ", the code that several functions share "_s, sharedBodies.bytes.size(), ", and calls between functions that are too far apart need "_s, sizeOfVeneers.load());
-            return { };
-        }
     }
     endStep("where the copies of the stubs go"_s);
     BitVector fallsIntoNext(m_functions.size());
@@ -2686,6 +2682,69 @@ Vector<uint8_t> ImageBuilder::finish()
     if (stubsAt.size() > maxStubCopiesPerImage) {
         m_failureReason = makeString("the program has too much machine code: "_s, codeSize, " bytes need "_s, stubsAt.size(), " copies of the runtime's stubs, and the limit is "_s, maxStubCopiesPerImage);
         return { };
+    }
+
+    auto targetOfStubCall = [&](size_t index, const StubCall& call) -> size_t {
+        size_t stubsForFunction = placement[index].second;
+        if (call.body) {
+            uint32_t indexWithinKind = bodyIndexWithinKind[call.body - 1];
+            return outlining.bodies[call.body - 1].singleCaller == Outlining::none ? stubsForFunction + sharedBodiesAt + sharedBodies.offsets[indexWithinKind] : ownBodyOffsets[indexWithinKind];
+        }
+        if (call.argumentMoves != StubCall::noArgumentMoves)
+            return stubsForFunction + argumentThunksAt + argumentThunks.offsets[numberOfArgumentMoves(m_functions[index].code.info.argumentMoves[call.argumentMoves])];
+        return stubsForFunction + (call.thunk ? offsetOfThunk(call.thunk - 1) : stubs.offsets[static_cast<unsigned>(call.stub)]);
+    };
+    // Veneers are local to their callers. Their sum over the image does not bound any one branch;
+    // check the final placement, including inserted stubs, before writing its relative branches.
+    auto checkBranch = [&](ASCIILiteral kind, size_t from, size_t to) {
+        size_t distance = from > to ? from - to : to - from;
+        if (distance <= stubCallReach + stubCallReachSlack)
+            return true;
+        m_failureReason = makeString("the program has too much machine code: a "_s, kind, " branch from byte "_s, from, " to byte "_s, to, " reaches "_s, distance, " bytes after layout; the limit is "_s, stubCallReach + stubCallReachSlack);
+        return false;
+    };
+    for (size_t at : stubsAt) {
+        for (auto& jump : argumentThunks.jumps) {
+            size_t target = at + (jump.thunk ? offsetOfThunk(jump.thunk - 1) : stubs.offsets[static_cast<unsigned>(jump.stub)]);
+            if (!checkBranch("argument thunk"_s, at + argumentThunksAt + jump.offset, target))
+                return { };
+        }
+        for (auto& jump : sharedBodies.jumps) {
+            if (jump.offset != OutlinedBodies::noJump && !checkBranch("shared body"_s, at + sharedBodiesAt + jump.offset, bodyJumpTarget(jump, at)))
+                return { };
+        }
+    }
+    for (size_t index = 0; index < m_functions.size(); ++index) {
+        size_t codeAt = placement[index].first;
+        for (auto& call : m_functions[index].code.info.stubCalls) {
+            size_t from = codeAt + call.offset;
+            if (!checkBranch("stub"_s, from, targetOfStubCall(index, call)))
+                return { };
+            if (auto target = directTargetOf(index, call)) {
+                size_t targetAt = placement[*target].first - preambleSizeForCall(*target, call);
+                if (size_t veneer = farCallees[index].find(farCalleeOf(*target, call)); veneer != notFound) {
+                    size_t veneerAt = codeAt + WTF::roundUpToMultipleOf<sizeof(uint32_t)>(m_functions[index].code.bytes.size()) + veneer * sizeOfVeneer;
+#if CPU(ARM64)
+                    int64_t pages = static_cast<int64_t>(targetAt >> 12) - static_cast<int64_t>(veneerAt >> 12);
+                    if (pages < -(1 << 20) || pages >= (1 << 20)) {
+                        m_failureReason = makeString("the program has too much machine code: a veneer at byte "_s, veneerAt, " cannot reach its target at byte "_s, targetAt);
+                        return { };
+                    }
+#else
+                    if (!checkBranch("veneer"_s, veneerAt, targetAt))
+                        return { };
+#endif
+                    targetAt = veneerAt;
+                }
+                if (!checkBranch("function"_s, from, targetAt))
+                    return { };
+            }
+        }
+        for (uint32_t number : ownBodiesOf[index]) {
+            auto& jump = ownBodies.jumps[number];
+            if (jump.offset != OutlinedBodies::noJump && !checkBranch("own body"_s, ownBodyOffsets[number] + jump.offset - ownBodies.offsets[number], bodyJumpTarget(jump, placement[index].second)))
+                return { };
+        }
     }
 
     endStep("the sizes of records and code"_s);
@@ -3465,15 +3524,11 @@ Vector<uint8_t> ImageBuilder::finish()
             IndexReferences::fill(code + codeAt, reference, reference.usesImageIndex ? index : info.stateNumber);
         for (auto& call : info.stubCalls) {
             if (call.body) {
-                uint32_t indexWithinKind = bodyIndexWithinKind[call.body - 1];
-                retargetStubCall(code, codeAt + call.offset, outlining.bodies[call.body - 1].singleCaller == Outlining::none ? stubsForFunction + sharedBodiesAt + sharedBodies.offsets[indexWithinKind] : ownBodyOffsets[indexWithinKind], false);
+                retargetStubCall(code, codeAt + call.offset, targetOfStubCall(index, call), false);
                 continue;
             }
             RELEASE_ASSERT(!isGeneratedOnlyIfCalled(call.stub) || calledStubs.get(static_cast<unsigned>(call.stub)));
-            size_t target = call.thunk ? offsetOfThunk(call.thunk - 1) : stubs.offsets[static_cast<unsigned>(call.stub)];
-            if (call.argumentMoves != StubCall::noArgumentMoves)
-                target = argumentThunksAt + argumentThunks.offsets[numberOfArgumentMoves(info.argumentMoves[call.argumentMoves])];
-            retargetStubCall(code, codeAt + call.offset, stubsForFunction + target, call.isTailCall);
+            retargetStubCall(code, codeAt + call.offset, targetOfStubCall(index, call), call.isTailCall);
         }
         for (uint32_t number : ownBodiesOf[index]) {
             size_t at = ownBodyOffsets[number];
