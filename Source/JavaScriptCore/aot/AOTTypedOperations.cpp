@@ -3891,6 +3891,11 @@ JSC_DEFINE_JIT_OPERATION(operationAOTTypedGetByNameCheckedAsNumber, double, (Ins
     OPERATION_RETURN(scope, std::bit_cast<double>(value.isUndefined() ? Typed::undefinedDouble : Typed::nullDouble));
 }
 
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTTypedIsArrayProxy, size_t, (Instance*, JSCell* cell))
+{
+    return Typed::isArrayProxy(asObject(cell));
+}
+
 JSC_DEFINE_JIT_OPERATION(operationAOTTypedRecordTypeMismatch, void, (Instance* instance, EncodedJSValue value, uint32_t type, uint32_t parameter, uint32_t where))
 {
     AOT_OPERATION_BEGIN_WITHOUT_CALLER(instance);

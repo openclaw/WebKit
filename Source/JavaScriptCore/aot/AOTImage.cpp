@@ -171,6 +171,7 @@ uint64_t imageStamp()
     mix(Instance::offsetOfCachedIntegerDoubles());
     mix(sizeof(Instance::NegativeOffsetFields));
     mix(Typed::builtinsHash);
+    mix(Typed::RuntimeType::allowsArrayProxiesFlag);
     mix(Typed::Format::version);
     mix(currentBinaryIdentity());
     return stamp;

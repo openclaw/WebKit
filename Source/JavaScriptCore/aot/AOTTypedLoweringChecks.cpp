@@ -739,11 +739,18 @@ Word32 Lowering::cellIsOfType(CellPointer cell, const Type& from, const Type& to
         result = logicalOr(result, isCallable(cell));
     for (uint16_t index : to.engineClasses) {
         JSType valueType = m_builtins.classes()[index].type;
-        if (!mayBeAnyObject && !std::ranges::any_of(from.engineClasses, [&](uint16_t other) { return m_builtins.classes()[other].type == valueType; }))
+        if (!mayBeAnyObject && !(valueType == ArrayType && to.allowsArrayProxies) && !std::ranges::any_of(from.engineClasses, [&](uint16_t other) { return m_builtins.classes()[other].type == valueType; }))
             continue;
         result = logicalOr(result, equal(type(), word32(valueType)));
         if (valueType != ArrayType)
             continue;
+        if (to.allowsArrayProxies) {
+            result = logicalOr(result, either<Word32>(equal(type(), word32(ProxyObjectType)), [&] {
+                return AOT_TYPED_OPERATION(IsArrayProxy, cell);
+            }, [&] {
+                return boolean(false);
+            }));
+        }
         if (m_isValidatingFact)
             result = logicalOr(result, isModifiedArray(cell));
         else if (!mayBeAnyObject)

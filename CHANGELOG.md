@@ -4,6 +4,7 @@ These entries describe the experimental `openclaw/aot-typed` fork.
 
 ## Unreleased
 
+- Preserve Proxy-backed declared arrays through generic AOT accesses with element checks, while retaining native storage specialization for proven array allocations.
 - Report final canonical function sizes for folded aliases in AOT maps after outlining and fall-through optimization.
 - Check final AOT branch distances instead of rejecting large images for the sum of caller-local far-call veneers.
 - Publish initial and final native-entry coverage snapshots without rewriting the full table during GC.

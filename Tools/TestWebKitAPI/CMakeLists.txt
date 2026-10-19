@@ -245,7 +245,7 @@ if (ENABLE_JAVASCRIPTCORE)
     )
 
     if (ENABLE_STATIC_JSC)
-        list(APPEND TestJavaScriptCore_SOURCES Tests/JavaScriptCore/AOTImage.cpp)
+        list(APPEND TestJavaScriptCore_SOURCES Tests/JavaScriptCore/AOTImage.cpp Tests/JavaScriptCore/AOTTypedArrays.cpp)
         list(APPEND TestJavaScriptCore_PRIVATE_INCLUDE_DIRECTORIES "$<TARGET_PROPERTY:JavaScriptCore,INCLUDE_DIRECTORIES>")
     endif ()
 

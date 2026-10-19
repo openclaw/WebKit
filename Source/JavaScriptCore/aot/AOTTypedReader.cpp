@@ -103,6 +103,15 @@ public:
         types.object = types.intern(Type::object());
         types.anything = types.intern(Type::anything());
         types.integer = types.intern(Type::integer(Range::full()));
+        unsigned declaredTypeCount = types.size();
+        m_nativeArrayTypes.grow(declaredTypeCount);
+        for (unsigned i = 0; i < declaredTypeCount; ++i) {
+            Type nativeArray = types.at(TypeID(i));
+            if (!nativeArray.allowsArrayProxies)
+                continue;
+            nativeArray.allowsArrayProxies = false;
+            m_nativeArrayTypes[i] = types.intern(nativeArray);
+        }
         auto shapes = section<Format::Shape>(m_header->shapes);
         m_program.layouts.grow(shapes.size());
         Vector<ASCIILiteral> shapeFailureReason(shapes.size());
@@ -647,6 +656,7 @@ private:
         type.integers = type.integers.unionWith(other.integers);
         type.anyObject |= other.anyObject;
         type.anyFunction |= other.anyFunction || type.anyObject;
+        type.allowsArrayProxies |= other.allowsArrayProxies;
         type.objectLayouts.appendVector(other.objectLayouts);
         type.engineClasses.appendVector(other.engineClasses);
         type.normalizeLiteralString();
@@ -654,6 +664,7 @@ private:
             type.objectLayouts.clear();
             type.engineClasses.clear();
             type.elements = { };
+            type.allowsArrayProxies = false;
         }
         std::ranges::sort(type.objectLayouts);
         type.objectLayouts.shrink(std::unique(type.objectLayouts.begin(), type.objectLayouts.end()) - type.objectLayouts.begin());
@@ -737,6 +748,7 @@ private:
             case Format::ObjectPartKind::Array: {
                 bool hasArrayPart = type.engineClasses.contains(builtins.arrayClass().index);
                 type.engineClasses.append(builtins.arrayClass().index);
+                type.allowsArrayProxies = true;
                 auto arguments = slice(m_words, part.typeArguments);
                 TypeID elements = arguments.size() == 1 ? typeAt(arguments[0]) : TypeID();
                 type.elements = hasArrayPart ? unionOf(type.elements, elements) : elements;
@@ -786,6 +798,7 @@ private:
             type.objectLayouts.clear();
             type.engineClasses.clear();
             type.elements = { };
+            type.allowsArrayProxies = false;
         }
         std::ranges::sort(type.objectLayouts);
         std::ranges::sort(type.engineClasses);
@@ -1007,6 +1020,9 @@ private:
                 m_failed = true;
                 break;
             }
+            if (value.opcode == Opcode::NewArray && m_program.at(value.type).allowsArrayProxies) {
+                value.type = m_nativeArrayTypes[value.type.index()];
+            }
             if (from.prediction != Format::none && from.prediction & Format::PredictionIsClosure) {
                 value.setPredictedClosure(FunctionID(from.prediction & ~Format::PredictionIsClosure));
                 if (value.predictedClosure().index() >= m_header->functions.count) {
@@ -1068,6 +1084,7 @@ private:
     std::span<const uint32_t> m_words;
     std::span<const Format::ObjectPart> m_objectParts;
     Vector<TypeID> m_types;
+    Vector<TypeID> m_nativeArrayTypes;
     Vector<TypeID> m_predictedTypes;
     Vector<uint32_t> m_callSignatures;
     uint32_t m_callSignatureRead { Format::none };

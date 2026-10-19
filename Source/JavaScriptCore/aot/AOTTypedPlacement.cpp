@@ -2231,6 +2231,7 @@ private:
         type.integers = type.integers.unionWith(other.integers);
         type.anyObject |= other.anyObject;
         type.anyFunction |= other.anyFunction;
+        type.allowsArrayProxies |= other.allowsArrayProxies;
         type.objectLayouts.appendVector(other.objectLayouts);
         type.engineClasses.appendVector(other.engineClasses);
     }
@@ -2243,6 +2244,7 @@ private:
             type.objectLayouts.clear();
             type.engineClasses.clear();
             type.elements = { };
+            type.allowsArrayProxies = false;
             return;
         }
         std::ranges::sort(type.engineClasses);
@@ -6466,7 +6468,7 @@ private:
                 if (isObjectLayout(supertype.kind) && !supertype.shape)
                     supertypesWithoutLayoutData.append({ test, id });
             }
-            Vector<uint64_t, 16> said { type.primitives, type.anyObject, type.anyFunction, type.acceptsUntypedObjects(m_program), static_cast<uint64_t>(type.integers.minimum), static_cast<uint64_t>(type.integers.maximum), type.objectLayouts.size(), type.elements ? m_typeOffsets[type.elements.index()] : 0 };
+            Vector<uint64_t, 16> said { type.primitives, type.anyObject, type.anyFunction, type.allowsArrayProxies, type.acceptsUntypedObjects(m_program), static_cast<uint64_t>(type.integers.minimum), static_cast<uint64_t>(type.integers.maximum), type.objectLayouts.size(), type.elements ? m_typeOffsets[type.elements.index()] : 0 };
             for (LayoutID id : type.objectLayouts)
                 said.append(supertypeOffset[id.index()]);
             for (uint16_t index : type.engineClasses)
@@ -6497,6 +6499,7 @@ private:
                 | (type.elements ? RuntimeType::hasElementsBit : 0) | (hasOneInteger ? RuntimeType::hasOneIntegerBit : hasNoInteger ? 0 : RuntimeType::hasIntegersBit);
             runtimeType.supertypesCount = type.objectLayouts.size();
             runtimeType.jsTypesCount = type.engineClasses.size();
+            runtimeType.arrayFlags = type.allowsArrayProxies ? RuntimeType::allowsArrayProxiesFlag : 0;
             uint32_t next = offset + sizeof(RuntimeType);
             for (LayoutID id : type.objectLayouts) {
                 at<int32_t>(next) = static_cast<int32_t>(supertypeOffset[id.index()]) - static_cast<int32_t>(offset);

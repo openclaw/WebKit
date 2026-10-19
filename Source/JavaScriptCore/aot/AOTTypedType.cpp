@@ -77,7 +77,7 @@ LayoutID Type::singleLayout() const
 
 const EngineClass* Type::singleEngineClass() const
 {
-    if (primitives & ~Primitive::UndefinedOrNull || anyObject || anyFunction || !objectLayouts.isEmpty() || engineClasses.size() != 1)
+    if (primitives & ~Primitive::UndefinedOrNull || anyObject || anyFunction || allowsArrayProxies || !objectLayouts.isEmpty() || engineClasses.size() != 1)
         return nullptr;
     return &Builtins::singleton().classes()[engineClasses[0]];
 }
@@ -147,6 +147,8 @@ bool Type::isSubsetOf(const Type& other, const Program& program, bool untypedObj
         return true;
     if (anyObject || (anyFunction && !other.anyFunction))
         return false;
+    if (allowsArrayProxies && !other.allowsArrayProxies)
+        return false;
     for (uint16_t engineClass : engineClasses) {
         if (!other.engineClasses.contains(engineClass))
             return false;
@@ -167,7 +169,7 @@ bool Type::isSubsetOf(const Type& other, const Program& program, bool untypedObj
 
 void add(Hasher& hasher, const Type& type)
 {
-    add(hasher, type.primitives, type.integers.minimum, type.integers.maximum, type.anyObject, type.anyFunction, type.elements);
+    add(hasher, type.primitives, type.integers.minimum, type.integers.maximum, type.anyObject, type.anyFunction, type.allowsArrayProxies, type.elements);
     for (LayoutID supertype : type.objectLayouts)
         add(hasher, supertype);
     for (uint16_t engineClass : type.engineClasses)
