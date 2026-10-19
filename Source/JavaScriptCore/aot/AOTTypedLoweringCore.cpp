@@ -1745,7 +1745,7 @@ Operand Lowering::lowerGetEnvironmentField(ValueID result, const Value& value)
     auto& field = m_program.at(value.layout()).fields[value.field()];
     CellPointer cell = in<CellPointer>(value.child(0));
     if (Options::validateAOTTypedFacts()) [[unlikely]]
-        validateIsNotReleased(cell, value);
+        validateIsNotReleased(cell, result, value);
     unsigned flags = safeIfReaches(cell, field.offset + sizeOf(field.store));
     if (field.flags & fieldIsImmutable)
         flags |= IsFixed;
@@ -1843,13 +1843,13 @@ bool Lowering::defersBarrierToPark(ValueID frame) const
     return false;
 }
 
-void Lowering::lowerPutEnvironmentField(const Value& value)
+void Lowering::lowerPutEnvironmentField(ValueID id, const Value& value)
 {
     auto& field = m_program.at(value.layout()).fields[value.field()];
     CellPointer cell = in<CellPointer>(value.child(0));
     ValueID stored = value.child(1);
     if (Options::validateAOTTypedFacts() && !isLoweringInitializingStore()) [[unlikely]]
-        validateIsNotReleased(cell, value);
+        validateIsNotReleased(cell, id, value);
     didEmitWrite(isLocalAllocation(m_function, value.child(0)) ? Writes::RuntimeState : Writes::Fields);
     Operand operand = in(stored, repOf(field.store));
     if (Options::validateAOTTypedFacts() && (field.singleFunctionIsProven || field.singleFunctionOrNullish || field.otherFunction)) [[unlikely]]
@@ -2547,7 +2547,7 @@ Operand Lowering::lower(ValueID id, const Value& value)
         if (m_currentIndexInBlock && isResumeClosureCreatedAtSuspend(m_currentIndexInBlock - 1))
             return undefined();
         if (!isObjectLayout(m_program.at(value.layout()).kind))
-            lowerPutEnvironmentField(value);
+            lowerPutEnvironmentField(id, value);
         else
             lowerPutField(id, value);
         return undefined();

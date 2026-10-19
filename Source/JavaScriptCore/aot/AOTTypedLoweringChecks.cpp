@@ -1734,7 +1734,7 @@ bool Lowering::markNullishTest(CellPointer accessed)
     return true;
 }
 
-void Lowering::validateIsNotReleased(CellPointer environment, const Value& access)
+void Lowering::validateIsNotReleased(CellPointer environment, ValueID accessID, const Value& access)
 {
     auto& layout = m_program.at(access.layout());
     if (!layout.reuseVariable || access.field() + 1 >= layout.fields.size())
@@ -1750,7 +1750,7 @@ void Lowering::validateIsNotReleased(CellPointer environment, const Value& acces
     m_out.appendTo(doesNotHold);
     {
         SetForScope isReporting(m_isReportingFactViolation, true);
-        AOT_TYPED_OPERATION(FactViolated, Boxed(m_out.int64Zero), word32(m_id.index()), word32(m_currentBlock->values[m_currentIndexInBlock].index()));
+        AOT_TYPED_OPERATION(FactViolated, Boxed(m_out.int64Zero), word32(m_id.index()), word32(accessID.index()));
     }
     m_out.jump(continuation);
     m_out.appendTo(continuation);

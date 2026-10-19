@@ -598,10 +598,10 @@ private:
     void lowerPutGlobal(const Value&);
     void lowerPutModuleVariable(const Value&);
     Operand lowerGetEnvironmentField(ValueID result, const Value&);
-    void lowerPutEnvironmentField(const Value&);
+    void lowerPutEnvironmentField(ValueID, const Value&);
 
     void validateIsNotEmpty(Boxed);
-    void validateIsNotReleased(CellPointer environment, const Value& access);
+    void validateIsNotReleased(CellPointer environment, ValueID accessID, const Value& access);
     Word32 isCell(Boxed value)
     {
         if (auto found = m_decoded.find(value.value()); found != m_decoded.end())
