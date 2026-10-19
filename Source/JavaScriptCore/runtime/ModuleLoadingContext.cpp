@@ -86,6 +86,11 @@ ModuleLoadingContext* ModuleLoadingContext::create(VM& vm, JSModuleLoader* loade
     return context;
 }
 
+void ModuleLoadingContext::setEntry(VM& vm, ModuleRegistryEntry* entry)
+{
+    m_entry.set(vm, this, entry);
+}
+
 JSModuleLoader::ModuleReferrer ModuleLoadingContext::referrer() const
 {
     JSValue ref = m_referrer.get();

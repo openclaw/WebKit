@@ -5327,7 +5327,9 @@ protected:
     // 13: exact call-site positions in the code block's owned rare data.
     // 14: async resume-label source positions.
     // 15: async positions name yield labels and positions follow bytecode optimization.
-    static constexpr uint32_t cachedTypesFormatRevision = 16;
+    // 17: upstream op_iterator_close_check metadata and op_iterator_open / op_iterator_next String-register layout
+    // (321765@main, 322172@main), combined with the fork's call-site and async position tables.
+    static constexpr uint32_t cachedTypesFormatRevision = 17;
     static uint32_t currentCacheVersion() { return computeJSCBytecodeCacheVersion() ^ (cachedTypesFormatRevision * 0x9E3779B9u); }
 
     GenericCacheEntry(Encoder& encoder, CachedCodeBlockTag tag)

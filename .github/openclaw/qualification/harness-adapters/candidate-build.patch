@@ -1,0 +1,17 @@
+diff --git a/scripts/buildkite.ts b/scripts/buildkite.ts
+index c31bf247ea334395250f9925ee605af72096e79a..84e2a90cdac611c15b0618a17f2d9e53b2b5d6b5 100644
+--- a/scripts/buildkite.ts
++++ b/scripts/buildkite.ts
+@@ -1004,12 +1004,6 @@
+   });
+ 
+   if (isCI) {
+-    startGroup("Environment", () => {
+-      for (const [key, value] of Object.entries(process.env).sort()) {
+-        console.log(`${key}:`, value);
+-      }
+-    });
+-
+     const show = (title: string, shells: string[], ...scripts: string[]) =>
+       startGroup(title, () => {
+         const shell = which(shells);

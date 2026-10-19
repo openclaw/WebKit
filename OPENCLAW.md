@@ -1,8 +1,8 @@
 # OpenClaw WebKit artifacts
 
 This fork owns the WebKit artifacts consumed by `openclaw/bun`. The engine base is
-`1600131e46b5af48bbda3559af8d8a3327230b6e`; each engine change is a separate
-commit. Upstream `.github/scripts/lanes.mjs`, Dockerfiles, ICU inputs and macOS
+`3d3257150c40a1aabdc5f8b48d5b33d0413674cb`. Normal merges retain both the
+main and published fork histories. Upstream `.github/scripts/lanes.mjs`, Dockerfiles, ICU inputs and macOS
 cross tools remain unchanged. No workflow publishes toolchain images.
 
 ## Patch batch
@@ -21,8 +21,9 @@ Bun adapters and a joint rebuild because engine class layouts change.
 commit and each active workflow-to-artifact mapping. The release workflow uses
 LTO for Linux glibc x64/arm64, macOS x64/arm64, and its optional Linux musl
 x64/arm64 and Windows x64 targets. Fork CI adds non-LTO Linux x64 and macOS arm64.
-That is nine artifacts. Windows arm64, debug, ASAN, Android and FreeBSD are not
-selected by these OpenClaw workflows. x64 has one Nehalem baseline.
+Windows ARM64 adds the upstream non-LTO release lane, for ten artifacts. LLVM's
+CodeView register-tuple limitation prevents ARM64 LTO (oven-sh/bun#31345).
+Debug, ASAN, Android and FreeBSD are not selected by these OpenClaw workflows. x64 has one Nehalem baseline.
 
 ## Add a patch and qualify
 
@@ -33,39 +34,49 @@ base, then review the whole batch. Changing the upstream recipe requires a
 separate qualification and an explicit base/recipe update.
 
 Dispatch **OpenClaw WebKit artifacts** from `openclaw/main` (or the protected
-`openclaw/batch-1` publication branch) with its full current
+`openclaw/batch-1` or `openclaw/release-5718a6ec` publication branch) with its full current
 commit SHA and `publish: false`. It builds the selected lanes on Linux x64 with
 Docker Buildx, at most two lanes at once. Each lane records the exact source,
 commit patches, recipe hashes, locally built toolchain image ID, BuildKit
 metadata, tool versions, elapsed time and tarball SHA-256. These records and the
 tarball are workflow artifacts. SDKs and toolchain images are not redistributed.
 
-The Linux test job builds both baseline and candidate Bun with separate caches.
-Qualification-only Bun adapters live under `.github/openclaw/qualification`;
-they do not update or publish the Bun fork. The job runs the original 44-file
+The Linux test job builds exactly two Bun executables, with separate sources,
+dependencies, build directories and caches. The historical baseline is Bun
+`b83b544ef744b6ab0dc1feadb59652261d64291d` with engine
+`1600131e46b5af48bbda3559af8d8a3327230b6e` and the recorded checksum/VM fixture
+patches 000 and 012. The candidate is Bun
+`ac9a670feaafe7623564b51e0257c3de583fe9ef`, tree
+`77decc869e3e0da3305e11cb3059e0e35a3a8be3`, with only its tracked WebKit
+manifest replaced by the measured candidate Linux archive. This is a Bun-plus-engine
+upgrade comparison, not an isolated engine measurement. The job runs the original 44-file
 fork selector output plus its two dependency checks, requires identical all-pass
 results, and checks Segmenter, four Proxy regressions, both 14-variant ALS hook
 modes and at least 16 worker resource-limit cases. Other platforms are built;
-this gate does not claim native runtime qualification on every architecture.
+this gate does not claim native runtime qualification on every architecture. A
+Windows 11 ARM64 job verifies archive provenance and native ARM64 PE identity,
+then runs JSC startup, DFG JIT, testFFI and ArrayBuffer accounting in five execution modes. Assembly and publication require
+its source- and archive-bound receipt.
 
 ## Publish and verify
 
 Batch 1 is published from `openclaw/batch-1` so concurrently reviewed batch-2
-engine changes can land on `openclaw/main` without entering this release. Both
+engine changes can land on `openclaw/main` without entering this release. All publication
 branches require the same protected environment and full-SHA/green-job checks.
 
-Pull requests run **OpenClaw engine checks** at the exact PR head, with a native
-Linux build using the same lane recipe and Bun qualification gate, plus the
-macOS arm64 fork artifact cross-built on a separate Linux runner. Both jobs are
-read-only; the macOS lane proves compilation, not native macOS execution.
+Pull requests run **OpenClaw engine checks** at the exact PR head. The Linux
+job uses the same lane recipe and Bun qualification gate. Separate Linux jobs
+cross-build the macOS arm64 fork artifact and Windows ARM64 lane; a native
+Windows ARM64 job qualifies the latter archive against the same PR head. All
+jobs are read-only; the macOS lane proves compilation, not native macOS execution.
 The native job also runs the ArrayBuffer accounting
 and confirmed parked-waiter inspection regression with LLInt, DFG, FTL and
 concurrent GC. This workflow provides the pre-merge check; it cannot publish.
 
-After a green build/test dispatch, dispatch the same full SHA with `publish:
-true`. This repeats the build and qualification, then waits at the protected
+For final publication, dispatch the reviewed full SHA with `publish: true`.
+This builds every lane and runs all qualification gates before waiting at the protected
 `openclaw-artifacts` environment. Only the publication job has repository write
-permission. It assembles exactly the nine archives, `manifest.json`,
+permission. It assembles exactly the ten archives, `manifest.json`,
 `SHA256SUMS`, `provenance.tar.gz`, and `LICENSE-SOURCES.txt`.
 
 Repository immutable releases must be enabled. Once the publishing dispatch is
@@ -83,7 +94,8 @@ still checks the published release's immutable state. Publication first atomical
 creates `autobuild-<full SHA>`, creates a draft, uploads every asset, verifies
 GitHub's asset digests, and publishes it. It then requires `immutable: true`,
 downloads every public asset, and checks the manifest and SHA256SUMS again.
-Existing tags, drafts and releases are never resumed or overwritten. A partial
+A separate `publish: false` dispatch is an optional dry run; it never substitutes
+for the final publication run’s own green gates. Existing tags, drafts and releases are never resumed or overwritten. A partial
 publication needs investigation and a new source commit/tag; there is no
 replacement option. Inspect the publication receipt before updating a consumer.
 
@@ -96,6 +108,27 @@ Keep every prior release. Revert the Bun manifest and WebKit source pin together
 then rebuild Bun against that matched engine. Never replace a published asset or
 use an old Bun executable with headers/libraries from another engine ABI.
 
+## VM entry storage
+
+The historical baseline applies the test-only collected-realm fix from
+`4c8accdd045b84c942fe447348a31a7cba04cde4`; it is already in the candidate Bun.
+Each VM test file hash is retained. PR checks and artifact builds upload the two
+qualified executables and hashes in `linux-bun-executables`, including available
+executables after a failed run. Compatibility and feature checks reuse the exact
+candidate binary and never rebuild or rewrite its identity receipt.
+
+The Linux x64 `testVMEntryRecord` native target poisons the next entry record and
+checks all fixed-arity and generic entry stubs, locator purity, nested-entry
+preservation, and ordinary JavaScript exception handling. Its synthetic callee
+captures storage before any legitimate spill; it never executes bytecode or
+collects while its deliberately incomplete JavaScript frame is active.
+
+The `testVMEntryScope` native target checks poisoned deferred-scope storage and
+entry, reset, nested-scope, and microtask lifecycle behavior. Deferred scopes keep
+the existing lazy entry and teardown boundaries without allocating heap storage.
+The Linux x64 artifact build makes both VM entry targets dependencies of `jsc`
+and requires both native executables to pass before accepting the artifact.
+
 ## Batch 1 (2026-10-04)
 
 - Fix Segmenter queries at surrogate-pair boundaries; thanks @steipete.
@@ -106,9 +139,11 @@ use an old Bun executable with headers/libraries from another engine ABI.
 
 ## Namespace interop qualification
 
-Pull requests run the read-only Linux engine check. It builds the unchanged native lane, verifies the JSC namespace stress results, and builds Bun with the matching qualification adapters before running the fork selection and namespace regressions. It has no publication job.
-
-The namespace adapter in `.github/openclaw/qualification/patches/008-namespace.patch` accompanies the engine facade API. Keep it in sync with the matching Bun integration until that integration becomes the qualification baseline. The native engine change and Bun consumer must be rebuilt together; a new engine release alone does not remove Bun's old namespace prototype.
+Pull requests run the read-only Linux engine check. It builds the unchanged native
+lane and verifies JSC namespace stress results before the exact candidate Bun runs
+the fork selection and namespace regressions. The facade, accounting, stack and
+worker counterparts are already in the pinned Bun candidate; no runtime adapter
+patch is reapplied. Engine and Bun must still be rebuilt together.
 
 ## Allocation sampling
 
@@ -136,30 +171,54 @@ entrypoint.
 
 ## ArrayBuffer ownership and worker snapshots
 
-The accounting adapter in `.github/openclaw/qualification/patches/010-arraybuffer-accounting.patch`
-uses the engine's allocation-origin and holder accounts for process, V8 and worker
-statistics. The qualification gate exercises its Node-compatible ownership cases
-and worker inspections in addition to the existing fork selection. Keep the adapter
-in sync with the Bun integration until that integration becomes the qualification
-baseline. Engine and Bun headers and libraries must be rebuilt together.
+The pinned Bun candidate uses the engine allocation-origin and holder accounts
+for process, V8 and worker statistics. Qualification retains ownership, transfer,
+worker inspection and external-buffer cases alongside the fork selection.
 
 ## Unreleased
 
-- Retry asynchronous VM trap delivery after a foreign-stack suspension refusal without holding the process-wide suspension lock, allowing other VMs to collect while native calls await them. Blocking GC suspension and Mach suspension retain their existing contracts. Carries #25 onto engine main with its native regression.
+- Retain the native Linux engine archive and provenance for seven days after its successful PR build, before Bun consumer qualification, so failed qualification can reuse the exact engine bytes.
+- Merge the main and published engine histories, then integrate upstream `3d3257150c40a1aabdc5f8b48d5b33d0413674cb` while preserving worker budgets, namespace facades, ALS, accounting, allocation sampling, traps, VM entry storage and all ten artifact lanes.
+- Port worker verification and passive-wait progress to upstream Collector ownership; preserve exactly-once ArrayBuffer accounting with the new allocation cadence.
+- Preserve syntax-selected stack positions through upstream parser and cache changes, including parenthesized optional calls and tags.
+- Qualify one exact Bun candidate across compatibility and feature gates, bind executable and archive bytes at assembly, and remove adapters already landed in Bun.
 
-- Initialize new VM entry scratch buffers and alignment padding, and store deferred microtask entry scopes as two initialized pointers, preventing stale stack values from retaining otherwise unreachable objects; carries #24 onto engine main and adapts the whole-word-state remedy in oven-sh/WebKit#694, thanks @robobun.
-- Require the native VM entry storage regressions in the Linux x64 artifact check, qualify dead-realm cleanup with the collected-realm fixture from openclaw/bun#151, and retain both qualified Linux Bun executables and hashes for three days; the fixture adapts oven-sh/bun#44544, thanks @robobun.
+- Require both native VM entry storage regressions in the Linux x64 artifact build and PR check.
+- Build and qualify Windows ARM64 at the exact PR head, matching the Linux and macOS source identity.
 
-- Deliver pending worker heap-limit termination promptly after GC by invalidating optimized code on the mutator, preserving full-GC live accounting and external-buffer exclusions.
+## Stack retention and Linux suspension (2026-10-09)
 
-- Preserve mimalloc pthread TLS-key ownership during shell exit by draining active setters before deletion; cover both late and in-flight allocations with native regressions. Builds on oven-sh/WebKit#698, thanks @dylan-conway.
+- Initialize new VM entry scratch buffers and alignment padding before entering JavaScript or native callees, preventing stale stack values from retaining otherwise unreachable objects during collection.
+- Store deferred microtask entry scopes as two initialized pointers, avoiding stale optional-flag padding that can conservatively retain lexical environments and cancellation reasons. Adapts the whole-word-state remedy in oven-sh/WebKit#694; thanks @robobun.
+- Verify dead-realm cleanup with the collected-realm fixture from openclaw/bun#151, adapted from oven-sh/bun#44544; thanks @robobun. Retain the qualified Linux Bun executables and hashes for three days, including failed qualification runs.
+- Retry asynchronous VM trap delivery after a foreign-stack suspension refusal without holding the process-wide suspension lock, allowing other VMs to collect while native calls await them. Blocking GC suspension and Mach suspension retain their existing contracts.
+
+## Passive collector progress and worker cadence (2026-10-07)
+
+- Wake passive collectors when a mutator begins waiting, even while shared helpers serve another heap; the native regression requires completion before helper release and preserves rooted objects.
 - Let workers use young-generation collections within their heap budgets; verify exhaustion with a full collection and preserve progress while idle through the matching Bun timer adapter.
 - Bound budgeted workers' post-full growth independently of machine-wide RAM, while retaining the collector minimum, separate nursery pacing and full-only heap-limit verification.
 
-- Fix ARM64 MacroAssembler register-to-memory `add64` operand order, restoring DFG typed-array allocation accounting and preserving the source register; cover the operation in testmasm and native ARM64 qualification.
+## Worker termination and allocator exit (2026-10-06)
 
-- Cache source-relative stack line and column lookups on demand, including syntax-selected positions.
+- Deliver pending worker heap-limit termination promptly after GC by invalidating optimized code on the mutator, preserving full-GC live accounting and external-buffer exclusions.
+
+- Prevent late JSC helper-thread allocation from overwriting a recycled pthread TLS key during process exit; close admission and drain in-flight TLS setters before deleting the key, with deterministic native regressions. Builds on the diagnosis in oven-sh/WebKit#698, thanks @dylan-conway. Standard Bun builds disable this allocator teardown.
+
+## ARM64 arithmetic and Windows artifacts (2026-10-05)
+
+- Fix ARM64 register-to-memory 64-bit addition so DFG typed-array allocations update their accounting counter without corrupting the source register; cover the operation in testmasm and qualify native ARM64 JSC across interpreter and JIT tiers.
+
+- Add the upstream non-LTO Windows ARM64 archive and require native Windows 11 ARM64 startup, JIT and FFI qualification before publication.
+
+## Repeated stack coordinates (2026-10-05)
+
+- Cache source-relative stack line and column lookups on demand, including syntax-selected positions; carries engine PR #8 onto the rebased release line, thanks @steipete.
 - Build both fork engine artifacts at the exact pull-request head before landing, with native Linux qualification and a Linux-hosted macOS arm64 compilation check.
+- Require the repeated-coordinate regression and surrounding error-stack stress cases, with seven direct stack execution modes including interpreter, baseline-only, DFG-only, eager FTL and concurrent GC, while retaining every rebased release gate.
+
+## Rebased engine batch
+
 - Keep syntax-selected stack positions separate from exception ranges for calls, constructors, property reads, and async continuations. Preserve the positions across bytecode rewriting, optimization, and cache replay.
 
 - Add real byte-based JSC heap allocation sampling with weighted allocating-stack profiles and independent major/minor collection inclusion.
@@ -169,11 +228,72 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 - Synchronize the parallel-helper activity assertion with task claims and completion; fixes a race exposed by ThreadSanitizer during accounting qualification.
 - Use atomic loads and resets for visited extra/external-memory totals updated by parallel markers.
 
+## Rebased release qualification
+
+- Rebase the four batch-1 engine patches and the landed namespace, allocation-sampling, stack-position and ArrayBuffer-accounting patches onto oven-sh/WebKit `5718a6ec579b98362ea7276a426deedcc6281ef5` (upstream #768). Thanks @Jarred-Sumner for idle compiler-thread and Atomics.wait memory release.
+- Retain the published batch-1 release. Publish this separately qualified batch only through the protected `openclaw/release-5718a6ec` environment policy; updating the Bun main manifest is a separate integration task.
+
+The existing qualification baseline remains upstream `1600131e46b5af48bbda3559af8d8a3327230b6e` with its committed archive checksums. The source/provenance base advances to `5718a6ec579b98362ea7276a426deedcc6281ef5`; the Docker and lane recipes are unchanged. Unlanded engine work is not included in this rebase.
+
+
+The rebased release is frozen on `openclaw/release-5718a6ec`; only patches merged
+into engine main and explicitly included before the freeze enter this batch.
+Later main changes require a new source commit and qualification. The published
+release notes come from `.github/openclaw/release-notes.md`.
+
+The historical W113/W150 investigations remain useful dependency evidence, but
+their reconstructed trees and four-build adapter flow are retired. The current
+comparison retains the original 44-file selection and two dependency checks.
+The feature gate uses the sorted union of those 44 paths, the historical 56 sync
+paths, and the candidate selector: 82 historical paths and 85 total. Missing
+tracked paths fail qualification. Startup and all three unchanged memory-release
+tests remain mandatory.
+
+The existing x64 Linux consumer uses Release with LTO disabled. Its 85-file run
+requires exactly one passing native JUnit result for each of the eight original
+compile-cache exit modes and deferred idle loading. Assembly revalidates those
+case identities and the archived XML digest. This is not final ThinLTO shipping
+qualification. ARM64 JSC proof is separate: the ARM64 Debug/ASAN natural-exit and
+deferred-idle controls exceeded their existing deadlines and remain unresolved
+until matched-profile evidence is available.
+
+A single post-build candidate receipt records the Bun commit, tree and index;
+engine source and lane archive bytes; manifest base blob, overlay and patch;
+executable bytes and measured runtime identities; and the separately copied,
+untracked worker fixture. Later gates validate the receipt without rewriting it.
+The one-lane manifest uses the production checksum resolver and SHA-256 prefetch
+cache; other lanes are unavailable until their real archives exist. Release
+assembly requires all ten lanes and checks the Linux archive and the separately
+uploaded executable/fixture bytes against that same receipt. Hosted CI revision
+variables are removed only for compilation so Bun reports its actual checkout.
+
+The shared test job retains module/promise/namespace/Segmenter, allocation
+sampling, worker budgets, ALS, realm/retention, inspector and stack/cache gates.
+The candidate includes the landed counterparts; only historical baseline patches
+000 and 012 remain.
+
 ## Stack positions
 
 `CodeBlock::callSitePositionForBytecodeIndex` returns an optional absolute source offset for an exact instruction or async resume label. Stack readers use this position while exception expression ranges and debugger line tables retain their existing divots. RareData owns the two sparse vectors, including decoded cache entries; the bytecode cache revision prevents older layouts from being reused.
 
 Bun must be rebuilt with its matching stack-reader adapter. It must also preserve built-in error constructor syntax: rewriting `new Error()` as `Error()` changes the position and allows a returning arrow to become a proper tail call. The engine's proper-tail-call behavior is unchanged. The integration continues @robobun’s upstream Bun source-position work in [#35179](https://github.com/oven-sh/bun/pull/35179), [#37396](https://github.com/oven-sh/bun/pull/37396), and [#41580](https://github.com/oven-sh/bun/pull/41580).
+
+The release gate includes the landed stack-position adapter, the complete CallSite/util/source-map and minifier regressions, live stack visitor, async positions, and owned/persistent JSC cache replay.
+
+
+The historical manifest-only W150 attempt failed because it accessed the removed
+public `TriState` namespace marker. Its required Bun #106 counterpart is now
+landed in the pinned candidate. No legacy marker shim is restored in the engine.
+The current candidate index remains its pinned tree before and after compilation,
+with the manifest as the sole tracked worktree change. Compatibility and feature
+checks run that same executable and require its unchanged identity receipt.
+
+The ArrayBuffer patch is qualified in five interpreter/JIT/concurrent-GC modes,
+with process ownership, worker snapshot, native external-buffer and serializer
+regressions. A combined regression inspects a worker during the new idle-memory
+purge and notification windows. VM inspection runs before the idle-purge branch,
+with the waiter-list lock dropped and VM heap access restored only for inspection;
+both paths recheck notification/termination before waiting again.
 
 The source provider caches only requested line/column conversions under its existing
 line-table lock. Coordinates remain relative to the provider's text; document

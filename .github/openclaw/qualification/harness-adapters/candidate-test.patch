@@ -1,0 +1,641 @@
+diff --git a/scripts/buildkite.ts b/scripts/buildkite.ts
+index c31bf247ea334395250f9925ee605af72096e79a..86062fa3c475ac22c1f4d3a6d6182ddab80c0037 100644
+--- a/scripts/buildkite.ts
++++ b/scripts/buildkite.ts
+@@ -784,22 +784,75 @@
+   const attribute = (attributes: string, name: string) => new RegExp(`\\s${name}="([^"]*)"`).exec(attributes)?.[1];
+   const keyOf = (file: string) => unescapeXml(file).replaceAll("\\", "/");
+   const files = new Map<string, JunitFileSuite>();
+-  for (const match of xml.matchAll(/<testsuite\b([^>]*)>/g)) {
+-    const attributes = match[1]!;
+-    const file = attribute(attributes, "file");
+-    if (!file || attribute(attributes, "name") !== file) continue;
+-    files.set(keyOf(file), {
+-      failures: Number(attribute(attributes, "failures") ?? 0),
+-      seconds: Number(attribute(attributes, "time") ?? 0),
+-      cases: [],
+-    });
+-  }
++  if (!xml.trim()) return files;
++  const document = xml.replace(/^\s*<\?xml[^?]*\?>/, "");
++  const stack: string[] = [];
++  const parents: Record<string, (string | undefined)[]> = {
++    testsuites: [undefined],
++    testsuite: ["testsuites", "testsuite"],
++    testcase: ["testsuite"],
++    failure: ["testcase"],
++    skipped: ["testcase"],
++    properties: ["testsuite"],
++    property: ["properties"],
++  };
++  let end = 0,
++    root = false;
++  const invalid = () => {
++    throw new Error("invalid native JUnit report");
++  };
++  // Only direct children own a file: a describe may itself be named after that file.
++  for (const match of document.matchAll(/<(\/?)([a-z]+)((?:\s+[\w-]+="[^"<]*")*\s*)(\/?)>/g)) {
++    const [, closing, tag, attributes, selfClosing] = match;
++    const text = document.slice(end, match.index);
++    if (text.includes("<") || (text.trim() && stack.at(-1) !== "failure")) invalid();
++    end = match.index! + match[0].length;
++    if (closing) {
++      if (attributes!.trim() || selfClosing || stack.pop() !== tag) invalid();
++      continue;
++    }
++    const names = [...attributes!.matchAll(/\s([\w-]+)="[^"]*"/g)].map(match => match[1]);
++    if (
++      new Set(names).size !== names.length ||
++      !parents[tag!]?.includes(stack.at(-1)) ||
++      (tag === "properties" && stack.length !== 2)
++    )
++      invalid();
++    if (!stack.length) {
++      if (root || tag !== "testsuites") invalid();
++      root = true;
++    }
++    if (tag === "testsuite" && stack.length === 1) {
++      const file = attribute(attributes!, "file");
++      const tests = attribute(attributes!, "tests");
++      const failures = attribute(attributes!, "failures");
++      const seconds = attribute(attributes!, "time");
++      if (
++        !file ||
++        attribute(attributes!, "name") !== file ||
++        tests === undefined ||
++        !/^\d+$/.test(tests) ||
++        !Number.isSafeInteger(Number(tests)) ||
++        failures === undefined ||
++        !/^\d+$/.test(failures) ||
++        !Number.isSafeInteger(Number(failures)) ||
++        seconds === undefined ||
++        !/^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(seconds) ||
++        !Number.isFinite(Number(seconds)) ||
++        files.has(keyOf(file))
++      )
++        invalid();
++      files.set(keyOf(file!), { failures: Number(failures), seconds: Number(seconds), cases: [] });
++    }
++    if (!selfClosing) stack.push(tag!);
++  }
++  if (!root || stack.length || document.slice(end).trim()) invalid();
+   for (const match of xml.matchAll(/<testcase\b([^>]*)>\s*<failure\b([^>]*)>/g)) {
+     const caseAttributes = match[1]!;
+     const failureAttributes = match[2]!;
+     const file = attribute(caseAttributes, "file");
+     const entry = file && files.get(keyOf(file));
+-    if (!entry) continue;
++    if (!entry) throw new Error("JUnit failure has no file suite");
+     entry.cases.push({
+       name: unescapeXml(attribute(caseAttributes, "name") ?? "(unnamed)"),
+       message: unescapeXml(attribute(failureAttributes, "message") ?? ""),
+@@ -1004,12 +1057,6 @@
+   });
+ 
+   if (isCI) {
+-    startGroup("Environment", () => {
+-      for (const [key, value] of Object.entries(process.env).sort()) {
+-        console.log(`${key}:`, value);
+-      }
+-    });
+-
+     const show = (title: string, shells: string[], ...scripts: string[]) =>
+       startGroup(title, () => {
+         const shell = which(shells);
+diff --git a/scripts/runner.node.ts b/scripts/runner.node.ts
+index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1c6c671fc 100755
+--- a/scripts/runner.node.ts
++++ b/scripts/runner.node.ts
+@@ -765,6 +765,7 @@
+     title: string,
+     fn: (index: number) => Promise<TestResult>,
+     concurrent = parallelism > 1,
++    firstResult?: TestResult,
+   ): Promise<TestResult | undefined> => {
+     const index = ++i;
+ 
+@@ -778,11 +779,13 @@
+       let grouptitle = `${getAnsi("gray")}[${index}/${total}]${getAnsi("reset")} ${title}`;
+       if (attempt > 1) grouptitle += ` ${getAnsi("gray")}[attempt #${attempt}]${getAnsi("reset")}`;
+ 
++      // A grouped execution already consumed the first attempt, including on a crash or missing report.
++      const runAttempt = () => (attempt === 1 && firstResult ? Promise.resolve(firstResult) : fn(index));
+       if (concurrent) {
+         console.log(grouptitle);
+-        result = await fn(index);
++        result = await runAttempt();
+       } else {
+-        result = await startGroup(grouptitle, () => fn(index));
++        result = await startGroup(grouptitle, runAttempt);
+       }
+ 
+       const { ok, stdoutPreview, error } = result;
+@@ -933,7 +936,7 @@
+       }
+     }
+ 
+-    const runOneTest = async (testPath: string, concurrent: boolean) => {
++    const runOneTest = async (testPath: string, concurrent: boolean, firstResult?: TestResult) => {
+       await awaitNapiPrebuild(testPath);
+       const absoluteTestPath = join(testsPath, testPath);
+       const title = relative(cwd, absoluteTestPath).replaceAll(sep, "/");
+@@ -1015,25 +1018,26 @@
+         return runTest(
+           title,
+           async index => {
+-            const { ok, error, stdout, crashes, exitCode, signalCode, duration } = await spawnBun(execPath, {
+-              cwd: cwd,
+-              args: [
+-                subcommand,
+-                "--config=" + join(import.meta.dirname, "../bunfig.node-test.toml"),
+-                ...(subcommand === "run" ? testFlags : []),
+-                absoluteTestPath,
+-              ],
+-              timeout: getNodeParallelTestTimeout(title),
+-              env: {
+-                ...env,
+-                // test/common/tmpdir.js derives `.tmp.${TEST_SERIAL_ID}` from this;
+-                // a unique value per test file keeps concurrent tmpdir.refresh()
+-                // calls from wiping each other when parallelSafeWidth > 1.
+-                TEST_SERIAL_ID: String(index),
+-              },
+-              stdout: concurrent ? () => {} : pipeTestStdout(process.stdout),
+-              stderr: concurrent ? () => {} : pipeTestStdout(process.stderr),
+-            });
++            const { ok, error, stdout, crashes, exitCode, signalCode, spawnError, timedOut, idledOut, duration } =
++              await spawnBun(execPath, {
++                cwd: cwd,
++                args: [
++                  subcommand,
++                  "--config=" + join(import.meta.dirname, "../bunfig.node-test.toml"),
++                  ...(subcommand === "run" ? testFlags : []),
++                  absoluteTestPath,
++                ],
++                timeout: getNodeParallelTestTimeout(title),
++                env: {
++                  ...env,
++                  // test/common/tmpdir.js derives `.tmp.${TEST_SERIAL_ID}` from this;
++                  // a unique value per test file keeps concurrent tmpdir.refresh()
++                  // calls from wiping each other when parallelSafeWidth > 1.
++                  TEST_SERIAL_ID: String(index),
++                },
++                stdout: concurrent ? () => {} : pipeTestStdout(process.stdout),
++                stderr: concurrent ? () => {} : pipeTestStdout(process.stderr),
++              });
+             const mb = 1024 ** 3;
+             let stdoutPreview = stdout.slice(0, mb).split("\n").slice(0, 50).join("\n");
+             if (crashes) stdoutPreview += crashes;
+@@ -1048,10 +1052,14 @@
+               stdoutPreview: stdoutPreview,
+               exitCode,
+               signalCode,
++              spawnError,
++              timedOut,
++              idledOut,
+               duration,
+             };
+           },
+           concurrent,
++          firstResult,
+         );
+       } else {
+         return runTest(
+@@ -1063,6 +1071,7 @@
+               stderr: concurrent ? () => {} : pipeTestStdout(process.stderr),
+             }),
+           concurrent,
++          firstResult,
+         );
+       }
+     };
+@@ -1088,17 +1097,20 @@
+       }
+       if (isAsan) env.BUN_FEATURE_FLAG_NO_ORPHANS = "1";
+ 
+-      const byPath = new Map(bucketFiles.map(t => [join("test", t).replaceAll("\\", "/"), t]));
+-      const norm = (p: string) =>
+-        byPath.get(
+-          p
+-            .trim()
+-            .replace(/:$/, "")
+-            .replace(/ \(\d+s\)$/, "")
+-            .replaceAll("\\", "/"),
+-        );
+-
+-      const { ok, stdout, crashes } = await startGroup(`${range} ${label}`, () =>
++      // An aborted process must not reuse a previous invocation's report.
++      rmSync(junitPath, { force: true });
++
++      const {
++        ok,
++        error: processError,
++        stdout,
++        crashes,
++        exitCode,
++        signalCode,
++        spawnError,
++        timedOut,
++        idledOut,
++      } = await startGroup(`${range} ${label}`, () =>
+         spawnBun(execPath, {
+           args: [
+             "test",
+@@ -1123,107 +1135,65 @@
+       );
+       if (crashes) process.stderr.write(crashes);
+ 
+-      let suites = new Map<string, JunitFileSuite>(); // repo-relative path -> { failures, seconds, cases: [{name, message}] }
++      // These terminal facts belong to the shared child, not to an individual file.
++      const groupedProcess = {
++        id: basename(junitPath),
++        memberCount: bucketFiles.length,
++        exitCode,
++        signalCode,
++        spawnError,
++        timedOut,
++        idledOut,
++      };
++      let suites = new Map<string, JunitFileSuite>();
++      let reportError: string | undefined;
+       try {
+         suites = parseJunitFileSuites(readFileSync(junitPath, "utf-8"));
+-      } catch {}
++        if (!suites.size) throw new Error("empty file suite report");
++        const expected = new Set(bucketFiles.map(t => join("test", t).replaceAll("\\", "/")));
++        if ([...suites.keys()].some(file => !expected.has(file))) throw new Error("unexpected file suite");
++      } catch (error) {
++        reportError = `invalid parallel JUnit report: ${error}`;
++      }
+       if (suites.size && isBuildkite) uploadArtifactsToBuildkite(junitPath);
+       else rmSync(junitPath, { force: true });
+ 
+-      const failed = new Set<string>(); // ran and failed (or hung) — a solo pass is a parallel-mode flake
+-      const incomplete = new Set<string>(); // never finished/started — re-run quietly
+-      let evidence = suites.size > 0;
+-      if (!ok && suites.size) {
+-        for (const t of bucketFiles) {
++      // File-level success cannot explain a failing process, such as an unhandled error after tests.
++      const unexplainedFailure =
++        !ok &&
++        bucketFiles.every(t => {
+           const suite = suites.get(join("test", t).replaceAll("\\", "/"));
+-          if (suite === undefined) incomplete.add(t);
+-          else if (suite.failures > 0) failed.add(t);
+-        }
+-      } else if (!ok) {
+-        let list: "running" | "not-started" | null = null; // while inside an interrupt report list
+-        for (const line of stripAnsi(stdout).split(/\r?\n/)) {
+-          if (line.startsWith("Interrupted while still running:")) {
+-            list = "running";
+-            continue;
+-          }
+-          if (/^\d+ file\(s\) had not started:$/.test(line)) {
+-            list = "not-started";
+-            continue;
+-          }
+-          if (list && /^ {2}\S/.test(line)) {
+-            const testPath = norm(line);
+-            if (testPath) (list === "running" ? failed : incomplete).add(testPath);
+-            continue;
+-          }
+-          list = null;
+-          const ended = /^✗ (.+?) \((worker crashed|aborted:|no live workers)/.exec(line);
+-          // The groups of the pattern are not optional, and testPath is only set when it matched.
+-          const testPath = ended && norm(ended[1]!);
+-          if (testPath) (ended![2] === "worker crashed" ? failed : incomplete).add(testPath);
+-        }
+-        evidence = failed.size + incomplete.size > 0;
+-      }
+-      const rerun = !ok && !evidence ? [...bucketFiles] : [...failed, ...incomplete];
+-      const rerunSet = new Set(rerun);
+-
++          return suite !== undefined && suite.failures === 0 && suite.cases.length === 0;
++        });
+       for (const t of bucketFiles) {
+-        if (rerunSet.has(t)) continue;
+         const title = join("test", t).replaceAll("\\", "/");
+-        const seconds = suites.get(title)?.seconds;
+-        const timing = seconds === undefined ? "" : ` ${getAnsi("gray")}(${seconds.toFixed(2)}s)${getAnsi("reset")}`;
+-        console.log(`${getAnsi("gray")}[${++i}/${total}]${getAnsi("reset")} ${title}${timing}`);
+-        okResults.push({
++        const suite = suites.get(title);
++        const error =
++          !ok && isAlwaysFailure(processError)
++            ? processError
++            : (reportError ??
++              (suite === undefined
++                ? "parallel JUnit report is missing this file"
++                : suite.failures > 0 || suite.cases.length > 0
++                  ? "failed in the parallel batch"
++                  : unexplainedFailure
++                    ? (processError ?? "parallel batch process failed")
++                    : undefined));
++        const passed = error === undefined;
++        const details = suite?.cases.map(({ name, message }) => `✗ ${name}\n${message}`).join("\n\n") ?? "";
++        await runOneTest(t, false, {
+           testPath: title,
+-          ok: true,
+-          status: "pass",
++          ok: passed,
++          status: passed ? "pass" : "fail",
++          error,
+           tests: [],
+           errors: [],
+-          stdout: "",
+-          stdoutPreview: "",
++          stdout: passed ? "" : stdout,
++          stdoutPreview: passed ? "" : [reportError, details, stdout.slice(-8192), crashes].filter(Boolean).join("\n"),
++          duration: suite === undefined ? undefined : suite.seconds * 1000,
++          groupedProcess,
++          groupedReport: { error: reportError, suite: suite ?? null },
+         });
+-      }
+-      for (const t of bucketFiles) {
+-        if (!failed.has(t)) continue;
+-        const title = join("test", t).replaceAll("\\", "/");
+-        const suite = suites.get(title);
+-        if (!suite?.cases.length) continue;
+-        startGroup(
+-          `${title} - ${suite.failures} failing in the parallel batch ${getAnsi("gray")}(${suite.seconds.toFixed(2)}s)${getAnsi("reset")}`,
+-          () => {
+-            for (const { name, message } of suite.cases) {
+-              console.log(`${getAnsi("red")}✗${getAnsi("reset")} ${name}`);
+-              if (message) console.log(message.replace(/^/gm, "    "));
+-            }
+-          },
+-        );
+-      }
+-      if (rerun.length) {
+-        console.log(
+-          `${getAnsi("yellow")}parallel bucket: retrying ${failed.size} failed and ${rerun.length - failed.size} unfinished file(s) one at a time${getAnsi("reset")}`,
+-        );
+-        for (const testPath of rerun) {
+-          const result = await runOneTest(testPath, false);
+-          if (result?.ok && failed.has(testPath) && isBuildkite) {
+-            const title = join("test", testPath).replaceAll("\\", "/");
+-            const cases = suites.get(title)?.cases ?? [];
+-            const first = cases[0];
+-            const firstError = first ? `${first.name} — ${first.message.split("\n")[0]}` : "";
+-            const reason = firstError
+-              ? escapeHtml(firstError.length > 100 ? `${firstError.slice(0, 97)}…` : firstError)
+-              : "failed in the parallel batch";
+-            const detail = cases.length
+-              ? `\n\n\`\`\`terminal\n${cases.map(({ name, message }) => `✗ ${name}\n${message}`).join("\n\n")}\n\`\`\`\n\n`
+-              : "";
+-            const unlisted = !isKnownFlakyTest(title);
+-            reportAnnotationToBuildkite({
+-              context: unlisted ? "flaky-new" : "flaky",
+-              label: title,
+-              style: "warning",
+-              priority: unlisted ? 4 : 3,
+-              content: `<details><summary><a href="${getFileUrl(title)}"><code>${title}</code></a> - ${reason} <i>(in the parallel batch on ${getBuildLabel()}; passed alone)</i>${unlisted ? " <b>(not in test/flaky-tests.txt)</b>" : ""}</summary>${detail}</details>`,
+-            });
+-          }
+-        }
+       }
+     };
+ 
+@@ -1505,6 +1475,11 @@
+       error: r.error,
+       exitCode: r.exitCode,
+       signalCode: r.signalCode,
++      spawnError: r.spawnError,
++      timedOut: r.timedOut,
++      idledOut: r.idledOut,
++      groupedProcess: r.groupedProcess,
++      groupedReport: r.groupedReport,
+       duration: r.duration,
+       stdoutPreview: r.stdoutPreview?.slice?.(-4000),
+     }));
+@@ -1537,12 +1512,17 @@
+   retries?: number;
+ }
+ 
+-interface SpawnResult {
++interface ProcessFacts {
++  exitCode: number | null;
++  signalCode: NodeJS.Signals | null;
++  spawnError: boolean;
++  timedOut: boolean;
++  idledOut: boolean;
++}
++
++interface SpawnResult extends ProcessFacts {
+   ok: boolean;
+   error: string | undefined;
+-  spawnError: NodeJS.ErrnoException | undefined;
+-  exitCode: number | null | undefined;
+-  signalCode: NodeJS.Signals | null | undefined;
+   timestamp: number;
+   duration: number;
+   stdout: string;
+@@ -1566,9 +1546,9 @@
+     stderr = process.stderr.write.bind(process.stderr),
+     retries = 0,
+   }: SpawnOptions = options;
+-  let exitCode: SpawnResult["exitCode"];
+-  let signalCode: SpawnResult["signalCode"];
+-  let spawnError: SpawnResult["spawnError"];
++  let exitCode: SpawnResult["exitCode"] | undefined;
++  let signalCode: SpawnResult["signalCode"] | undefined;
++  let spawnError: NodeJS.ErrnoException | undefined;
+   let timestamp: number | undefined;
+   let timedOut = false;
+   let idledOut = false;
+@@ -1826,11 +1806,13 @@
+   if (timedOut && (!error || error === signalCode || /^code \d+$/.test(error)))
+     error = idledOut ? "stalled" : "timeout";
+   return {
+-    ok: exitCode === 0 && !signalCode && !spawnError,
++    ok: exitCode === 0 && !signalCode && !spawnError && !timedOut && !idledOut,
+     error,
+-    exitCode,
+-    signalCode,
+-    spawnError,
++    exitCode: exitCode ?? null,
++    signalCode: signalCode ?? null,
++    spawnError: !!spawnError,
++    timedOut,
++    idledOut,
+     stdout: buffer,
+     timestamp: timestamp || Date.now(),
+     duration: duration || 0,
+@@ -2028,7 +2010,7 @@
+   }
+ }
+ 
+-interface TestResult {
++interface TestResult extends Partial<ProcessFacts> {
+   testPath: string;
+   ok: boolean;
+   status: string;
+@@ -2038,8 +2020,8 @@
+   stdout: string;
+   stdoutPreview: string;
+   // For --results-json and the JUnit report.
+-  exitCode?: SpawnResult["exitCode"];
+-  signalCode?: SpawnResult["signalCode"];
++  groupedProcess?: ProcessFacts & { id: string; memberCount: number };
++  groupedReport?: { error?: string; suite: JunitFileSuite | null };
+   duration?: number;
+ }
+ 
+@@ -2107,19 +2089,22 @@
+     env.BUN_FEATURE_FLAG_NO_ORPHANS = "1";
+   }
+ 
+-  const { ok, error, stdout, crashes, exitCode, signalCode, duration } = await spawnBun(execPath, {
+-    args: isReallyTest ? testArgs : [...args, absPath],
+-    cwd: opts.cwd,
+-    // release-asan with debug-assertions on runs every spawned subprocess
+-    // slower; give each file more headroom so tests with heavy beforeAll
+-    // setup (napi node-gyp compiles) or many subprocess spawns don't hit
+-    // the file wall before any individual test times out. Kept below the
+-    // per-test multiplier so the overall shard stays inside the job timeout.
+-    timeout: isReallyTest ? Math.ceil(timeout * (isAsan ? 2 : 1)) : 30_000,
+-    env,
+-    stdout: opts.stdout ?? pipeTestStdout(process.stdout),
+-    stderr: opts.stderr ?? pipeTestStdout(process.stderr),
+-  });
++  const { ok, error, stdout, crashes, exitCode, signalCode, spawnError, timedOut, idledOut, duration } = await spawnBun(
++    execPath,
++    {
++      args: isReallyTest ? testArgs : [...args, absPath],
++      cwd: opts.cwd,
++      // release-asan with debug-assertions on runs every spawned subprocess
++      // slower; give each file more headroom so tests with heavy beforeAll
++      // setup (napi node-gyp compiles) or many subprocess spawns don't hit
++      // the file wall before any individual test times out. Kept below the
++      // per-test multiplier so the overall shard stays inside the job timeout.
++      timeout: isReallyTest ? Math.ceil(timeout * (isAsan ? 2 : 1)) : 30_000,
++      env,
++      stdout: opts.stdout ?? pipeTestStdout(process.stdout),
++      stderr: opts.stderr ?? pipeTestStdout(process.stderr),
++    },
++  );
+   let { tests, errors, stdout: stdoutPreview } = parseTestStdout(stdout, testPath);
+   if (crashes) stdoutPreview += crashes;
+ 
+@@ -2142,6 +2127,9 @@
+     stdoutPreview,
+     exitCode,
+     signalCode,
++    spawnError,
++    timedOut,
++    idledOut,
+     duration,
+   };
+ }
+@@ -2185,20 +2173,23 @@
+   // image's baked cache when one exists (the `prefetch` tool of
+   // scripts/build/ci-images/spec.ts sets BUN_INSTALL_CACHE_DIR machine-wide).
+   const cacheDir = process.env.BUN_INSTALL_CACHE_DIR;
+-  let { ok, error, stdout, duration, crashes } = await spawnBun(execPath, {
+-    args: ["install"],
+-    timeout: testTimeout,
+-    ...options,
+-    env: {
+-      // A puppeteer postinstall reached through these installs would download
+-      // Chrome into the agent's shared ~/.cache; a half-extracted download left
+-      // there on a persistent agent fails every later job's install. Tests that
+-      // need a browser install one into a per-run cache (getPuppeteerInstallEnv).
+-      PUPPETEER_SKIP_DOWNLOAD: "1",
+-      ...options.env,
+-      ...(cacheDir && { BUN_INSTALL_CACHE_DIR: cacheDir }),
++  let { ok, error, stdout, duration, crashes, exitCode, signalCode, spawnError, timedOut, idledOut } = await spawnBun(
++    execPath,
++    {
++      args: ["install"],
++      timeout: testTimeout,
++      ...options,
++      env: {
++        // A puppeteer postinstall reached through these installs would download
++        // Chrome into the agent's shared ~/.cache; a half-extracted download left
++        // there on a persistent agent fails every later job's install. Tests that
++        // need a browser install one into a per-run cache (getPuppeteerInstallEnv).
++        PUPPETEER_SKIP_DOWNLOAD: "1",
++        ...options.env,
++        ...(cacheDir && { BUN_INSTALL_CACHE_DIR: cacheDir }),
++      },
+     },
+-  });
++  );
+   if (crashes) stdout += crashes;
+   const relativePath = relative(cwd, options.cwd);
+   const testPath = join(relativePath, "package.json");
+@@ -2219,6 +2210,11 @@
+     ],
+     stdout,
+     stdoutPreview: stdout,
++    exitCode,
++    signalCode,
++    spawnError,
++    timedOut,
++    idledOut,
+     duration,
+   };
+ }
+@@ -2233,7 +2229,9 @@
+  */
+ async function installCiRemapServer(execPath: string): Promise<boolean> {
+   const title = relative(cwd, join(ciRemapServerPath, "package.json")).replaceAll(sep, "/");
+-  const { ok, error } = await startGroup(title, () => spawnBunInstall(execPath, { cwd: ciRemapServerPath }));
++  const { ok, error } = await startGroup(title, () =>
++    spawnBunInstall(execPath, { cwd: ciRemapServerPath, args: ["install", "--frozen-lockfile"] }),
++  );
+   if (!ok) console.warn(`ci-remap server not installed (${title}: ${error}), crash reports will not be remapped`);
+   return ok;
+ }
+@@ -2855,11 +2853,8 @@
+   if (outcome === "pass") {
+     return 0;
+   }
+-  if (!isBuildkite) {
+-    return 1;
+-  }
+-  // On Buildkite, you can define a `soft_fail` property to differentiate
+-  // from failing tests and the runner itself failing.
++  // Keep test failure, cancellation, and setup failure distinct in every environment.
++  // Buildkite soft_fail uses the same exit codes.
+   if (outcome === "fail") {
+     return 2;
+   }
+diff --git a/scripts/openclaw-ci/tests.ts b/scripts/openclaw-ci/tests.ts
+index 029e7ad6c3afc97130962250f2cfbc6452f40a6a..bcbbc12cc6fc0535ad7ec7ce9ab9a8dba1b79eee 100644
+--- a/scripts/openclaw-ci/tests.ts
++++ b/scripts/openclaw-ci/tests.ts
+@@ -1,6 +1,6 @@
+ import { $ } from "bun";
+ import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+-import { appendFileSync, existsSync, mkdirSync, readFileSync, statfsSync, writeFileSync } from "node:fs";
++import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statfsSync, writeFileSync } from "node:fs";
+ import { homedir } from "node:os";
+ import { basename, dirname, resolve } from "node:path";
+ 
+@@ -242,6 +242,7 @@
+   const command = process.argv[2];
+   const selectionPath = "build/openclaw-ci/selected.json";
+   const resultsPath = "build/openclaw-ci/results.json";
++  const terminalPath = "build/openclaw-ci/runner-terminal.json";
+   if (command === "select-windows") {
+     const selected = selectTests([], await git("ls-files", "-z", "test"), false, "windows");
+     mkdirSync(dirname(selectionPath), { recursive: true });
+@@ -278,6 +279,7 @@
+     }
+     reportDiskUsage("before");
+     // CI invokes this script with the built executable; the upstream runner uses it for every test.
++    rmSync(terminalPath, { force: true });
+     const result = spawnSync(
+       "node",
+       [
+@@ -321,6 +323,10 @@
+       if (direct.stderr) process.stderr.write(direct.stderr);
+     }
+     reportDiskUsage("after");
++    writeFileSync(
++      terminalPath,
++      JSON.stringify({ status: result.status, signal: result.signal, spawnError: !!result.error }) + "\n",
++    );
+     if (result.error) throw result.error;
+     if (result.status !== 0) process.exit(result.status ?? 1);
+     const results: { testPath: string; ok: boolean }[] = JSON.parse(readFileSync(resultsPath, "utf8"));

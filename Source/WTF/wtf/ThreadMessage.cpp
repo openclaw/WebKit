@@ -44,7 +44,7 @@ MessageStatus trySendMessageScoped(const ThreadSuspendLocker& locker, Thread& th
     return MessageStatus::MessageRan;
 }
 
-MessageStatus sendMessageScoped(const ThreadSuspendLocker& locker, Thread& thread, const ThreadMessage& message)
+MessageStatus sendMessageScoped(const ThreadSuspendLocker& locker, Thread& thread, NOESCAPE const ThreadMessage& message)
 {
     auto result = thread.suspend(locker);
     if (!result)
