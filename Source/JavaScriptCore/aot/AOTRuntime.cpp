@@ -417,14 +417,23 @@ uint64_t** RuntimeTable::nativeEntryCounters()
         m_nativeEntryPointers.reserveInitialCapacity(m_nativeEntryCounts.size());
         for (auto& count : m_nativeEntryCounts)
             m_nativeEntryPointers.append(&count);
+        // Keep interrupted VMs visible without rewriting their full image table at every GC.
+        writeCounts(false, false);
     }
     return m_nativeEntryPointers.mutableSpan().data();
 }
 
 void RuntimeTable::writeOperationCounts(bool isFinal) const
 {
+    writeCounts(isFinal, true);
+}
+
+void RuntimeTable::writeCounts(bool isFinal, bool includeOperations) const
+{
     const char* path = byteCast<char>(Options::aotTypeCoverageCountsPath());
-    if ((!Options::useAOTOperationCounters() && !m_nativeEntryImage) || !path)
+    if ((!includeOperations || !Options::useAOTOperationCounters()) && (!m_nativeEntryImage || (m_hasWrittenNativeEntrySnapshot && !isFinal)))
+        return;
+    if (!path)
         return;
     String name = makeStringByReplacingAll(String::fromUTF8(path), "%p"_s, String::number(getCurrentProcessID()));
     name = name.contains("%v"_s) ? makeStringByReplacingAll(name, "%v"_s, String::number(m_vmID)) : makeString(name, "-vm-"_s, m_vmID);
@@ -434,7 +443,7 @@ void RuntimeTable::writeOperationCounts(bool isFinal) const
         String temporary = makeString(destination, ".tmp"_s);
         auto file = FilePrintStream::open(temporary.utf8(), "w"_s);
         if (!file)
-            return;
+            return false;
         if (suffix == ".native-entries"_s)
             setvbuf(file->file(), nullptr, _IOFBF, MB);
         file->println("# AOT-SNAPSHOT\t1\t", getCurrentProcessID(), "\t", m_vmID, "\t", sequence, "\t", isFinal ? "final" : "partial");
@@ -443,10 +452,13 @@ void RuntimeTable::writeOperationCounts(bool isFinal) const
         bool succeeded = !fflush(file->file()) && !ferror(file->file());
         file.reset();
         // Same-directory replacement is atomic on POSIX; markers also detect an interrupted copy on other platforms.
-        if (!succeeded || !FileSystem::moveFile(temporary, destination))
+        if (!succeeded || !FileSystem::moveFile(temporary, destination)) {
             FileSystem::deleteFile(temporary);
+            return false;
+        }
+        return true;
     };
-    if (Options::useAOTOperationCounters()) {
+    if (includeOperations && Options::useAOTOperationCounters()) {
         write(".operations"_s, [&](PrintStream& file) { dumpOperationCounts(file); });
         write(".allocations"_s, [&](PrintStream& file) {
             file.println("ANCHOR\t", RawPointer(reinterpret_cast<void*>(&WTFGetBacktrace)));
@@ -468,8 +480,8 @@ void RuntimeTable::writeOperationCounts(bool isFinal) const
             });
         }
     }
-    if (m_nativeEntryImage) {
-        write(".native-entries"_s, [&](PrintStream& file) {
+    if (m_nativeEntryImage && (isFinal || !m_hasWrittenNativeEntrySnapshot)) {
+        bool succeeded = write(".native-entries"_s, [&](PrintStream& file) {
             auto& header = m_nativeEntryImage->header();
             const auto* metadata = m_nativeEntryImage->at<NativeEntryMetadata>(header.nativeEntriesOffset);
             bool complete = true;
@@ -489,6 +501,7 @@ void RuntimeTable::writeOperationCounts(bool isFinal) const
                 file.printf("%u\t%s\t%u\t%" PRIu64 "\n", i, kind.characters(), metadata[i].bodyBytes, m_nativeEntryCounts[i]);
             }
         });
+        m_hasWrittenNativeEntrySnapshot |= succeeded;
     }
 }
 
@@ -3401,7 +3414,7 @@ void Instance::finalizeUnconditionally(bool newOnly)
 {
     if (Options::validateAOTTypedFacts()) [[unlikely]]
         validateUnwatchedSlots(nullptr, true);
-    if (Options::useAOTOperationCounters() || nativeEntryCounters) [[unlikely]] {
+    if (Options::useAOTOperationCounters()) [[unlikely]] {
         AOT::runtimeTable(*vm).countOperation("Heap::collection", newOnly ? "eden" : "full");
         AOT::runtimeTable(*vm).removeDeadFilledPairs(*vm);
         AOT::writeOperationCounts(*vm);

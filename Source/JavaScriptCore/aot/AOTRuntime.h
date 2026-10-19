@@ -258,9 +258,12 @@ public:
     uint64_t** nativeEntryCounters();
 
 private:
+    void writeCounts(bool isFinal, bool includeOperations) const;
+
     void* m_entries[numberOfEntries];
     uint64_t m_vmID;
     mutable uint64_t m_snapshotSequence { 0 };
+    mutable bool m_hasWrittenNativeEntrySnapshot { false };
     Image* m_nativeEntryImage { nullptr };
     Vector<uint64_t> m_nativeEntryCounts;
     Vector<uint64_t*> m_nativeEntryPointers;
