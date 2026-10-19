@@ -64,6 +64,16 @@ static bool hasInlineElementReads(TypedArrayType type)
     }
 }
 
+static bool isProxyCapableArray(const Type& type)
+{
+    if (!type.allowsArrayProxies)
+        return false;
+    Type native = type;
+    native.allowsArrayProxies = false;
+    auto* engineClass = native.singleEngineClass();
+    return engineClass && engineClass->type == ArrayType;
+}
+
 Integer Lowering::indexOrElse(ValueID key, LBasicBlock otherwise, bool boundsCheckRejectsNegatives)
 {
     Operand operand = get(key);
@@ -1442,6 +1452,16 @@ Operand Lowering::lowerGetByVal(ValueID result, const Value& value)
     auto genericPath = [&] {
         return ensure(genericGetByVal(object, key), type);
     };
+    auto& keyType = typeOf(key);
+    bool isNumericKey = keyType.isNumber() || (keyType.primitives & Primitive::Number && keyType.hasOnlyPrimitives(Primitive::Number | Primitive::UndefinedOrNull));
+    if (isProxyCapableArray(typeOf(object)) && isNumericKey) {
+        CellPointer array = nonNullish(object, { });
+        return eitherOperand(equal(loadCellType(array), word32(ProxyObjectType)), repOf(type), [&] {
+            return genericPath();
+        }, [&] {
+            return ensure(AOT_TYPED_OPERATION(ArrayGet, array, in<Boxed>(key)), type);
+        });
+    }
     if (value.readsForInKey()) {
         auto& keyRead = m_function.at(originOf(key));
         ValueID index = keyRead.child(1);
@@ -1686,7 +1706,7 @@ void Lowering::findElementsPerStep()
         auto& values = m_function.blocks[b].values;
         for (unsigned i = 0; i < values.size(); ++i) {
             auto& value = m_function.at(values[i]);
-            if (value.opcode == Opcode::IteratorOpen && keyedAccessOf(m_program, m_function, value) == KeyedAccess::Generic && !stringIteration(values[i]) && !m_entryIterations.get(values[i].index()) && !m_entryPairs.contains(values[i].index()))
+            if (value.opcode == Opcode::IteratorOpen && keyedAccessOf(m_program, m_function, value) == KeyedAccess::Generic && !isProxyCapableArray(typeOf(value.child(0))) && !stringIteration(values[i]) && !m_entryIterations.get(values[i].index()) && !m_entryPairs.contains(values[i].index()))
                 found.append({ b, i });
         }
     }
@@ -2326,6 +2346,15 @@ Operand Lowering::lowerIteratorOpen(ValueID result, const Value& value)
             return AOT_TYPED_OPERATION(IterOpenInFrame, in<Boxed>(iterable), *record);
         return AOT_TYPED_OPERATION(IterOpen, in<Boxed>(iterable));
     };
+    if (isProxyCapableArray(typeOf(iterable))) {
+        CellPointer array = nonNullish(iterable, { });
+        return eitherOperand(equal(loadCellType(array), word32(ProxyObjectType)), repOf(typeOf(result)), [&] {
+            return ensure(genericPath(), typeOf(result));
+        }, [&] {
+            AOT_TYPED_OPERATION(OpenModifiedArray, array);
+            return ensure(array, typeOf(iterable), typeOf(result));
+        });
+    }
     auto expected = predictionOf(iterable);
     if (!expected || !expected->singleEngineClass() || expected->singleEngineClass()->type != ArrayType)
         return ensure(genericPath(), typeOf(result));
@@ -2450,6 +2479,9 @@ Operand Lowering::valueOfArrayOrRecord(ValueID result, const Value& value)
             m_indexIsKnownInBounds = false;
             return element;
         }, [&] {
+            const auto& opened = m_function.at(originOf(iterator));
+            if (opened.opcode == Opcode::IteratorOpen && isProxyCapableArray(typeOf(opened.child(0))))
+                return ensure(AOT_TYPED_OPERATION(ArrayGet, asCell(in<Boxed>(iterator)), in<Boxed>(value.child(1))), type);
             return ensure(genericGetByVal(iterator, value.child(1)), type);
         });
     }, [&] {
