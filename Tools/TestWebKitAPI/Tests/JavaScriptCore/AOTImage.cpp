@@ -89,6 +89,86 @@ TEST(JavaScriptCore_AOTImage, FoldedAliasesHaveFinalBodySizes)
     EXPECT_EQ(aliasSize, canonicalSize);
 }
 
+TEST(JavaScriptCore_AOTImage, OutliningPreservesReturnAddressBeforeFrameSetup)
+{
+    using namespace JSC;
+    using namespace JSC::AOT;
+    JSC::initialize();
+    for (bool forced : { false, true }) {
+        String path = FileSystem::createTemporaryFile("aot-prologue"_s);
+        ASSERT_FALSE(path.isEmpty());
+        auto pathBytes = path.utf8();
+        auto oldPath = Options::aotMapFilePath();
+        auto oldOutlining = Options::aotOutlineForTesting();
+        auto cleanup = makeScopeExit([&] {
+            Options::aotMapFilePath() = oldPath;
+            Options::aotOutlineForTesting() = oldOutlining;
+            FileSystem::deleteFile(path);
+        });
+        Options::aotMapFilePath() = pathBytes.data();
+        Options::aotOutlineForTesting() = forced ? u8"k" : nullptr;
+
+        ImageBuilder builder;
+        builder.setProgramIdentifierIndices(nullptr, 1);
+        for (unsigned index = 0; index < 16; ++index) {
+            CompiledCode code;
+            auto append = [&](uint32_t instruction) {
+                code.bytes.append(std::span { reinterpret_cast<const uint8_t*>(&instruction), sizeof(instruction) });
+            };
+            // A generic entry may discard a collapsible caller before saving LR.
+            // Turning its return-address comparison into BL destroys that LR.
+            for (uint32_t instruction : std::array<uint32_t, 13> {
+                     0xaa1e03ed, 0xf84001b1, 0xd2807e30, 0xf2b54230,
+                     0xf2c077f0, 0xf2f22010, 0xeb10023f, 0x54000081,
+                     0x910003bf, 0xa8c17bfd, 0x17fffff6, 0xa9bf7bfd, 0x910003fd })
+                append(instruction);
+            code.frameSetupEnd = code.bytes.size();
+            for (unsigned i = 0; i < 12; ++i)
+                append(0xd503201f);
+            append(0x52800000 | index << 5); // Different results keep the functions distinct.
+            append(0x910003bf);
+            append(0xa8c17bfd);
+            append(0xd65f03c0);
+            code.hasCodeAnnotations = true;
+            code.rareCodeMayBeOutlined = !forced;
+            code.allCodeMayBeOutlined = true;
+            code.info.isGenericEntrypoint = true;
+            code.info.typedFunction = index;
+            builder.add({ 0, index, ImageKey::typedFunction }, index, WTF::move(code), "prelude"_s);
+        }
+        auto image = builder.finish();
+        ASSERT_FALSE(image.isEmpty());
+        ImageHeader header;
+        memcpy(&header, image.span().data(), sizeof(header));
+        auto contents = FileSystem::readEntireFile(path);
+        ASSERT_TRUE(contents);
+        unsigned functions = 0;
+        bool sawOutlinedCall = false;
+        for (auto& line : String::fromUTF8(contents->span()).split('\n')) {
+            auto fields = line.split('\t');
+            if (fields[0] != "F"_s || fields.last() != "prelude"_s)
+                continue;
+            ++functions;
+            auto start = parseInteger<unsigned>(fields[2]).value();
+            auto end = start + parseInteger<unsigned>(fields[3]).value();
+            bool savedReturnAddress = false;
+            for (auto at = start; at < end; at += sizeof(uint32_t)) {
+                uint32_t instruction;
+                memcpy(&instruction, image.span().data() + header.codeOffset + at, sizeof(instruction));
+                if ((instruction & 0xffc07fff) == 0xa9807bfd) // STP FP, LR, [SP, #-n]!
+                    savedReturnAddress = true;
+                if (instruction >> 26 == 0x25) {
+                    EXPECT_TRUE(savedReturnAddress);
+                    sawOutlinedCall = true;
+                }
+            }
+            EXPECT_TRUE(savedReturnAddress);
+        }
+        EXPECT_EQ(functions, 16u);
+        EXPECT_TRUE(sawOutlinedCall);
+    }
+}
+
 } // namespace TestWebKitAPI
 
 #endif // ENABLE(AOT) && CPU(ARM64)

@@ -789,6 +789,9 @@ Cause tryDecode(const Code& code, const Functor& functor)
             instruction.kind = Kind::Pinned;
         }
 #if CPU(ARM64)
+        // Outlined calls overwrite LR, so the caller must already have saved it.
+        if (at < code.frameSetupEnd && (instruction.kind == Kind::Plain || instruction.kind == Kind::StubCall))
+            instruction.kind = Kind::Pinned;
         if (at >= code.appendedEntriesStart && instruction.kind == Kind::Plain)
             instruction.kind = Kind::Pinned;
 #endif

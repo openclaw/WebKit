@@ -1850,7 +1850,7 @@ Vector<uint8_t> ImageBuilder::finish()
         generateFunctionPreambles();
         endStep("choosing what is outlined"_s);
     }
-    static const char* const outlinesForTesting = byteCast<char>(Options::aotOutlineForTesting());
+    const char* const outlinesForTesting = byteCast<char>(Options::aotOutlineForTesting());
     if (outlinesForTesting && outlining.bodies.isEmpty()) {
         const bool outlinesCalls = !!strchr(outlinesForTesting, 'k');
         struct Found {

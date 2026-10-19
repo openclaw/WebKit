@@ -3394,6 +3394,7 @@ static bool compilePart(const Program& program, FunctionID id, const Function& f
     CCallHelpers::JumpList frameDoesNotFit;
     bool fitsByProof = false;
     CCallHelpers::Label afterFramelessStackCheck;
+    CCallHelpers::Label frameSetupEnd;
     proc.code().setPrologueForEntrypoint(0, createSharedTask<Air::PrologueGeneratorFunction>([&](CCallHelpers& jit, Air::Code& code, Air::GenerationContext&) {
         if (context.hasNoFrame(code)) {
             if (context.callsPreserveLiveRegisters && !program.hasCheckedStackOnEntry(id)) {
@@ -3414,6 +3415,7 @@ static bool compilePart(const Program& program, FunctionID id, const Function& f
         if (code.placesSpillsAboveFrameRecord()) {
             jit.m_assembler.stp<64>(GPRInfo::callFrameRegister, CCallHelpers::linkRegister, CCallHelpers::stackPointerRegister, PairPreIndex(-static_cast<int>(code.bytesAboveFrameRecord() + sizeof(CallerFrameAndPC))));
             jit.move(CCallHelpers::stackPointerRegister, GPRInfo::callFrameRegister);
+            frameSetupEnd = jit.label();
             if ((context.emitsCalls && !isDeferredToCallee) || context.needsStackCheckForTailCalls || code.frameSize() > 256)
                 frameDoesNotFit = emitStackCheck(jit, 0);
             pushCalleeSaves(jit, code.calleeSaveRegisterAtOffsetList());
@@ -3421,6 +3423,7 @@ static bool compilePart(const Program& program, FunctionID id, const Function& f
         }
 #endif
         jit.emitFunctionPrologue();
+        frameSetupEnd = jit.label();
         RegisterAtOffsetList saves = code.calleeSaveRegisterAtOffsetList();
         bool checksStack = ((context.emitsCalls || context.callsPreserveLiveRegisters) && !isDeferredToCallee) || context.needsStackCheckForTailCalls || code.frameSize() > 256;
 #if CPU(X86_64)
@@ -3700,6 +3703,8 @@ static bool compilePart(const Program& program, FunctionID id, const Function& f
     auto offsetOf = [&](CCallHelpers::Label label) {
         return static_cast<uint32_t>(static_cast<uint8_t*>(linkBuffer.locationOf<JSEntryPtrTag>(label).untaggedPtr()) - static_cast<uint8_t*>(start));
     };
+    if (!info.hasNoFrame)
+        result.frameSetupEnd = offsetOf(frameSetupEnd);
     result.rareCodeStart = std::min<uint32_t>(offsetOf(proc.code().rareCodeStart()), info.codeSize);
     for (auto& data : context.dataInCode)
         result.dataInCode.append({ offsetOf(data.start), data.numberOfWords, false });

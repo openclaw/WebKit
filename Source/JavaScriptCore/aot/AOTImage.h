@@ -136,6 +136,7 @@ struct CompiledCode {
     Vector<uint8_t> instructions;
     Vector<DataInCode> dataInCode;
     uint32_t appendedEntriesStart { std::numeric_limits<uint32_t>::max() };
+    uint32_t frameSetupEnd { 0 };
     CompiledFunctionInfo info;
     String whyDeclined;
     String bytesByOperation;

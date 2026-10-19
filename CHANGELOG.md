@@ -4,6 +4,7 @@ These entries describe the experimental `openclaw/aot-typed` fork.
 
 ## Unreleased
 
+- Keep outlined calls after ARM64 frame setup so generic AOT entry points retain their caller's return address.
 - Preserve Proxy-backed declared arrays through generic AOT accesses with element checks, while retaining native storage specialization for proven array allocations.
 - Report final canonical function sizes for folded aliases in AOT maps after outlining and fall-through optimization.
 - Check final AOT branch distances instead of rejecting large images for the sum of caller-local far-call veneers.
