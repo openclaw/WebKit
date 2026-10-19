@@ -76,6 +76,7 @@
 #include <wtf/FilePrintStream.h>
 #include <wtf/FileSystem.h>
 #include <atomic>
+#include <inttypes.h>
 #include <wtf/HexNumber.h>
 #include <wtf/ProcessID.h>
 #include <wtf/SHA1.h>
@@ -434,6 +435,8 @@ void RuntimeTable::writeOperationCounts(bool isFinal) const
         auto file = FilePrintStream::open(temporary.utf8(), "w"_s);
         if (!file)
             return;
+        if (suffix == ".native-entries"_s)
+            setvbuf(file->file(), nullptr, _IOFBF, MB);
         file->println("# AOT-SNAPSHOT\t1\t", getCurrentProcessID(), "\t", m_vmID, "\t", sequence, "\t", isFinal ? "final" : "partial");
         contents(*file);
         file->println("# END\t", sequence);
@@ -483,7 +486,7 @@ void RuntimeTable::writeOperationCounts(bool isFinal) const
                 case NativeEntryKind::GenericUntyped: kind = "generic-untyped"_s; break;
                 case NativeEntryKind::Generated: kind = "generated"_s; break;
                 }
-                file.println(i, "\t", kind, "\t", metadata[i].bodyBytes, "\t", m_nativeEntryCounts[i]);
+                file.printf("%u\t%s\t%u\t%" PRIu64 "\n", i, kind.characters(), metadata[i].bodyBytes, m_nativeEntryCounts[i]);
             }
         });
     }

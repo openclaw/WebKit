@@ -4,6 +4,7 @@ These entries describe the experimental `openclaw/aot-typed` fork.
 
 ## Unreleased
 
+- Reduce native-entry snapshot serialization overhead while preserving complete per-VM coverage records.
 - Materialize ARM64 SIMD bitmask tables in generated code so embedded Wasm works after AOT image relocation.
 - Resolve structure property names through the identifier overflow table when enumerating large AOT programs.
 
