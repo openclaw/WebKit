@@ -110,6 +110,14 @@ jobs:
         env:
           BUILDX_METADATA_PROVENANCE: max
         run: python3 .github/openclaw/artifacts.py build --lane bun-webkit-linux-amd64 --output "$RUNNER_TEMP/linux-artifact"
+      - name: Retain native Linux engine artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: bun-webkit-linux-amd64
+          path: ${{ runner.temp }}/linux-artifact
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
       - name: Install pinned Bun and JSC test tools
         run: |
           curl -fsSL --retry 5 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null

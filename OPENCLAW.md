@@ -177,6 +177,7 @@ worker inspection and external-buffer cases alongside the fork selection.
 
 ## Unreleased
 
+- Retain the native Linux engine archive and provenance for seven days after its successful PR build, before Bun consumer qualification, so failed qualification can reuse the exact engine bytes.
 - Merge the main and published engine histories, then integrate upstream `3d3257150c40a1aabdc5f8b48d5b33d0413674cb` while preserving worker budgets, namespace facades, ALS, accounting, allocation sampling, traps, VM entry storage and all ten artifact lanes.
 - Port worker verification and passive-wait progress to upstream Collector ownership; preserve exactly-once ArrayBuffer accounting with the new allocation cadence.
 - Preserve syntax-selected stack positions through upstream parser and cache changes, including parenthesized optional calls and tags.
