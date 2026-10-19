@@ -13601,7 +13601,9 @@ JSValue State::coerce(JSGlobalObject* globalObject, JSValue value, const Runtime
     countCoercion(value, before, type, reason, way, result);
     if (result)
         return result;
-    if ((reason == Format::CastReason::Flow || ((reason == Format::CastReason::Claim || reason == Format::CastReason::Store) && type.checksUntypedObjects())) && !compiled && value.isObject() && !data.isCompiledForAudit) {
+    // Overlapping narrowed unions may share member transitions without a common-layout transition.
+    bool shouldTryInPlace = reason == Format::CastReason::Flow || (!compiled && (reason == Format::CastReason::Claim || reason == Format::CastReason::Store) && type.checksUntypedObjects());
+    if (shouldTryInPlace && value.isObject() && !data.isCompiledForAudit) {
         bool didConvertInPlace = convertInPlace(globalObject, asObject(value), type);
         RETURN_IF_EXCEPTION(scope, { });
         if (didConvertInPlace)
