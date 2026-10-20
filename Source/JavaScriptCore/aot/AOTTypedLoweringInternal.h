@@ -1070,7 +1070,7 @@ private:
     bool isPredictedSymbol(const Function&, ValueID) const;
     void lowerObjectLiteral(const ObjectLiteral&);
     static unsigned roundInlineCapacityToCellSize(unsigned inlineCapacity);
-    static unsigned inlineCapacityForLiteral(const Program&, const Function&, ValueID allocationSite, bool hasFields, const UsersInBlocks* users = nullptr);
+    static unsigned inlineCapacityForLiteral(const Program&, const Function&, ValueID allocationSite, bool hasFields, const UsersInBlocks* users = nullptr, std::span<const StringID> copiedNames = { });
     const UsersInBlocks* usersOfAllocation(ValueID allocationSite) const;
     mutable bool m_didFindAllocationUsers { false };
     mutable BitVector m_isAllocation;
@@ -1082,7 +1082,7 @@ private:
     CellPointer newObjectWithProperties(unsigned slot, bool hasNullPrototype, ValueID newTarget, ValueID constructor, unsigned inlineCapacity, std::span<const StringID> names, std::span<const Boxed> values, uint64_t stores = 0, const ObjectLiteral* group = nullptr, uint32_t row = Format::none);
     uint32_t structureDescriptorFor(std::span<const StringID> names, unsigned inlineCapacity, bool hasNullPrototype) const;
     void findStructureDescriptorOf(ObjectLiteral&) const;
-    CellPointer newObjectLiteral(std::span<const StringID> names, std::span<const Boxed> values);
+    CellPointer newObjectLiteral(std::span<const StringID> names, std::span<const Boxed> values, ValueID allocationSite = { });
     uint32_t rowOfNames(std::span<const StringID>);
     uint32_t rowOf(std::span<const uint32_t>);
     struct CloneDefinitions {
@@ -1099,7 +1099,7 @@ private:
     bool alwaysPreservesSourceLayout(const CloneCapacity&) const;
     Word32 preservesSourceLayout(ValueID source, const CloneCapacity&);
     CellPointer cloneObjectOutOfLine(ValueID source, const CloneCapacity&);
-    CellPointer cloneObject(ValueID source, bool keepsLayout, const CloneDefinitions& = { }, const CloneCapacity& = { });
+    CellPointer cloneObject(ValueID copy, ValueID source, bool keepsLayout, const CloneDefinitions& = { }, const CloneCapacity& = { });
     CloneDefinitions definitionsOnClone(ValueID object, bool mayCarryOut);
     const Block* m_cloneDefinitionsBlock { nullptr };
     Vector<size_t, 2> m_cloneDefinitions;

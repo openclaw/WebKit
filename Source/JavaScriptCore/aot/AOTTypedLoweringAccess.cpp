@@ -3312,10 +3312,11 @@ uint32_t Lowering::rowOf(std::span<const uint32_t> row)
     return start;
 }
 
-CellPointer Lowering::newObjectLiteral(std::span<const StringID> names, std::span<const Boxed> values)
+CellPointer Lowering::newObjectLiteral(std::span<const StringID> names, std::span<const Boxed> values, ValueID allocationSite)
 {
+    unsigned inlineCapacity = allocationSite ? inlineCapacityForLiteral(m_program, m_function, allocationSite, !names.empty(), usersOfAllocation(allocationSite), names) : roundInlineCapacityToCellSize(names.size());
     if (m_context.sites.size() + 2 > std::min<uint32_t>(SharedData::maxSlots, FunctionInfo::maxEncodedSlots)) {
-        CellPointer object = newEmptyObject(names.size());
+        CellPointer object = newEmptyObject(inlineCapacity);
         for (unsigned i = 0; i < names.size(); ++i)
             AOT_TYPED_OPERATION(DefineByName, box(object), word32(names[i].index()), values[i]);
         return object;
@@ -3323,7 +3324,7 @@ CellPointer Lowering::newObjectLiteral(std::span<const StringID> names, std::spa
     unsigned slot = m_context.sites.size();
     m_context.sites.append(Site { });
     m_context.sites.append(Site { });
-    return newObjectWithProperties(slot, false, { }, { }, roundInlineCapacityToCellSize(names.size()), names, values);
+    return newObjectWithProperties(slot, false, { }, { }, inlineCapacity, names, values);
 }
 
 bool Lowering::isPredictedSymbol(const Function& function, ValueID id) const
@@ -3389,7 +3390,7 @@ const UsersInBlocks* Lowering::usersOfAllocation(ValueID allocationSite) const
         for (auto& block : m_function.blocks) {
             for (ValueID id : block.values) {
                 auto& value = m_function.at(id);
-                if (value.opcode == Opcode::NewObject || value.opcode == Opcode::CreateThis || isObjectCreateNull(value))
+                if (value.opcode == Opcode::NewObject || value.opcode == Opcode::CreateThis || isObjectCreateNull(value) || languageOperationOf(m_program, value) == LanguageOperation::CloneObject)
                     m_isAllocation.set(id.index());
             }
         }
@@ -3412,7 +3413,7 @@ const UsersInBlocks* Lowering::usersOfAllocation(ValueID allocationSite) const
     return found == m_allocationUsers.end() ? &m_noUsers : &found->value;
 }
 
-unsigned Lowering::inlineCapacityForLiteral(const Program& program, const Function& function, ValueID id, bool hasFields, const UsersInBlocks* users)
+unsigned Lowering::inlineCapacityForLiteral(const Program& program, const Function& function, ValueID id, bool hasFields, const UsersInBlocks* users, std::span<const StringID> copiedNames)
 {
     auto& builtins = Builtins::singleton();
     auto withoutUpcasts = [&](ValueID value) {
@@ -3429,6 +3430,7 @@ unsigned Lowering::inlineCapacityForLiteral(const Program& program, const Functi
         return implementation.kind == BuiltinImplementation::Operation && implementation.operation == LanguageOperation::CopyDataProperties;
     };
     Vector<StringID, 16> names;
+    names.appendRange(copiedNames.begin(), copiedNames.end());
     unsigned numberOfKeys = 0;
     collectAssignedProperties(program, function, id, 3, names, numberOfKeys, users);
     unsigned inlineCapacity = std::min<unsigned>(names.size() + numberOfKeys, JSFinalObject::maxInlineCapacity);
@@ -4798,10 +4800,10 @@ CellPointer Lowering::finishObjectLiteral(CellPointer object)
     return join.finish().as<CellPointer>();
 }
 
-CellPointer Lowering::cloneObject(ValueID sourceID, bool keepsLayout, const CloneDefinitions& defined, const CloneCapacity& room)
+CellPointer Lowering::cloneObject(ValueID copyID, ValueID sourceID, bool keepsLayout, const CloneDefinitions& defined, const CloneCapacity& room)
 {
     if (!keepsLayout)
-        return cloneAsPlainObject(sourceID, defined);
+        return cloneAsPlainObject(copyID, sourceID, defined);
     Boxed source = in<Boxed>(sourceID);
     auto outOfLine = [&] {
         return cloneObjectOutOfLine(sourceID, room);

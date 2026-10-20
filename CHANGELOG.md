@@ -4,6 +4,7 @@ These entries describe the experimental `openclaw/aot-typed` fork.
 
 ## Unreleased
 
+- Reserve space for later fields and typed conversion when cloning records so generic spreads preserve aliased mutations with wide references.
 - Preserve Object.entries key/value pairs when array iteration uses a generic iterator.
 - Restore declared-array read and iteration checks while preserving Proxy-array behavior.
 - Resolve compiled Flow checks through registered in-place member specializations while preserving object identity.

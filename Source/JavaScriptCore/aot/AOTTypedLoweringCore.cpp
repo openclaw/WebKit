@@ -2191,7 +2191,7 @@ Operand Lowering::lowerLanguageOperation(ValueID id, const Value& value)
             };
             auto expected = predictionOf(id);
             bool keepsLayout = hasRecordLayouts(type) || (expected && hasRecordLayouts(*expected));
-            return ensure(countPlainAllocation(PlainAllocationKind::Clone, id, cloneObject(value.arguments[0], keepsLayout, { }, cloneCapacityOf(id))), m_program.at(m_program.types.object), type);
+            return ensure(countPlainAllocation(PlainAllocationKind::Clone, id, cloneObject(id, value.arguments[0], keepsLayout, { }, cloneCapacityOf(id))), m_program.at(m_program.types.object), type);
         }
     case LanguageOperation::CopyDataProperties:
         if (auto* literal = spreadLiteralAt(m_currentIndexInBlock)) {
@@ -2212,7 +2212,7 @@ Operand Lowering::lowerLanguageOperation(ValueID id, const Value& value)
             }
         }
         if (isAllocatedHere(value.arguments[0])) {
-            CellPointer object = countPlainAllocation(PlainAllocationKind::Clone, value.arguments[0], cloneObject(value.arguments[1], false, definitionsOnClone(value.arguments[0], keyOrdersExpectedOf(value.arguments[1]).isEmpty())));
+            CellPointer object = countPlainAllocation(PlainAllocationKind::Clone, value.arguments[0], cloneObject(value.arguments[0], value.arguments[1], false, definitionsOnClone(value.arguments[0], keyOrdersExpectedOf(value.arguments[1]).isEmpty())));
             defineDeferredAllocation(value.arguments[0], object);
             return ensure(object, m_program.at(m_program.types.object), type);
         }

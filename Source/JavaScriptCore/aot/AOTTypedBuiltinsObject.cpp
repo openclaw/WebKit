@@ -1378,7 +1378,7 @@ void Lowering::byKeyOrder(ValueID object, const Vector<KeyOrder, 2>& orders, con
     genericPath();
 }
 
-CellPointer Lowering::cloneAsPlainObject(ValueID source, const CloneDefinitions& defined)
+CellPointer Lowering::cloneAsPlainObject(ValueID copy, ValueID source, const CloneDefinitions& defined)
 {
     auto& anything = m_program.at(m_program.types.anything);
     Join made(m_out, Rep::Cell, b3TypeOf(Rep::Cell));
@@ -1390,7 +1390,7 @@ CellPointer Lowering::cloneAsPlainObject(ValueID source, const CloneDefinitions&
             names.append(fields[index].name);
             values.append(readField(cell, fields[index], anything).as<Boxed>());
         }
-        made.add(newObjectLiteral(names.span(), values.span()));
+        made.add(newObjectLiteral(names.span(), values.span(), copy));
     }, [&] {
         if (defined.more)
             made.add(AOT_TYPED_OPERATION(CloneObjectAndExtend, in<Boxed>(source), integer(static_cast<int64_t>(defined.more)), defined.values.size() > 0 ? in<Boxed>(defined.values[0]) : undefined(), defined.values.size() > 1 ? in<Boxed>(defined.values[1]) : undefined()));
