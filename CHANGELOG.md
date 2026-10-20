@@ -4,6 +4,7 @@ These entries describe the experimental `openclaw/aot-typed` fork.
 
 ## Unreleased
 
+- Preserve Object.entries key/value pairs when array iteration uses a generic iterator.
 - Restore declared-array read and iteration checks while preserving Proxy-array behavior.
 - Resolve compiled Flow checks through registered in-place member specializations while preserving object identity.
 - Keep outlined calls after ARM64 frame setup so generic AOT entry points retain their caller's return address.

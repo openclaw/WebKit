@@ -6633,6 +6633,9 @@ private:
         ValueID iterator = callUses.users[0];
         if (m_function.at(iterator).opcode != Opcode::IteratorOpen)
             return false;
+        // Flattening reads two indexed values for each iterator step.
+        if (keyedAccessOf(m_program, m_function, m_function.at(iterator)) != KeyedAccess::Array)
+            return false;
         Uses iteratorUses = usesOf(iterator);
         if (iteratorUses.isUsedByTerminator)
             return false;
