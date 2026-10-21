@@ -224,6 +224,7 @@ def _CreateOutputHeader(source_path_or_url: str, source_digest: str) -> str:
       ' */\n\n'
       '#ifndef RTC_BASE_SSL_ROOTS_H_\n'
       '#define RTC_BASE_SSL_ROOTS_H_\n\n'
+      '#include <cstddef>\n\n'
       '// This file is the root certificates in C form.\n\n'
       f'// It was generated at {now_utc.isoformat()} by the following script:\n'
       '// `tools_webrtc/sslroots/generate_sslroots.py '

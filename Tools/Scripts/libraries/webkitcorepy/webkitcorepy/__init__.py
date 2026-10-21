@@ -61,7 +61,7 @@ if sys.version_info >= (3, 12):
 else:
     AutoInstall.register(Package('setuptools', Version(59, 8, 0), aliases=['_distutils_hack', 'pkg_resources']))
 
-AutoInstall.register(Package('certifi', Version(2022, 12, 7)))
+AutoInstall.register(Package('certifi', Version(2026, 10, 19)))
 AutoInstall.register(Package('chardet', Version(3, 0, 4)))
 AutoInstall.register(Package('dateutil', Version(2, 8, 1), pypi_name='python-dateutil', wheel=True))
 AutoInstall.register(Package('entrypoints', Version(0, 3, 0)))
