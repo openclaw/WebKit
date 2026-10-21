@@ -5871,7 +5871,7 @@ public:
         auto hasOnlyDecodedForm = [&](uint32_t index) {
             if (isLeftOut(index))
                 return true;
-            return isConstant.get(index) && !charactersAreAllASCII(byteCast<Latin1Character>(strings[index])) && !isPrivateName(strings[index]) && !isEnginePrivateName(strings[index]);
+            return isConstant.get(index) && !charactersAreAllASCII(byteCast<Latin1Character>(strings[index])) && !isPrivateName(strings[index]) && !isEnginePrivateName(strings[index]) && !isConstantSymbol(strings[index]);
         };
         auto isName = [&](uint32_t index) {
             return index < m_program.identifierNumbers.size() && m_program.identifierNumbers[index];

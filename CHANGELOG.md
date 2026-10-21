@@ -4,6 +4,7 @@ These entries describe the experimental `openclaw/aot-typed-2` fork.
 
 ## Unreleased
 
+- Preserve encoded constant-symbol field names when building typed AOT images.
 - Avoid allocating per-VM function state for counter-only image-index references.
 - Preserve typed program lengths and section offsets above 4 GiB with format 39.
 - Keep native-entry coverage per VM with image-bound initial and final snapshots, and preserve wide counter relocations during outlining.
