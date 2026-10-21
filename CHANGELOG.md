@@ -4,6 +4,7 @@ These entries describe the experimental `openclaw/aot-typed-2` fork.
 
 ## Unreleased
 
+- Avoid allocating per-VM function state for counter-only image-index references.
 - Preserve typed program lengths and section offsets above 4 GiB with format 39.
 - Keep native-entry coverage per VM with image-bound initial and final snapshots, and preserve wide counter relocations during outlining.
 - Check final branch reach and folded alias sizes after AOT image layout, and keep outlined calls after ARM64 frame setup.

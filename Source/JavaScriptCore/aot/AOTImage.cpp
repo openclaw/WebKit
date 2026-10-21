@@ -3385,7 +3385,8 @@ Vector<uint8_t> ImageBuilder::finish()
             isDuplicate.quickSet(index);
             continue;
         }
-        if (info.numSlots || !info.indexRelocations.isEmpty() || !(function.key.kind & ImageKey::typedFunction))
+        bool referencesState = std::ranges::any_of(info.indexRelocations, [](const auto& reference) { return !reference.usesImageIndex; });
+        if (info.numSlots || referencesState || !(function.key.kind & ImageKey::typedFunction))
             info.stateNumber = numberOfStates++;
     }
     Ref recordWriterThread = Thread::create("AOT image"_s, [&] {
