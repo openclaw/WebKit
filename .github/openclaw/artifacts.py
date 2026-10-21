@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Owned packaging and provenance around the unchanged upstream lane runner."""
+"""Owned packaging and provenance around the pinned upstream lane runner."""
 import argparse
 import hashlib
 import json
@@ -15,6 +15,10 @@ BASE = '1600131e46b5af48bbda3559af8d8a3327230b6e'
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = json.loads((ROOT / '.github/openclaw/variants.json').read_text())
 RECIPE = ['.github/scripts/lanes.mjs', 'Dockerfile', 'Dockerfile.musl', 'Dockerfile.macos', 'Dockerfile.windows', 'icu', 'macos-cross']
+# Keep the engine comparison BASE; admit only this reviewed Node security update.
+# Tree identities include file modes and every descendant of recipe directories.
+RECIPE_REVISION = {'reviewed_source':'87b224c8cb5510b638f48130722ffc7a6a616c0d',
+    'tree_sha256':'fabc54c96a4f33f485be7964cbe55f4ef88838db6ad5713e5abe1b515b99c6da'}
 
 def run(*args, **kwargs):
     return subprocess.run(args, check=True, text=True, **kwargs)
@@ -34,7 +38,9 @@ def source():
     if not re.fullmatch('[0-9a-f]{40}', sha):
         raise ValueError('full source SHA required')
     run('git', 'merge-base', '--is-ancestor', BASE, sha)
-    run('git', 'diff', '--exit-code', BASE, sha, '--', *RECIPE)
+    recipe = subprocess.check_output(['git', 'ls-tree', '--full-tree', '-z', sha, '--', *RECIPE])
+    if hashlib.sha256(recipe).hexdigest() != RECIPE_REVISION['tree_sha256']:
+        raise ValueError('source recipe differs from the reviewed revision')
     run('git', 'diff', '--exit-code', 'HEAD')
     return sha
 
@@ -65,7 +71,7 @@ def build(label, destination):
     provenance = destination / 'provenance'
     provenance.mkdir()
     command = json.loads(capture('node', '.github/scripts/lanes.mjs', 'build', label, '--output', str(artifact), '--dry-run'))
-    # Build the unchanged base locally. No image registry write or inherited workflow is used.
+    # Build the pinned recipe base locally. No image registry write or inherited workflow is used.
     base_tag = 'openclaw-webkit-toolchain:' + hashlib.sha256(lane['image'].encode()).hexdigest()[:24]
     base_command = command[:command.index('--target=artifact')] + ['--target=base', '--load', '--tag', base_tag, '--metadata-file', str(provenance/'toolchain-build.json'), '.']
     run('docker', 'buildx', 'use', 'default')
@@ -92,7 +98,7 @@ def build(label, destination):
     for commit in capture('git','rev-list','--reverse',BASE+'..'+sha).splitlines():
         patch = subprocess.check_output(['git','show','--format=','--binary',commit])
         patches.append({'commit':commit,'subject':capture('git','show','-s','--format=%s',commit),'patch_sha256':hashlib.sha256(patch).hexdigest()})
-    manifest = {'schema_version':1,'source':sha,'base':BASE,'lane':lane,'patches':patches,
+    manifest = {'schema_version':1,'source':sha,'base':BASE,'recipe_revision':RECIPE_REVISION,'lane':lane,'patches':patches,
         'recipe_sha256':{p:digest(ROOT/p) for p in paths},'toolchain_image_id':image['Id'],
         'commands':{'base':base_command,'artifact':build_command},
         'tool_versions':tool_versions,'docker_version':capture('docker','version'),'buildx_version':capture('docker','buildx','version'),
