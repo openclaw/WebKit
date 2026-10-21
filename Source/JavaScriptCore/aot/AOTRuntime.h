@@ -29,9 +29,11 @@
 #include "StackManager.h"
 #include "Structure.h"
 #include "StructureID.h"
+#include <optional>
 #include <wtf/BitVector.h>
 #include <wtf/BitSet.h>
 #include <wtf/HashMap.h>
+#include <wtf/MappedFileData.h>
 #include <wtf/SegmentedVector.h>
 #include <wtf/TZoneMalloc.h>
 
@@ -245,7 +247,7 @@ public:
     uint64_t** nativeEntryCounters();
 
 private:
-    void writeCounts(bool isFinal, bool includeOperations) const;
+    bool writeCounts(bool isFinal, bool includeOperations) const;
 
     void* m_entries[numberOfEntries];
     uint64_t m_vmID;
@@ -253,6 +255,9 @@ private:
     mutable bool m_hasWrittenNativeEntrySnapshot { false };
     Image* m_nativeEntryImage { nullptr };
     Vector<uint64_t> m_nativeEntryCounts;
+    std::span<uint64_t> m_nativeEntryCountStorage;
+    std::optional<FileSystem::MappedFileData> m_nativeEntryCountMapping;
+    String m_nativeEntryCountPath;
     Vector<uint64_t*> m_nativeEntryPointers;
     Vector<std::unique_ptr<VirtualCallInfo>> m_callLinkInfos;
     UncheckedKeyHashMap<std::pair<const char*, const char*>, uint64_t> m_operationCounts;

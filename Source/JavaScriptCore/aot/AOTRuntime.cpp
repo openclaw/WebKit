@@ -69,6 +69,9 @@
 #include "WebAssemblyFunction.h"
 #include "UnlinkedModuleProgramCodeBlock.h"
 #include <mutex>
+#include <bit>
+#include <limits>
+#include <wtf/FileHandle.h>
 #include <wtf/FilePrintStream.h>
 #include <wtf/FileSystem.h>
 #include <atomic>
@@ -210,6 +213,48 @@ static void JIT_OPERATION_ATTRIBUTES operationNotUsedByImage()
 
 static std::atomic<uint64_t> nextRuntimeTableID { 1 };
 
+// The ready header and immutable metadata precede the shared counter slots. A
+// reader of an unclosed file must independently prove its writer has stopped.
+struct NativeEntryFileHeader {
+    std::array<char, 8> magic { 'J', 'S', 'C', 'N', 'C', 'T', '0', '1' };
+    uint32_t version { 1 };
+    uint32_t headerBytes { 128 };
+    uint64_t fileBytes;
+    uint64_t pid;
+    uint64_t vm;
+    uint64_t stamp;
+    uint64_t rowCount;
+    uint64_t metadataOffset { 128 };
+    uint64_t countsOffset;
+    std::array<uint8_t, 20> imageDigest;
+    std::array<uint8_t, 20> metadataDigest;
+    uint32_t ready { 0 };
+    uint32_t closed { 0 };
+    uint64_t reserved { 0 };
+};
+static_assert(sizeof(NativeEntryFileHeader) == 128);
+static_assert(offsetof(NativeEntryFileHeader, ready) == 112);
+static_assert(sizeof(NativeEntryMetadata) == 8);
+
+static String nativeCountsBasePath(uint64_t vmID)
+{
+    const char* path = byteCast<char>(Options::aotTypeCoverageCountsPath());
+    if (!path)
+        return { };
+    String name = makeStringByReplacingAll(String::fromUTF8(path), "%p"_s, String::number(getCurrentProcessID()));
+    return name.contains("%v"_s) ? makeStringByReplacingAll(name, "%v"_s, String::number(vmID)) : makeString(name, "-vm-"_s, vmID);
+}
+
+[[noreturn]] static void failNativeEntryCapture(const String& path)
+{
+    if (!path.isNull()) {
+        if (auto file = FilePrintStream::open(makeString(path, ".failed"_s).utf8(), "w"_s))
+            file->println("AOT native-entry shared capture could not be initialized");
+    }
+    dataLogLn("AOT native-entry shared capture could not be initialized: ", path);
+    CRASH();
+}
+
 RuntimeTable::RuntimeTable(VM& vm)
     : m_vmID(nextRuntimeTableID.fetch_add(1, std::memory_order_relaxed))
 {
@@ -268,7 +313,16 @@ RuntimeTable::RuntimeTable(VM& vm)
 
 RuntimeTable::~RuntimeTable()
 {
-    writeOperationCounts(true);
+    bool wroteFinal = writeCounts(true, true);
+    if (m_nativeEntryCountMapping) {
+        auto* header = reinterpret_cast<NativeEntryFileHeader*>(m_nativeEntryCountMapping->mutableSpan().data());
+        std::atomic_ref(header->closed).store(1, std::memory_order_release);
+        if (wroteFinal) {
+            m_nativeEntryCountStorage = { };
+            m_nativeEntryCountMapping.reset();
+            FileSystem::deleteFile(m_nativeEntryCountPath);
+        }
+    }
 }
 
 void RuntimeTable::countOperationBySlotState(const char* name, const Slot* slot)
@@ -397,9 +451,63 @@ uint64_t** RuntimeTable::nativeEntryCounters()
         if (!image || !image->header().nativeEntriesOffset)
             return nullptr;
         m_nativeEntryImage = image;
-        m_nativeEntryCounts.fill(0, image->header().numberOfFunctions);
-        m_nativeEntryPointers.reserveInitialCapacity(m_nativeEntryCounts.size());
-        for (auto& count : m_nativeEntryCounts)
+        size_t count = image->header().numberOfFunctions;
+        String basePath = nativeCountsBasePath(m_vmID);
+        if (!Options::aotNativeEntrySharedCapture()) {
+            m_nativeEntryCounts.fill(0, count);
+            m_nativeEntryCountStorage = m_nativeEntryCounts.mutableSpan();
+        } else {
+            if (basePath.isNull())
+                failNativeEntryCapture(basePath);
+            m_nativeEntryCountPath = makeString(basePath, ".native-counts"_s);
+            String temporary = makeString(m_nativeEntryCountPath, ".tmp"_s);
+            RELEASE_ASSERT(std::endian::native == std::endian::little);
+            constexpr uint64_t maximumFileBytes = std::min<uint64_t>(std::numeric_limits<size_t>::max(), std::numeric_limits<int64_t>::max());
+            RELEASE_ASSERT(count <= (maximumFileBytes - sizeof(NativeEntryFileHeader)) / 16);
+            size_t metadataBytes = count * sizeof(NativeEntryMetadata);
+            size_t countsOffset = sizeof(NativeEntryFileHeader) + metadataBytes;
+            size_t fileBytes = countsOffset + count * sizeof(uint64_t);
+            if (FileSystem::fileExists(m_nativeEntryCountPath))
+                failNativeEntryCapture(m_nativeEntryCountPath);
+            std::optional<FileSystem::MappedFileData> mapping { FileSystem::createMappedFileData(temporary, fileBytes) };
+            if (!*mapping)
+                failNativeEntryCapture(m_nativeEntryCountPath);
+            auto bytes = mapping->mutableSpan();
+            auto metadata = std::span(image->at<NativeEntryMetadata>(image->header().nativeEntriesOffset), count);
+            NativeEntryFileHeader header;
+            header.fileBytes = fileBytes;
+            header.pid = getCurrentProcessID();
+            header.vm = m_vmID;
+            header.stamp = image->header().stamp;
+            header.rowCount = count;
+            header.countsOffset = countsOffset;
+            header.imageDigest = image->header().nativeEntriesDigest;
+            SHA1 digest;
+            digest.addBytes(std::as_bytes(metadata));
+            digest.computeHash(header.metadataDigest);
+            memcpy(bytes.data(), &header, sizeof(header));
+            memcpy(bytes.data() + sizeof(header), metadata.data(), metadataBytes);
+            auto counts = std::span(reinterpret_cast<uint64_t*>(bytes.data() + countsOffset), count);
+            zeroSpan(counts);
+            // Windows cannot rename a mapped file. Reopen the published file
+            // before exposing slots; a killed initializer leaves ready == 0.
+            mapping.reset();
+            if (!FileSystem::moveFile(temporary, m_nativeEntryCountPath))
+                failNativeEntryCapture(m_nativeEntryCountPath);
+            auto handle = FileSystem::openFile(m_nativeEntryCountPath, FileSystem::FileOpenMode::ReadWrite);
+            if (!handle)
+                failNativeEntryCapture(m_nativeEntryCountPath);
+            auto published = handle.map(FileSystem::MappedFileMode::Shared, FileSystem::FileOpenMode::ReadWrite);
+            if (!published || published->size() != fileBytes)
+                failNativeEntryCapture(m_nativeEntryCountPath);
+            bytes = published->mutableSpan();
+            auto* publishedHeader = reinterpret_cast<NativeEntryFileHeader*>(bytes.data());
+            std::atomic_ref(publishedHeader->ready).store(1, std::memory_order_release);
+            m_nativeEntryCountStorage = std::span(reinterpret_cast<uint64_t*>(bytes.data() + countsOffset), count);
+            m_nativeEntryCountMapping.emplace(WTF::move(*published));
+        }
+        m_nativeEntryPointers.reserveInitialCapacity(m_nativeEntryCountStorage.size());
+        for (auto& count : m_nativeEntryCountStorage)
             m_nativeEntryPointers.append(&count);
         // Keep interrupted VMs visible without rewriting their full image table at every GC.
         writeCounts(false, false);
@@ -412,15 +520,13 @@ void RuntimeTable::writeOperationCounts(bool isFinal) const
     writeCounts(isFinal, true);
 }
 
-void RuntimeTable::writeCounts(bool isFinal, bool includeOperations) const
+bool RuntimeTable::writeCounts(bool isFinal, bool includeOperations) const
 {
-    const char* path = byteCast<char>(Options::aotTypeCoverageCountsPath());
     if ((!includeOperations || !Options::useAOTOperationCounters()) && (!m_nativeEntryImage || (m_hasWrittenNativeEntrySnapshot && !isFinal)))
-        return;
-    if (!path)
-        return;
-    String name = makeStringByReplacingAll(String::fromUTF8(path), "%p"_s, String::number(getCurrentProcessID()));
-    name = name.contains("%v"_s) ? makeStringByReplacingAll(name, "%v"_s, String::number(m_vmID)) : makeString(name, "-vm-"_s, m_vmID);
+        return false;
+    String name = nativeCountsBasePath(m_vmID);
+    if (name.isNull())
+        return false;
     uint64_t sequence = ++m_snapshotSequence;
     auto write = [&](ASCIILiteral suffix, const auto& contents) {
         String destination = makeString(name, suffix);
@@ -469,10 +575,10 @@ void RuntimeTable::writeCounts(bool isFinal, bool includeOperations) const
             auto& header = m_nativeEntryImage->header();
             const auto* metadata = m_nativeEntryImage->at<NativeEntryMetadata>(header.nativeEntriesOffset);
             bool complete = true;
-            for (unsigned i = 0; i < m_nativeEntryCounts.size(); ++i)
+            for (unsigned i = 0; i < m_nativeEntryCountStorage.size(); ++i)
                 complete &= metadata[i].kind != NativeEntryKind::Uninstrumented;
-            file.println("image\t", SHA1::hexDigest(header.nativeEntriesDigest).data(), "\t", header.stamp, "\t", m_nativeEntryCounts.size(), "\t", complete ? "complete" : "incomplete");
-            for (unsigned i = 0; i < m_nativeEntryCounts.size(); ++i) {
+            file.println("image\t", SHA1::hexDigest(header.nativeEntriesDigest).data(), "\t", header.stamp, "\t", m_nativeEntryCountStorage.size(), "\t", complete ? "complete" : "incomplete");
+            for (unsigned i = 0; i < m_nativeEntryCountStorage.size(); ++i) {
                 ASCIILiteral kind;
                 switch (metadata[i].kind) {
                 case NativeEntryKind::Uninstrumented: kind = "uninstrumented"_s; break;
@@ -482,11 +588,13 @@ void RuntimeTable::writeCounts(bool isFinal, bool includeOperations) const
                 case NativeEntryKind::GenericUntyped: kind = "generic-untyped"_s; break;
                 case NativeEntryKind::Generated: kind = "generated"_s; break;
                 }
-                file.printf("%u\t%s\t%u\t%" PRIu64 "\n", i, kind.characters(), metadata[i].bodyBytes, m_nativeEntryCounts[i]);
+                file.printf("%u\t%s\t%u\t%" PRIu64 "\n", i, kind.characters(), metadata[i].bodyBytes, m_nativeEntryCountStorage[i]);
             }
         });
         m_hasWrittenNativeEntrySnapshot |= succeeded;
+        return succeeded;
     }
+    return false;
 }
 
 void RuntimeTable::recordSample(const char* kind, StringView group, String&& sample)
