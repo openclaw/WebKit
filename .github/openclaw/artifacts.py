@@ -15,10 +15,10 @@ BASE = '1600131e46b5af48bbda3559af8d8a3327230b6e'
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = json.loads((ROOT / '.github/openclaw/variants.json').read_text())
 RECIPE = ['.github/scripts/lanes.mjs', 'Dockerfile', 'Dockerfile.musl', 'Dockerfile.macos', 'Dockerfile.windows', 'icu', 'macos-cross']
-# Keep the engine comparison BASE; admit only this reviewed Node security update.
+# Keep the engine comparison BASE; admit only these reviewed runtime and CA updates.
 # Tree identities include file modes and every descendant of recipe directories.
-RECIPE_REVISION = {'reviewed_source':'87b224c8cb5510b638f48130722ffc7a6a616c0d',
-    'tree_sha256':'fabc54c96a4f33f485be7964cbe55f4ef88838db6ad5713e5abe1b515b99c6da'}
+RECIPE_REVISION = {'reviewed_source':'670af3032b19a37504d389437c871ebbdf2f35a4',
+    'tree_sha256':'03e3c253c84d9738a17530c6490325c778f8d995212b598af66a283cc5d9389f'}
 
 def run(*args, **kwargs):
     return subprocess.run(args, check=True, text=True, **kwargs)
