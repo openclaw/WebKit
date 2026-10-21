@@ -313,9 +313,10 @@ private:
     std::span<const T> section(Format::Section section) const
     {
         auto buffer = m_buffer;
-        if (section.offsetInBytes % alignof(T) || static_cast<uint64_t>(section.offsetInBytes) + static_cast<uint64_t>(section.count) * sizeof(T) > buffer.size())
+        uint64_t offset = section.offsetInBytes.value();
+        if (offset % alignof(T) || offset > buffer.size() || section.count > (buffer.size() - offset) / sizeof(T))
             return { };
-        return { reinterpret_cast<const T*>(buffer.data() + section.offsetInBytes), section.count };
+        return { reinterpret_cast<const T*>(buffer.data() + offset), section.count };
     }
 
     template<typename T>

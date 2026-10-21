@@ -69,6 +69,8 @@ struct ImageHeader {
     uint32_t numberOfRegExps;
     uint32_t regExpSourceOffset;
     uint32_t functionStartsOffset;
+    uint32_t nativeEntriesOffset;
+    std::array<uint8_t, 20> nativeEntriesDigest;
     uint32_t codeGranulesOffset;
     uint32_t callSitesOffset;
     uint32_t faultingAccessesOffset;
@@ -91,6 +93,12 @@ struct ImageHeader {
     uint32_t webAssemblyCodeOffset;
     uint32_t entriesUsed[(numberOfEntries + 31) / 32];
     uint32_t languageOperationsUsed[(Typed::numberOfLanguageOperations + 31) / 32];
+};
+
+struct NativeEntryMetadata {
+    uint32_t bodyBytes;
+    NativeEntryKind kind;
+    uint8_t reserved[3] { };
 };
 
 struct ImageRegExp {

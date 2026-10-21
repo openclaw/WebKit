@@ -153,7 +153,7 @@ struct ClosureWord {
     static_assert(isNotCallableBit == 63);
     static constexpr uint64_t offsetMask = (1ULL << numberOfOffsetBits) - 1;
     static constexpr uint32_t functionMask = (1u << numberOfFunctionBits) - 1;
-    static constexpr uint32_t firstReservedFunction = (functionMask >> 1) + 1 - 16;
+    static constexpr uint32_t firstReservedFunction = functionMask + 1 - 16;
     static constexpr uint64_t maxSizeOfCode = (offsetMask + 1) * offsetUnit;
 
     static uint64_t encode(uint64_t relative, uint32_t function)

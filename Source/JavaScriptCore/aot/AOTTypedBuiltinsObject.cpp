@@ -1981,7 +1981,7 @@ void Lowering::assignFields(CellPointer target, ValueID targetID, CellPointer so
     }
 }
 
-CellPointer Lowering::cloneAsPlainObject(ValueID source, const CloneDefinitions& defined)
+CellPointer Lowering::cloneAsPlainObject(ValueID copy, ValueID source, const CloneDefinitions& defined)
 {
     auto& anything = m_program.at(m_program.types.anything);
     Join results(m_out, Rep::Cell, b3TypeOf(Rep::Cell));
@@ -2002,7 +2002,7 @@ CellPointer Lowering::cloneAsPlainObject(ValueID source, const CloneDefinitions&
                 values.append(in<Boxed>(defined.values[i]));
             }
         }
-        results.add(newObjectLiteral(names.span(), values.span()));
+        results.add(newObjectLiteral(names.span(), values.span(), copy));
     }, [&] {
         if (defined.values.size() == 1 && get(defined.values[0]).rep == Rep::Double)
             results.add(AOT_TYPED_OPERATION(CloneObjectAndExtendWithNumber, in<Boxed>(source), integer(static_cast<int64_t>(defined.more)), in<Number>(defined.values[0])));

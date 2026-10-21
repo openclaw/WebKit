@@ -26655,11 +26655,30 @@ ArgumentThunks generateArgumentThunks(const Vector<const ArgumentMoves*>& all)
 }
 
 
-void IndexRelocations::load(CCallHelpers& jit, GPRReg base, GPRReg dest, uint32_t addend, uint32_t scale)
+void IndexRelocations::load(CCallHelpers& jit, GPRReg base, GPRReg dest, uint32_t addend, uint32_t scale, bool usesImageIndex)
 {
     bool isHalfWord = scale == sizeof(uint32_t);
     RELEASE_ASSERT(isHalfWord ? !(addend % sizeof(uint32_t)) : !(addend % sizeof(void*)) && !(scale % sizeof(void*)));
     RELEASE_ASSERT(scale <= std::numeric_limits<uint16_t>::max());
+#if CPU(ARM64) || CPU(X86_64)
+    if (usesImageIndex) {
+        GPRReg scratch = jit.scratchRegister();
+        RELEASE_ASSERT(base != scratch && dest != scratch);
+#if CPU(ARM64)
+        auto label = jit.label();
+#endif
+        jit.moveWithPatch(CCallHelpers::TrustedImmPtr(nullptr), scratch);
+#if CPU(X86_64)
+        auto label = jit.label();
+#endif
+        m_references.append({ label, addend, scale, false, false, true });
+        if (isHalfWord)
+            jit.load32(CCallHelpers::BaseIndex(base, scratch, CCallHelpers::TimesOne), dest);
+        else
+            jit.loadPtr(CCallHelpers::BaseIndex(base, scratch, CCallHelpers::TimesOne), dest);
+        return;
+    }
+#endif
 #if CPU(ARM64)
     m_references.append({ jit.label(), addend, scale });
     jit.m_assembler.add<64>(dest, base, UInt12(0), 12);
@@ -26844,14 +26863,22 @@ Vector<IndexReference> IndexRelocations::link(LinkBuffer& linkBuffer)
     auto* start = static_cast<uint8_t*>(linkBuffer.entrypoint<JSEntryPtrTag>().untaggedPtr());
     Vector<IndexReference> result;
     for (auto& reference : m_references)
-        result.append({ static_cast<uint32_t>(static_cast<uint8_t*>(linkBuffer.locationOf<JSEntryPtrTag>(reference.instructions).untaggedPtr()) - start), reference.addend, static_cast<uint16_t>(reference.scale), reference.isSiteCacheWord, reference.isAddress });
+        result.append({ static_cast<uint32_t>(static_cast<uint8_t*>(linkBuffer.locationOf<JSEntryPtrTag>(reference.instructions).untaggedPtr()) - start), reference.addend, static_cast<uint16_t>(reference.scale), reference.isSiteCacheWord, reference.isAddress, reference.usesImageIndex });
     return result;
 }
 
 void IndexRelocations::fill(uint8_t* code, const IndexReference& reference, uint32_t index)
 {
-#if CPU(ARM64)
+#if CPU(ARM64) || CPU(X86_64)
     uint64_t distance = reference.addend + static_cast<uint64_t>(index) * reference.scale;
+    if (reference.usesImageIndex) {
+        // Image indices can exceed the compact ARM64 load's 24-bit displacement.
+        RELEASE_ASSERT(distance < (1ull << 48));
+        CCallHelpers::AssemblerType_T::linkPointer(code, AssemblerLabel(reference.offset), reinterpret_cast<void*>(static_cast<uintptr_t>(distance)));
+        return;
+    }
+#endif
+#if CPU(ARM64)
     auto* instructions = reinterpret_cast<uint32_t*>(code + reference.offset);
     if (reference.isAddress) {
         RELEASE_ASSERT(distance <= std::numeric_limits<uint32_t>::max());
@@ -26869,7 +26896,6 @@ void IndexRelocations::fill(uint8_t* code, const IndexReference& reference, uint
     RELEASE_ASSERT(!(distance & ((1u << log2BytesLoaded) - 1)));
     instructions[1] |= static_cast<uint32_t>((distance & 0xfff) >> log2BytesLoaded) << 10;
 #elif CPU(X86_64)
-    uint64_t distance = reference.addend + static_cast<uint64_t>(index) * reference.scale;
     RELEASE_ASSERT(distance <= static_cast<uint64_t>(std::numeric_limits<int32_t>::max()));
     uint8_t* displacement = code + reference.offset - sizeof(int32_t);
     int32_t encoded = 0;

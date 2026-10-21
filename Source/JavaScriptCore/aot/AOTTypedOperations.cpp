@@ -4242,6 +4242,11 @@ JSC_DEFINE_JIT_OPERATION(operationAOTTypedGetByNameCheckedAsNumber, double, (Ins
     OPERATION_RETURN(scope, std::bit_cast<double>(value.isUndefined() ? Typed::undefinedDouble : Typed::nullDouble));
 }
 
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTTypedIsArrayProxy, size_t, (Instance*, JSCell* cell))
+{
+    return Typed::isArrayProxy(asObject(cell));
+}
+
 JSC_DEFINE_JIT_OPERATION(operationAOTTypedRecordTypeMismatch, void, (Instance* instance, EncodedJSValue value, uint32_t type, uint32_t parameter, uint32_t where))
 {
     AOT_OPERATION_BEGIN_WITHOUT_CALLER(instance);
@@ -4670,9 +4675,7 @@ UniquedStringImpl* nameInStructureDescriptor(VM& vm, unsigned number, unsigned i
     auto& data = *image->at<Typed::Data>(image->header().typedDataOffset);
     uint32_t hashAndFlags = data.stringHashAndFlags(data.row(number)[1 + index]);
     RELEASE_ASSERT(hashAndFlags & Typed::Data::stringHasIdentifierNumber);
-    const Identifier* name = VMProgram::of(vm)->identifierIfCreated(hashAndFlags & Typed::Data::stringHashMask);
-    RELEASE_ASSERT(name);
-    return name->impl();
+    return VMProgram::of(vm)->identifier(hashAndFlags & Typed::Data::stringHashMask);
 }
 
 static JSObject* newObjectWithFields(Instance* instance, JSGlobalObject* globalObject, VM& vm, Data* data, Slot* cache, Structure* empty, JSCell* constructor, uint32_t count, const EncodedJSValue* values, const uint32_t* nameIndicesOf, uint32_t numberInRegisters, uint32_t structureDescriptorPlusOne = 0)

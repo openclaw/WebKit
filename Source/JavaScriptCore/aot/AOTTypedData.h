@@ -248,7 +248,9 @@ struct RuntimeType {
     uint8_t bits;
     uint8_t jsTypesCount;
     uint16_t supertypesCount;
-    uint16_t unused;
+    uint16_t arrayFlags;
+    static constexpr uint16_t allowsArrayProxiesFlag = 1;
+    bool allowsArrayProxies() const { return arrayFlags & allowsArrayProxiesFlag; }
     static constexpr uint8_t allowsAnyObjectBit = 1;
     static constexpr uint8_t allowsAnyFunctionBit = 2;
     static constexpr uint8_t acceptsUntypedObjectsBit = 4;

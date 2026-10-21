@@ -8893,12 +8893,27 @@ bool State::fits(const RuntimeType& type, JSValue value) const
     return type.acceptsUncheckedObjects() || matchesTypedSubtype(type, asObject(cell));
 }
 
+bool isArrayProxy(JSObject* object)
+{
+    if (object->type() != ProxyObjectType)
+        return false;
+    do {
+        auto* proxy = uncheckedDowncast<ProxyObject>(object);
+        if (proxy->isRevoked())
+            return false;
+        object = proxy->target();
+    } while (object->type() == ProxyObjectType);
+    return object->type() == ArrayType || object->type() == DerivedArrayType;
+}
+
 bool State::matchesTypedSubtype(const RuntimeType& type, JSObject* cell) const
 {
     if (type.allowsAnyObject())
         return true;
     if (Object* object = compiledObject(cell))
         return acceptsShape(type, object->shape());
+    if (type.allowsArrayProxies() && isArrayProxy(cell))
+        return true;
     for (uint32_t i = 0; i < type.numberOfJSTypes(); ++i) {
         if (type.jsTypes()[i] == cell->type())
             return true;
@@ -9139,6 +9154,8 @@ bool State::isAssignable(const RuntimeType& from, const RuntimeType& to) const
     if (to.allowsAnyObject() || to.acceptsUntypedObjects())
         return true;
     if (from.allowsAnyObject() || from.acceptsUntypedObjects() || (from.allowsAnyFunction() && !to.allowsAnyFunction()))
+        return false;
+    if (from.allowsArrayProxies() && !to.allowsArrayProxies())
         return false;
     std::span toJSTypes { to.jsTypes(), to.numberOfJSTypes() };
     for (uint32_t i = 0; i < from.numberOfJSTypes(); ++i) {
@@ -15849,7 +15866,9 @@ JSValue State::coerce(JSGlobalObject* globalObject, JSValue value, const Runtime
         return result;
     if (keepsUnconvertibleObjects && value.isObject() && type.acceptsOnlyOtherLayouts())
         return value;
-    if ((reason == Format::CastReason::Flow || ((reason == Format::CastReason::Claim || reason == Format::CastReason::Store) && type.checksUntypedObjects())) && !compiled && value.isObject() && !data.isCompiledForAudit) {
+    // Overlapping narrowed unions may share member transitions without a common-layout transition.
+    bool shouldTryInPlace = reason == Format::CastReason::Flow || (!compiled && (reason == Format::CastReason::Claim || reason == Format::CastReason::Store) && type.checksUntypedObjects());
+    if (shouldTryInPlace && value.isObject() && !data.isCompiledForAudit) {
         bool didConvertInPlace = convertInPlace(globalObject, asObject(value), type);
         RETURN_IF_EXCEPTION(scope, { });
         if (didConvertInPlace)

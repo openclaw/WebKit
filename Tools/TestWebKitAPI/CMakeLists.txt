@@ -243,6 +243,15 @@ if (ENABLE_JAVASCRIPTCORE)
         ${TESTWEBKITAPI_DIR}
     )
 
+    if (ENABLE_STATIC_JSC)
+        list(APPEND TestJavaScriptCore_SOURCES
+            Tests/JavaScriptCore/AOTConvention.cpp
+            Tests/JavaScriptCore/AOTImage.cpp
+            Tests/JavaScriptCore/AOTTypedArrays.cpp
+        )
+        list(APPEND TestJavaScriptCore_PRIVATE_INCLUDE_DIRECTORIES "$<TARGET_PROPERTY:JavaScriptCore,INCLUDE_DIRECTORIES>")
+    endif ()
+
     if (NOT TESTWEBKITAPI_MERGED_BINARY)
         WEBKIT_EXECUTABLE_DECLARE(TestJavaScriptCore)
     endif ()

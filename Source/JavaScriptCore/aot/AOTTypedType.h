@@ -72,6 +72,8 @@ struct Type {
     Range integers;
     bool anyObject { false };
     bool anyFunction { false };
+    // A declared array can be a Proxy; only proven native arrays have storage we may access directly.
+    bool allowsArrayProxies { false };
     Vector<LayoutID, 1> objectLayouts;
     Vector<uint16_t, 1> builtinClasses;
     TypeID elements;

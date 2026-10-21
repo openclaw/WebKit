@@ -45,6 +45,8 @@ class GlobalPropertyWatchpoint;
 
 namespace Typed {
 
+bool isArrayProxy(JSObject*);
+
 class Extension;
 struct BuiltinClass;
 struct ExtraPropertiesHandle;

@@ -25,6 +25,12 @@
 
 #include "config.h"
 
+#if ENABLE(AOT)
+#include "AOTInstructionsInCode.h"
+#include "AOTOutliner.h"
+#include "AOTStubs.h"
+#include "AllowMacroScratchRegisterUsage.h"
+#endif
 #include "CCallHelpers.h"
 #include "CPU.h"
 #include "FPRInfo.h"
@@ -989,6 +995,81 @@ void testLoad64ExtendedAddress()
     for (size_t i = 0; i < table.size(); ++i)
         CHECK_EQ(invoke<uint64_t>(test, i), table[i]);
 }
+
+#if ENABLE(AOT) && (CPU(ARM64) || CPU(X86_64))
+void testAOTImageIndexLoad()
+{
+    auto test = [](uint32_t index, uint32_t addend, uint16_t scale) {
+        CCallHelpers jit;
+        AOT::IndexRelocations references;
+        emitFunctionPrologue(jit);
+        {
+            AllowMacroScratchRegisterUsage allowScratch(jit);
+            references.load(jit, GPRInfo::argumentGPR0, GPRInfo::returnValueGPR, addend, scale, true);
+        }
+        emitFunctionEpilogue(jit);
+        jit.ret();
+        LinkBuffer linkBuffer(jit, nullptr);
+        auto patches = references.link(linkBuffer);
+        CHECK_EQ(patches.size(), 1u);
+        auto* code = static_cast<uint8_t*>(linkBuffer.entrypoint<JSEntryPtrTag>().untaggedPtr());
+        Vector<uint8_t> bytes(linkBuffer.size());
+        memcpy(bytes.mutableSpan().data(), code, bytes.size());
+        AOT::IndexRelocations::fill(bytes.mutableSpan().data(), patches[0], index);
+        performJITMemcpy<jitMemcpyRepatch>(code, bytes.span().data(), bytes.size());
+        auto executable = FINALIZE_CODE(linkBuffer, JSEntryPtrTag, nullptr, "AOT image index load");
+
+        uint64_t expected = 0xfedcba9876543210ull;
+        uintptr_t distance = addend + static_cast<uint64_t>(index) * scale;
+        // Only the final effective address is dereferenced, so no giant table is needed.
+        uintptr_t base = reinterpret_cast<uintptr_t>(&expected) - distance;
+        CHECK_EQ(invoke<uint64_t>(executable, base), expected);
+    };
+    test(0, 0, sizeof(uint64_t*));
+    test((1u << 21) - 1, 0, sizeof(uint64_t*));
+    test(1u << 21, 0, sizeof(uint64_t*));
+    test(std::numeric_limits<uint32_t>::max(), 0, sizeof(uint64_t*));
+    test(std::numeric_limits<uint32_t>::max(), 0xfffffff8u, 0xfff8u);
+}
+
+void testAOTImageIndexOutlining()
+{
+    CCallHelpers jit;
+    AOT::IndexRelocations references;
+    emitFunctionPrologue(jit);
+    {
+        AllowMacroScratchRegisterUsage allowScratch(jit);
+        references.load(jit, GPRInfo::argumentGPR0, GPRInfo::returnValueGPR, 0, sizeof(uint64_t*), true);
+    }
+    for (unsigned i = 0; i < 20; ++i)
+        jit.add64(CCallHelpers::TrustedImm32(1), GPRInfo::returnValueGPR);
+    emitFunctionEpilogue(jit);
+    jit.ret();
+    LinkBuffer linkBuffer(jit, nullptr);
+    AOT::CompiledCode code;
+    code.bytes.append(std::span { static_cast<const uint8_t*>(linkBuffer.entrypoint<JSEntryPtrTag>().untaggedPtr()), linkBuffer.size() });
+    code.info.indexRelocations = references.link(linkBuffer);
+    code.hasCodeAnnotations = true;
+    code.rareCodeMayBeOutlined = true;
+    code.allCodeMayBeOutlined = true;
+#if CPU(X86_64)
+    code.instructions = AOT::instructionRecords(code.bytes.span(), code.dataInCode.span());
+#endif
+    const auto& reference = code.info.indexRelocations[0];
+    Vector<const AOT::CompiledCode*> functions;
+    functions.fill(&code, 32);
+    auto outlining = AOT::chooseWindows(functions, { });
+    CHECK_EQ(outlining.bodies.isEmpty(), false);
+    for (const auto& places : outlining.places) {
+        for (const auto& place : places)
+            CHECK_EQ(place.offset >= reference.patchEnd() || place.offset + place.length <= reference.patchBegin(), true);
+    }
+    AOT::forEachInstructionInCode(code, [&](const AOT::InstructionInCode& instruction) {
+        if (instruction.offset < reference.patchEnd() && instruction.offset + instruction.length > reference.patchBegin())
+            CHECK_EQ(static_cast<unsigned>(instruction.kind), static_cast<unsigned>(AOT::InstructionInCode::Kind::Pinned));
+    });
+}
+#endif
 
 void testAdd32Imm()
 {
@@ -8891,6 +8972,10 @@ void run(const char* filter) WTF_IGNORES_THREAD_SAFETY_ANALYSIS
     RUN(testBranchAddSubImmediateSetsFlags());
     RUN(testStore64Imm64AddressPointer());
     RUN(testLoad64ExtendedAddress());
+#if ENABLE(AOT)
+    RUN(testAOTImageIndexLoad());
+    RUN(testAOTImageIndexOutlining());
+#endif
 
     RUN(testAdd32Imm());
     RUN(testAdd32ArgImm());

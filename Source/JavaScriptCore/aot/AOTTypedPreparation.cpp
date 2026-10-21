@@ -5192,6 +5192,7 @@ static Type unionOf(const Type& a, const Type& b)
     result.integers = a.integers.unionWith(b.integers);
     result.anyObject |= b.anyObject;
     result.anyFunction |= b.anyFunction;
+    result.allowsArrayProxies |= b.allowsArrayProxies;
     for (LayoutID supertype : b.objectLayouts) {
         if (!result.objectLayouts.contains(supertype))
             result.objectLayouts.append(supertype);

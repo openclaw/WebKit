@@ -1135,10 +1135,29 @@ struct IndexReference {
     uint16_t scale;
     bool isSiteCacheWord { false };
     bool isAddress { false };
+    bool usesImageIndex { false };
+
+    uint32_t patchBegin() const
+    {
+#if CPU(ARM64)
+        return offset;
+#else
+        return offset - (usesImageIndex ? sizeof(uintptr_t) : sizeof(int32_t));
+#endif
+    }
+
+    uint32_t patchEnd() const
+    {
+#if CPU(ARM64)
+        return offset + (usesImageIndex ? ARM64Assembler::NUMBER_OF_ADDRESS_ENCODING_INSTRUCTIONS : 2) * sizeof(uint32_t);
+#else
+        return offset;
+#endif
+    }
 };
 class IndexRelocations {
 public:
-    void load(CCallHelpers&, GPRReg base, GPRReg dest, uint32_t addend, uint32_t scale);
+    void load(CCallHelpers&, GPRReg base, GPRReg dest, uint32_t addend, uint32_t scale, bool usesImageIndex = false);
     void load16(CCallHelpers&, GPRReg base, GPRReg dest, uint32_t addend, uint32_t scale);
     CCallHelpers::JumpList loadSiteCacheUnlessStructureDiffers(CCallHelpers&, GPRReg receiver, GPRReg firstWord, GPRReg secondWord, unsigned wordInFunction, CCallHelpers::Jump* hasAnotherStructure = nullptr);
     static CCallHelpers::Jump countMissAndBranchIfSiteIsFilledAnew(CCallHelpers&, GPRReg scratch);
@@ -1156,6 +1175,7 @@ private:
         uint32_t scale;
         bool isSiteCacheWord { false };
         bool isAddress { false };
+        bool usesImageIndex { false };
     };
     void loadSiteCacheWord(CCallHelpers&, GPRReg dest, unsigned wordInFunction);
     void getAddressOfSiteCacheWord(CCallHelpers&, GPRReg dest, unsigned wordInFunction);

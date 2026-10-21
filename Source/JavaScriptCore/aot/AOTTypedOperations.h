@@ -126,6 +126,7 @@ struct Slot;
     v(operationAOTTypedCountPlainAllocation) \
     v(operationAOTTypedGetExtra) \
     v(operationAOTTypedEnforceType) \
+    v(operationAOTTypedIsArrayProxy) \
     v(operationAOTTypedEnforceTypeOrConvert) \
     v(operationAOTTypedGetByNameChecked) \
     v(operationAOTTypedGetByNameCheckedAsNumber) \
@@ -423,6 +424,7 @@ AOT_DECLARE_NOEXCEPT_TYPED_OPERATION(operationAOTTypedCountClosure, RuntimeState
 AOT_DECLARE_NOEXCEPT_TYPED_OPERATION(operationAOTTypedCountPlainAllocation, RuntimeState, void, (Instance*, JSCell*, uint32_t function, uint32_t kindAndValue));
 AOT_DECLARE_TYPED_OPERATION(operationAOTTypedGetExtra, Nothing, EncodedJSValue, (Instance*, JSCell* object, uint32_t name));
 AOT_DECLARE_TYPED_OPERATION(operationAOTTypedEnforceType, Nothing, EncodedJSValue, (Instance*, EncodedJSValue value, uint32_t type));
+AOT_DECLARE_NOEXCEPT_TYPED_OPERATION(operationAOTTypedIsArrayProxy, Nothing, size_t, (Instance*, JSCell*));
 AOT_DECLARE_TYPED_OPERATION(operationAOTTypedEnforceTypeOrConvert, RuntimeState, EncodedJSValue, (Instance*, EncodedJSValue value, uint32_t type));
 AOT_DECLARE_TYPED_OPERATION(operationAOTTypedGetByNameChecked, Heap, EncodedJSValue, (Instance*, JSCell* object, uint32_t name, uint32_t type));
 AOT_DECLARE_TYPED_OPERATION(operationAOTTypedGetByNameCheckedAsNumber, Heap, double, (Instance*, JSCell* object, uint32_t name, uint32_t type));

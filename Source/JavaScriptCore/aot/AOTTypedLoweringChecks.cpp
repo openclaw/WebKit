@@ -991,11 +991,18 @@ Word32 Lowering::cellIsOfType(CellPointer cell, const Type& from, const Type& to
         result = logicalOr(result, isCallable(cell));
     for (uint16_t index : to.builtinClasses) {
         JSType valueType = m_builtins.classes()[index].type;
-        if (!mayBeAnyObject && !std::ranges::any_of(from.builtinClasses, [&](uint16_t other) { return m_builtins.classes()[other].type == valueType; }))
+        if (!mayBeAnyObject && !(valueType == ArrayType && to.allowsArrayProxies) && !std::ranges::any_of(from.builtinClasses, [&](uint16_t other) { return m_builtins.classes()[other].type == valueType; }))
             continue;
         result = logicalOr(result, equal(type(), word32(valueType)));
         if (valueType != ArrayType)
             continue;
+        if (to.allowsArrayProxies) {
+            result = logicalOr(result, either<Word32>(equal(type(), word32(ProxyObjectType)), [&] {
+                return AOT_TYPED_OPERATION(IsArrayProxy, cell);
+            }, [&] {
+                return boolean(false);
+            }));
+        }
         if (m_isValidatingFact)
             result = logicalOr(result, isModifiedArray(cell));
         else if (!mayBeAnyObject)
@@ -1444,6 +1451,9 @@ bool Lowering::resultMayInstantiateType(const Type& guarantee, const Type& type)
 
 std::optional<ArgumentMoves> Lowering::typeCheckThunkTests(const Type& type) const
 {
+    // Compact kind checks cannot distinguish array Proxies from other Proxies.
+    if (type.allowsArrayProxies)
+        return std::nullopt;
     constexpr GPRReg value = GPRInfo::returnValueGPR;
     constexpr unsigned maxRanges = 2;
     uint64_t kinds = 0;
@@ -1566,6 +1576,9 @@ bool Lowering::mayCastInRegister(const Type& from, const Type& to) const
 
 std::optional<ArgumentMoves> Lowering::castInRegisterTests(const Type& type, bool usesCastTest, bool inspectsUntypedObjects) const
 {
+    // Compact kind checks cannot distinguish array Proxies from other Proxies.
+    if (type.allowsArrayProxies)
+        return std::nullopt;
     constexpr unsigned maxRanges = 2;
     uint64_t kinds = 0;
     unsigned numberOfTypes = 0;
@@ -1984,7 +1997,7 @@ bool Lowering::markNullishTest(CellPointer accessed)
     return true;
 }
 
-void Lowering::validateIsNotReleased(CellPointer environment, const Value& access)
+void Lowering::validateIsNotReleased(CellPointer environment, ValueID accessID, const Value& access)
 {
     auto& layout = m_program.at(access.layout());
     if (!layout.reuseVariable || access.field() + 1 >= layout.fields.size())
@@ -2000,7 +2013,7 @@ void Lowering::validateIsNotReleased(CellPointer environment, const Value& acces
     m_out.appendTo(doesNotHold);
     {
         SetForScope isReporting(m_isReportingFactViolation, true);
-        AOT_TYPED_OPERATION(FactViolated, Boxed(m_out.int64Zero), word32(m_id.index()), word32(m_currentBlock->values[m_currentIndexInBlock].index()));
+        AOT_TYPED_OPERATION(FactViolated, Boxed(m_out.int64Zero), word32(m_id.index()), word32(accessID.index()));
     }
     m_out.jump(continuation);
     m_out.appendTo(continuation);

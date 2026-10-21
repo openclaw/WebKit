@@ -50,7 +50,7 @@
     };
     std::optional<Vector<AssignedField, 8>> fieldsAssignedWithoutRunningCode(ValueID target, const KeyOrder&);
     void assignFields(CellPointer target, ValueID targetID, CellPointer source, std::span<const AssignedField>, LBasicBlock otherwise);
-    CellPointer cloneAsPlainObject(ValueID source, const CloneDefinitions&);
+    CellPointer cloneAsPlainObject(ValueID copy, ValueID source, const CloneDefinitions&);
     CellPointer newArrayOf(std::span<const Boxed>);
     CellPointer lowerValuesOrEntries(InlineBuiltin, const Value&);
     bool isNewPlainObject(ValueID) const;

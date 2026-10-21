@@ -1946,8 +1946,14 @@ private:
 
         Tmp maskTmp = m_code.newTmp(FP);
         auto gpTmp = m_code.newTmp(GP);
-        append(Air::Move, Arg::immPtr(vectorBitmaskTower(simdInfo.lane)), gpTmp);
-        append(Air::MoveVector, Arg::addr(gpTmp), maskTmp);
+        const auto& tower = *vectorBitmaskTower(simdInfo.lane);
+        // AOT code must not retain the compiler process's address of this table.
+        append(Air::Move, Arg::bigImm(tower.u64x2[0]), gpTmp);
+        append(Air::VectorSplatInt64, gpTmp, maskTmp);
+        if (tower.u64x2[1] != tower.u64x2[0]) {
+            append(Air::Move, Arg::bigImm(tower.u64x2[1]), gpTmp);
+            append(Air::VectorReplaceLaneInt64, Arg::imm(1), gpTmp, maskTmp);
+        }
 
         Tmp vectorTmp = m_code.newTmp(FP);
 

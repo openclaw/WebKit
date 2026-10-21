@@ -797,7 +797,7 @@ private:
             if (m_function.at(literal).opcode != Opcode::NewObject || !parameters[k])
                 continue;
             bool becomesRecord = m_program.at(parameters[k]).objectLayouts.containsIf([&](LayoutID supertype) {
-                return m_program.at(supertype).kind == LayoutKind::Record && !m_program.at(supertype).acceptsUncheckedObjects();
+                return m_program.at(supertype).kind == LayoutKind::Record;
             });
             if (!becomesRecord)
                 continue;

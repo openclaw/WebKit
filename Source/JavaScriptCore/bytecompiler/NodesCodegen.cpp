@@ -4344,11 +4344,11 @@ RegisterID* AuditedExpressionNode::emitBytecode(BytecodeGenerator& generator, Re
         generator.setStoredValueAudit({ m_id, m_passes, m_minimum, m_maximum, position() });
         return generator.emitNode(dst, m_expr);
     }
+    if (m_passes.contains(AuditedValueClass::ReadsArrayElement) && m_expr->isBracketAccessorNode())
+        generator.setAuditedElementRead(m_id);
     if (m_passes.contains(AuditedValueClass::Acts)) {
         RefPtr<RegisterID> held = generator.tempDestination(dst);
         RefPtr<RegisterID> found;
-        if (m_passes.contains(AuditedValueClass::ReadsArrayElement) && m_expr->isBracketAccessorNode())
-            generator.setAuditedElementRead(m_id);
         if (generator.allowsTailCallOptimization() && !generator.auditedTailCall() && !m_expr->isAuditedExpressionNode()) {
             generator.setAuditedTailCall(m_id);
             found = generator.emitNodeInTailPosition(held.get(), m_expr);

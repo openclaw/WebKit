@@ -1377,6 +1377,21 @@ bool Lowering::run()
     m_out.appendTo(prologue);
     m_out.initializeConstants(m_proc, prologue);
     findPinnedRegisters();
+    if (Options::countAOTNativeEntries()) {
+        auto* count = m_out.patchpoint(Void);
+        count->effects = Effects::none();
+        m_heaps.decoratePatchpointRead(&m_heaps.root, count);
+        m_heaps.decoratePatchpointWrite(&m_heaps.root, count);
+        count->numGPScratchRegisters = 1;
+        count->clobber(RegisterSet::macroClobberedGPRs());
+        count->setGenerator([references = &m_context.indexRelocations](CCallHelpers& jit, const StackmapGenerationParams& params) {
+            AllowMacroScratchRegisterUsage allowScratch(jit);
+            GPRReg scratch = params.gpScratch(0);
+            jit.loadPtr(CCallHelpers::Address(instanceGPR, Instance::offsetOfNativeEntryCounters()), scratch);
+            references->load(jit, scratch, scratch, 0, sizeof(uint64_t*), true);
+            jit.add64(CCallHelpers::TrustedImm32(1), CCallHelpers::Address(scratch));
+        });
+    }
     if (!lowerEntryParameters())
         return false;
     static constexpr OpcodeSet lazilyFetchedLeaves { Opcode::String, Opcode::BuiltinFunction };
@@ -1843,7 +1858,7 @@ Operand Lowering::lowerGetEnvironmentField(ValueID result, const Value& value)
     auto& field = m_program.at(value.layout()).fields[value.field()];
     CellPointer cell = in<CellPointer>(value.child(0));
     if (Options::validateAOTTypedFacts()) [[unlikely]]
-        validateIsNotReleased(cell, value);
+        validateIsNotReleased(cell, result, value);
     unsigned flags = safeIfReaches(cell, field.offset + sizeOf(field.store));
     if (field.flags & fieldIsImmutable)
         flags |= IsFixed;
@@ -1941,13 +1956,13 @@ bool Lowering::defersBarrierToPark(ValueID frame) const
     return false;
 }
 
-void Lowering::lowerPutEnvironmentField(const Value& value)
+void Lowering::lowerPutEnvironmentField(ValueID result, const Value& value)
 {
     auto& field = m_program.at(value.layout()).fields[value.field()];
     CellPointer cell = in<CellPointer>(value.child(0));
     ValueID stored = value.child(1);
     if (Options::validateAOTTypedFacts() && !isLoweringInitializingStore()) [[unlikely]]
-        validateIsNotReleased(cell, value);
+        validateIsNotReleased(cell, result, value);
     didEmitWrite(isLocalAllocation(m_function, value.child(0)) ? Writes::RuntimeState : Writes::Fields);
     Operand operand = in(stored, repOf(field.store));
     if (Options::validateAOTTypedFacts() && (field.singleFunctionIsProven || field.isSingleFunctionOrNullish || field.otherFunction)) [[unlikely]]
@@ -2344,7 +2359,7 @@ Operand Lowering::lowerLanguageOperation(ValueID id, const Value& value)
             auto expected = predictionOf(id, Primitive::UndefinedOrNull, PredictionUse::DecidesLayoutAtBirth);
             bool keepsLayout = hasRecordLayouts(type) || (expected && hasRecordLayouts(*expected));
             bool takesStores = !keepsLayout && !m_isLoweringMergeGroup;
-            return ensure(countPlainAllocation(PlainAllocationKind::Clone, id, cloneObject(value.arguments[0], keepsLayout, takesStores ? storesDirectlyBehindClone(id) : CloneDefinitions { 0, { } }, cloneCapacityOf(id))), m_program.at(m_program.types.object), type);
+            return ensure(countPlainAllocation(PlainAllocationKind::Clone, id, cloneObject(id, value.arguments[0], keepsLayout, takesStores ? storesDirectlyBehindClone(id) : CloneDefinitions { 0, { } }, cloneCapacityOf(id))), m_program.at(m_program.types.object), type);
         }
     case LanguageOperation::CopyDataProperties:
         if (auto* literal = spreadLiteralAt(m_currentIndexInBlock)) {
@@ -2365,7 +2380,7 @@ Operand Lowering::lowerLanguageOperation(ValueID id, const Value& value)
             }
         }
         if (isAllocatedHere(value.arguments[0])) {
-            CellPointer object = countPlainAllocation(PlainAllocationKind::Clone, value.arguments[0], cloneObject(value.arguments[1], false, definitionsOnClone(value.arguments[0], true)));
+            CellPointer object = countPlainAllocation(PlainAllocationKind::Clone, value.arguments[0], cloneObject(value.arguments[0], value.arguments[1], false, definitionsOnClone(value.arguments[0], true)));
             defineDeferredAllocation(value.arguments[0], object);
             return ensure(object, m_program.at(m_program.types.object), type);
         }
@@ -2737,7 +2752,7 @@ Operand Lowering::lower(ValueID id, const Value& value)
         if (m_currentIndexInBlock && isResumeClosureCreatedAtSuspend(m_currentIndexInBlock - 1))
             return undefined();
         if (!isObjectLayout(m_program.at(value.layout()).kind))
-            lowerPutEnvironmentField(value);
+            lowerPutEnvironmentField(id, value);
         else
             lowerPutField(id, value);
         return undefined();
@@ -3756,6 +3771,7 @@ static bool compilePart(const Program& program, FunctionID id, const Function& f
             return;
         }
         AllowMacroScratchRegisterUsage allowScratch(jit);
+        auto frameSetupStart = jit.label();
         if (context.dropsCollapsibleCallerFrames)
             dropCollapsibleCallerFrames(jit, stubTemporaryGPRs[4]);
         bool isDeferredToCallee = function.isGenericEntrypoint() && function.inlineFrames.size() <= 1 && program.genericEntrypointsWithCalleeStackCheck.get(id.index());
@@ -3766,6 +3782,7 @@ static bool compilePart(const Program& program, FunctionID id, const Function& f
         if (code.placesSpillsAboveFrameRecord()) {
             jit.m_assembler.stp<64>(GPRInfo::callFrameRegister, CCallHelpers::linkRegister, CCallHelpers::stackPointerRegister, PairPreIndex(-static_cast<int>(code.bytesAboveFrameRecord() + sizeof(CallerFrameAndPC))));
             jit.move(CCallHelpers::stackPointerRegister, GPRInfo::callFrameRegister);
+            context.rangesKeptInline.append({ frameSetupStart, jit.label() });
             if ((context.emitsCalls && !isDeferredToCallee) || context.needsStackCheckForTailCalls || code.frameSize() > 256)
                 frameDoesNotFit = emitStackCheck(jit, 0);
             pushCalleeSaves(jit, code.calleeSaveRegisterAtOffsetList());
@@ -3773,6 +3790,8 @@ static bool compilePart(const Program& program, FunctionID id, const Function& f
         }
 #endif
         jit.emitFunctionPrologue();
+        // An outlined call before frame setup would overwrite the caller's return address.
+        context.rangesKeptInline.append({ frameSetupStart, jit.label() });
         RegisterAtOffsetList saves = code.calleeSaveRegisterAtOffsetList();
         bool checksStack = ((context.emitsCalls || context.callsPreserveLiveRegisters) && !isDeferredToCallee) || context.needsStackCheckForTailCalls || code.frameSize() > 256;
 #if CPU(X86_64)
@@ -3995,6 +4014,14 @@ static bool emitCode(const Program& program, FunctionID id, const Function& func
     info.typedFunction = function.isValueEntryClone ? function.valueEntryTarget.index() : id.index();
     info.isGenericEntrypoint = function.isGenericEntrypoint();
     info.kindByte = kindByteOf(program, function);
+    if (Options::countAOTNativeEntries()) {
+        if (function.isSharedOutlinedBody || function.isGuardedPreludeEntry || function.isRampForClosures || (function.isValueEntry && !function.isValueEntryClone))
+            info.nativeEntryKind = NativeEntryKind::Generated;
+        else if (function.isGenericEntrypoint())
+            info.nativeEntryKind = function.isTyped() ? NativeEntryKind::GenericTyped : NativeEntryKind::GenericUntyped;
+        else
+            info.nativeEntryKind = function.isTyped() ? NativeEntryKind::Typed : NativeEntryKind::Untyped;
+    }
     Vector<ModuleID, 2> sources;
     constexpr ModuleID builtinsModule { UINT32_MAX - 1 };
     auto builtinsSource = [&] {
