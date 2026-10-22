@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 16
+          fetch-depth: 0
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: |
@@ -38,7 +38,7 @@ jobs:
             !/WebDriverTests/
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version: '26.3.0'
+          node-version: '26.12.1'
       - name: Test publication integrity gates
         run: python3 .github/openclaw/test_release.py
       - name: Measure runner capacity and Docker support
@@ -59,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 16
+          fetch-depth: 0
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: |
@@ -72,7 +72,7 @@ jobs:
             !/WebDriverTests/
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version: '26.3.0'
+          node-version: '26.12.1'
       - name: Build unchanged upstream lane and record provenance
         env:
           LANE: ${{ matrix.lane }}
@@ -96,7 +96,7 @@ jobs:
           sparse-checkout: .github
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version: '26.3.0'
+          node-version: '26.12.1'
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: bun-webkit-linux-amd64

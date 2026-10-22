@@ -12,6 +12,7 @@ ARG LINUX_ARCH="x86_64"
 # `--build-context base=docker-image://...`, which replaces this stage (.github/workflows/ci.yml, the `image` job).
 # Without that, it is built here like any other stage. Lane settings belong in `lane` below.
 FROM alpine:3.23 as base
+RUN apk add --no-cache --upgrade ca-certificates-bundle=20261020-r0
 
 # LLVM 23 is in Alpine edge only. `@edge` is a tagged repository: apk takes a package from it only when the package is
 # asked for with that tag, or when a tagged package needs something 3.23 does not have. So musl, libstdc++ and gcc stay
