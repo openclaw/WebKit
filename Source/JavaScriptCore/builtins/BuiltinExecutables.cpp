@@ -47,17 +47,17 @@ namespace JSC {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(BuiltinExecutables);
 
-static ALWAYS_INLINE const char* builtinSourceText()
+static ALWAYS_INLINE std::span<const char> builtinSourceText()
 {
     if (isFeatureRemoved(RemovableFeature::BuiltinSourceText)) [[unlikely]]
-        return nullptr;
+        return { };
     recordRemovableEntryPoint<RemovableFeature::BuiltinSourceText, RemovedFeatureStub::ReturnDefault, &s_JSCCombinedCode>();
-    return s_JSCCombinedCode;
+    return { s_JSCCombinedCode, s_JSCCombinedCodeLength };
 }
 
 BuiltinExecutables::BuiltinExecutables(VM& vm)
     : m_vm(vm)
-    , m_combinedSourceProvider(BuiltinsSourceProvider::create(StringImpl::createWithoutCopying({ builtinSourceText(), s_JSCCombinedCodeLength }), s_JSCBuiltinSourceStarts, 0))
+    , m_combinedSourceProvider(BuiltinsSourceProvider::create(StringImpl::createWithoutCopying(builtinSourceText()), s_JSCBuiltinSourceStarts, 0))
 {
 }
 
