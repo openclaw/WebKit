@@ -21,12 +21,17 @@ git fetch --depth=1 origin "$BASELINE_BUN"
 git checkout --detach "$BASELINE_BUN"
 test "$(git rev-parse HEAD)" = "$BASELINE_BUN"
 git diff --exit-code
+baseline_tree=$(git rev-parse HEAD^{tree})
+cp "$inputs/baseline-artifacts.json" scripts/build/deps/webkit-artifacts.json
+test "$(git diff --name-only)" = scripts/build/deps/webkit-artifacts.json
 "$bootstrap" install --frozen-lockfile
 (cd test && "$bootstrap" install --frozen-lockfile)
-export BUN_WEBKIT_ARTIFACT_MANIFEST="$inputs/baseline-artifacts.json"
 export BUN_BUILD_PREFETCH_DIR="$QUALIFICATION_DIR/baseline-prefetch"
 export BUN_BUILD_CACHE_DIR="$QUALIFICATION_DIR/cache-baseline"
-PATH="$(dirname "${QUALIFICATION_BASELINE_NODE:-$(command -v node)}"):$PATH" env -u GITHUB_SHA -u BUILDKITE_COMMIT -u GIT_SHA "$bootstrap" run build:release --lto=off --webkit-version="$BASE" --buildDir="$repo/build/qualify-baseline" --timings > "$QUALIFICATION_DIR/build-baseline.log" 2>&1
+PATH="$(dirname "${QUALIFICATION_BASELINE_NODE:-$(command -v node)}"):$PATH" env -u BUN_WEBKIT_ARTIFACT_MANIFEST -u GITHUB_SHA -u BUILDKITE_COMMIT -u GIT_SHA "$bootstrap" run build:release --lto=off --webkit-version="$BASE" --buildDir="$repo/build/qualify-baseline" --timings > "$QUALIFICATION_DIR/build-baseline.log" 2>&1
+test "$(git write-tree)" = "$baseline_tree"
+test "$(git diff --name-only)" = scripts/build/deps/webkit-artifacts.json
+git diff --binary HEAD > "$QUALIFICATION_DIR/bun-baseline-manifest.patch"
 baseline="$repo/build/qualify-baseline/bun"
 "$baseline" -e 'if(process.versions.webkit!==process.argv[1] || Bun.revision!==process.argv[2]) throw new Error("wrong control engine or Bun source revision");' "$BASE" "$BASELINE_BUN"
 sha256sum "$baseline" > "$QUALIFICATION_DIR/bun-baseline.sha256"
