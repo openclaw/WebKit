@@ -118,6 +118,13 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '26.3.0'
+      - name: Retain the historical control's Node path
+        run: echo "QUALIFICATION_BASELINE_NODE=$(command -v node)" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.12.1'
+      - name: Retain the matched candidate's Node path
+        run: echo "QUALIFICATION_CANDIDATE_NODE=$(command -v node)" >> "$GITHUB_ENV"
       - name: Verify pipeline integrity and runner support
         run: |
           python3 .github/openclaw/test_release.py
