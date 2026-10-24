@@ -575,6 +575,7 @@ static void testImageFunctionLimit()
     AOT_TEST_CHECK(checkImageFunctionLimit(limit, context));
     AOT_TEST_CHECK(!context.diagnostics().hasErrors());
     AOT_TEST_CHECK(!checkImageFunctionLimit(limit + 1, context));
+    context.diagnostics().finish(nullptr);
     const auto& diagnostics = context.diagnostics().userDiagnostics();
     AOT_TEST_CHECK(diagnostics.size() == 1);
     AOT_TEST_CHECK(diagnostics[0].kind == UserDiagnosticKind::TooManyFunctions);
