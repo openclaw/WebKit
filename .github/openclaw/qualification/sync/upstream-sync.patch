@@ -1,0 +1,2692 @@
+diff --git a/.github/UPSTREAM_SYNC.md b/.github/UPSTREAM_SYNC.md
+index 8e96782e..089ab102 100644
+--- a/.github/UPSTREAM_SYNC.md
++++ b/.github/UPSTREAM_SYNC.md
+@@ -90,3 +90,14 @@ A landed sync reaches OpenClaw through a fork release. Dispatching the release
+ workflow on `automation/sync-upstream` without a tag builds and smoke-tests every
+ release target as a dry run; the release cadence and security-patch policy are in
+ [OPENCLAW_RELEASE.md](OPENCLAW_RELEASE.md#upstream-sync-and-security-patches).
++
++## Pending engine target after the October 2026 sync
++
++Upstream Bun `1878660bb47a6a87ebe518cea0581ef4bf9b71f8` targets WebKit
++`5718a6ec579b98362ea7276a426deedcc6281ef5` for idle JSC-thread and
++`Atomics.wait` memory release. The fork continues to consume the checksum-pinned
++OpenClaw release `1ee09069fef6bdf26a899b3da06fc48714aa8a4d` from
++`scripts/build/deps/webkit-artifacts.json`. Updating this target requires a
++separately qualified and published OpenClaw WebKit release; upstream artifacts
++are never a fallback. The additional engine-side idle-release behavior is not
++in the currently pinned release.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index cf69a85e..10801b41 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -171,3 +171,8 @@
+ - Switch the fork’s default WebKit source to immutable openclaw/WebKit releases with a committed SHA-256 manifest, verified extraction, and digest-keyed caches.
+ 
+ - Allow Proxy objects in VM and main-realm global prototype chains with the pinned OpenClaw WebKit, including jsdom Window prototypes. Ports [oven-sh/bun#42347](https://github.com/oven-sh/bun/pull/42347). Thanks @robobun!
++
++## Upstream sync — October 2026 (second sync)
++
++- Merge oven-sh/bun through `1878660bb47a6a87ebe518cea0581ef4bf9b71f8`, retaining fork resolver, module-loader, stack, worker and VM fixes and the checksum-pinned OpenClaw WebKit release; record the newer upstream engine target separately.
++- Incorporate upstream TLS handshake shutdown, macOS split-DNS failover, file-body clone, Buffer write validation and mimalloc improvements while preserving fork idle accounting.
+diff --git a/packages/bun-usockets/src/crypto/openssl.c b/packages/bun-usockets/src/crypto/openssl.c
+index 2b5e6aa1..d39b12aa 100644
+--- a/packages/bun-usockets/src/crypto/openssl.c
++++ b/packages/bun-usockets/src/crypto/openssl.c
+@@ -1163,6 +1163,10 @@ void us_socket_set_inline_reject(struct us_socket_t *s) {
+   SSL_set_verify(s_ssl(s), SSL_VERIFY_PEER, us_inline_reject_verify_callback);
+ }
+ 
++void us_socket_set_first_flight_before_fin(struct us_socket_t *s) {
++  s->ssl_first_flight_before_fin = 1;
++}
++
+ /* Drop the strdup'd passphrase. Called as soon as private-key load completes
+  * (the only consumer of the passwd_cb), so the secret never outlives ctx
+  * construction and SSL_CTX_free() is sufficient on every later path. Also
+@@ -1778,6 +1782,8 @@ void us_internal_ssl_attach(struct us_socket_t *s, SSL_CTX *ctx,
+   s->ssl_in_use = 0;
+   s->ssl_pending_detach = 0;
+   s->ssl_pending_close_code = 0;
++  s->ssl_first_flight_before_fin = 0;
++  s->ssl_shutdown_after_first_flight = 0;
+   s->ssl_is_server = is_client ? 0 : 1;
+   s->ssl_inline_reject = 0;
+   s->ssl_verify_failed = 0;
+@@ -2291,6 +2297,12 @@ struct us_socket_t *us_internal_ssl_on_open(struct us_socket_t *s, int is_client
+   /* Kick the handshake immediately — some peers stall waiting for ClientHello. */
+   ssl_set_loop_data(result);
+   ssl_update_handshake(result, 1);
++  if (ssl_gone(result)) return result;
++  result->ssl_first_flight_before_fin = 0;
++  if (result->ssl_shutdown_after_first_flight) {
++    result->ssl_shutdown_after_first_flight = 0;
++    us_internal_ssl_shutdown(result);
++  }
+   return result;
+ }
+ 
+@@ -2882,6 +2894,10 @@ int us_internal_ssl_writev(struct us_socket_t *s, const struct us_iovec_t *iov,
+ 
+ void us_internal_ssl_shutdown(struct us_socket_t *s) {
+   if (us_socket_is_closed(s) || us_internal_ssl_is_shut_down(s)) return;
++  if (s->ssl_first_flight_before_fin) {
++    s->ssl_shutdown_after_first_flight = 1;
++    return;
++  }
+ 
+   /* Spilled ciphertext is data the layers above already count as written;
+    * a FIN/close_notify now would cut it off. Finish the shutdown from the
+diff --git a/packages/bun-usockets/src/internal/internal.h b/packages/bun-usockets/src/internal/internal.h
+index b580b7d9..af0274a7 100644
+--- a/packages/bun-usockets/src/internal/internal.h
++++ b/packages/bun-usockets/src/internal/internal.h
+@@ -364,6 +364,10 @@ struct us_socket_t {
+    * inside a handshake callback must still RST, not FIN, when it is finally
+    * performed). */
+   unsigned char ssl_pending_close_code : 2;
++  /* us_socket_set_first_flight_before_fin: the first handshake step is still due, and a shutdown waits for it. */
++  unsigned char ssl_first_flight_before_fin : 1;
++  /* us_internal_ssl_shutdown held its FIN back for that step. */
++  unsigned char ssl_shutdown_after_first_flight : 1;
+   /* Consecutive send() failures with an errno that is neither
+    * would-block/transient nor a known peer-gone error (see
+    * us_socket_write_check_error). Reset by any send that makes progress.
+diff --git a/packages/bun-usockets/src/libusockets.h b/packages/bun-usockets/src/libusockets.h
+index 2c4216df..430f8f1a 100644
+--- a/packages/bun-usockets/src/libusockets.h
++++ b/packages/bun-usockets/src/libusockets.h
+@@ -389,6 +389,8 @@ void us_socket_start_tls_handshake(us_socket_r s) nonnull_fn_decl;
+  * server that fails verification. Must run before the handshake is driven
+  * (on_open, or between adopt_tls and start_tls_handshake). No-op otherwise. */
+ void us_socket_set_inline_reject(us_socket_r s) nonnull_fn_decl;
++/* Call it from on_open. A shutdown before the first handshake step sends its FIN after that step. */
++void us_socket_set_first_flight_before_fin(us_socket_r s) nonnull_fn_decl;
+ 
+ /* ── Listen ───────────────────────────────────────────────────────────────
+  * The listener owns: an embedded group for accepted sockets, the SSL_CTX
+diff --git a/scripts/build/deps/mimalloc.ts b/scripts/build/deps/mimalloc.ts
+index 2984efa9..76238c1f 100644
+--- a/scripts/build/deps/mimalloc.ts
++++ b/scripts/build/deps/mimalloc.ts
+@@ -12,7 +12,7 @@
+ 
+ import type { Dependency, DirectBuild } from "../source.ts";
+ 
+-const MIMALLOC_COMMIT = "eab09015a5850ae18fc43ccfaa5bbe8272992314";
++const MIMALLOC_COMMIT = "7a828c116d96bb9a66f6c2e3417c739cbbfdb23c";
+ 
+ export const mimalloc: Dependency = {
+   name: "mimalloc",
+diff --git a/src/js/node/tls.ts b/src/js/node/tls.ts
+index f585b344..b5754b3d 100644
+--- a/src/js/node/tls.ts
++++ b/src/js/node/tls.ts
+@@ -5,6 +5,7 @@ const Duplex = require("internal/streams/duplex");
+ const EventEmitter = require("node:events");
+ const addServerName = $newRustFunction("Listener.rs", "jsAddServerName", 3);
+ const setListenerSecureContext = $newRustFunction("Listener.rs", "jsSetSecureContext", 2);
++const firstFlightBeforeFin = $newRustFunction("runtime/socket/socket.rs", "jsFirstFlightBeforeFin", 1);
+ const { throwNotImplemented } = require("internal/shared");
+ const { idnaToASCII } = require("internal/url");
+ const {
+@@ -1671,9 +1672,16 @@ function connect(...args) {
+   if (timeout) {
+     tlssock.setTimeout(timeout);
+   }
++  // https://github.com/nodejs/node/blob/v26.3.0/lib/internal/tls/wrap.js#L1795
++  if (!options.socket) tlssock.once("connect", onConnectStart);
+   return tlssock.connect(normal);
+ }
+ 
++// The engine sends the ClientHello when the listeners of 'connect' have run. An end() of theirs must not get ahead of it.
++function onConnectStart() {
++  firstFlightBeforeFin(this._handle);
++}
++
+ function getCiphers() {
+   return getDefaultCiphers().split(":");
+ }
+diff --git a/src/jsc/bindings/JSBuffer.cpp b/src/jsc/bindings/JSBuffer.cpp
+index 95986d0d..29fb49bb 100644
+--- a/src/jsc/bindings/JSBuffer.cpp
++++ b/src/jsc/bindings/JSBuffer.cpp
+@@ -2373,11 +2373,20 @@ static JSC::EncodedJSValue jsBufferPrototypeFunction_SliceWithEncoding(JSC::JSGl
+     return jsBufferToString(lexicalGlobalObject, scope, castedThis, start, end - start, encoding);
+ }
+ 
++// Node's native writers reject a non-string value and never coerce it (THROW_AND_RETURN_IF_NOT_STRING, src/node_errors.h).
++static JSString* stringArgumentOrThrow(JSC::ThrowScope& scope, JSC::JSGlobalObject* globalObject, JSValue value)
++{
++    if (value.isString()) [[likely]]
++        return asString(value);
++    Bun::throwError(globalObject, scope, Bun::ErrorCode::ERR_INVALID_ARG_TYPE, "argument must be a string"_s);
++    return nullptr;
++}
++
+ // https://github.com/nodejs/node/blob/v26.3.0/lib/internal/buffer.js#L962-L990
+ // Only utf8Write/latin1Write/asciiWrite go through this strict JS wrapper in node;
+ // the other encodings use jsBufferPrototypeFunction_StringWriteWithEncoding below.
+ template<BufferEncodingType encoding>
+-static JSC::EncodedJSValue jsBufferPrototypeFunction_writeEncodingBody(JSC::VM& vm, JSC::JSGlobalObject* lexicalGlobalObject, JSArrayBufferView* castedThis, JSString* str, JSValue offsetValue, JSValue lengthValue)
++static JSC::EncodedJSValue jsBufferPrototypeFunction_writeEncodingBody(JSC::VM& vm, JSC::JSGlobalObject* lexicalGlobalObject, JSArrayBufferView* castedThis, JSValue stringValue, JSValue offsetValue, JSValue lengthValue)
+ {
+     auto scope = DECLARE_THROW_SCOPE(vm);
+ 
+@@ -2438,6 +2447,10 @@ static JSC::EncodedJSValue jsBufferPrototypeFunction_writeEncodingBody(JSC::VM&
+         maxLength = std::min(byteLength - safeOffset, static_cast<size_t>(intLength));
+     }
+ 
++    // Node's JS wrapper checks the bounds first, so a bounds error wins over a non-string value.
++    JSString* str = stringArgumentOrThrow(scope, lexicalGlobalObject, stringValue);
++    RETURN_IF_EXCEPTION(scope, {});
++
+     RELEASE_AND_RETURN(scope, writeToBuffer(lexicalGlobalObject, castedThis, str, safeOffset, maxLength, encoding));
+ }
+ 
+@@ -2449,10 +2462,7 @@ static JSC::EncodedJSValue jsBufferPrototypeFunctionWriteWithEncoding(JSC::JSGlo
+ 
+     auto* castedThis = dynamicDowncast<JSC::JSArrayBufferView>(callFrame->thisValue());
+ 
+-    auto arg0 = callFrame->argument(0);
+-    JSString* text = arg0.toStringOrNull(lexicalGlobalObject);
+-    RETURN_IF_EXCEPTION(scope, {});
+-
++    JSValue stringValue = callFrame->argument(0);
+     JSValue offsetValue = callFrame->argument(1);
+     JSValue lengthValue = callFrame->argument(2);
+ 
+@@ -2461,7 +2471,7 @@ static JSC::EncodedJSValue jsBufferPrototypeFunctionWriteWithEncoding(JSC::JSGlo
+         return {};
+     }
+ 
+-    RELEASE_AND_RETURN(scope, jsBufferPrototypeFunction_writeEncodingBody<encoding>(vm, lexicalGlobalObject, castedThis, text, offsetValue, lengthValue));
++    RELEASE_AND_RETURN(scope, jsBufferPrototypeFunction_writeEncodingBody<encoding>(vm, lexicalGlobalObject, castedThis, stringValue, offsetValue, lengthValue));
+ }
+ 
+ // https://github.com/nodejs/node/blob/v26.3.0/src/node_buffer.cc#L711-L741
+@@ -2484,7 +2494,8 @@ static JSC::EncodedJSValue jsBufferPrototypeFunction_StringWriteWithEncoding(JSC
+     const JSValue offsetValue = callFrame->argument(1);
+     const JSValue lengthValue = callFrame->argument(2);
+ 
+-    JSString* text = strValue.toStringOrNull(lexicalGlobalObject);
++    // The binding rejects the value before it reads offset or length.
++    JSString* text = stringArgumentOrThrow(scope, lexicalGlobalObject, strValue);
+     RETURN_IF_EXCEPTION(scope, {});
+ 
+     size_t offset = 0;
+@@ -2492,9 +2503,9 @@ static JSC::EncodedJSValue jsBufferPrototypeFunction_StringWriteWithEncoding(JSC
+         return {};
+     }
+ 
+-    // toStringOrNull/toNumber only run user-overridable code for object arguments, and
++    // toNumber only runs user-overridable code for an object argument, and
+     // that code can detach or resize the view, so re-validate only when it could have run.
+-    if ((strValue.isObject() || offsetValue.isObject()) && castedThis->isDetached()) [[unlikely]] {
++    if (offsetValue.isObject() && castedThis->isDetached()) [[unlikely]] {
+         throwTypeError(lexicalGlobalObject, scope, "ArrayBufferView is detached"_s);
+         return {};
+     }
+diff --git a/src/jsc/webcore_types.rs b/src/jsc/webcore_types.rs
+index 591d3e8e..cbb70e72 100644
+--- a/src/jsc/webcore_types.rs
++++ b/src/jsc/webcore_types.rs
+@@ -791,6 +791,8 @@ pub mod store {
+         pub max_size: SizeType,
+         /// Milliseconds since ECMAScript epoch.
+         pub last_modified: crate::JSTimeType,
++        /// `st_mode` as a body's `clone()` saw it, kept apart from what the `Bun.file()` sharing this store answers from.
++        pub mode_seen_by_clone: Option<bun_sys::Mode>,
+     }
+ 
+     impl Default for File {
+@@ -803,6 +805,7 @@ pub mod store {
+                 seekable: None,
+                 max_size: MAX_SIZE,
+                 last_modified: crate::INIT_TIMESTAMP,
++                mode_seen_by_clone: None,
+             }
+         }
+     }
+diff --git a/src/runtime/api/BunObject.rs b/src/runtime/api/BunObject.rs
+index 29c34548..cd5203e6 100644
+--- a/src/runtime/api/BunObject.rs
++++ b/src/runtime/api/BunObject.rs
+@@ -1025,9 +1025,15 @@ fn sleep_sync(global_object: &JSGlobalObject, callframe: &CallFrame) -> JsResult
+         )));
+     }
+ 
++    // mimalloc's scavenger sweeps this thread's heaps while it sleeps, as it does across the event loop's poll.
++    // SAFETY: nothing allocates or frees on this thread until `mi_on_thread_idle_end` below.
++    let handed_off = unsafe { bun_alloc::mimalloc::mi_on_thread_idle_start() };
+     std::thread::sleep(core::time::Duration::from_millis(
+         u64::try_from(milliseconds).expect("int cast"),
+     ));
++    if handed_off {
++        bun_alloc::mimalloc::mi_on_thread_idle_end();
++    }
+     Ok(JSValue::UNDEFINED)
+ }
+ 
+diff --git a/src/runtime/dns_jsc/dns.rs b/src/runtime/dns_jsc/dns.rs
+index 5634a548..b06683e2 100644
+--- a/src/runtime/dns_jsc/dns.rs
++++ b/src/runtime/dns_jsc/dns.rs
+@@ -118,7 +118,7 @@ bun_output::declare_scope!(DNSResolver, visible);
+ const IANA_DNS_PORT: i32 = 53;
+ 
+ // ──────────────────────────────────────────────────────────────────────────
+-// dns_sd (macOS): DNSServiceGetAddrInfo over one shared mDNSResponder connection, no per-lookup threads.
++// dns_sd (macOS): DNSServiceQueryRecord over one shared mDNSResponder connection, no per-lookup threads.
+ // ──────────────────────────────────────────────────────────────────────────
+ 
+ #[cfg(target_os = "macos")]
+@@ -1209,33 +1209,6 @@ impl GetAddrInfoRequest {
+         request
+     }
+ 
+-    /// Reply callback (inside `DNSServiceProcessResult`): records state; completion happens in `on_readable`.
+-    /// # Safety
+-    /// `context` is the registered `*mut GetAddrInfoRequest`; `address`, if non-null, is a valid sockaddr.
+-    #[cfg(target_os = "macos")]
+-    pub(crate) unsafe extern "C" fn dns_sd_reply(
+-        _sd_ref: dns_sd::DNSServiceRef,
+-        flags: u32,
+-        _interface_index: u32,
+-        error_code: i32,
+-        _hostname: *const c_char,
+-        address: *const Sockaddr,
+-        ttl: u32,
+-        context: *mut c_void,
+-    ) {
+-        dns_sd::SharedConnection::note_reply(context);
+-        // SAFETY: context is the *mut GetAddrInfoRequest passed to start().
+-        let this: *mut Self = context.cast();
+-        // SAFETY: `this` is the live heap request (JS thread); `address` is valid per dns_sd.h.
+-        unsafe {
+-            (*this)
+-                .backend
+-                .as_dns_sd_mut()
+-                .query
+-                .record_reply(flags, error_code, address, ttl);
+-        }
+-    }
+-
+     /// Complete a dns_sd-backed request; `this` is the live heap request, consumed on every path.
+     #[cfg(target_os = "macos")]
+     pub(crate) fn complete_dns_sd(this: *mut Self) {
+@@ -2779,39 +2752,7 @@ pub(crate) mod internal {
+                 query: dns_sd::QueryState::new(protocol),
+             };
+         }
+-        let Some(_) = shared.start(
+-            dns_sd::Inflight::Internal(req),
+-            protocol,
+-            host,
+-            dns_sd_reply,
+-            req.cast::<c_void>(),
+-        ) else {
+-            return false;
+-        };
+-
+-        true
+-    }
+-
+-    #[cfg(target_os = "macos")]
+-    unsafe extern "C" fn dns_sd_reply(
+-        _sd_ref: dns_sd::DNSServiceRef,
+-        flags: u32,
+-        _interface_index: u32,
+-        error_code: i32,
+-        _hostname: *const c_char,
+-        address: *const Sockaddr,
+-        ttl: u32,
+-        context: *mut c_void,
+-    ) {
+-        dns_sd::SharedConnection::note_reply(context);
+-        let req: *mut Request = context.cast();
+-        // SAFETY: `context` is the registered `req` (event-loop thread); `address` is valid per dns_sd.h.
+-        unsafe {
+-            (*req)
+-                .dns_sd
+-                .query
+-                .record_reply(flags, error_code, address, ttl)
+-        };
++        shared.start(dns_sd::Inflight::Internal(req), protocol, host)
+     }
+ 
+     /// Complete an internal request: build an addrinfo chain and reuse `process_results` (happy-eyeballs order).
+diff --git a/src/runtime/dns_jsc/dns_sd.rs b/src/runtime/dns_jsc/dns_sd.rs
+index a2a7d844..95d0b2a0 100644
+--- a/src/runtime/dns_jsc/dns_sd.rs
++++ b/src/runtime/dns_jsc/dns_sd.rs
+@@ -1,9 +1,9 @@
+-//! macOS DNSServiceGetAddrInfo backend: all lookups share one mDNSResponder connection (see dns.rs banner).
++//! macOS DNSServiceQueryRecord backend: all lookups share one mDNSResponder connection (see dns.rs banner).
+ 
+ use super::*;
+ use bun_collections::index_sort;
+ 
+-pub(crate) type DNSServiceRef = *mut c_void;
++type DNSServiceRef = *mut c_void;
+ type DNSServiceFlags = u32;
+ type DNSServiceErrorType = i32;
+ pub(crate) type DNSServiceProtocol = u32;
+@@ -18,18 +18,23 @@ const FLAGS_TIMEOUT: DNSServiceFlags = 0x10000;
+ pub(crate) const PROTOCOL_IPV4: DNSServiceProtocol = 0x01;
+ pub(crate) const PROTOCOL_IPV6: DNSServiceProtocol = 0x02;
+ 
++const TYPE_A: u16 = 1;
++const TYPE_AAAA: u16 = 28;
++const CLASS_IN: u16 = 1;
++
+ pub(crate) const ERR_NO_ERROR: DNSServiceErrorType = 0;
+-pub(crate) const ERR_NO_SUCH_RECORD: DNSServiceErrorType = -65554;
+ pub(crate) const ERR_TIMEOUT: DNSServiceErrorType = -65568;
+-const ERR_DEFUNCT_CONNECTION: DNSServiceErrorType = -65569;
+ 
+-type GetAddrInfoReply = unsafe extern "C" fn(
++type QueryRecordReply = unsafe extern "C" fn(
+     sd_ref: DNSServiceRef,
+     flags: DNSServiceFlags,
+     interface_index: u32,
+     error_code: DNSServiceErrorType,
+-    hostname: *const c_char,
+-    address: *const Sockaddr,
++    fullname: *const c_char,
++    rrtype: u16,
++    rrclass: u16,
++    rdlen: u16,
++    rdata: *const c_void,
+     ttl: u32,
+     context: *mut c_void,
+ );
+@@ -40,35 +45,37 @@ unsafe extern "C" {
+     fn DNSServiceRefSockFD(sd_ref: DNSServiceRef) -> c_int;
+     fn DNSServiceProcessResult(sd_ref: DNSServiceRef) -> DNSServiceErrorType;
+     fn DNSServiceRefDeallocate(sd_ref: DNSServiceRef);
+-    fn DNSServiceGetAddrInfo(
++    fn DNSServiceQueryRecord(
+         sd_ref: *mut DNSServiceRef,
+         flags: DNSServiceFlags,
+         interface_index: u32,
+-        protocol: DNSServiceProtocol,
+-        hostname: *const c_char,
+-        callback: GetAddrInfoReply,
++        fullname: *const c_char,
++        rrtype: u16,
++        rrclass: u16,
++        callback: QueryRecordReply,
+         context: *mut c_void,
+     ) -> DNSServiceErrorType;
+ }
+ 
+-/// SPI: `DNSServiceGetAddrInfo` plus the attribute libinfo's getaddrinfo passes. Absent on macOS 12, so resolved at runtime.
+-type GetAddrInfoExFn = unsafe extern "C" fn(
++/// `DNSServiceQueryRecord` plus an attribute. Absent on macOS 12, so resolved at runtime.
++type QueryRecordWithAttributeFn = unsafe extern "C" fn(
+     sd_ref: *mut DNSServiceRef,
+     flags: DNSServiceFlags,
+     interface_index: u32,
+-    protocol: DNSServiceProtocol,
+-    hostname: *const c_char,
++    fullname: *const c_char,
++    rrtype: u16,
++    rrclass: u16,
+     attr: *const DNSServiceAttribute,
+-    callback: GetAddrInfoReply,
++    callback: QueryRecordReply,
+     context: *mut c_void,
+ ) -> DNSServiceErrorType;
+ 
+-/// `DNSServiceGetAddrInfoEx` with `kDNSServiceAttrAllowFailover` (lets mDNSResponder fail a query over to
+-/// scoped/supplemental resolvers, as getaddrinfo does), when this OS has both.
+-fn getaddrinfo_ex() -> Option<(GetAddrInfoExFn, *const DNSServiceAttribute)> {
++/// libinfo's getaddrinfo call: only QueryRecord sends `kDNSServiceAttrAllowFailover` to the daemon (`DNSServiceGetAddrInfoEx` drops it).
++fn query_record_allowing_failover()
++-> Option<(QueryRecordWithAttributeFn, *const DNSServiceAttribute)> {
+     let f = bun_sys::dlsym_with_handle!(
+-        GetAddrInfoExFn,
+-        "DNSServiceGetAddrInfoEx",
++        QueryRecordWithAttributeFn,
++        "DNSServiceQueryRecordWithAttribute",
+         Some(libc::RTLD_DEFAULT)
+     )?;
+     let attr = bun_sys::dlsym_with_handle!(
+@@ -150,41 +157,75 @@ enum Attempt {
+     Reissued,
+ }
+ 
++/// The A and the AAAA subordinate of one lookup; null for a family that was not asked for.
++type FamilyRefs = [DNSServiceRef; 2];
++
++fn deallocate_refs(sd_refs: FamilyRefs) {
++    for sd_ref in sd_refs {
++        if !sd_ref.is_null() {
++            // SAFETY: FFI; a non-null entry is a live subordinate that nothing else releases.
++            unsafe { DNSServiceRefDeallocate(sd_ref) };
++        }
++    }
++}
++
++/// What dnssd_clientstub's `handle_addrinfo_response` builds: a link-local address is scoped to the interface it was seen on.
++fn address_from_record(
++    rrtype: u16,
++    rdata: &[u8],
++    interface_index: u32,
++) -> Option<bun_dns::Address> {
++    match rrtype {
++        TYPE_A => {
++            let ip = Ipv4Addr::from(<[u8; 4]>::try_from(rdata).ok()?);
++            Some(bun_dns::Address::from_ip(ip.into(), 0))
++        }
++        TYPE_AAAA => {
++            let ip = Ipv6Addr::from(<[u8; 16]>::try_from(rdata).ok()?);
++            let mut address = bun_dns::Address::from_ip(ip.into(), 0);
++            if ip.is_unicast_link_local() {
++                address.set_scope_id(interface_index);
++            }
++            Some(address)
++        }
++        _ => None,
++    }
++}
++
+ /// Per-query state shared by the JS `dns.lookup` path and the internal connect path.
+ pub(crate) struct QueryState {
+-    pub(crate) sd_ref: DNSServiceRef,
++    sd_refs: FamilyRefs,
+     pub(crate) results: bun_dns::ResultList,
+-    /// First hard error (NoSuchRecord/Timeout are per-family negatives, not errors).
+-    pub(crate) sd_error: DNSServiceErrorType,
+     /// A family timed out: an unsuppressed reissue would only wait out the timeout again.
+     saw_timeout: bool,
+     /// Last reply had `MoreComing` and no other request's reply followed: more is queued daemon-side.
+     awaiting_more: bool,
+-    /// Protocol bits with no reply yet; any family-tagged callback clears its bit.
++    /// Protocol bits with no reply yet; an address record or any error for a family's question clears its bit.
+     pub(crate) pending_proto: DNSServiceProtocol,
+     stragglers: Stragglers,
+     attempt: Attempt,
+     /// Kept so `finish()` can reissue the query for the retry.
+     hostname: bun::ZBox,
+-    callback: Option<GetAddrInfoReply>,
+ }
+ 
+ impl QueryState {
+     pub(crate) fn new(protocol: DNSServiceProtocol) -> Self {
+         Self {
+-            sd_ref: ptr::null_mut(),
++            sd_refs: [ptr::null_mut(); 2],
+             results: Default::default(),
+-            sd_error: 0,
+             saw_timeout: false,
+             awaiting_more: false,
+             pending_proto: protocol,
+             stragglers: Stragglers::None,
+             attempt: Attempt::Plain,
+             hostname: bun::ZBox::from_bytes(b""),
+-            callback: None,
+         }
+     }
+ 
++    fn deallocate_refs(&mut self) {
++        deallocate_refs(core::mem::replace(&mut self.sd_refs, [ptr::null_mut(); 2]));
++    }
++
+     /// Back to a fresh in-flight state for the unsuppressed reissue.
+     pub(crate) fn reset_for_retry(&mut self, protocol: DNSServiceProtocol) {
+         self.attempt = Attempt::Reissued;
+@@ -200,49 +241,40 @@ impl QueryState {
+ 
+     /// A suppressed query that returned nothing at all gets one unsuppressed retry.
+     fn should_retry_unsuppressed(&self) -> bool {
+-        self.attempt == Attempt::Suppressed
+-            && self.results.is_empty()
+-            && self.sd_error == 0
+-            && !self.saw_timeout
++        self.attempt == Attempt::Suppressed && self.results.is_empty() && !self.saw_timeout
+     }
+ 
+-    /// Absorb one callback. SAFETY: `address`, if non-null, is a valid sockaddr (dnssd_clientstub guarantees it).
+-    pub(crate) unsafe fn record_reply(
++    /// Absorb one callback for the question `sd_ref`.
++    fn record_reply(
+         &mut self,
++        sd_ref: DNSServiceRef,
+         flags: DNSServiceFlags,
++        interface_index: u32,
+         error_code: DNSServiceErrorType,
+-        address: *const Sockaddr,
++        rrtype: u16,
++        rdata: &[u8],
+         ttl: u32,
+     ) {
+         self.awaiting_more = flags & FLAGS_MORE_COMING != 0;
+-        // Only PolicyDenied passes a null sockaddr; A/AAAA replies (incl. negatives) are family-tagged.
+-        if address.is_null() {
+-            if self.sd_error == 0 {
+-                self.sd_error = error_code;
+-            }
+-            return;
++        // As in libinfo, any error ends only its own family. The daemon's refusals carry no rrtype, so `sd_ref` names the family.
++        if error_code != ERR_NO_ERROR || matches!(rrtype, TYPE_A | TYPE_AAAA) {
++            self.pending_proto &= !if sd_ref == self.sd_refs[0] {
++                PROTOCOL_IPV4
++            } else {
++                PROTOCOL_IPV6
++            };
+         }
+-        // SAFETY: caller contract.
+-        let fam = unsafe { (*address).sa_family } as i32;
+-        // Any reply retires the family's bit; completeness is tracked by `awaiting_more`.
+-        self.pending_proto &= !if fam == netc::AF_INET6 {
+-            PROTOCOL_IPV6
+-        } else {
+-            PROTOCOL_IPV4
+-        };
+-        if error_code == ERR_NO_ERROR && flags & FLAGS_ADD != 0 {
+-            self.results.push(GetAddrInfoResult {
+-                // SAFETY: caller contract.
+-                address: unsafe { bun_dns::Address::init_posix(address.cast()) },
+-                ttl: ttl as i32,
+-            });
+-        } else if error_code == ERR_TIMEOUT {
+-            self.saw_timeout = true;
+-        } else if error_code != ERR_NO_ERROR
+-            && error_code != ERR_NO_SUCH_RECORD
+-            && self.sd_error == 0
+-        {
+-            self.sd_error = error_code;
++        match error_code {
++            ERR_NO_ERROR if flags & FLAGS_ADD != 0 => {
++                if let Some(address) = address_from_record(rrtype, rdata, interface_index) {
++                    self.results.push(GetAddrInfoResult {
++                        address,
++                        ttl: ttl as i32,
++                    });
++                }
++            }
++            ERR_TIMEOUT => self.saw_timeout = true,
++            _ => {}
+         }
+         self.stragglers = match (self.only_stragglers_left(), self.stragglers) {
+             (false, _) => Stragglers::None,
+@@ -258,9 +290,7 @@ impl QueryState {
+     }
+ 
+     pub(crate) fn is_ready(&self) -> bool {
+-        self.sd_error != 0
+-            || self.stragglers == Stragglers::GaveUp
+-            || (self.pending_proto == 0 && !self.awaiting_more)
++        self.stragglers == Stragglers::GaveUp || (self.pending_proto == 0 && !self.awaiting_more)
+     }
+ 
+     /// Deadline for giving up on stragglers (a silent second family, or a dangling `MoreComing`).
+@@ -295,6 +325,21 @@ impl Inflight {
+         }
+     }
+ 
++    /// The `on_reply` that turns `context()` back into this variant.
++    fn reply_callback(&self) -> QueryRecordReply {
++        match *self {
++            Inflight::Jsc(_) => on_reply::<false>,
++            Inflight::Internal(_) => on_reply::<true>,
++        }
++    }
++
++    fn complete(self) {
++        match self {
++            Inflight::Jsc(r) => GetAddrInfoRequest::complete_dns_sd(r),
++            Inflight::Internal(r) => internal::dns_sd_complete(r),
++        }
++    }
++
+     /// SAFETY: the request behind `self` is live (pinned in `inflight`);
+     /// the `&mut` derives from the stored raw pointer, not from a borrow.
+     unsafe fn query<'a>(self) -> &'a mut QueryState {
+@@ -308,6 +353,41 @@ impl Inflight {
+     }
+ }
+ 
++/// Records a reply; `on_readable` completes. SAFETY: `context` is a live request of the `INTERNAL` kind; `rdata` spans `rdlen` bytes.
++unsafe extern "C" fn on_reply<const INTERNAL: bool>(
++    sd_ref: DNSServiceRef,
++    flags: DNSServiceFlags,
++    interface_index: u32,
++    error_code: DNSServiceErrorType,
++    _fullname: *const c_char,
++    rrtype: u16,
++    _rrclass: u16,
++    rdlen: u16,
++    rdata: *const c_void,
++    ttl: u32,
++    context: *mut c_void,
++) {
++    SharedConnection::note_reply(context);
++    let owner = if INTERNAL {
++        Inflight::Internal(context.cast())
++    } else {
++        Inflight::Jsc(context.cast())
++    };
++    // SAFETY: caller contract; the slice is only read before this callback returns.
++    let rdata = unsafe { bun::ffi::slice(rdata.cast::<u8>(), rdlen as usize) };
++    // SAFETY: caller contract; event-loop thread, and no other borrow of the query is live here.
++    let query = unsafe { owner.query() };
++    query.record_reply(
++        sd_ref,
++        flags,
++        interface_index,
++        error_code,
++        rrtype,
++        rdata,
++        ttl,
++    );
++}
++
+ /// One per event loop: owns the primary `DNSServiceRef` + `FilePoll`; lookups are ShareConnection subordinates.
+ pub(crate) struct SharedConnection {
+     main_ref: DNSServiceRef,
+@@ -400,76 +480,88 @@ impl SharedConnection {
+         Self::current()
+     }
+ 
+-    /// Start a subordinate query and track it (keeps the process alive); `None` if the daemon refused.
++    /// Start `owner`'s queries and track it (keeps the process alive); `false` if the daemon refused.
+     pub(crate) fn start(
+         &mut self,
+         owner: Inflight,
+         protocol: DNSServiceProtocol,
+         hostname: &ZStr,
+-        callback: GetAddrInfoReply,
+-        context: *mut c_void,
+-    ) -> Option<DNSServiceRef> {
++    ) -> bool {
+         let suppress = addrconfig_flags(protocol);
+-        let sub = self.issue(protocol, suppress, hostname, callback, context)?;
++        let Some(sd_refs) = self.issue(owner, protocol, suppress, hostname) else {
++            return false;
++        };
+         if self.inflight.is_empty() {
+             let ctx = self.ctx;
+             self.file_poll().enable_keeping_process_alive(ctx);
+         }
+         // SAFETY: `owner` is the caller's live request, tracked here until `finish()`.
+         let q = unsafe { owner.query() };
+-        q.sd_ref = sub;
++        q.sd_refs = sd_refs;
+         q.attempt = if suppress != 0 {
+             Attempt::Suppressed
+         } else {
+             Attempt::Plain
+         };
+         q.hostname = bun::ZBox::from_bytes(hostname.as_bytes());
+-        q.callback = Some(callback);
+         self.inflight.push(owner);
+-        Some(sub)
++        true
+     }
+ 
++    /// One query per family in `protocol`, as libinfo does; `None`, with none left running, if the daemon refused one.
+     fn issue(
+         &mut self,
++        owner: Inflight,
+         protocol: DNSServiceProtocol,
+         suppress: DNSServiceFlags,
+         hostname: &ZStr,
+-        callback: GetAddrInfoReply,
+-        context: *mut c_void,
+-    ) -> Option<DNSServiceRef> {
+-        // ShareConnection requires `sub` to start as a copy of the primary ref.
+-        let mut sub: DNSServiceRef = self.main_ref;
++    ) -> Option<FamilyRefs> {
+         let flags = FLAGS_SHARE_CONNECTION | FLAGS_TIMEOUT | FLAGS_RETURN_INTERMEDIATES | suppress;
+-        let hostname = hostname.as_ptr().cast::<c_char>();
+-        // SAFETY: FFI; `hostname` is NUL-terminated (copied by dns_sd); `context` is only stored.
+-        let err = unsafe {
+-            match getaddrinfo_ex() {
+-                Some((ex, attr)) => ex(
+-                    &raw mut sub,
+-                    flags,
+-                    0,
+-                    protocol,
+-                    hostname,
+-                    attr,
+-                    callback,
+-                    context,
+-                ),
+-                None => DNSServiceGetAddrInfo(
+-                    &raw mut sub,
+-                    flags,
+-                    0,
+-                    protocol,
+-                    hostname,
+-                    callback,
+-                    context,
+-                ),
++        // Sent as given: the daemon tries search domains only for a name with no trailing dot.
++        let name = hostname.as_ptr().cast::<c_char>();
++        let (callback, context) = (owner.reply_callback(), owner.context());
++        let mut sd_refs: FamilyRefs = [ptr::null_mut(); 2];
++        let families = [(PROTOCOL_IPV4, TYPE_A), (PROTOCOL_IPV6, TYPE_AAAA)];
++        for (i, (family, rrtype)) in families.into_iter().enumerate() {
++            if protocol & family == 0 {
++                continue;
+             }
+-        };
+-        if err != ERR_NO_ERROR {
+-            bun_output::scoped_log!(dns, "DNSServiceGetAddrInfo failed: {}", err);
+-            return None;
++            // ShareConnection requires `sub` to start as a copy of the primary ref.
++            let mut sub: DNSServiceRef = self.main_ref;
++            // SAFETY: FFI; `name` is NUL-terminated (copied by dns_sd); `context` is only stored.
++            let err = unsafe {
++                match query_record_allowing_failover() {
++                    Some((query_record, allow_failover)) => query_record(
++                        &raw mut sub,
++                        flags,
++                        0,
++                        name,
++                        rrtype,
++                        CLASS_IN,
++                        allow_failover,
++                        callback,
++                        context,
++                    ),
++                    None => DNSServiceQueryRecord(
++                        &raw mut sub,
++                        flags,
++                        0,
++                        name,
++                        rrtype,
++                        CLASS_IN,
++                        callback,
++                        context,
++                    ),
++                }
++            };
++            if err != ERR_NO_ERROR {
++                bun_output::scoped_log!(dns, "DNSServiceQueryRecord failed: {}", err);
++                deallocate_refs(sd_refs);
++                return None;
++            }
++            sd_refs[i] = sub;
+         }
+-        Some(sub)
++        Some(sd_refs)
+     }
+ 
+     /// Called first from every reply callback: a different `context` ends the previous request's `MoreComing` run.
+@@ -507,7 +599,7 @@ impl SharedConnection {
+             let ready = core::mem::take(&mut this.inflight);
+             let detached = SHARED.replace(ptr::null_mut());
+             for inf in ready {
+-                Self::finish(inf, Some(rc));
++                Self::fail(inf);
+             }
+             // SAFETY: `detached` was just removed from SHARED and drained.
+             unsafe { Self::destroy(detached) };
+@@ -516,7 +608,7 @@ impl SharedConnection {
+         let ready = this.take_ready(|q| q.is_ready());
+         this.arm_early_out();
+         for inf in ready {
+-            Self::finish(inf, None);
++            Self::finish(inf);
+         }
+     }
+ 
+@@ -600,7 +692,7 @@ impl SharedConnection {
+             ready
+         };
+         for inf in ready {
+-            Self::finish(inf, None);
++            Self::finish(inf);
+         }
+     }
+ 
+@@ -626,22 +718,23 @@ impl SharedConnection {
+         drop(conn);
+     }
+ 
+-    /// `force_err` drops partial results so teardown rejects instead of resolving.
+-    fn finish(inf: Inflight, force_err: Option<DNSServiceErrorType>) {
++    fn finish(inf: Inflight) {
+         // SAFETY: `inf` is a live heap request just removed from `inflight`.
+         let q = unsafe { inf.query() };
+-        // SAFETY: FFI; `sd_ref` is this request's live subordinate.
+-        unsafe { DNSServiceRefDeallocate(q.sd_ref) };
+-        if let Some(e) = force_err {
+-            q.results.clear();
+-            q.sd_error = e;
+-        } else if q.should_retry_unsuppressed() && Self::retry_unsuppressed(inf) {
++        q.deallocate_refs();
++        if q.should_retry_unsuppressed() && Self::retry_unsuppressed(inf) {
+             return;
+         }
+-        match inf {
+-            Inflight::Jsc(r) => GetAddrInfoRequest::complete_dns_sd(r),
+-            Inflight::Internal(r) => internal::dns_sd_complete(r),
+-        }
++        inf.complete();
++    }
++
++    /// The connection is going away: drops partial results so the request rejects instead of resolving.
++    fn fail(inf: Inflight) {
++        // SAFETY: `inf` is a live heap request just removed from `inflight`.
++        let q = unsafe { inf.query() };
++        q.deallocate_refs();
++        q.results.clear();
++        inf.complete();
+     }
+ 
+     /// Reissue `inf`'s query without SuppressUnusable; `false` if it couldn't be reissued.
+@@ -652,11 +745,8 @@ impl SharedConnection {
+         // SAFETY: `inf` is a live heap request removed from `inflight` by the caller.
+         let q = unsafe { inf.query() };
+         let (protocol, hostname) = (protocol_for_pending(q), q.hostname.clone());
+-        let Some(callback) = q.callback else {
+-            return false;
+-        };
+         q.reset_for_retry(protocol);
+-        let Some(sub) = this.issue(protocol, 0, &hostname, callback, inf.context()) else {
++        let Some(sd_refs) = this.issue(inf, protocol, 0, &hostname) else {
+             return false;
+         };
+         bun_output::scoped_log!(
+@@ -664,7 +754,7 @@ impl SharedConnection {
+             "retrying {} without SuppressUnusable",
+             bstr::BStr::new(hostname.as_bytes())
+         );
+-        q.sd_ref = sub;
++        q.sd_refs = sd_refs;
+         if this.inflight.is_empty() {
+             let ctx = this.ctx;
+             this.file_poll().enable_keeping_process_alive(ctx);
+@@ -687,13 +777,12 @@ impl SharedConnection {
+                 // have waiters on other threads (and its outcome is cached): this
+                 // thread going away is not an answer. Finish it on the work pool.
+                 Inflight::Internal(req) => {
+-                    // SAFETY: `inf` is a live heap request just removed from `inflight`;
+-                    // FFI releases this thread's subordinate for it.
+-                    unsafe { DNSServiceRefDeallocate(inf.query().sd_ref) };
++                    // SAFETY: `inf` is a live heap request just removed from `inflight`.
++                    unsafe { inf.query() }.deallocate_refs();
+                     internal::run_on_work_pool(req);
+                 }
+                 // A dns.lookup() from this thread's script: only this VM waits on it.
+-                Inflight::Jsc(_) => Self::finish(inf, Some(ERR_DEFUNCT_CONNECTION)),
++                Inflight::Jsc(_) => Self::fail(inf),
+             }
+         }
+         // SAFETY: `this` is detached and drained.
+@@ -755,13 +844,7 @@ pub(crate) fn lookup(
+     let promise_value = unsafe { (*request).head.promise.value() };
+ 
+     let name_z = bun::ZBox::from_bytes(query.name.as_ref());
+-    let Some(_) = shared.start(
+-        Inflight::Jsc(request),
+-        protocol,
+-        &name_z,
+-        GetAddrInfoRequest::dns_sd_reply,
+-        request.cast::<c_void>(),
+-    ) else {
++    if !shared.start(Inflight::Jsc(request), protocol, &name_z) {
+         // SAFETY: request is exclusively owned; dns_sd never accepted it.
+         unsafe {
+             if let Some(pos) = (*request).pending_slot {
+@@ -775,7 +858,7 @@ pub(crate) fn lookup(
+             drop(bun_core::heap::take(request));
+         }
+         return lib_c::lookup(this, query, global_this, context);
+-    };
++    }
+ 
+     this.request_sent(this.vm());
+ 
+diff --git a/src/runtime/socket/mod.rs b/src/runtime/socket/mod.rs
+index bfe0c559..51aec89f 100644
+--- a/src/runtime/socket/mod.rs
++++ b/src/runtime/socket/mod.rs
+@@ -120,8 +120,9 @@ pub(crate) use udp_socket::UDPSocket;
+ /// the name the generator expects rather than special-casing the generator.
+ pub(crate) mod socket {
+     pub(crate) use super::socket_body::{
+-        js_create_socket_pair, js_get_buffered_amount, js_is_named_pipe_socket,
+-        js_set_socket_options, js_upgrade_duplex_to_tls, js_upgrade_tls_deferred, testing_ap_is,
++        js_create_socket_pair, js_first_flight_before_fin, js_get_buffered_amount,
++        js_is_named_pipe_socket, js_set_socket_options, js_upgrade_duplex_to_tls,
++        js_upgrade_tls_deferred, testing_ap_is,
+     };
+ }
+ 
+diff --git a/src/runtime/socket/socket_body.rs b/src/runtime/socket/socket_body.rs
+index 1bf3d1a7..84dfc230 100644
+--- a/src/runtime/socket/socket_body.rs
++++ b/src/runtime/socket/socket_body.rs
+@@ -4656,6 +4656,20 @@ pub(crate) fn js_upgrade_tls_deferred(
+     Err(global.throw(format_args!("Expected a socket instance")))
+ }
+ 
++/// `tls.connect()`'s first 'connect' listener, where node sends the ClientHello.
++#[bun_jsc::host_fn]
++pub(crate) fn js_first_flight_before_fin(
++    _global: &JSGlobalObject,
++    callframe: &CallFrame,
++) -> JsResult<JSValue> {
++    jsc::mark_binding!();
++    let [socket] = callframe.arguments_as_array::<1>();
++    if let Some(this) = socket.as_class_ref::<TLSSocket>() {
++        this.socket.get().set_first_flight_before_fin();
++    }
++    Ok(JSValue::UNDEFINED)
++}
++
+ #[bun_jsc::host_fn]
+ pub(crate) fn js_upgrade_duplex_to_tls(
+     global: &JSGlobalObject,
+diff --git a/src/runtime/webcore/Blob.rs b/src/runtime/webcore/Blob.rs
+index f85d1129..fc47dea0 100644
+--- a/src/runtime/webcore/Blob.rs
++++ b/src/runtime/webcore/Blob.rs
+@@ -1254,8 +1254,13 @@ impl BlobExt for Blob {
+     }
+ 
+     fn get_exists_sync(&self) -> JSValue {
+-        if self.size.get() == MAX_SIZE {
+-            self.resolve_size();
++        match self.store.get() {
++            _ if self.size.get() == MAX_SIZE => self.resolve_size(),
++            // A failed stat is not an answer to keep: the file may exist by now.
++            Some(store) if matches!(&store.data, store::Data::File(file) if file.seekable.is_none()) => {
++                resolve_file_stat(store)
++            }
++            _ => {}
+         }
+ 
+         // If there's no store that means it's empty and we just return true
+@@ -1996,7 +2001,8 @@ impl BlobExt for Blob {
+     }
+ 
+     fn get_size_for_bindings(&self) -> u64 {
+-        if self.size.get() == MAX_SIZE {
++        let has_size = self.size.get() != MAX_SIZE;
++        if !has_size {
+             self.resolve_size();
+         }
+ 
+@@ -2004,7 +2010,17 @@ impl BlobExt for Blob {
+         // signal that the size is unknown.
+         if let Some(store) = self.store.get() {
+             if let store::Data::File(file) = &store.data {
+-                if !file.seekable.unwrap_or(false) {
++                // A slice has its size without a stat, and `clone()` learns the mode without filling `seekable`.
++                let mode_seen_by_clone = file.mode_seen_by_clone.filter(|_| has_size);
++                if !file
++                    .seekable
++                    .or_else(|| mode_seen_by_clone.map(bun_sys::S::ISREG))
++                    .unwrap_or(false)
++                {
++                    // Printing is not to leave the 0 of a failed stat behind: the body would read as empty.
++                    if !has_size && file.seekable.is_none() {
++                        self.size.set(MAX_SIZE);
++                    }
+                     return u64::MAX;
+                 }
+             }
+@@ -5836,6 +5852,34 @@ pub(crate) fn store_reads_repeatably(store: &RefPtr<Store>) -> bool {
+     }
+ }
+ 
++/// Whether two Blobs over `store` would compete for its bytes (an fd, a pipe, a terminal). A directory or a closed fd has none: each Blob fails when read.
++pub(crate) fn store_yields_bytes_once(store: &RefPtr<Store>) -> bool {
++    if !matches!(store.data, store::Data::File(_)) {
++        return false;
++    }
++    let is_fd = Store::data_mut(store).as_file().pathlike.is_fd();
++    // What the tee of an fd does next, so this costs no extra `fstat`.
++    if is_fd && Store::data_mut(store).as_file().seekable.is_none() {
++        resolve_file_stat(store);
++    }
++    let file = Store::data_mut(store).as_file_mut();
++    let mode = if file.seekable.is_some() {
++        Some(file.mode)
++    } else if let PathOrFileDescriptor::Path(path) = &file.pathlike {
++        // Not `resolve_file_stat`: the `Bun.file()` sharing `store` answers from what that caches.
++        if file.mode_seen_by_clone.is_none() {
++            let mut buffer = bun_paths::path_buffer_pool::get();
++            if let bun_sys::Result::Ok(stat) = bun_sys::stat(path.slice_z(&mut buffer)) {
++                file.mode_seen_by_clone = Some(stat.st_mode as bun_sys::Mode);
++            }
++        }
++        file.mode_seen_by_clone
++    } else {
++        None
++    };
++    mode.is_some_and(|mode| !bun_sys::S::ISDIR(mode) && (is_fd || !bun_sys::S::ISREG(mode)))
++}
++
+ // ──────────────────────────────────────────────────────────────────────────
+ // toStringWithBytes / toString / toJSON / toFormData / toArrayBuffer{View}
+ // ──────────────────────────────────────────────────────────────────────────
+diff --git a/src/runtime/webcore/Body.rs b/src/runtime/webcore/Body.rs
+index 66e2e131..8ede5c11 100644
+--- a/src/runtime/webcore/Body.rs
++++ b/src/runtime/webcore/Body.rs
+@@ -127,8 +127,8 @@ impl Body {
+         unsafe { self.value.get_mut() }
+     }
+ 
+-    pub(crate) fn len(&self) -> blob::SizeType {
+-        self.value_mut().size()
++    pub(crate) fn known_len(&self) -> Option<usize> {
++        self.value_mut().known_size()
+     }
+ }
+ 
+@@ -767,6 +767,14 @@ impl Value {
+         }
+     }
+ 
++    /// `None` for a file that does not exist or is not seekable.
++    pub(crate) fn known_size(&mut self) -> Option<usize> {
++        match self.size() {
++            u64::MAX => None,
++            size => Some(size as usize),
++        }
++    }
++
+     pub(crate) fn memory_cost(&self) -> usize {
+         match self {
+             Value::InternalBlob(b) => b.memory_cost(),
+@@ -1571,9 +1579,7 @@ impl Value {
+         }
+ 
+         if let Value::Blob(b) = self {
+-            if b.store()
+-                .is_some_and(|store| !blob::store_reads_repeatably(store))
+-            {
++            if b.store().is_some_and(blob::store_yields_bytes_once) {
+                 // A pipe or other fd yields its bytes once: read it as one
+                 // stream and tee that.
+                 self.to_readable_stream(cx)?;
+diff --git a/src/runtime/webcore/Request.rs b/src/runtime/webcore/Request.rs
+index 1fe691fb..ca3ae8ef 100644
+--- a/src/runtime/webcore/Request.rs
++++ b/src/runtime/webcore/Request.rs
+@@ -540,12 +540,15 @@ impl Request {
+         } else {
+             "BunRequest"
+         };
+-        writeln!(
+-            writer,
+-            "{} ({}) {{",
+-            class_label,
+-            bun_fmt::size(self.body_value_mut().size() as usize, Default::default())
+-        )?;
++        match self.body_value_mut().known_size() {
++            Some(size) => writeln!(
++                writer,
++                "{} ({}) {{",
++                class_label,
++                bun_fmt::size(size, Default::default())
++            )?,
++            None => writeln!(writer, "{} {{", class_label)?,
++        }
+         {
+             // RAII guard restores indent on every exit incl. `?` error paths.
+             // Shadows `formatter` for the block; auto-derefs to `&mut F`.
+diff --git a/src/runtime/webcore/Response.rs b/src/runtime/webcore/Response.rs
+index 8a301930..4a76eae6 100644
+--- a/src/runtime/webcore/Response.rs
++++ b/src/runtime/webcore/Response.rs
+@@ -427,10 +427,6 @@ impl Response {
+ 
+ impl Response {
+     #[inline]
+-    pub(crate) fn get_body_len(&self) -> usize {
+-        self.body.get().len() as usize
+-    }
+-
+     pub(crate) fn get_form_data_encoding(
+         &self,
+     ) -> JsResult<Option<Box<bun_core::form_data::AsyncFormData>>> {
+@@ -646,11 +642,14 @@ impl Response {
+         // `fmt::Error`.
+         let js_err = |_: JsError| core::fmt::Error;
+ 
+-        writeln!(
+-            writer,
+-            "Response ({}) {{",
+-            bun_core::fmt::size(self.get_body_len(), Default::default())
+-        )?;
++        match self.body.get().known_len() {
++            Some(len) => writeln!(
++                writer,
++                "Response ({}) {{",
++                bun_core::fmt::size(len, Default::default())
++            )?,
++            None => writeln!(writer, "Response {{")?,
++        }
+ 
+         {
+             let mut formatter = formatter.indented();
+diff --git a/src/uws_sys/socket.rs b/src/uws_sys/socket.rs
+index f9faf344..32d37ee3 100644
+--- a/src/uws_sys/socket.rs
++++ b/src/uws_sys/socket.rs
+@@ -572,6 +572,13 @@ impl<const IS_SSL: bool> NewSocketHandler<IS_SSL> {
+         }
+     }
+ 
++    /// A shutdown before the first handshake step sends its FIN after that step.
++    pub fn set_first_flight_before_fin(&self) {
++        if let InternalSocket::Connected(s) = self.socket {
++            sock(s).set_first_flight_before_fin();
++        }
++    }
++
+     /// The session an SSLWrapper-backed socket got last from the new-session callback, borrowed.
+     pub fn wrapper_latest_session(&self) -> *mut bun_boringssl_sys::SSL_SESSION {
+         match self.socket {
+diff --git a/src/uws_sys/us_socket_t.rs b/src/uws_sys/us_socket_t.rs
+index db3284f2..09f8e8d8 100644
+--- a/src/uws_sys/us_socket_t.rs
++++ b/src/uws_sys/us_socket_t.rs
+@@ -309,6 +309,11 @@ impl us_socket_t {
+         c::us_socket_set_inline_reject(self);
+     }
+ 
++    /// A shutdown before the first handshake step sends its FIN after that step.
++    pub fn set_first_flight_before_fin(&mut self) {
++        c::us_socket_set_first_flight_before_fin(self);
++    }
++
+     /// Feed bytes that were already read off the wire (e.g. a ClientHello the
+     /// plain-TCP layer consumed before the upgrade) through the same decrypt
+     /// path as bytes arriving from the kernel.
+@@ -591,6 +596,7 @@ mod c {
+         ) -> *mut us_socket_t;
+         pub(super) safe fn us_socket_start_tls_handshake(s: &mut us_socket_t);
+         pub(super) safe fn us_socket_set_inline_reject(s: &mut us_socket_t);
++        pub(super) safe fn us_socket_set_first_flight_before_fin(s: &mut us_socket_t);
+     }
+ }
+ 
+diff --git a/test/js/bun/dns/mdnsresponder-fixture.ts b/test/js/bun/dns/mdnsresponder-fixture.ts
+new file mode 100644
+index 00000000..fca1c897
+--- /dev/null
++++ b/test/js/bun/dns/mdnsresponder-fixture.ts
+@@ -0,0 +1,222 @@
++// A scripted stand-in for mDNSResponder. libsystem_dnssd connects to $DNSSD_UDS_PATH when it is set.
++//
++//   bun mdnsresponder-fixture.ts <socket path> <answers JSON> <client script>
++//
++// Runs the client script in a child Bun, answers its queries from `answers`, and after the client has
++// gone prints every request it made as one line of JSON. The client's own stdout comes first.
++import { dlopen, ptr } from "bun:ffi";
++import { closeSync, writeSync } from "node:fs";
++
++export type Answer = {
++  rrtype: number;
++  /** An IPv4 or IPv6 address as bytes, or any other rdata. */
++  rdata?: number[];
++  /** Defaults to kDNSServiceFlagsAdd. */
++  flags?: number;
++  error?: number;
++  ifindex?: number;
++  ttl?: number;
++  /** Held back until a query for this name arrives. */
++  after?: string;
++};
++/** Keyed by `${name} ${rrtype}`. A query with no entry gets kDNSServiceErr_NoSuchRecord. */
++export type Answers = Record<string, Answer[]>;
++
++const [socketPath, answersJSON, clientScript] = process.argv.slice(2);
++const answers: Answers = JSON.parse(answersJSON);
++
++const { symbols: libc } = dlopen("libSystem.B.dylib", {
++  socket: { args: ["i32", "i32", "i32"], returns: "i32" },
++  bind: { args: ["i32", "ptr", "u32"], returns: "i32" },
++  listen: { args: ["i32", "i32"], returns: "i32" },
++  accept: { args: ["i32", "ptr", "ptr"], returns: "i32" },
++  poll: { args: ["ptr", "u32", "i32"], returns: "i32" },
++  recvmsg: { args: ["i32", "ptr", "i32"], returns: "i64" },
++});
++
++const AF_UNIX = 1;
++const SOCK_STREAM = 1;
++const SOL_SOCKET = 0xffff;
++const SCM_RIGHTS = 1;
++const POLLIN = 1;
++
++const HEADER_SIZE = 28;
++const IPC_FLAGS_TRAILING_TLVS = 2;
++const ops = { 1: "connection", 8: "query", 15: "addrinfo", 63: "cancel" } as const;
++const QUERY_REPLY = 68;
++const ADDRINFO_REPLY = 72;
++
++const FLAGS_ADD = 0x2;
++const ERR_NO_SUCH_RECORD = -65554;
++const ERR_UNSUPPORTED = -65544;
++const TYPE_A = 1;
++const TYPE_AAAA = 28;
++
++function check(rc: number, what: string) {
++  if (rc < 0) throw new Error(`${what} failed`);
++  return rc;
++}
++
++function listenOn(path: string) {
++  const pathBytes = Buffer.from(path);
++  if (pathBytes.length >= 104) throw new Error(`socket path is too long for sun_path: ${path}`);
++  const addr = new Uint8Array(106);
++  addr[0] = addr.length;
++  addr[1] = AF_UNIX;
++  addr.set(pathBytes, 2);
++  const fd = check(libc.socket(AF_UNIX, SOCK_STREAM, 0), "socket");
++  check(libc.bind(fd, ptr(addr), addr.length), "bind");
++  check(libc.listen(fd, 8), "listen");
++  return fd;
++}
++
++/** One recvmsg(): the bytes read (empty at EOF) and any descriptors that came with them. */
++function receive(fd: number) {
++  const data = new Uint8Array(4096);
++  const control = new Uint8Array(64);
++  const iov = new BigUint64Array([BigInt(ptr(data)), BigInt(data.length)]);
++  const msg = new DataView(new ArrayBuffer(48));
++  msg.setBigUint64(16, BigInt(ptr(iov)), true);
++  msg.setInt32(24, 1, true);
++  msg.setBigUint64(32, BigInt(ptr(control)), true);
++  msg.setUint32(40, control.length, true);
++  const n = Number(libc.recvmsg(fd, ptr(new Uint8Array(msg.buffer)), 0));
++  const fds: number[] = [];
++  const cmsg = new DataView(control.buffer);
++  if (msg.getUint32(40, true) >= 16 && cmsg.getInt32(4, true) === SOL_SOCKET && cmsg.getInt32(8, true) === SCM_RIGHTS) {
++    for (let at = 12; at + 4 <= cmsg.getUint32(0, true); at += 4) fds.push(cmsg.getInt32(at, true));
++  }
++  return { bytes: Buffer.from(data.subarray(0, Math.max(n, 0))), fds };
++}
++
++function reply(op: number, context: Buffer, name: string, qtype: number) {
++  const fullname = Buffer.from((name.endsWith(".") ? name : name + ".") + "\0");
++  const list = answers[`${name} ${qtype}`] ?? [{ rrtype: qtype, error: ERR_NO_SUCH_RECORD }];
++  return list.map(({ rrtype, rdata = [], flags = FLAGS_ADD, error = 0, ifindex = 0, ttl = 60, after }) => {
++    const body = Buffer.alloc(12 + fullname.length + 6 + rdata.length + 4);
++    body.writeUInt32BE(flags, 0);
++    body.writeUInt32BE(ifindex, 4);
++    body.writeInt32BE(error, 8);
++    let at = 12 + fullname.copy(body, 12);
++    at = body.writeUInt16BE(rrtype, at);
++    at = body.writeUInt16BE(1, at);
++    at = body.writeUInt16BE(rdata.length, at);
++    at += Buffer.from(rdata).copy(body, at);
++    body.writeUInt32BE(ttl, at);
++    const header = Buffer.alloc(HEADER_SIZE);
++    header.writeUInt32BE(1, 0);
++    header.writeUInt32BE(body.length, 4);
++    header.writeUInt32BE(op, 12);
++    context.copy(header, 16);
++    return { after, bytes: Buffer.concat([header, body]) };
++  });
++}
++
++function cstring(data: Buffer, at: number) {
++  const end = data.indexOf(0, at);
++  return { value: data.toString("latin1", at, end), next: end + 1 };
++}
++
++function tlvs(data: Buffer, at: number) {
++  const out: Record<number, number[]> = {};
++  while (at + 4 <= data.length) {
++    const length = data.readUInt16BE(at + 2);
++    out[data.readUInt16BE(at)] = [...data.subarray(at + 4, at + 4 + length)];
++    at += 4 + length;
++  }
++  return out;
++}
++
++const requests: object[] = [];
++let held: { conn: number; after: string; bytes: Buffer }[] = [];
++
++function handle(conn: number, header: Buffer, data: Buffer, errorFds: number[]) {
++  const op = header.readUInt32BE(12);
++  const context = header.subarray(16, 24);
++  const hasTLVs = (header.readUInt32BE(8) & IPC_FLAGS_TRAILING_TLVS) !== 0;
++  const status = Buffer.alloc(4);
++
++  if (ops[op] === "connection") {
++    writeSync(conn, status);
++    return;
++  }
++  if (ops[op] === "cancel") return;
++
++  // Byte 0 is the empty control path that marks a request whose status goes to a descriptor of its own.
++  const flags = data.readUInt32BE(1);
++  const ifindex = data.readUInt32BE(5);
++  const replies: ReturnType<typeof reply> = [];
++  if (ops[op] === "query") {
++    const { value: name, next } = cstring(data, 9);
++    const rrtype = data.readUInt16BE(next);
++    for (const { conn, bytes } of held.filter(({ after }) => after === name)) writeSync(conn, bytes);
++    held = held.filter(({ after }) => after !== name);
++    requests.push({ op: "query", name, rrtype, flags, ifindex, tlvs: hasTLVs ? tlvs(data, next + 4) : {} });
++    replies.push(...reply(QUERY_REPLY, context, name, rrtype));
++  } else if (ops[op] === "addrinfo") {
++    const protocol = data.readUInt32BE(9);
++    const { value: name, next } = cstring(data, 13);
++    requests.push({ op: "addrinfo", name, protocol, flags, ifindex, tlvs: hasTLVs ? tlvs(data, next) : {} });
++    if (protocol & 2) replies.push(...reply(ADDRINFO_REPLY, context, name, TYPE_AAAA));
++    if (protocol & 1) replies.push(...reply(ADDRINFO_REPLY, context, name, TYPE_A));
++  } else {
++    requests.push({ op });
++    status.writeInt32BE(ERR_UNSUPPORTED);
++  }
++
++  const errorFd = errorFds.shift();
++  if (errorFd === undefined) throw new Error(`request with op ${op} came without a descriptor for its status`);
++  writeSync(errorFd, status);
++  closeSync(errorFd);
++  for (const { after, bytes } of replies) {
++    if (after === undefined) writeSync(conn, bytes);
++    else held.push({ conn, after, bytes });
++  }
++}
++
++const listener = listenOn(socketPath);
++const client = Bun.spawn({
++  cmd: [process.execPath, "-e", clientScript],
++  env: { ...process.env, DNSSD_UDS_PATH: socketPath },
++  stdio: ["ignore", "inherit", "inherit", "pipe"],
++});
++// Only the client holds the other end, so this becomes readable when the client is gone.
++const clientGone = client.stdio[3] as number;
++
++const conns = new Map<number, { pending: Buffer; errorFds: number[] }>();
++serving: while (true) {
++  const fds = [clientGone, listener, ...conns.keys()];
++  const pollfds = new DataView(new ArrayBuffer(fds.length * 8));
++  fds.forEach((fd, i) => {
++    pollfds.setInt32(i * 8, fd, true);
++    pollfds.setInt16(i * 8 + 4, POLLIN, true);
++  });
++  check(libc.poll(ptr(new Uint8Array(pollfds.buffer)), fds.length, -1), "poll");
++  for (let i = 0; i < fds.length; i++) {
++    if (pollfds.getInt16(i * 8 + 6, true) === 0) continue;
++    const fd = fds[i];
++    if (fd === clientGone) break serving;
++    if (fd === listener) {
++      conns.set(check(libc.accept(listener, null, null), "accept"), { pending: Buffer.alloc(0), errorFds: [] });
++      continue;
++    }
++    const conn = conns.get(fd)!;
++    const { bytes, fds: passed } = receive(fd);
++    if (bytes.length === 0) {
++      closeSync(fd);
++      conns.delete(fd);
++      continue;
++    }
++    conn.errorFds.push(...passed);
++    conn.pending = Buffer.concat([conn.pending, bytes]);
++    while (conn.pending.length >= HEADER_SIZE) {
++      const size = HEADER_SIZE + conn.pending.readUInt32BE(4);
++      if (conn.pending.length < size) break;
++      handle(fd, conn.pending.subarray(0, HEADER_SIZE), conn.pending.subarray(HEADER_SIZE, size), conn.errorFds);
++      conn.pending = conn.pending.subarray(size);
++    }
++  }
++}
++
++console.log(JSON.stringify(requests));
++process.exitCode = await client.exited;
+diff --git a/test/js/bun/dns/resolve-dns.test.ts b/test/js/bun/dns/resolve-dns.test.ts
+index a9d7efde..6f2fec08 100644
+--- a/test/js/bun/dns/resolve-dns.test.ts
++++ b/test/js/bun/dns/resolve-dns.test.ts
+@@ -1,9 +1,11 @@
+ import { SystemError, dns } from "bun";
+-import { describe, expect, test } from "bun:test";
+-import { bunEnv, bunExe, isASAN, isWindows, withoutAggressiveGC } from "harness";
++import { afterAll, beforeAll, describe, expect, test } from "bun:test";
++import { bunEnv, bunExe, isASAN, isMacOS, isWindows, tempDir, withoutAggressiveGC } from "harness";
+ import { isIP, isIPv4, isIPv6 } from "node:net";
+ import { join } from "node:path";
++import type { Answer, Answers } from "./mdnsresponder-fixture";
+ 
++const cc = Bun.which("cc") || Bun.which("clang");
+ const backends = ["system", "libc", "c-ares"];
+ const validHostnames = ["localhost", "example.com"];
+ const invalidHostnames = ["adsfa.asdfasdf.asdf.com"]; // known invalid
+@@ -298,4 +300,240 @@ describe("dns", () => {
+       );
+     });
+   });
++
++  // On macOS the system backend talks to mDNSResponder over a unix socket. These put a scripted responder
++  // behind that socket, so each test sees the requests Bun makes and chooses the replies Bun gets.
++  describe.skipIf(!isMacOS || !cc)("system backend over the mDNSResponder socket", () => {
++    // libsystem_dnssd has a DNSSD_UDS_PATH override of its own, but on macOS 26 only a setuid process reads it.
++    const redirectConnect = /* c */ `
++      #include <stdlib.h>
++      #include <string.h>
++      #include <sys/socket.h>
++      #include <sys/un.h>
++
++      int connect_nocancel(int, const struct sockaddr *, socklen_t) __asm("_connect$NOCANCEL");
++
++      static const struct sockaddr *redirect(const struct sockaddr *addr, struct sockaddr_un *to) {
++        const char *path = getenv("DNSSD_UDS_PATH");
++        if (!path || addr->sa_family != AF_UNIX ||
++            strcmp(((const struct sockaddr_un *)addr)->sun_path, "/var/run/mDNSResponder"))
++          return addr;
++        to->sun_len = sizeof(*to);
++        to->sun_family = AF_UNIX;
++        strlcpy(to->sun_path, path, sizeof(to->sun_path));
++        return (const struct sockaddr *)to;
++      }
++
++      static int redirected_connect(int fd, const struct sockaddr *addr, socklen_t len) {
++        struct sockaddr_un to;
++        return connect(fd, redirect(addr, &to), len);
++      }
++
++      static int redirected_connect_nocancel(int fd, const struct sockaddr *addr, socklen_t len) {
++        struct sockaddr_un to;
++        return connect_nocancel(fd, redirect(addr, &to), len);
++      }
++
++      __attribute__((used, section("__DATA,__interpose"))) static const struct {
++        const void *replacement, *original;
++      } interpose[] = {
++        {(const void *)redirected_connect, (const void *)connect},
++        {(const void *)redirected_connect_nocancel, (const void *)connect_nocancel},
++      };
++    `;
++
++    let dir: ReturnType<typeof tempDir>;
++    let sockets = 0;
++
++    beforeAll(async () => {
++      dir = tempDir("dns-sd", { "redirect.c": redirectConnect });
++      await using proc = Bun.spawn({
++        cmd: [cc!, "-dynamiclib", "-o", "redirect.dylib", "redirect.c"],
++        cwd: String(dir),
++        env: bunEnv,
++        stdout: "inherit",
++        stderr: "pipe",
++      });
++      const [stderr, exitCode] = await Promise.all([proc.stderr.text(), proc.exited]);
++      if (exitCode !== 0) throw new Error(`could not compile redirect.c: ${stderr}`);
++    });
++
++    afterAll(() => dir?.[Symbol.dispose]());
++
++    const A = 1;
++    const CNAME = 5;
++    const AAAA = 28;
++    // kDNSServiceFlagsShareConnection | kDNSServiceFlagsTimeout | kDNSServiceFlagsReturnIntermediates
++    const baseFlags = 0x4000 | 0x10000 | 0x1000;
++    const suppressUnusable = 0x8000;
++    const alias: Answer = { rrtype: CNAME, rdata: [5, ...Buffer.from("alias"), 4, ...Buffer.from("test"), 0] };
++    const a = (...rdata: number[]): Answer => ({ rrtype: A, rdata });
++    const aaaa = (first: number, last: number, more: Partial<Answer> = {}): Answer => ({
++      rrtype: AAAA,
++      rdata: [first >> 8, first & 0xff, ...Buffer.alloc(13), last],
++      ...more,
++    });
++
++    /** Runs `script` with `answers` behind the socket: the one line of JSON it prints, and the requests it made. */
++    async function exchange(answers: Answers, script: string) {
++      await using proc = Bun.spawn({
++        cmd: [
++          bunExe(),
++          join(import.meta.dir, "mdnsresponder-fixture.ts"),
++          join(String(dir), `${sockets++}.sock`),
++          JSON.stringify(answers),
++          script,
++        ],
++        env: { ...bunEnv, DYLD_INSERT_LIBRARIES: join(String(dir), "redirect.dylib"), NO_PROXY: "*", no_proxy: "*" },
++        stdout: "pipe",
++        stderr: "inherit",
++      });
++      const [stdout, exitCode] = await Promise.all([proc.stdout.text(), proc.exited]);
++      const [printed, requests] = stdout
++        .trim()
++        .split("\n")
++        .map(line => JSON.parse(line));
++      return {
++        printed,
++        // TLV 4 is IPC_TLV_TYPE_SERVICE_ATTR_FAILOVER_POLICY; 1 is kDNSServiceFailoverPolicyAllow.
++        requests: requests.map(({ tlvs, ...request }) => ({ ...request, failoverPolicy: tlvs?.[4]?.at(-1) })),
++        exitCode,
++      };
++    }
++
++    const lookup = (name: string, options: object = {}) =>
++      `console.log(JSON.stringify(await Bun.dns.lookup(${JSON.stringify(name)}, ${JSON.stringify(options)}).catch(e => e.code)))`;
++
++    const queries = (name: string, flags: number, rrtypes = [A, AAAA]) =>
++      rrtypes.map(rrtype => ({ op: "query", name, rrtype, flags, ifindex: 0, failoverPolicy: 1 }));
++
++    const both = {
++      "host.corp.example 1": [alias, a(10, 0, 0, 10)],
++      "host.corp.example 28": [alias, aaaa(0xfd00, 0x10)],
++    };
++
++    // https://github.com/oven-sh/bun/issues/44075
++    test.concurrent("lookup() queries each family and allows failover to another resolver", async () => {
++      expect(await exchange(both, lookup("host.corp.example"))).toEqual({
++        printed: [
++          { address: "fd00::10", family: 6, ttl: 60 },
++          { address: "10.0.0.10", family: 4, ttl: 60 },
++        ],
++        requests: queries("host.corp.example", baseFlags | suppressUnusable),
++        exitCode: 0,
++      });
++    });
++
++    test.concurrent("lookup() makes the same requests as getaddrinfo()", async () => {
++      const [system, libc] = await Promise.all(
++        ["system", "libc"].map(backend => exchange(both, lookup("host.corp.example", { backend }))),
++      );
++      expect(libc.requests).toHaveLength(2);
++      expect(system.requests).toEqual(libc.requests);
++    });
++
++    test.concurrent("fetch() queries each family and allows failover to another resolver", async () => {
++      const script = `
++        using server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("reached") });
++        const response = await fetch("http://host.corp.example:" + server.port + "/");
++        console.log(JSON.stringify(await response.text()));
++      `;
++      expect(await exchange({ "host.corp.example 1": [alias, a(127, 0, 0, 1)] }, script)).toEqual({
++        printed: "reached",
++        requests: queries("host.corp.example", baseFlags | suppressUnusable),
++        exitCode: 0,
++      });
++    });
++
++    test.concurrent.each([
++      { family: 4, rrtype: A, address: "10.0.0.10" },
++      { family: 6, rrtype: AAAA, address: "fd00::10" },
++    ])("lookup() with family: $family queries that family alone", async ({ family, rrtype, address }) => {
++      expect(await exchange(both, lookup("host.corp.example", { family }))).toEqual({
++        printed: [{ address, family, ttl: 60 }],
++        requests: queries("host.corp.example", baseFlags, [rrtype]),
++        exitCode: 0,
++      });
++    });
++
++    // mDNSResponder tries the search domains for a single label only when the name has no trailing dot.
++    test.concurrent.each(["intranet", "host.corp.example."])("lookup(%j) sends the name as written", async name => {
++      expect(await exchange({ [`${name} 1`]: [a(10, 0, 0, 10)] }, lookup(name))).toEqual({
++        printed: [{ address: "10.0.0.10", family: 4, ttl: 60 }],
++        requests: queries(name, baseFlags | suppressUnusable),
++        exitCode: 0,
++      });
++    });
++
++    test.concurrent("lookup() scopes a link-local address to the interface it was seen on", async () => {
++      const answers = { "printer.local 28": [aaaa(0xfe80, 1, { ifindex: 7 }), aaaa(0xfd00, 1, { ifindex: 7 })] };
++      expect(await exchange(answers, lookup("printer.local"))).toEqual({
++        printed: [
++          { address: "fe80::1%7", family: 6, ttl: 60 },
++          { address: "fd00::1", family: 6, ttl: 60 },
++        ],
++        requests: queries("printer.local", baseFlags | suppressUnusable),
++        exitCode: 0,
++      });
++    });
++
++    test.concurrent("lookup() keeps only well-formed records that were added", async () => {
++      const removed = { ...a(10, 0, 0, 9), flags: 0 };
++      const answers = { "host.corp.example 1": [a(10, 0, 0, 10), removed, a(10, 0, 0)] };
++      expect(await exchange(answers, lookup("host.corp.example"))).toEqual({
++        printed: [{ address: "10.0.0.10", family: 4, ttl: 60 }],
++        requests: queries("host.corp.example", baseFlags | suppressUnusable),
++        exitCode: 0,
++      });
++    });
++
++    // kDNSServiceErr_NoAuth. The daemon reports a question it refuses to start with no record type.
++    const refused: Answer = { rrtype: 0, error: -65555 };
++
++    test.concurrent("lookup() waits for the other family when the daemon refuses one question", async () => {
++      const answers = {
++        "host.corp.example 1": [refused],
++        "host.corp.example 28": [aaaa(0xfd00, 0x10, { after: "second.test" })],
++        "first.test 1": [a(10, 0, 0, 1)],
++        "second.test 1": [a(10, 0, 0, 2)],
++      };
++      // The answer for first.test is behind the refusal on the socket, so the refusal has been read once it resolves.
++      const script = `
++        const host = Bun.dns.lookup("host.corp.example").catch(e => e.code);
++        await Bun.dns.lookup("first.test");
++        await Bun.dns.lookup("second.test");
++        console.log(JSON.stringify(await host));
++      `;
++      expect(await exchange(answers, script)).toEqual({
++        printed: [{ address: "fd00::10", family: 6, ttl: 60 }],
++        requests: ["host.corp.example", "first.test", "second.test"].flatMap(name =>
++          queries(name, baseFlags | suppressUnusable),
++        ),
++        exitCode: 0,
++      });
++    });
++
++    test.concurrent("lookup() reports ENOTFOUND when the daemon refuses both questions", async () => {
++      const answers = { "host.corp.example 1": [refused], "host.corp.example 28": [refused] };
++      expect(await exchange(answers, lookup("host.corp.example"))).toEqual({
++        printed: "DNS_ENOTFOUND",
++        requests: [
++          ...queries("host.corp.example", baseFlags | suppressUnusable),
++          ...queries("host.corp.example", baseFlags),
++        ],
++        exitCode: 0,
++      });
++    });
++
++    test.concurrent("lookup() asks once more without SuppressUnusable before it reports ENOTFOUND", async () => {
++      expect(await exchange({}, lookup("host.corp.example"))).toEqual({
++        printed: "DNS_ENOTFOUND",
++        requests: [
++          ...queries("host.corp.example", baseFlags | suppressUnusable),
++          ...queries("host.corp.example", baseFlags),
++        ],
++        exitCode: 0,
++      });
++    });
++  });
+ });
+diff --git a/test/js/bun/util/bun-file-exists.test.js b/test/js/bun/util/bun-file-exists.test.js
+index dc1a810c..f8526c84 100644
+--- a/test/js/bun/util/bun-file-exists.test.js
++++ b/test/js/bun/util/bun-file-exists.test.js
+@@ -1,6 +1,7 @@
+ import { write } from "bun";
+ import { expect, test } from "bun:test";
+-import { unlinkSync } from "fs";
++import { unlinkSync, writeFileSync } from "fs";
++import { tempDir } from "harness";
+ import { tmpdir } from "os";
+ import { join } from "path";
+ test("bun-file-exists", async () => {
+@@ -18,3 +19,15 @@ test("bun-file-exists", async () => {
+   unlinkSync(temp);
+   expect(await Bun.file(temp).exists()).toBeFalse();
+ });
++
++test.each([
++  ["exists()", file => file.exists()],
++  ["size", file => file.size],
++])("one Bun.file() sees a file that is created after %s found none", async (_, look) => {
++  using dir = tempDir("bun-file-exists-later", {});
++  const file = Bun.file(join(String(dir), "later.txt"));
++  await look(file);
++  expect(await file.exists()).toBeFalse();
++  writeFileSync(file.name, "boop");
++  expect(await file.exists()).toBeTrue();
++});
+diff --git a/test/js/bun/util/inspect.test.js b/test/js/bun/util/inspect.test.js
+index 931e45c7..3549700b 100644
+--- a/test/js/bun/util/inspect.test.js
++++ b/test/js/bun/util/inspect.test.js
+@@ -141,6 +141,34 @@ it("Blob inspect", () => {
+ }`);
+ });
+ 
++it("Response and Request print no size for a Bun.file() body whose size is unknown", () => {
++  using dir = tempDir("inspect-unknown-size", {});
++  const firstLines = file => [
++    Bun.inspect(new Response(file)).split("\n")[0],
++    Bun.inspect(new Request("http://example.com/", { method: "POST", body: file })).split("\n")[0],
++  ];
++  expect({
++    missing: firstLines(Bun.file(join(String(dir), "missing.txt"))),
++    directory: firstLines(Bun.file(String(dir))),
++  }).toEqual({
++    missing: ["Response {", "Request {"],
++    directory: ["Response {", "Request {"],
++  });
++});
++
++it("printing a Response over a Bun.file() that does not exist yet leaves its body as it is", async () => {
++  using dir = tempDir("inspect-missing-then-created", {});
++  const path = join(String(dir), "later.txt");
++  const response = new Response(Bun.file(path));
++  const before = Bun.inspect(response).split("\n")[0];
++  await Bun.write(path, "created");
++  expect({ before, after: Bun.inspect(response).split("\n")[0], text: await response.text() }).toEqual({
++    before: "Response {",
++    after: "Response (7 bytes) {",
++    text: "created",
++  });
++});
++
+ it("utf16 property name", () => {
+   var { Database } = require("bun:sqlite");
+   const db = Database.open(":memory:");
+diff --git a/test/js/bun/util/sleepSync.test.ts b/test/js/bun/util/sleepSync.test.ts
+index 45361c2b..99a9f820 100644
+--- a/test/js/bun/util/sleepSync.test.ts
++++ b/test/js/bun/util/sleepSync.test.ts
+@@ -1,5 +1,6 @@
+ import { sleepSync } from "bun";
+ import { expect, it } from "bun:test";
++import { bunEnv, bunExe, isASAN } from "harness";
+ 
+ it("sleepSync uses milliseconds", async () => {
+   const start = performance.now();
+@@ -28,3 +29,49 @@ it("sleepSync with negative number throws", async () => {
+ it("can map with sleepSync", async () => {
+   [1, 2, 3].map(sleepSync);
+ });
++
++// Free blocks inside pages that are still in use belong to the thread that owns the pages. They go back to the OS
++// when that thread tells mimalloc that it is about to block.
++it.skipIf(isASAN /* malloc is not mimalloc */)(
++  "sleepSync lets mimalloc release this thread's free memory",
++  async () => {
++    await using proc = Bun.spawn({
++      cmd: [
++        bunExe(),
++        "-e",
++        `
++      const { heapStats } = require("bun:jsc");
++      const purgeCalls = () => heapStats().mimalloc.purge_calls;
++      const spin = ms => { const start = performance.now(); while (performance.now() - start < ms); };
++
++      // the characters of these strings are allocated and freed by this thread
++      let strings = [];
++      for (let i = 0; i < 100000; i++) strings.push(Buffer.alloc(900 + (i % 5) * 8, 97).toString("latin1"));
++      // (far enough apart that whole OS pages are free in between, also where those are 16 KB)
++      strings = strings.filter((_, i) => i % 64 === 0);
++      Bun.gc(true);
++
++      // what needs no idle thread settles first, without going idle
++      let before = purgeCalls();
++      for (let stable = 0, tries = 0; stable < 3 && tries < 50; tries++) {
++        spin(60);
++        const now = purgeCalls();
++        stable = now === before ? stable + 1 : 0;
++        before = now;
++      }
++
++      let released = 0;
++      for (let i = 0; i < 20 && released < 500; i++) {
++        Bun.sleepSync(100);
++        released = purgeCalls() - before;
++      }
++      console.log(released >= 500, strings.length);
++      `,
++      ],
++      env: bunEnv,
++      stderr: "pipe",
++    });
++    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
++    expect({ stdout, stderr, exitCode }).toEqual({ stdout: "true 1563\n", stderr: "", exitCode: 0 });
++  },
++);
+diff --git a/test/js/bun/wasm/compile-rss-fixture.mjs b/test/js/bun/wasm/compile-rss-fixture.mjs
+new file mode 100644
+index 00000000..c5ff8e8b
+--- /dev/null
++++ b/test/js/bun/wasm/compile-rss-fixture.mjs
+@@ -0,0 +1,145 @@
++// Fixture for compile-rss.test.ts. Compiles a generated wasm module 6 times, discards each result,
++// then polls RSS until it falls below the target (argv[2], MiB) or the deadline passes. The idle
++// compiler threads exit after 10 s and release everything then, so the deadline stays well below
++// that. Prints one JSON line with the lowest RSS growth seen, relative to the RSS before the first
++// compile.
++
++class Bytes {
++  constructor() {
++    this.buf = new Uint8Array(1 << 20);
++    this.len = 0;
++  }
++  push(...bytes) {
++    for (const b of bytes) this.byte(b);
++  }
++  byte(b) {
++    if (this.len === this.buf.length) {
++      const next = new Uint8Array(this.buf.length * 2);
++      next.set(this.buf);
++      this.buf = next;
++    }
++    this.buf[this.len++] = b;
++  }
++  leb(n) {
++    do {
++      let b = n & 0x7f;
++      n >>>= 7;
++      if (n !== 0) b |= 0x80;
++      this.byte(b);
++    } while (n !== 0);
++  }
++  append(other) {
++    for (let i = 0; i < other.len; i++) this.byte(other.buf[i]);
++  }
++  section(id, payload) {
++    this.byte(id);
++    this.leb(payload.len);
++    this.append(payload);
++  }
++  bytes() {
++    return this.buf.subarray(0, this.len);
++  }
++}
++
++// A module shaped like a tree-sitter parser: a few dozen functions of 20 to 30 KB of control-flow
++// heavy code, plus one giant function. Compiling it makes each wasm compiler thread allocate and
++// free tens of MB of temporaries. Uniform modules of many small functions do not show the
++// retention: their pages end up fully free and mimalloc's scavenger purges them on its own.
++function makeModule({ functionCount = 35, opsPerFunction = 1400, giantOps = 30000 } = {}) {
++  const out = new Bytes();
++  out.push(0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00);
++
++  // type 0: (i32, i32) -> i32
++  const types = new Bytes();
++  types.push(1, 0x60, 2, 0x7f, 0x7f, 1, 0x7f);
++  out.section(1, types);
++
++  const funcs = new Bytes();
++  funcs.leb(functionCount);
++  for (let f = 0; f < functionCount; f++) funcs.byte(0);
++  out.section(3, funcs);
++
++  const exports = new Bytes();
++  exports.push(1, 1, 0x66, 0x00, 0); // export "f" = func 0
++  out.section(7, exports);
++
++  const code = new Bytes();
++  code.leb(functionCount);
++  for (let f = 0; f < functionCount; f++) {
++    const ops = f === 0 ? giantOps : opsPerFunction + ((f * 7919) % 400);
++    const body = new Bytes();
++    body.push(1, 1, 0x7f); // one local group: 1 x i32
++    body.push(0x20, 0); // local.get 0
++    for (let i = 0; i < ops; i++) {
++      // block
++      //   local.get 1; i32.const k; i32.add; local.tee 2
++      //   br_table {0,0,0,0} 0
++      //   local.get 2; local.get 0; call g; drop
++      // end
++      // local.get 2; i32.xor
++      body.push(0x02, 0x40, 0x20, 1, 0x41);
++      body.leb((f * 31 + i * 7) & 0x3f);
++      body.push(0x6a, 0x22, 2, 0x0e, 4, 0, 0, 0, 0, 0, 0x20, 2, 0x20, 0, 0x10);
++      body.leb((f + 1) % functionCount);
++      body.push(0x1a, 0x0b, 0x20, 2, 0x73);
++    }
++    body.byte(0x0b); // end
++    code.leb(body.len);
++    code.append(body);
++  }
++  out.section(10, code);
++  return out.bytes();
++}
++
++const targetMiB = Number(process.argv[2]);
++if (!Number.isFinite(targetMiB)) throw new Error(`expected the target in MiB as argv[2], got ${process.argv[2]}`);
++// On Darwin mimalloc returns memory with MADV_FREE_REUSABLE, which the kernel keeps counted in RSS
++// until it reuses the pages. phys_footprint drops at once, so measure that there. memoryFootprint()
++// returns undefined when task_info fails, so fall back to RSS.
++const rss = () =>
++  (process.platform === "darwin" ? Bun.unsafe.memoryFootprint?.() : undefined) ?? process.memoryUsage.rss();
++const sleep = ms => new Promise(r => setTimeout(r, ms));
++const bytes = makeModule();
++
++// Building the module leaves garbage behind. Wait until RSS stops falling before taking the
++// baseline: mimalloc hands freed memory back on its own schedule, and there is no signal for it.
++let base = Infinity;
++const baseDeadline = performance.now() + 2000;
++do {
++  Bun.gc(true);
++  await sleep(50);
++  const now = rss();
++  if (now >= base - 1048576) break;
++  base = now;
++} while (performance.now() < baseDeadline);
++// Each compile adds to what the unfixed threads keep (8 threads: 18 to 27 MiB after 3 compiles,
++// 35 to 39 MiB after 6) and costs about 20 ms. The fixed build returns to the baseline either way.
++for (let i = 0; i < 6; i++) {
++  let mod = await WebAssembly.compile(bytes);
++  mod = null;
++}
++// Read before anything is freed: the test checks that the compiles grew RSS at all.
++const peak = rss() - base;
++// Free the modules. The main thread frees their metadata into the compiler threads' pages, and only
++// those threads can hand that memory back. They do so once they have worked and gone idle again, so
++// give each of them one trivial function to compile after the modules are gone.
++Bun.gc(true);
++await WebAssembly.compile(makeModule({ functionCount: 16, opsPerFunction: 1, giantOps: 1 }));
++Bun.gc(true);
++const afterCompiles = rss() - base;
++
++const deadline = performance.now() + 3000;
++let min = Infinity;
++do {
++  await sleep(100);
++  Bun.gc(true);
++  min = Math.min(min, rss() - base);
++} while (performance.now() < deadline && min / 1048576 >= targetMiB);
++console.log(
++  JSON.stringify({
++    moduleMiB: bytes.length / 1048576,
++    peakDeltaMiB: peak / 1048576,
++    afterCompilesDeltaMiB: afterCompiles / 1048576,
++    idleDeltaMiB: min / 1048576,
++  }),
++);
+diff --git a/test/js/bun/wasm/compile-rss.test.ts b/test/js/bun/wasm/compile-rss.test.ts
+new file mode 100644
+index 00000000..8987962c
+--- /dev/null
++++ b/test/js/bun/wasm/compile-rss.test.ts
+@@ -0,0 +1,38 @@
++import { expect, test } from "bun:test";
++import { bunEnv, bunExe, isASAN, isDebug } from "harness";
++import path from "node:path";
++
++// Unfixed, the 8 idle wasm compiler threads keep 35 to 39 MiB of freed compile temporaries until
++// they exit after 10 s. Fixed, they release it about 100 ms after the last compile and RSS returns
++// to where it started.
++const idleTargetMiB = 10;
++
++// Debug and ASAN builds link a JavaScriptCore that does not allocate through mimalloc, so the
++// per-thread retention this test checks for does not exist there.
++test.skipIf(isDebug || isASAN)(
++  "WebAssembly.compile does not retain memory in idle compiler threads (#41438)",
++  async () => {
++    await using proc = Bun.spawn({
++      cmd: [bunExe(), path.join(import.meta.dir, "compile-rss-fixture.mjs"), String(idleTargetMiB)],
++      env: {
++        ...bunEnv,
++        // The retained amount scales with the compiler thread count. Pin it so the test does not
++        // depend on the core count of the machine.
++        BUN_JSC_numberOfWasmCompilerThreads: "8",
++      },
++      stdout: "pipe",
++      stderr: "pipe",
++    });
++    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
++    expect(stderr).toBe("");
++    const result = JSON.parse(stdout.trim().split("\n").at(-1)!);
++    // The whole measurement is in the object so a failure prints it. The compiles have to grow RSS
++    // well past the target first, or the idle check means nothing.
++    expect({
++      ...result,
++      grew: result.peakDeltaMiB > idleTargetMiB * 2,
++      released: result.idleDeltaMiB < idleTargetMiB,
++    }).toMatchObject({ grew: true, released: true });
++    expect(exitCode).toBe(0);
++  },
++);
+diff --git a/test/js/node/buffer.test.js b/test/js/node/buffer.test.js
+index 01ad7373..a2df8e1a 100644
+--- a/test/js/node/buffer.test.js
++++ b/test/js/node/buffer.test.js
+@@ -4527,6 +4527,136 @@ describe("raw <enc>Slice / <enc>Write bindings match Node", () => {
+       expect(buf.toString("hex")).toBe(untouched);
+     });
+ 
++    // Node's native writers start with THROW_AND_RETURN_IF_NOT_STRING: they reject a value
++    // that is not a primitive string and never coerce it.
++    describe("with a value that is not a string", () => {
++      const NOT_A_STRING = expect.objectContaining({
++        code: "ERR_INVALID_ARG_TYPE",
++        message: "argument must be a string",
++      });
++      const nonStrings = () => [
++        123,
++        null,
++        undefined,
++        true,
++        1n,
++        Symbol("s"),
++        {},
++        [],
++        new String("ab"),
++        Buffer.from("ab"),
++        () => {},
++      ];
++
++      it.each([...strict, ...clamping])("%s throws ERR_INVALID_ARG_TYPE", method => {
++        const buf = dest();
++        for (const value of nonStrings()) {
++          expect(() => buf[method](value)).toThrow(NOT_A_STRING);
++          expect(() => buf[method](value, 0, 1)).toThrow(NOT_A_STRING);
++        }
++        expect(() => buf[method]()).toThrow(NOT_A_STRING);
++        expect(() => buf[method](123)).toThrow(TypeError);
++        expect(buf.toString("hex")).toBe(untouched);
++      });
++
++      it.each([...strict, ...clamping])("%s does not coerce an object value", method => {
++        const calls = [];
++        const value = {
++          toString() {
++            calls.push("toString");
++            return source[method];
++          },
++          valueOf() {
++            calls.push("valueOf");
++            return source[method];
++          },
++          [Symbol.toPrimitive]() {
++            calls.push("toPrimitive");
++            return source[method];
++          },
++        };
++        // The handler is a Proxy too, so a lookup of any trap is recorded. A message built
++        // from the value would show up here as a `get` of "constructor".
++        const proxy = new Proxy(value, new Proxy({}, { get: (_, trap) => void calls.push(`trap ${trap}`) }));
++        const buf = dest();
++        expect(() => buf[method](value)).toThrow(NOT_A_STRING);
++        expect(() => buf[method](proxy)).toThrow(NOT_A_STRING);
++        expect(calls).toEqual([]);
++        expect(buf.toString("hex")).toBe(untouched);
++      });
++
++      it.each([...strict, ...clamping])("%s throws on an empty, a detached and a plain Uint8Array receiver", method => {
++        const detached = Buffer.from(new ArrayBuffer(9));
++        structuredClone(detached.buffer, { transfer: [detached.buffer] });
++        expect(() => Buffer.alloc(0)[method](123)).toThrow(NOT_A_STRING);
++        expect(() => detached[method](123)).toThrow(NOT_A_STRING);
++        expect(() => Buffer.prototype[method].call(new Uint8Array(9), 123)).toThrow(NOT_A_STRING);
++      });
++
++      // utf8Write/latin1Write/asciiWrite check the bounds in a JS wrapper first. The native
++      // writer sees the value only after that, so a bounds error wins.
++      it.each(strict)("%s reports an out-of-bounds offset or length first", method => {
++        const buf = dest();
++        expect(() => buf[method](123, -1)).toThrow(OUT_OF_BOUNDS);
++        expect(() => buf[method](123, 10)).toThrow(OUT_OF_BOUNDS);
++        expect(() => buf[method](123, Infinity)).toThrow(OUT_OF_BOUNDS);
++        expect(() => buf[method](123, 0, -1)).toThrow(OUT_OF_BOUNDS);
++        expect(() => buf[method](123, 0, 10)).toThrow(OUT_OF_BOUNDS);
++        expect(() => buf[method](123, 6, 4)).toThrow(OUT_OF_BOUNDS);
++        // In bounds, including the ranges that leave nothing to write.
++        expect(() => buf[method](123, 9)).toThrow(NOT_A_STRING);
++        expect(() => buf[method](123, 0, 0)).toThrow(NOT_A_STRING);
++        expect(() => buf[method](123, NaN)).toThrow(NOT_A_STRING);
++        expect(() => buf[method](123, NaN, NaN)).toThrow(NOT_A_STRING);
++        expect(() => buf[method](123, "abc")).toThrow(NOT_A_STRING);
++        expect(() => buf[method](123, 1.5)).toThrow(NOT_A_STRING);
++      });
++
++      it.each(strict)("%s converts offset and length before it rejects the value", method => {
++        const converted = [];
++        const arg = (name, result) => ({
++          valueOf() {
++            if (!converted.includes(name)) converted.push(name);
++            return result;
++          },
++        });
++        expect(() => dest()[method](123, arg("offset", 0), arg("length", 1))).toThrow(NOT_A_STRING);
++        expect(converted).toEqual(["offset", "length"]);
++
++        const throwing = message => ({
++          valueOf() {
++            throw new Error(message);
++          },
++        });
++        expect(() => dest()[method](123, throwing("offset valueOf"))).toThrow("offset valueOf");
++        expect(() => dest()[method](123, 0, throwing("length valueOf"))).toThrow("length valueOf");
++      });
++
++      // base64/base64url/hex/ucs2 are the raw binding. It rejects the value before it reads
++      // offset or length, so the value error wins and neither argument is converted.
++      it.each(clamping)("%s rejects the value before it reads offset and length", method => {
++        const buf = dest();
++        expect(() => buf[method](123, -1)).toThrow(NOT_A_STRING);
++        expect(() => buf[method](123, 10)).toThrow(NOT_A_STRING);
++        expect(() => buf[method](123, Infinity)).toThrow(NOT_A_STRING);
++        expect(() => buf[method](123, 0, -1)).toThrow(NOT_A_STRING);
++        expect(() => buf[method](123, 9, 1)).toThrow(NOT_A_STRING);
++        expect(() => buf[method](123, 0, 0)).toThrow(NOT_A_STRING);
++        expect(() => buf[method](123, NaN, NaN)).toThrow(NOT_A_STRING);
++
++        const converted = [];
++        const arg = name => ({
++          valueOf() {
++            converted.push(name);
++            throw new Error(`${name} valueOf`);
++          },
++        });
++        expect(() => buf[method](123, arg("offset"), arg("length"))).toThrow(NOT_A_STRING);
++        expect(converted).toEqual([]);
++        expect(buf.toString("hex")).toBe(untouched);
++      });
++    });
++
+     it("the documented write() wrapper is unchanged", () => {
+       const buf = dest();
+       expect(() => buf.write("hello", 6, 1000)).toThrow(expect.objectContaining({ code: "ERR_OUT_OF_RANGE" }));
+diff --git a/test/js/node/tls/node-tls-duplex-end-verify.test.ts b/test/js/node/tls/node-tls-duplex-end-verify.test.ts
+index 81dd7b37..f4a8c29d 100644
+--- a/test/js/node/tls/node-tls-duplex-end-verify.test.ts
++++ b/test/js/node/tls/node-tls-duplex-end-verify.test.ts
+@@ -981,3 +981,154 @@ test("a bad record behind the client's Finished does not make a server accept an
+   // Node reports the bad record. Its code depends on the cipher, so only the class of the error is fixed.
+   assert.match(events[0], isBun ? /^tlsClientError DEPTH_ZERO_SELF_SIGNED_CERT$/ : /^tlsClientError ERR_SSL_/);
+ });
++
++// A client calls end() before the first step of its handshake. Returns the ordered events of the client.
++async function endBeforeClientHello(
++  when,
++  maxVersion,
++  rejectUnauthorized,
++  { trusted = false, servername = "agent1" } = {},
++) {
++  const events = [];
++  const { promise, resolve } = Promise.withResolvers();
++  const server = tls.createServer({ key, cert, maxVersion }, socket => socket.on("error", () => {}));
++  server.on("tlsClientError", () => {});
++  await new Promise(listening => server.listen(0, "127.0.0.1", listening));
++  const client = tls.connect({
++    port: server.address().port,
++    host: "127.0.0.1",
++    servername,
++    rejectUnauthorized,
++    maxVersion,
++    ...(trusted && { ca: serverCA }),
++  });
++  if (when === "in the same tick") client.end();
++  else if (when === "in the next tick") process.nextTick(() => client.end());
++  else client.on("connect", () => client.end());
++  for (const event of ["finish", "secureConnect", "end"]) client.on(event, () => events.push(event));
++  client.on("error", err => events.push(`error ${err.code}`));
++  client.on("close", () => {
++    events.push("close");
++    resolve();
++  });
++  await promise;
++  server.close();
++  return events;
++}
++
++for (const when of ["in the same tick", "in the next tick", "inside 'connect'"]) {
++  test(`TLSv1.3: end() ${when} still refuses an untrusted certificate`, async () => {
++    assert.deepStrictEqual(await endBeforeClientHello(when, "TLSv1.3", true), [
++      "finish",
++      "error UNABLE_TO_VERIFY_LEAF_SIGNATURE",
++      "close",
++    ]);
++  });
++
++  test(`TLSv1.3: end() ${when} still refuses a certificate for another name`, async () => {
++    const wrongName = { trusted: true, servername: "another.name" };
++    assert.deepStrictEqual(await endBeforeClientHello(when, "TLSv1.3", true, wrongName), [
++      "finish",
++      "error ERR_TLS_CERT_ALTNAME_INVALID",
++      "close",
++    ]);
++  });
++
++  test(`TLSv1.3: end() ${when} still completes the handshake`, async () => {
++    assert.deepStrictEqual(await endBeforeClientHello(when, "TLSv1.3", false), [
++      "finish",
++      "secureConnect",
++      "end",
++      "close",
++    ]);
++  });
++
++  test(`TLSv1.2: end() ${when} reports the handshake that the server cannot complete`, async () => {
++    // The client cannot send its second flight after the FIN, so the handshake ends when the server closes.
++    assert.deepStrictEqual(await endBeforeClientHello(when, "TLSv1.2", false), [
++      "finish",
++      "end",
++      "error ECONNRESET",
++      "close",
++    ]);
++  });
++}
++
++test("end() inside 'connect' still reports a ClientHello that the client cannot build", async () => {
++  const events = [];
++  const { promise, resolve } = Promise.withResolvers();
++  const server = tls.createServer({ key, cert }, socket => socket.on("error", () => {}));
++  server.on("tlsClientError", () => {});
++  await new Promise(listening => server.listen(0, "127.0.0.1", listening));
++  // No protocol version is inside this window, so the first step of the handshake fails.
++  const client = tls.connect({
++    port: server.address().port,
++    host: "127.0.0.1",
++    rejectUnauthorized: false,
++    minVersion: "TLSv1.3",
++    maxVersion: "TLSv1.2",
++  });
++  client.on("connect", () => client.end());
++  client.on("secureConnect", () => events.push("secureConnect"));
++  client.on("error", err => events.push(`error ${err.code}`));
++  client.on("close", () => {
++    events.push("close");
++    resolve();
++  });
++  await promise;
++  server.close();
++  // OpenSSL and BoringSSL name the reason differently.
++  assert.match(events.join(", "), /^error ERR_SSL_NO_(PROTOCOLS_AVAILABLE|SUPPORTED_VERSIONS_ENABLED), close$/);
++});
++
++test("end() inside 'connect' sends the ClientHello before the FIN", async () => {
++  const { promise, resolve, reject } = Promise.withResolvers();
++  let accepted;
++  const server = net.createServer({ allowHalfOpen: true }, socket => {
++    accepted = socket;
++    const received = [];
++    socket.on("error", reject);
++    socket.on("data", chunk => received.push(chunk));
++    socket.on("end", () => resolve(Buffer.concat(received)));
++  });
++  await new Promise(listening => server.listen(0, "127.0.0.1", listening));
++  const client = tls.connect({ port: server.address().port, host: "127.0.0.1", rejectUnauthorized: false });
++  client.on("error", () => {});
++  client.on("connect", () => client.end());
++  const beforeFin = await promise;
++  client.destroy();
++  accepted.destroy();
++  server.close();
++  // One complete handshake record: the ClientHello.
++  assert.deepStrictEqual(
++    { type: beforeFin[0], complete: beforeFin.length >= 5 && beforeFin.length === 5 + beforeFin.readUInt16BE(3) },
++    { type: 22, complete: true },
++  );
++});
++
++test("end() after a second connect() of the same socket sends no ClientHello", async () => {
++  // Only tls.connect() starts a handshake: https://github.com/nodejs/node/blob/v26.3.0/lib/internal/tls/wrap.js#L1795
++  const received = [];
++  const second = Promise.withResolvers();
++  const server = net.createServer(socket => {
++    let bytes = 0;
++    socket.on("error", second.reject);
++    socket.on("data", chunk => (bytes += chunk.length));
++    socket.on("end", () => received.push(bytes) === 2 && second.resolve());
++  });
++  await new Promise(listening => server.listen(0, "127.0.0.1", listening));
++  const where = { port: server.address().port, host: "127.0.0.1" };
++  const client = tls.connect({ ...where, rejectUnauthorized: false });
++  client.on("error", () => {});
++  client.end();
++  await new Promise(closed => client.once("close", closed));
++  client.connect(where);
++  client.end();
++  try {
++    await second.promise;
++    assert.strictEqual(received[1], 0);
++  } finally {
++    client.destroy();
++    server.close();
++  }
++});
+diff --git a/test/js/web/atomics.test.ts b/test/js/web/atomics.test.ts
+index a36b5cf8..673821d3 100644
+--- a/test/js/web/atomics.test.ts
++++ b/test/js/web/atomics.test.ts
+@@ -1,4 +1,5 @@
+ import { describe, expect, test } from "bun:test";
++import { bunEnv, bunExe, isASAN } from "harness";
+ 
+ describe("Atomics", () => {
+   describe("basic operations", () => {
+@@ -307,3 +308,118 @@ describe("Atomics", () => {
+     });
+   });
+ });
++
++// Free blocks inside pages that are still in use belong to the thread that owns the pages. They go back to the OS
++// when that thread tells mimalloc that it is idle, which a wait that takes a while does.
++test.skipIf(isASAN /* malloc is not mimalloc */)(
++  "Atomics.wait lets mimalloc release this thread's free memory",
++  async () => {
++    await using proc = Bun.spawn({
++      cmd: [
++        bunExe(),
++        "-e",
++        `
++      const { heapStats } = require("bun:jsc");
++      const purgeCalls = () => heapStats().mimalloc.purge_calls;
++      const spin = ms => { const start = performance.now(); while (performance.now() - start < ms); };
++
++      // the characters of these strings are allocated and freed by this thread
++      let strings = [];
++      for (let i = 0; i < 100000; i++) strings.push(Buffer.alloc(900 + (i % 5) * 8, 97).toString("latin1"));
++      // (far enough apart that whole OS pages are free in between, also where those are 16 KB)
++      strings = strings.filter((_, i) => i % 64 === 0);
++      Bun.gc(true);
++
++      // what needs no idle thread settles first, without going idle
++      let before = purgeCalls();
++      for (let stable = 0, tries = 0; stable < 3 && tries < 50; tries++) {
++        spin(60);
++        const now = purgeCalls();
++        stable = now === before ? stable + 1 : 0;
++        before = now;
++      }
++
++      const view = new Int32Array(new SharedArrayBuffer(4));
++      let released = 0;
++      for (let i = 0; i < 10 && released < 500; i++) {
++        if (Atomics.wait(view, 0, 0, 250) !== "timed-out") throw new Error("unexpected result");
++        released = purgeCalls() - before;
++      }
++      console.log(released >= 500, strings.length);
++      `,
++      ],
++      env: bunEnv,
++      stderr: "pipe",
++    });
++    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
++    expect({ stdout, stderr, exitCode }).toEqual({ stdout: "true 1563\n", stderr: "", exitCode: 0 });
++  },
++);
++
++// 100 ms into a wait the waiter drops the lock of the waiter list to release its memory, and takes it again.
++test.skipIf(isASAN /* malloc is not mimalloc */)(
++  "a notify that arrives while Atomics.wait releases this thread's free memory is not lost",
++  async () => {
++    await using proc = Bun.spawn({
++      cmd: [
++        bunExe(),
++        "-e",
++        `
++      const view = new Int32Array(new SharedArrayBuffer(16));
++      const [VALUE, WAITING, LAST] = [0, 1, 2];
++      const worker = new Worker(
++        URL.createObjectURL(
++          new Blob(
++            [
++              \`
++              self.onmessage = event => {
++                const view = new Int32Array(event.data);
++                const results = [];
++                for (;;) {
++                  // Free memory in between what is in use, so that the release has something to do and takes a while.
++                  let strings = [];
++                  for (let i = 0; i < 100000; i++) strings.push(Buffer.alloc(900 + (i % 5) * 8, 97).toString("latin1"));
++                  strings = strings.filter((_, i) => i % 64 === 0);
++                  Bun.gc(true);
++                  Atomics.store(view, 1, 1);
++                  // A waiter that misses its notification is off the list already: it sleeps for the whole
++                  // timeout and then still answers "ok".
++                  const start = performance.now();
++                  const result = Atomics.wait(view, 0, 0, 10000);
++                  results.push(performance.now() - start > 5000 ? "late" : result);
++                  Atomics.store(view, 0, 0);
++                  if (Atomics.load(view, 2)) return postMessage(results);
++                }
++              };
++              \`,
++            ],
++            { type: "application/javascript" },
++          ),
++        ),
++      );
++      worker.postMessage(view.buffer);
++      const results = new Promise(resolve => (worker.onmessage = event => resolve(event.data)));
++      const delays = [];
++      for (let delay = 100; delay <= 107; delay += 1) delays.push(delay);
++      for (const delay of delays) {
++        while (Atomics.load(view, WAITING) !== 1);
++        Atomics.store(view, WAITING, 0);
++        const start = performance.now();
++        while (performance.now() - start < delay);
++        if (delay === delays.at(-1)) Atomics.store(view, LAST, 1);
++        Atomics.store(view, VALUE, 1);
++        Atomics.notify(view, VALUE);
++      }
++      // ("not-equal" if the worker was held up for that long before it got to wait)
++      console.log(JSON.stringify((await results).filter(result => result !== "ok" && result !== "not-equal")), delays.length);
++      process.exit(0);
++      `,
++      ],
++      env: bunEnv,
++      stderr: "pipe",
++    });
++    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
++    expect({ stdout, stderr, exitCode }).toEqual({ stdout: "[] 8\n", stderr: "", exitCode: 0 });
++  },
++  30_000,
++);
+diff --git a/test/js/web/fetch/body-clone.test.ts b/test/js/web/fetch/body-clone.test.ts
+index 2b1a4094..19e732ce 100644
+--- a/test/js/web/fetch/body-clone.test.ts
++++ b/test/js/web/fetch/body-clone.test.ts
+@@ -1,5 +1,6 @@
+ import { describe, expect, test } from "bun:test";
+-import { bunEnv, bunExe, isASAN, isDebug, isWindows, tempDirWithFiles } from "harness";
++import { bunEnv, bunExe, isASAN, isDebug, isLinux, isWindows, tempDirWithFiles } from "harness";
++import { closeSync, openSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+ import net from "node:net";
+ import { join } from "node:path";
+ 
+@@ -1171,6 +1172,18 @@ describe("clone() of a body over an unread native stream keeps the Blob behind i
+     expect(await cloneInChild("Bun.stdin")).toEqual(bothBodiesReadStdin);
+   });
+ 
++  // Reads of one fd share its offset, so the second Blob would start where the first one ended.
++  test("a body over a regular file given by file descriptor is teed, not duped", async () => {
++    const fd = openSync(join(tempDirWithFiles("body-clone-fd", { "a.txt": "hello world" }), "a.txt"), "r");
++    try {
++      const original = new Response(Bun.file(fd));
++      const clone = original.clone();
++      expect(await Promise.all([original.text(), clone.text()])).toEqual(["hello world", "hello world"]);
++    } finally {
++      closeSync(fd);
++    }
++  });
++
+   // The same store kind reached by path: stat says it is not a regular file.
+   test.skipIf(isWindows)("a body over a FIFO opened by path is still teed", async () => {
+     const fifo = join(tempDirWithFiles("body-clone-fifo", {}), "body.fifo");
+@@ -1183,6 +1196,159 @@ describe("clone() of a body over an unread native stream keeps the Blob behind i
+     expect(await cloneInChild("Bun.file(process.argv.at(-1)).stream()", [fifo])).toEqual(bothBodiesReadStdin);
+     expect(await writer.exited).toBe(0);
+   });
++
++  test.skipIf(isWindows)("a body over a FIFO given by path as the Blob itself is teed, not duped", async () => {
++    const fifo = join(tempDirWithFiles("body-clone-fifo-blob", {}), "body.fifo");
++    expect(Bun.spawnSync({ cmd: ["mkfifo", fifo] }).exitCode).toBe(0);
++    await using writer = Bun.spawn({
++      cmd: ["sh", "-c", `printf 'hello world' > "$1"`, "sh", fifo],
++      stdout: "ignore",
++      stderr: "inherit",
++    });
++    expect(await cloneInChild("Bun.file(process.argv.at(-1))", [fifo])).toEqual(bothBodiesReadStdin);
++    expect(await writer.exited).toBe(0);
++  });
++
++  // The body shares its store with the Bun.file() it was made from. A stat cached
++  // there is what `size`, `lastModified`, `exists()` and a later `.body` answer from.
++  describe("clone() of a Bun.file() body does not change what the Bun.file() answers", () => {
++    const post = (body: Bun.BunFile) => new Request("http://example.com/", { method: "POST", body });
++    const cloners: Array<[string, (file: Bun.BunFile) => unknown]> = [
++      ["Response.clone()", file => new Response(file).clone()],
++      ["Request.clone()", file => post(file).clone()],
++      ["new Request(request)", file => new Request(post(file))],
++      ["new Request(request, init)", file => new Request(post(file), { headers: { "x-test": "1" } })],
++      // @ts-expect-error Bun takes a Response as init and clones its body.
++      ["new Request(url, response)", file => new Request("http://example.com/", new Response(file))],
++    ];
++
++    async function afterClone<T>(
++      clone: (file: Bun.BunFile) => unknown,
++      change: (path: string) => void,
++      read: (file: Bun.BunFile) => T | Promise<T>,
++    ) {
++      const path = join(tempDirWithFiles("body-clone-answers", { "log.txt": "12345" }), "log.txt");
++      const file = Bun.file(path);
++      clone(file);
++      change(path);
++      return await read(file);
++    }
++    const grow = (path: string) => writeFileSync(path, "123456789");
++
++    test.each(cloners)("%s: size and a later body see a file that grew", async (_, clone) => {
++      expect({
++        size: await afterClone(clone, grow, file => file.size),
++        body: await afterClone(clone, grow, file => Bun.readableStreamToText(new Response(file).body!)),
++      }).toEqual({ size: 9, body: "123456789" });
++    });
++
++    test("lastModified and exists() see a file that changed", async () => {
++      const clone = cloners[0][1];
++      const mtime = new Date("2033-05-18T03:33:20.000Z");
++      expect({
++        lastModified: await afterClone(
++          clone,
++          path => utimesSync(path, mtime, mtime),
++          file => file.lastModified,
++        ),
++        exists: await afterClone(clone, unlinkSync, file => file.exists()),
++      }).toEqual({ lastModified: mtime.getTime(), exists: false });
++    });
++
++    test("both bodies see a file that grew", async () => {
++      const path = join(tempDirWithFiles("body-clone-grew", { "log.txt": "12345" }), "log.txt");
++      const original = new Response(Bun.file(path));
++      const clone = original.clone();
++      grow(path);
++      expect(await Promise.all([original.body, clone.body].map(body => Bun.readableStreamToText(body!)))).toEqual([
++        "123456789",
++        "123456789",
++      ]);
++    });
++
++    test("exists() sees a file that was created before the clone", async () => {
++      const path = join(tempDirWithFiles("body-clone-created", {}), "later.txt");
++      const file = Bun.file(path);
++      expect(await file.exists()).toBe(false);
++      writeFileSync(path, "12345");
++      new Response(file).clone();
++      expect(await file.exists()).toBe(true);
++    });
++
++    test("the size console.log prints for the clone", () => {
++      const sizeOf = (change: (path: string) => void, body: (file: Bun.BunFile) => Blob) => {
++        const path = join(tempDirWithFiles("body-clone-label", { "log.txt": "12345" }), "log.txt");
++        const clone = new Response(body(Bun.file(path))).clone();
++        change(path);
++        return [Bun.inspect(clone), Bun.inspect(clone)].map(printed => printed.split("\n")[0]).join(" ");
++      };
++      expect({
++        whole: sizeOf(
++          () => {},
++          file => file,
++        ),
++        slice: sizeOf(
++          () => {},
++          file => file.slice(1, 4),
++        ),
++        grew: sizeOf(grow, file => file),
++        deleted: sizeOf(unlinkSync, file => file),
++      }).toEqual({
++        whole: "Response (5 bytes) { Response (5 bytes) {",
++        slice: "Response (3 bytes) { Response (3 bytes) {",
++        grew: "Response (9 bytes) { Response (9 bytes) {",
++        deleted: "Response { Response {",
++      });
++    });
++
++    // procfs reports `st_size == 0` for a file that has content, so with that stat cached all three read "".
++    test.skipIf(!isLinux)("a procfs file is read whole", async () => {
++      const file = Bun.file("/proc/sys/kernel/ostype");
++      const original = new Response(file);
++      const clone = original.clone();
++      expect({
++        original: await original.text(),
++        clone: await clone.text(),
++        file: await file.text(),
++      }).toEqual({ original: "Linux\n", clone: "Linux\n", file: "Linux\n" });
++    });
++  });
++
++  // No bytes to compete for: it is duped like a regular file, and each body fails when it is read.
++  describe("clone() of a body that cannot be read does not throw", () => {
++    const sizeRead = (file: Bun.BunFile) => (file.size, file);
++    const directory = () => tempDirWithFiles("body-clone-dir", {});
++
++    async function codes(file: Bun.BunFile) {
++      const original = new Response(file);
++      const clone = original.clone();
++      const results = await Promise.allSettled([original.text(), clone.text()]);
++      return results.map(result => (result.status === "rejected" ? result.reason?.code : result.status));
++    }
++
++    test("a directory by path", async () => {
++      expect({
++        fresh: await codes(Bun.file(directory())),
++        sizeRead: await codes(sizeRead(Bun.file(directory()))),
++      }).toEqual({ fresh: ["EISDIR", "EISDIR"], sizeRead: ["EISDIR", "EISDIR"] });
++    });
++
++    test.skipIf(isWindows)("a directory by file descriptor", async () => {
++      const fd = openSync(directory(), "r");
++      try {
++        expect({
++          fresh: await codes(Bun.file(fd)),
++          sizeRead: await codes(sizeRead(Bun.file(fd))),
++        }).toEqual({ fresh: ["EISDIR", "EISDIR"], sizeRead: ["EISDIR", "EISDIR"] });
++      } finally {
++        closeSync(fd);
++      }
++    });
++
++    test.skipIf(isWindows)("a file descriptor that is not open", async () => {
++      expect(await codes(Bun.file(1_000_000))).toEqual(["EBADF", "EBADF"]);
++    });
++  });
+ });
+ 
+ test("Blob type from a consumed Response keeps the original content-type after clones with different content-types are consumed", async () => {
+diff --git a/test/js/web/timers/timer-gc-roots.test.ts b/test/js/web/timers/timer-gc-roots.test.ts
+index 6f5576f2..a88f55d3 100644
+--- a/test/js/web/timers/timer-gc-roots.test.ts
++++ b/test/js/web/timers/timer-gc-roots.test.ts
+@@ -133,6 +133,9 @@ describe.concurrent("AbortSignal.timeout is released when its wrapper is collect
+           await new Promise(r => setTimeout(r, 10));
+         }
+       }
++      // RSS still climbs to its plateau in the first rounds
++      await round();
++      await round();
+       await round();
+       const before = process.memoryUsage().rss;
+       await round();
+diff --git a/test/regression/issue/17190.test.ts b/test/regression/issue/17190.test.ts
+new file mode 100644
+index 00000000..ff045e32
+--- /dev/null
++++ b/test/regression/issue/17190.test.ts
+@@ -0,0 +1,26 @@
++// https://github.com/oven-sh/bun/issues/17190
++import { expect, test } from "bun:test";
++import { tls as selfSigned } from "harness";
++import { once } from "node:events";
++import type { AddressInfo } from "node:net";
++import tls from "node:tls";
++
++test("tls.connect() followed at once by end() reports a self-signed certificate", async () => {
++  const server = tls.createServer(selfSigned, socket => socket.on("error", () => {}));
++  server.on("tlsClientError", () => {});
++  await once(server.listen(0, "127.0.0.1"), "listening");
++  try {
++    const socket = tls.connect({
++      host: "127.0.0.1",
++      port: (server.address() as AddressInfo).port,
++      rejectUnauthorized: true,
++    });
++    const { promise, resolve } = Promise.withResolvers<string>();
++    socket.on("error", err => resolve(`error ${(err as NodeJS.ErrnoException).code}`));
++    socket.on("close", () => resolve("close with no error"));
++    socket.end();
++    expect(await promise).toBe("error DEPTH_ZERO_SELF_SIGNED_CERT");
++  } finally {
++    server.close();
++  }
++});

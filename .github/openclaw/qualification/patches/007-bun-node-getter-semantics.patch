@@ -1,0 +1,92 @@
+From 14ed320ab52ac480f9ab1180cf041971052e6915 Mon Sep 17 00:00:00 2001
+From: Peter Steinberger <steipete@gmail.com>
+Date: Sat, 3 Oct 2026 09:10:07 -0700
+Subject: [PATCH] fix(worker): match Node resource-limit getter evaluation
+
+---
+ src/jsc/bindings/webcore/JSWorker.cpp         | 18 +++++++---
+ .../worker_threads/worker_threads.test.ts     | 33 +++++++++++++++++++
+ 2 files changed, 47 insertions(+), 4 deletions(-)
+
+diff --git a/src/jsc/bindings/webcore/JSWorker.cpp b/src/jsc/bindings/webcore/JSWorker.cpp
+index 6e3775a..61f6401 100644
+--- a/src/jsc/bindings/webcore/JSWorker.cpp
++++ b/src/jsc/bindings/webcore/JSWorker.cpp
+@@ -489,16 +489,26 @@ template<> __attribute__((minsize)) JSC::EncodedJSValue JSC_HOST_CALL_ATTRIBUTES
+                 auto* limitsObject = asObject(resourceLimitsValue);
+                 WorkerResourceLimits limits;
+                 auto readLimit = [&](ASCIILiteral key, double& out, std::optional<double> floor = std::nullopt) -> bool {
+-                    JSValue value = limitsObject->getIfPropertyExists(lexicalGlobalObject, Identifier::fromString(vm, key));
++                    auto identifier = Identifier::fromString(vm, key);
++                    JSValue value = limitsObject->get(lexicalGlobalObject, identifier);
+                     if (throwScope.exception())
+                         return false;
+-                    if (value && value.isNumber())
+-                        out = floor ? std::max(value.asNumber(), *floor) : value.asNumber();
++                    if (!value.isNumber())
++                        return true;
++                    // Node checks typeof first, then reads again for MathMax/Float64Array conversion.
++                    // https://github.com/nodejs/node/blob/v24.21.0/lib/internal/worker.js#L654-L667
++                    value = limitsObject->get(lexicalGlobalObject, identifier);
++                    if (throwScope.exception())
++                        return false;
++                    double number = value.toNumber(lexicalGlobalObject);
++                    if (throwScope.exception())
++                        return false;
++                    out = floor ? std::max(number, *floor) : number;
+                     return true;
+                 };
+-                if (!readLimit("maxYoungGenerationSizeMb"_s, limits.maxYoungGenerationSizeMb)) return {};
+                 // Node floors this one at 2 MB (MathMax(value, 2)).
+                 if (!readLimit("maxOldGenerationSizeMb"_s, limits.maxOldGenerationSizeMb, 2.0)) return {};
++                if (!readLimit("maxYoungGenerationSizeMb"_s, limits.maxYoungGenerationSizeMb)) return {};
+                 if (!readLimit("codeRangeSizeMb"_s, limits.codeRangeSizeMb)) return {};
+                 if (!readLimit("stackSizeMb"_s, limits.stackSizeMb)) return {};
+                 // Node replaces a non-positive stack size with its 4 MB default.
+diff --git a/test/js/node/worker_threads/worker_threads.test.ts b/test/js/node/worker_threads/worker_threads.test.ts
+index 643f0ff..37fc1a6 100644
+--- a/test/js/node/worker_threads/worker_threads.test.ts
++++ b/test/js/node/worker_threads/worker_threads.test.ts
+@@ -3902,6 +3902,39 @@ test("getHeapStatistics includes array storage allocated since the last collecti
+ });
+ 
+ describe("resourceLimits", () => {
++  test("reads numeric getters in Node order and converts the second value", async () => {
++    const calls: string[] = [];
++    const values = { maxOldGenerationSizeMb: 64, maxYoungGenerationSizeMb: 16, codeRangeSizeMb: 32, stackSizeMb: 2 };
++    const limits = {};
++    for (const key of Object.keys(values)) {
++      let count = 0;
++      Object.defineProperty(limits, key, { get() { calls.push(key); return ++count === 1 ? values[key] : String(values[key]); } });
++    }
++    const worker = new Worker("", { eval: true, resourceLimits: limits });
++    try {
++      expect(calls).toEqual(Object.keys(values).flatMap(key => [key, key]));
++      expect(worker.resourceLimits).toEqual(values);
++    } finally {
++      await worker.terminate();
++    }
++  });
++
++  test("propagates a second getter exception unchanged", async () => {
++    const error = new Error("second resource-limit getter");
++    let reads = 0;
++    let worker: Worker | undefined;
++    let caught: unknown;
++    try {
++      worker = new Worker("", { eval: true, resourceLimits: { get maxOldGenerationSizeMb() { if (++reads === 2) throw error; return 64; } } });
++    } catch (value) {
++      caught = value;
++    } finally {
++      await worker?.terminate();
++    }
++    expect(caught).toBe(error);
++    expect(reads).toBe(2);
++  });
++
+   async function runLimitedWorker(limits: object, body: string) {
+     await using child = Bun.spawn({
+       cmd: [bunExe(), "-e", `
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,0 +1,46 @@
+diff --git a/src/runtime/timer/WTFTimer.rs b/src/runtime/timer/WTFTimer.rs
+index 9a0841e58..053e9c582 100644
+--- a/src/runtime/timer/WTFTimer.rs
++++ b/src/runtime/timer/WTFTimer.rs
+@@ -43,6 +43,8 @@ pub(crate) struct WTFTimer {
+     // that owns this wrapper lives on the VM's run loop, so the VM outlives
+     // the timer.
+     vm: NonNull<VirtualMachine>,
++    // An uncounted gate can wake the owner without keeping its VM alive.
++    wake_handle: bun_jsc::VmHandle,
+     // FFI handle into WebKit's RunLoop::TimerBase; owned by C++.
+     run_loop_timer: NonNull<RunLoopTimer>,
+     pub(crate) event_loop_timer: EventLoopTimer,
+@@ -130,12 +132,18 @@ impl WTFTimer {
+         // There's only one of these per VM, and each VM has its own imminent_gc_timer.
+         // Only set imminent if it's not already set to avoid overwriting another timer.
+         if seconds.partial_cmp(&0.0) != Some(core::cmp::Ordering::Greater) {
+-            let _ = imminent.compare_exchange(
+-                ptr::null_mut(),
+-                self_opaque,
+-                Ordering::SeqCst,
+-                Ordering::SeqCst,
+-            );
++            let wake_handle = t.wake_handle.clone();
++            if imminent
++                .compare_exchange(
++                    ptr::null_mut(),
++                    self_opaque,
++                    Ordering::SeqCst,
++                    Ordering::SeqCst,
++                )
++                .is_ok()
++            {
++                wake_handle.wake();
++            }
+             return;
+         }
+         // Clear imminent if this timer was the one that set it.
+@@ -257,6 +265,7 @@ unsafe extern "C" fn WTFTimer__create(run_loop_timer: *mut RunLoopTimer) -> *mut
+         let el = &*vm_ref.event_loop();
+         Box::new(WTFTimer {
+             vm: NonNull::new_unchecked(vm),
++            wake_handle: vm_ref.handle(),
+             imminent: bun_ptr::BackRef::new(&el.imminent_gc_timer),
+             event_loop_timer: EventLoopTimer {
+                 next: ElTimespec {

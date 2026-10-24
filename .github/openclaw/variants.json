@@ -1,0 +1,61 @@
+{
+  "bun_repository": "openclaw/bun",
+  "bun_commit": "7f836a97af610dd0e949e49658156321430fd4bd",
+  "base": "5e3554face1338d738543540a82f23e3163045f5",
+  "lanes": [
+    {
+      "label": "bun-webkit-linux-amd64",
+      "consumer": "openclaw-build-test.yml linux-x64: build:release --lto=off"
+    },
+    {
+      "label": "bun-webkit-macos-arm64",
+      "consumer": "openclaw-build-test.yml darwin-arm64: build:release --lto=off"
+    },
+    {
+      "label": "bun-webkit-linux-amd64-lto",
+      "consumer": "openclaw-release.yml default linux-x64"
+    },
+    {
+      "label": "bun-webkit-linux-arm64-lto",
+      "consumer": "openclaw-release.yml default linux-arm64"
+    },
+    {
+      "label": "bun-webkit-macos-arm64-lto",
+      "consumer": "openclaw-release.yml default darwin-arm64"
+    },
+    {
+      "label": "bun-webkit-macos-amd64-lto",
+      "consumer": "openclaw-release.yml default darwin-x64"
+    },
+    {
+      "label": "bun-webkit-linux-amd64-musl-lto",
+      "consumer": "openclaw-release.yml optional linux-x64-musl"
+    },
+    {
+      "label": "bun-webkit-linux-arm64-musl-lto",
+      "consumer": "openclaw-release.yml optional linux-arm64-musl"
+    },
+    {
+      "label": "bun-webkit-windows-amd64-lto",
+      "consumer": "openclaw-release.yml optional windows-x64"
+    },
+    {
+      "label": "bun-webkit-windows-arm64",
+      "consumer": "openclaw-release.yml windows-arm64: release without LTO"
+    }
+  ],
+  "excluded": "Android, FreeBSD, debug and ASAN are not selected by the fork's active OpenClaw workflows. Windows arm64 uses upstream's non-LTO lane because LLVM CodeView cannot encode its LTO register tuples. There is no separate x64 baseline WebKit archive.",
+  "upstream_sync": {
+    "bun_commit": "7f836a97af610dd0e949e49658156321430fd4bd",
+    "bun_tree": "6d48bbc70792af33275054219f761c3aef10a8e6",
+    "upstream_commit": "a8fcd319be58ad4d284330b86602cfb3c8e49c83"
+  },
+  "baseline_bun_commit": "cabfa8138d20ca57ccfb0a9309103ebb55900125",
+  "baseline_webkit_commit": "a2976f02e69fde8ccc45dc8fb346173f9d63f8a1",
+  "bun_tree": "6d48bbc70792af33275054219f761c3aef10a8e6",
+  "runtime_cache": {
+    "version": 44,
+    "source": "src/jsc/RuntimeTranspilerCache.rs",
+    "sha256": "4b711da8e5417a4268855039a29188c85055cb5e8f5617e3fc2870df5fe309a5"
+  }
+}

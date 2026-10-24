@@ -1,0 +1,107 @@
+diff --git a/src/jsc/VirtualMachine.rs b/src/jsc/VirtualMachine.rs
+index 42d8269c..147bf00f 100644
+--- a/src/jsc/VirtualMachine.rs
++++ b/src/jsc/VirtualMachine.rs
+@@ -422,6 +422,7 @@ pub struct VirtualMachine {
+     /// the finalizer). Not the current context: that is what the async context says.
+     pub(crate) entered_context: Cell<Option<crate::ContextId>>,
+     pub test_isolation_enabled: bool,
++    pub test_isolation_pending_stdio: Cell<usize>,
+     /// Counts `bun test --isolate` file swaps. The realm's context keeps its identifier across
+     /// them, so a timer or pool job of the realm's remembers the count it was made under: one
+     /// made under an earlier count is the finished file's, and is dropped.
+@@ -6267,6 +6273,12 @@ impl VirtualMachine {
+         // What the outgoing file's close handlers and last microtasks opened
+         // since the caller's sweep.
+         let _ = self.stop_context_handles(crate::StopReason::Disposed);
++        // A backpressured stdio sink still owns fd 1/2's poll until its tail drains.
++        // Retire the outgoing script before pumping I/O, and create no new sink yet.
++        while self.test_isolation_pending_stdio.get() != 0 {
++            self.event_loop_ref().auto_tick_active();
++            self.tick();
++        }
+         // Nothing enters its script now, so no close handler dials again: this sweep leaves no socket.
+         self.close_test_file_sockets();
+         debug_assert!(!self.has_test_file_sockets());
+diff --git a/src/runtime/webcore/FileSink.rs b/src/runtime/webcore/FileSink.rs
+index 029e92c9..9343b196 100644
+--- a/src/runtime/webcore/FileSink.rs
++++ b/src/runtime/webcore/FileSink.rs
+@@ -72,8 +72,11 @@ pub struct FileSink {
+     /// while an async operation is pending. This is set when endFromJS returns a
+     /// pending Promise and cleared when the operation completes.
+     pub(crate) js_sink_ref: JsCell<bun_jsc::strong::Optional>,
+-    /// Armed while a file this sink opened for a `Bun.ModuleGraph`'s script is open.
++    /// Armed for graph-owned files and process stdio under `bun test --isolate`.
+     abort_handle: bun_jsc::AbortHandle,
++    /// Isolated test files flush their stdio before releasing its poll registrations.
++    flush_on_abort: Cell<bool>,
++    isolation_flush_pending: Cell<bool>,
+ }
+ 
+ // `bun.ptr.RefCount(FileSink, "ref_count", deinit, .{})` — intrusive single-thread
+@@ -266,6 +341,12 @@ pub(crate) fn create_stdio(global: &JSGlobalObject, frame: &CallFrame) -> JsResu
+     sink.writer
+         .with_mut(|writer| writer.update_ref(sink.io_evtloop(), false));
+     sink.started.set(true);
++    let vm = global.bun_vm();
++    if vm.test_isolation_enabled {
++        sink.flush_on_abort.set(true);
++        // SAFETY: the started sink is heap-allocated and leaves its context in on_close.
++        unsafe { bun_jsc::AbortHandle::arm_owner(sink.as_ptr(), vm.root_context()) };
++    }
+     // SAFETY: the new sink is exclusively owned here; to_js takes the wrapper's reference.
+     Ok(unsafe { (*sink.as_ptr()).to_js(global) })
+ }
+@@ -608,6 +689,11 @@ impl FileSink {
+             let _entered = (*this).completion_scope();
+ 
+             (*this).abort_handle.leave();
++            if (*this).isolation_flush_pending.replace(false) {
++                let vm = (*this).js_vm().expect("isolated stdio VM is alive");
++                let pending = &vm.test_isolation_pending_stdio;
++                pending.set(pending.get() - 1);
++            }
+             if (*this).js_global().is_some() {
+                 if let Some(stream) = (*this).pipe.get().stream() {
+                     stream.done();
+@@ -1752,11 +1838,13 @@ impl FileSink {
+             pump_promise_ref: Cell::new(false),
+             js_sink_ref: JsCell::new(bun_jsc::strong::Optional::empty()),
+             abort_handle: bun_jsc::AbortHandle::for_owner::<FileSink>(),
++            flush_on_abort: Cell::new(false),
++            isolation_flush_pending: Cell::new(false),
+         }
+     }
+ }
+ 
+-bun_jsc::impl_abort_handle_owner!(FileSink, abort_handle, |this, _cause| {
++bun_jsc::impl_abort_handle_owner!(FileSink, abort_handle, |this, cause| {
+     // What is buffered is dropped with the graph: the writer closes without draining (a reader
+     // that never reads would keep it open for ever), and a parked write gives up its promise and
+     // the wrapper it pins, as when an attached process exits. `on_close` may free `this`.
+@@ -1764,6 +1852,24 @@ bun_jsc::impl_abort_handle_owner!(FileSink, abort_handle, |this, _cause| {
+     // write+dealloc provenance; the guard keeps it so across `close()` and `run_pending`.
+     unsafe {
+         let _guard = RefPtr::init_ref(this);
++        // Only global swaps drain pending stdio; VM teardown must close it synchronously.
++        if (*this).flush_on_abort.get()
++            && matches!(
++                cause,
++                bun_jsc::AbortCause::ContextStopped(bun_jsc::StopReason::Disposed)
++            )
++        {
++            #[cfg(not(windows))]
++            if (*this).writer.get().has_pending_data()
++                && !(*this).isolation_flush_pending.replace(true)
++            {
++                let vm = (*this).js_vm().expect("isolated stdio VM is alive");
++                let pending = &vm.test_isolation_pending_stdio;
++                pending.set(pending.get() + 1);
++            }
++            let _ = (*this).end(None);
++            return;
++        }
+         (*this).done.set(true);
+         #[cfg(windows)]
+         if !(*this).writer.get().owns_fd {

@@ -1,0 +1,674 @@
+From 0b06a938bb854917852b4ca3788ebd9331fda32a Mon Sep 17 00:00:00 2001
+From: Peter Steinberger <steipete@gmail.com>
+Date: Sat, 3 Oct 2026 08:47:50 -0700
+Subject: [PATCH] feat(worker): bind per-VM resource limits and heap
+ termination
+
+Local-only dependent-engine prototype; do not merge with the stock WebKit artifact. Adapt worker reporting and termination ownership from oven-sh/bun#32896, with external backing stores excluded by the new full-GC hook. Add nursery and per-VM stack sizing plus worker-only OOM regressions. Code range remains reporting-only; platform defaults and startup edge cases still require qualification.
+---
+ CHANGELOG.md                                  |  2 +
+ docs/runtime/workers.mdx                      | 11 +++
+ packages/bun-types/bun.d.ts                   | 19 +++-
+ src/js/node/worker_threads.ts                 |  9 +-
+ src/jsc/bindings/ErrorCode.ts                 |  1 +
+ src/jsc/bindings/webcore/JSWorker.cpp         | 42 +++++++++
+ src/jsc/bindings/webcore/Worker.cpp           | 19 +++-
+ src/jsc/bindings/webcore/Worker.h             |  7 +-
+ .../bindings/webcore/WorkerMessagingProxy.cpp | 92 ++++++++++++++++++-
+ .../bindings/webcore/WorkerMessagingProxy.h   | 12 +++
+ src/jsc/bindings/webcore/WorkerOptions.h      | 31 +++++++
+ src/jsc/web_worker.rs                         | 22 ++++-
+ .../worker_threads/worker_threads.test.ts     | 79 ++++++++++++++++
+ 13 files changed, 332 insertions(+), 14 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b815c47..6dd3bc3 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -145,3 +145,5 @@
+ - Count allocations since the most recent garbage collection in process, V8-compatible, and worker heap statistics, including newly retained JavaScript array storage.
+ 
+ - Publish cached resolver paths once so worker resolution and filesystem-router reloads cannot expose truncated symlink targets. Adapts [oven-sh/bun#40258](https://github.com/oven-sh/bun/pull/40258). Thanks @robobun!
++
++- Add experimental Node worker resource-limit reporting, per-VM managed-heap termination, nursery sizing, and JavaScript stack limits with a matching local WebKit build. Adapts [oven-sh/bun#32896](https://github.com/oven-sh/bun/pull/32896). Thanks @robobun!
+diff --git a/docs/runtime/workers.mdx b/docs/runtime/workers.mdx
+index 616d00d..7ff82f7 100644
+--- a/docs/runtime/workers.mdx
++++ b/docs/runtime/workers.mdx
+@@ -327,3 +327,14 @@ if (Bun.isMainThread) {
+   console.log("I'm in a worker");
+ }
+ ```
++
++
++## Node worker resource limits
++
++`node:worker_threads` accepts `resourceLimits` and exposes the effective values through `worker.resourceLimits` and the worker's `resourceLimits` export. The parent property becomes an empty object when the worker exits.
++
++`maxOldGenerationSizeMb` limits the managed heap after a full garbage collection. ArrayBuffer backing storage is excluded. A worker over the limit emits `ERR_WORKER_OUT_OF_MEMORY` and exits with code 1. `maxYoungGenerationSizeMb` sizes the nursery without independently limiting the retained heap. `stackSizeMb` controls JavaScript stack checks; the native stack retains initialization and exception-handling headroom.
++
++`codeRangeSizeMb` is reported for compatibility. JSC shares its executable allocator across workers, so this option does not reserve executable memory per worker.
++
++This local prototype uses 4096 MiB old-generation and 192 MiB nursery defaults, matching the qualified Linux x64 Node 24 host. Default sizing on memory-constrained hosts, command-line heap overrides, and very small startup limits require further qualification before release.
+diff --git a/packages/bun-types/bun.d.ts b/packages/bun-types/bun.d.ts
+index 1769d75..48beeef 100644
+--- a/packages/bun-types/bun.d.ts
++++ b/packages/bun-types/bun.d.ts
+@@ -704,7 +704,17 @@ declare module "bun" {
+      * @default true
+      */
+     // trackUnmanagedFds?: boolean;
+-    // resourceLimits?: import("worker_threads").ResourceLimits;
++
++    /**
++     * Resource limits for the worker's JS engine, in megabytes, with the same
++     * shape as Node.js. `maxOldGenerationSizeMb` caps the worker's heap: a
++     * worker whose heap is still above it after a full garbage collection is
++     * terminated and emits an `ERR_WORKER_OUT_OF_MEMORY` error event. The
++     * young-generation option sizes the nursery. `stackSizeMb` sets the JS
++     * stack capacity. `codeRangeSizeMb` is reported without a per-worker
++     * executable-memory reservation. These limits apply to Node workers.
++     */
++    resourceLimits?: import("node:worker_threads").ResourceLimits;
+ 
+     /**
+      * An array of module specifiers to preload in the worker.
+@@ -775,6 +785,13 @@ declare module "bun" {
+      * This value is unique for each `Worker` instance inside a single process.
+      */
+     threadId: number;
++
++    /**
++     * The JS engine resource constraints this worker was created with, or
++     * an empty object once the worker has stopped. Inside the worker thread,
++     * it is available as `require('node:worker_threads').resourceLimits`.
++     */
++    readonly resourceLimits: import("node:worker_threads").ResourceLimits;
+   }
+ 
+   interface Env {
+diff --git a/src/js/node/worker_threads.ts b/src/js/node/worker_threads.ts
+index b8995f0..1d5e152 100644
+--- a/src/js/node/worker_threads.ts
++++ b/src/js/node/worker_threads.ts
+@@ -88,6 +88,7 @@ const {
+   16: WebWorker,
+   17: _workerHasRef,
+   18: _workerEventLoopUtilization,
++  19: resourceLimits,
+ } = $cpp("Worker.cpp", "createNodeWorkerThreadsBinding") as [
+   unknown,
+   number,
+@@ -113,6 +114,7 @@ const {
+   ) => WebWorker,
+   (worker: WebWorker) => boolean | undefined,
+   (worker: WebWorker) => [number, number] | null,
++  Record<string, number>,
+ ];
+ 
+ type NodeWorkerOptions = import("node:worker_threads").WorkerOptions;
+@@ -342,8 +344,6 @@ Object.defineProperty(MessagePort.prototype, kInspectCustom, {
+   configurable: true,
+ });
+ 
+-let resourceLimits = {};
+-
+ const BUN_WORKER_STDIO_KEY = "@@bunWorkerThreadsStdio";
+ const BUN_WORKER_MESSAGING_KEY = "@@bunWorkerThreadsMessaging";
+ // The worker's `parentPort`: port2 of a channel whose port1 is the parent
+@@ -1078,6 +1078,11 @@ class Worker extends EventEmitter {
+     return this.#exited ? null : this.#name;
+   }
+ 
++  get resourceLimits() {
++    // Read back from the single native parse; {} once the worker stopped.
++    return this.#worker.resourceLimits;
++  }
++
+   ref() {
+     // node's ref()/unref() touch the handle and the public port; stdio ports'
+     // ref state tracks in-flight I/O.
+diff --git a/src/jsc/bindings/ErrorCode.ts b/src/jsc/bindings/ErrorCode.ts
+index 458507b..29c4417 100644
+--- a/src/jsc/bindings/ErrorCode.ts
++++ b/src/jsc/bindings/ErrorCode.ts
+@@ -373,5 +373,6 @@ const errors: ErrorCodeMapping = [
+   ["ERR_INSPECTOR_COMMAND", Error],
+   ["ERR_REDIS_SERVER_ERROR", Error, "RedisError"],
+   ["ERR_FFI_CC_DISABLED", Error],
++  ["ERR_WORKER_OUT_OF_MEMORY", Error],
+ ];
+ export default errors;
+diff --git a/src/jsc/bindings/webcore/JSWorker.cpp b/src/jsc/bindings/webcore/JSWorker.cpp
+index 87f62c0..884f644 100644
+--- a/src/jsc/bindings/webcore/JSWorker.cpp
++++ b/src/jsc/bindings/webcore/JSWorker.cpp
+@@ -481,6 +481,33 @@ template<> __attribute__((minsize)) JSC::EncodedJSValue JSC_HOST_CALL_ATTRIBUTES
+             RETURN_IF_EXCEPTION(throwScope, {});
+         }
+ 
++        JSValue resourceLimitsValue = optionsObject->getIfPropertyExists(lexicalGlobalObject, Identifier::fromString(vm, "resourceLimits"_s));
++        RETURN_IF_EXCEPTION(throwScope, {});
++        // As in Node's parseResourceLimits: non-objects, functions and non-number fields are ignored.
++        if (resourceLimitsValue && resourceLimitsValue.isObject() && !resourceLimitsValue.isCallable()) {
++            auto* limitsObject = asObject(resourceLimitsValue);
++            WorkerResourceLimits limits;
++            auto readLimit = [&](ASCIILiteral key, double& out, std::optional<double> floor = std::nullopt) -> bool {
++                JSValue value = limitsObject->getIfPropertyExists(lexicalGlobalObject, Identifier::fromString(vm, key));
++                if (throwScope.exception())
++                    return false;
++                if (value && value.isNumber())
++                    out = floor ? std::max(value.asNumber(), *floor) : value.asNumber();
++                return true;
++            };
++            if (!readLimit("maxYoungGenerationSizeMb"_s, limits.maxYoungGenerationSizeMb)) return {};
++            // Node floors this one at 2 MB (MathMax(value, 2)).
++            if (!readLimit("maxOldGenerationSizeMb"_s, limits.maxOldGenerationSizeMb, 2.0)) return {};
++            if (!readLimit("codeRangeSizeMb"_s, limits.codeRangeSizeMb)) return {};
++            if (!readLimit("stackSizeMb"_s, limits.stackSizeMb)) return {};
++            // Node replaces a non-positive stack size with its 4 MB default.
++            if (!(limits.stackSizeMb > 0))
++                limits.stackSizeMb = 4;
++            else
++                limits.stackSizeMb = std::max(limits.stackSizeMb, 192.0 / 1024.0);
++            options.resourceLimits = limits;
++        }
++
+         JSValue execArgvValue = optionsObject->getIfPropertyExists(lexicalGlobalObject, Identifier::fromString(vm, "execArgv"_s));
+         RETURN_IF_EXCEPTION(throwScope, {});
+         if (execArgvValue && execArgvValue.pureToBoolean() != TriState::False) {
+@@ -608,6 +635,20 @@ JSC_DEFINE_CUSTOM_GETTER(jsWorker_threadIdGetter, (JSGlobalObject * lexicalGloba
+     return JSValue::encode(jsNumber(worker.clientIdentifier() - 1));
+ }
+ 
++JSC_DEFINE_CUSTOM_GETTER(jsWorker_resourceLimitsGetter, (JSGlobalObject * lexicalGlobalObject, JSC::EncodedJSValue thisValue, PropertyName))
++{
++    auto* castedThis = dynamicDowncast<JSWorker>(JSValue::decode(thisValue));
++    if (!castedThis) [[unlikely]]
++        return JSValue::encode(jsUndefined());
++
++    auto& worker = castedThis->wrapped();
++    // Node reports {} once the thread has exited (the proxy is already Closing inside the OOM 'error' handler).
++    if (worker.hasExited())
++        return JSValue::encode(constructEmptyObject(lexicalGlobalObject));
++    auto limits = worker.contextProxy().options().resourceLimits;
++    return JSValue::encode(createResourceLimitsObject(lexicalGlobalObject, worker.contextProxy().isOnline() ? limits.resolved() : limits));
++}
++
+ /* Hash table for prototype */
+ 
+ static const HashTableValue JSWorkerPrototypeTableValues[] = {
+@@ -617,6 +658,7 @@ static const HashTableValue JSWorkerPrototypeTableValues[] = {
+     { "onmessageerror"_s, JSC::PropertyAttribute::CustomAccessor | JSC::PropertyAttribute::DOMAttribute, NoIntrinsic, { HashTableValue::GetterSetterType, jsWorker_onmessageerror, setJSWorker_onmessageerror } },
+     { "postMessage"_s, static_cast<unsigned>(JSC::PropertyAttribute::Function), NoIntrinsic, { HashTableValue::NativeFunctionType, jsWorkerPrototypeFunction_postMessage, 1 } },
+     { "ref"_s, static_cast<unsigned>(JSC::PropertyAttribute::Function), NoIntrinsic, { HashTableValue::NativeFunctionType, jsWorkerPrototypeFunction_ref, 0 } },
++    { "resourceLimits"_s, JSC::PropertyAttribute::CustomAccessor | JSC::PropertyAttribute::DOMAttribute | JSC::PropertyAttribute::ReadOnly | JSC::PropertyAttribute::DontDelete, NoIntrinsic, { HashTableValue::GetterSetterType, jsWorker_resourceLimitsGetter, nullptr } },
+     { "terminate"_s, static_cast<unsigned>(JSC::PropertyAttribute::Function), NoIntrinsic, { HashTableValue::NativeFunctionType, jsWorkerPrototypeFunction_terminate, 0 } },
+     { "threadId"_s, JSC::PropertyAttribute::CustomAccessor | JSC::PropertyAttribute::DOMAttribute | JSC::PropertyAttribute::ReadOnly | JSC::PropertyAttribute::DontDelete, NoIntrinsic, { HashTableValue::GetterSetterType, jsWorker_threadIdGetter, nullptr } },
+     { "unref"_s, static_cast<unsigned>(JSC::PropertyAttribute::Function), NoIntrinsic, { HashTableValue::NativeFunctionType, jsWorkerPrototypeFunction_unref, 0 } },
+diff --git a/src/jsc/bindings/webcore/Worker.cpp b/src/jsc/bindings/webcore/Worker.cpp
+index 5c00738..c1e6b69 100644
+--- a/src/jsc/bindings/webcore/Worker.cpp
++++ b/src/jsc/bindings/webcore/Worker.cpp
+@@ -147,7 +147,7 @@ void Worker::dispatchEvent(Event& event)
+     EventTargetWithInlineData::dispatchEvent(event);
+ }
+ 
+-void Worker::dispatchCloseEvent(Event& event)
++void Worker::dispatchExitEvent(Event& event)
+ {
+     EventTargetWithInlineData::dispatchEvent(event);
+ }
+@@ -250,6 +250,17 @@ JSC_DEFINE_HOST_FUNCTION(jsFunctionWorkerEventLoopUtilization, (JSGlobalObject *
+     RELEASE_AND_RETURN(scope, JSValue::encode(result));
+ }
+ 
++JSObject* createResourceLimitsObject(JSGlobalObject* globalObject, const WorkerResourceLimits& limits)
++{
++    auto& vm = JSC::getVM(globalObject);
++    auto* object = constructEmptyObject(globalObject, globalObject->objectPrototype(), 4);
++    object->putDirect(vm, Identifier::fromString(vm, "maxYoungGenerationSizeMb"_s), jsNumber(limits.maxYoungGenerationSizeMb));
++    object->putDirect(vm, Identifier::fromString(vm, "maxOldGenerationSizeMb"_s), jsNumber(limits.maxOldGenerationSizeMb));
++    object->putDirect(vm, Identifier::fromString(vm, "codeRangeSizeMb"_s), jsNumber(limits.codeRangeSizeMb));
++    object->putDirect(vm, Identifier::fromString(vm, "stackSizeMb"_s), jsNumber(limits.stackSizeMb));
++    return object;
++}
++
+ JSC_DEFINE_HOST_FUNCTION(jsReceiveMessageOnPort, (JSGlobalObject * lexicalGlobalObject, CallFrame* callFrame))
+ {
+     auto& vm = JSC::getVM(lexicalGlobalObject);
+@@ -381,7 +392,7 @@ JSValue createNodeWorkerThreadsBinding(Zig::GlobalObject* globalObject)
+ 
+     bool isNodeWorker = proxy && proxy->options().kind == WorkerOptions::Kind::Node;
+ 
+-    JSObject* array = constructEmptyArray(globalObject, nullptr, 19);
++    JSObject* array = constructEmptyArray(globalObject, nullptr, 20);
+     RETURN_IF_EXCEPTION(scope, {});
+     array->putDirectIndex(globalObject, 0, workerData);
+     RETURN_IF_EXCEPTION(scope, {});
+@@ -423,6 +434,10 @@ JSValue createNodeWorkerThreadsBinding(Zig::GlobalObject* globalObject)
+     RETURN_IF_EXCEPTION(scope, {});
+     array->putDirectIndex(globalObject, 18, JSFunction::create(vm, globalObject, 1, "workerEventLoopUtilization"_s, jsFunctionWorkerEventLoopUtilization, ImplementationVisibility::Public, NoIntrinsic));
+     RETURN_IF_EXCEPTION(scope, {});
++    JSObject* resourceLimits = proxy ? createResourceLimitsObject(globalObject, proxy->options().resourceLimits.resolved()) : constructEmptyObject(globalObject);
++    RETURN_IF_EXCEPTION(scope, {});
++    array->putDirectIndex(globalObject, 19, resourceLimits);
++    RETURN_IF_EXCEPTION(scope, {});
+     return array;
+ }
+ 
+diff --git a/src/jsc/bindings/webcore/Worker.h b/src/jsc/bindings/webcore/Worker.h
+index 09ae547..a6b2e45 100644
+--- a/src/jsc/bindings/webcore/Worker.h
++++ b/src/jsc/bindings/webcore/Worker.h
+@@ -33,6 +33,7 @@
+ 
+ namespace JSC {
+ class JSGlobalObject;
++class JSObject;
+ class JSValue;
+ }
+ 
+@@ -71,9 +72,9 @@ public:
+     bool eventLoopUtilization(double& elapsedMs, double& idleMs);
+ 
+     // Node worker_threads: 'message'/'error'/'messageerror' are not delivered once terminate() was
+-    // called; 'close' (which carries the exit code) always is.
++    // called; the final OOM error and close event are always delivered.
+     void dispatchEvent(Event&) final;
+-    void dispatchCloseEvent(Event&);
++    void dispatchExitEvent(Event&);
+ 
+     const String& name() const { return m_name; }
+     // Both identifiers are process-unique; threadId is derived from the worker's.
+@@ -100,6 +101,8 @@ private:
+ };
+ 
+ JSC::JSValue createNodeWorkerThreadsBinding(Zig::GlobalObject* globalObject);
++// Shared by the in-worker `resourceLimits` export and the worker.resourceLimits getter (JSWorker.cpp).
++JSC::JSObject* createResourceLimitsObject(JSC::JSGlobalObject*, const WorkerResourceLimits&);
+ 
+ JSC_DECLARE_HOST_FUNCTION(jsFunctionPostMessage);
+ 
+diff --git a/src/jsc/bindings/webcore/WorkerMessagingProxy.cpp b/src/jsc/bindings/webcore/WorkerMessagingProxy.cpp
+index b752048..128c798 100644
+--- a/src/jsc/bindings/webcore/WorkerMessagingProxy.cpp
++++ b/src/jsc/bindings/webcore/WorkerMessagingProxy.cpp
+@@ -39,6 +39,7 @@
+ #include "SerializedScriptValue.h"
+ #include "Worker.h"
+ #include "ZigGlobalObject.h"
++#include <JavaScriptCore/HeapObserver.h>
+ #include <JavaScriptCore/JSPromise.h>
+ #include <JavaScriptCore/PropertyNameArray.h>
+ #include <wtf/HashSet.h>
+@@ -84,7 +85,7 @@ void* WebWorker__create(
+     size_t execArgvRequirePreloadCount,
+     uint8_t execArgvEvalMode);
+ // Raise a TerminationException in the worker VM at its next safepoint and wake its loop. Any thread.
+-void WebWorker__requestTermination(void*);
++bool WebWorker__requestTermination(void*);
+ // Toggle the keep-alive this worker holds on the parent event loop. Parent thread.
+ void WebWorker__setRef(void*, bool);
+ bool WebWorker__hasRef(void* worker);
+@@ -99,6 +100,74 @@ void WebWorker__deref(void*);
+ 
+ } // extern "C"
+ 
++// ---- resourceLimits ------------------------------------------------------------------------------
++
++// didGarbageCollect runs on whichever thread finished the collection (possibly JSC's collector thread, which has no per-thread Bun state), before the mutator resumes.
++class WorkerHeapLimitObserver final : public JSC::HeapObserver {
++    WTF_MAKE_TZONE_ALLOCATED(WorkerHeapLimitObserver);
++
++public:
++    WorkerHeapLimitObserver(WorkerMessagingProxy& proxy, JSC::VM& vm, void* workerThread)
++        : m_proxy(proxy)
++        , m_vm(vm)
++        , m_workerThread(workerThread)
++    {
++    }
++
++private:
++    void willGarbageCollect() final {}
++
++    void didGarbageCollect(JSC::CollectionScope scope) final
++    {
++        // Only a full collection's survivor size is the live set; an eden collection's is not.
++        if (scope != JSC::CollectionScope::Full)
++            return;
++        if (m_proxy.m_heapLimitDisarmed.load(std::memory_order_acquire))
++            return;
++        if (!m_vm.heap.heapLimitExceeded())
++            return;
++        // A thread that is already stopping (terminate(), process.exit()) keeps its own reason.
++        if (!WebWorker__requestTermination(m_workerThread))
++            return;
++        m_proxy.m_stoppedByHeapLimit.store(true, std::memory_order_release);
++    }
++
++    WorkerMessagingProxy& m_proxy;
++    JSC::VM& m_vm;
++    void* const m_workerThread;
++};
++
++WTF_MAKE_TZONE_ALLOCATED_IMPL(WorkerHeapLimitObserver);
++
++void WorkerMessagingProxy::installHeapLimitObserver(JSC::VM& vm, void* workerThread)
++{
++    if (m_options.kind != WorkerOptions::Kind::Node)
++        return;
++    auto limits = m_options.resourceLimits.resolved();
++    vm.setWorkerStackUsage(WorkerResourceLimits::bytes(limits.stackSizeMb));
++    vm.heap.setWorkerHeapLimits(WorkerResourceLimits::bytes(limits.maxOldGenerationSizeMb), WorkerResourceLimits::bytes(limits.maxYoungGenerationSizeMb));
++    ASSERT(!m_heapLimitObserver);
++    m_heapLimitObserver = makeUnique<WorkerHeapLimitObserver>(*this, vm, workerThread);
++    vm.heap.addObserver(m_heapLimitObserver.get());
++}
++
++extern "C" size_t WebWorker__stackSize(WorkerMessagingProxy* proxy)
++{
++    if (proxy->options().kind != WorkerOptions::Kind::Node)
++        return 0;
++    return WorkerResourceLimits::bytes(proxy->options().resourceLimits.stackSizeMb);
++}
++
++extern "C" void WebWorker__installHeapLimitObserver(WorkerMessagingProxy* proxy, Zig::GlobalObject* globalObject, void* workerThread)
++{
++    proxy->installHeapLimitObserver(JSC::getVM(globalObject), workerThread);
++}
++
++extern "C" void WebWorker__disarmHeapLimitObserver(WorkerMessagingProxy* proxy)
++{
++    proxy->disarmHeapLimitObserver();
++}
++
+ WorkerMessagingProxy::WorkerMessagingProxy(Worker& workerObject, ScriptExecutionContext& parentContext, WorkerOptions&& options)
+     : m_scriptExecutionContext(&parentContext)
+     , m_workerObject(&workerObject)
+@@ -790,6 +859,10 @@ void WorkerMessagingProxy::workerGlobalScopeDestroyedInternal(int32_t exitCode,
+     // Web Worker's 'close' event keeps 0 for that case (documented).
+     if (m_options.kind == WorkerOptions::Kind::Node && stoppedByParent)
+         exitCode = 1;
++    // Node: ERR_WORKER_OUT_OF_MEMORY always comes with exit code 1.
++    const bool stoppedByHeapLimit = m_stoppedByHeapLimit.load(std::memory_order_acquire);
++    if (stoppedByHeapLimit)
++        exitCode = 1;
+ 
+     // Closing while 'close' dispatches so handlers observe threadId == -1 / !isOnline() but a
+     // postMessage() from inside them is still accepted and dropped (browser/Node behaviour).
+@@ -806,9 +879,20 @@ void WorkerMessagingProxy::workerGlobalScopeDestroyedInternal(int32_t exitCode,
+     // task then finds it empty.
+     drainMessagesToWorkerObject(*m_scriptExecutionContext, DrainBudget::UntilEmpty);
+ 
+-    if (RefPtr workerObject = m_workerObject; workerObject && workerObject->hasEventListeners(eventNames().closeEvent)) {
+-        auto event = CloseEvent::create(exitCode == 0, static_cast<unsigned short>(exitCode), exitCode == 0 ? "Worker terminated normally"_s : "Worker exited abnormally"_s);
+-        workerObject->dispatchCloseEvent(event);
++    if (RefPtr workerObject = m_workerObject) {
++        // Node emits 'error' (with worker.resourceLimits already {}) and then 'exit' for a worker that hit its heap limit.
++        if (stoppedByHeapLimit && workerObject->hasEventListeners(eventNames().errorEvent)) {
++            ErrorEvent::Init init;
++            // An empty message makes worker_threads.ts emit `error` itself, keeping its `code`.
++            init.error = Bun::createError(m_scriptExecutionContext->globalObject(), Bun::ErrorCode::ERR_WORKER_OUT_OF_MEMORY,
++                "Worker terminated due to reaching memory limit: JS heap out of memory"_s);
++            auto event = ErrorEvent::create(eventNames().errorEvent, init, EventIsTrusted::Yes);
++            workerObject->dispatchExitEvent(event);
++        }
++        if (workerObject->hasEventListeners(eventNames().closeEvent)) {
++            auto event = CloseEvent::create(exitCode == 0, static_cast<unsigned short>(exitCode), exitCode == 0 ? "Worker terminated normally"_s : "Worker exited abnormally"_s);
++            workerObject->dispatchExitEvent(event);
++        }
+     }
+ 
+     releaseWorkerThread();
+diff --git a/src/jsc/bindings/webcore/WorkerMessagingProxy.h b/src/jsc/bindings/webcore/WorkerMessagingProxy.h
+index f2e8ea6..c517414 100644
+--- a/src/jsc/bindings/webcore/WorkerMessagingProxy.h
++++ b/src/jsc/bindings/webcore/WorkerMessagingProxy.h
+@@ -50,6 +50,7 @@ namespace WebCore {
+ 
+ class Event;
+ class Worker;
++class WorkerHeapLimitObserver;
+ 
+ // The only object shared between a Worker (parent thread, script-visible) and the thread that runs
+ // its global scope. Created with the Worker; outlives both the Worker object and the thread.
+@@ -113,6 +114,11 @@ public:
+     void workerGlobalScopeDestroyed(int32_t exitCode, bool stoppedByParent);
+     void drainMessagesToWorkerGlobalScope(ScriptExecutionContext&);
+ 
++    // No-op without a configured resourceLimits heap limit; a limit hit stops the thread like terminate() and reports ERR_WORKER_OUT_OF_MEMORY.
++    void installHeapLimitObserver(JSC::VM&, void* workerThread);
++    // The collections run by exit handlers and teardown must not be reported as running out of memory.
++    void disarmHeapLimitObserver() { m_heapLimitDisarmed.store(true, std::memory_order_release); }
++
+     // -- Either thread ---------------------------------------------------------------------------
+     WorkerOptions& options() { return m_options; }
+     ScriptExecutionContextIdentifier workerContextIdentifier() const { return m_workerContextIdentifier; }
+@@ -153,6 +159,12 @@ private:
+ 
+     std::atomic<State> m_state { State::Pending };
+ 
++    // The observer runs on whichever thread finished a collection (hence the atomics) and is never unregistered: this proxy outlives the heap it watches.
++    friend class WorkerHeapLimitObserver;
++    std::unique_ptr<WorkerHeapLimitObserver> m_heapLimitObserver;
++    std::atomic<bool> m_heapLimitDisarmed { false };
++    std::atomic<bool> m_stoppedByHeapLimit { false };
++
+     // Pending -> Running happens under this lock so a task posted while Pending is either queued here
+     // (and run by workerGlobalScopeStarted) or posted directly, never lost.
+     Lock m_pendingTasksLock;
+diff --git a/src/jsc/bindings/webcore/WorkerOptions.h b/src/jsc/bindings/webcore/WorkerOptions.h
+index 72532e8..de50621 100644
+--- a/src/jsc/bindings/webcore/WorkerOptions.h
++++ b/src/jsc/bindings/webcore/WorkerOptions.h
+@@ -14,6 +14,36 @@ enum class WorkerEvalMode : uint8_t {
+     Module,
+ };
+ 
++struct WorkerResourceLimits {
++    double maxYoungGenerationSizeMb { -1 };
++    double maxOldGenerationSizeMb { -1 };
++    double codeRangeSizeMb { -1 };
++    double stackSizeMb { 4 };
++
++    WorkerResourceLimits resolved() const
++    {
++        auto result = *this;
++        if (!(result.maxOldGenerationSizeMb > 0))
++            result.maxOldGenerationSizeMb = 4096;
++        if (!(result.maxYoungGenerationSizeMb > 0))
++            result.maxYoungGenerationSizeMb = 192;
++        if (!(result.codeRangeSizeMb > 0))
++            result.codeRangeSizeMb = 0;
++        return result;
++    }
++
++    static size_t bytes(double mb)
++    {
++        if (!(mb > 0) || !std::isfinite(mb))
++            return 0;
++        double value = mb * 1024.0 * 1024.0;
++        if (value >= static_cast<double>(std::numeric_limits<size_t>::max()))
++            return std::numeric_limits<size_t>::max();
++        return static_cast<size_t>(value);
++    }
++
++};
++
+ struct WorkerOptions {
+     enum class Kind : uint8_t {
+         // Created by the global Worker constructor
+@@ -52,6 +82,7 @@ struct WorkerOptions {
+     size_t execArgvRequirePreloadCount { 0 };
+     WorkerEvalMode execArgvEvalMode { WorkerEvalMode::Auto };
+     String evalSource;
++    WorkerResourceLimits resourceLimits;
+ };
+ 
+ } // namespace WebCore
+diff --git a/src/jsc/web_worker.rs b/src/jsc/web_worker.rs
+index 8429f7f..e4b7e80 100644
+--- a/src/jsc/web_worker.rs
++++ b/src/jsc/web_worker.rs
+@@ -234,6 +234,9 @@ unsafe extern "C" {
+         message: BunString,
+         err: JSValue,
+     );
++    safe fn WebWorker__installHeapLimitObserver(proxy: *mut c_void, global: &JSGlobalObject, worker_thread: *const c_void);
++    safe fn WebWorker__disarmHeapLimitObserver(proxy: *mut c_void);
++    safe fn WebWorker__stackSize(proxy: *mut c_void) -> usize;
+     safe fn Bun__freeSharedHeaderBufferForThreadExit();
+     // Raw FFI (no RAII guard) so `thread_main` can take the API lock and abandon
+     // it with the VM — see the note there.
+@@ -645,7 +648,11 @@ impl WebWorker {
+             _parent_ticket: parent_ticket,
+         };
+         let spawn = std::thread::Builder::new()
+-            .stack_size(bun_threading::thread_pool::DEFAULT_THREAD_STACK_SIZE as usize)
++            .stack_size({
++                let bytes = WebWorker__stackSize(proxy);
++                // Keep native initialization and exception handling headroom; JSC enforces the requested script stack.
++                bytes.max(bun_threading::thread_pool::DEFAULT_THREAD_STACK_SIZE as usize)
++            })
+             .spawn(move || {
+                 let start = start;
+                 start.worker.thread_main(start.init);
+@@ -722,7 +729,7 @@ impl WebWorker {
+     /// TerminationException in its VM at the next safepoint, wake its loop.
+     /// Any thread that holds a ref (the proxy) may call this.
+     #[unsafe(export_name = "WebWorker__requestTermination")]
+-    pub(crate) extern "C" fn request_termination(this: *mut WebWorker) {
++    pub(crate) extern "C" fn request_termination(this: *mut WebWorker) -> bool {
+         let this = bun_ptr::ParentRef::from(NonNull::new(this).expect("WebWorker FFI ptr"));
+         // The handle's lock is taken *before* the flag is published: a worker
+         // that breaks out of its loop because it saw the flag then blocks in
+@@ -730,7 +737,7 @@ impl WebWorker {
+         // set here, instead of racing past with neither.
+         let handle = this.vm_handle.lock();
+         if this.set_requested_terminate() {
+-            return;
++            return false;
+         }
+         log!("[{}] requestTermination", this.execution_context_id);
+         if let Some(handle) = &*handle {
+@@ -743,6 +750,7 @@ impl WebWorker {
+             // safepoint and its loop woken.
+             handle.request_termination();
+         }
++        true
+     }
+ 
+     /// The parent reading this worker's loop counters for `eventLoopUtilization()`: false outside
+@@ -980,6 +988,11 @@ impl WebWorker {
+         self.vm.set(vm);
+         // SAFETY: `vm` is the live VM just built on this thread.
+         *self.vm_handle.lock() = Some(unsafe { (*vm).handle() });
++        WebWorker__installHeapLimitObserver(
++            self.messaging_proxy,
++            JSGlobalObject::opaque_ref(unsafe { (*vm).global }),
++            core::ptr::from_ref(self).cast(),
++        );
+ 
+         // SAFETY: `vm` is a valid heap-allocated VM ptr (checked above).
+         unsafe {
+@@ -1276,6 +1289,9 @@ impl WebWorker {
+         bun_analytics::features::workers_terminated.fetch_add(1, Ordering::Relaxed);
+         log!("[{}] shutdown", self.execution_context_id);
+ 
++        // The exit handlers' and teardown's collections must not report out of memory.
++        WebWorker__disarmHeapLimitObserver(self.messaging_proxy);
++
+         // worker-thread only field; no other thread reads `arena`.
+         let mut arena = self.arena.replace(None);
+         let env_loader = self.worker_env_loader.replace(core::ptr::null_mut());
+diff --git a/test/js/node/worker_threads/worker_threads.test.ts b/test/js/node/worker_threads/worker_threads.test.ts
+index 46971b5..0389f69 100644
+--- a/test/js/node/worker_threads/worker_threads.test.ts
++++ b/test/js/node/worker_threads/worker_threads.test.ts
+@@ -3900,3 +3900,82 @@ test("getHeapStatistics includes array storage allocated since the last collecti
+     await worker.terminate();
+   }
+ });
++
++describe("resourceLimits", () => {
++  async function runLimitedWorker(limits: object, body: string) {
++    await using child = Bun.spawn({
++      cmd: [bunExe(), "-e", `
++        const {Worker,resourceLimits}=require('node:worker_threads');
++        const w=new Worker(${JSON.stringify("const {parentPort,resourceLimits}=require('node:worker_threads');parentPort.postMessage({limits:resourceLimits});parentPort.once('message',()=>{" + body + "});")},{eval:true,resourceLimits:${JSON.stringify(limits)}});
++        const result={main:resourceLimits,before:w.resourceLimits,events:[],messages:[]};
++        w.on('online',()=>{result.online=w.resourceLimits;});
++        w.on('message',m=>{result.messages.push(m);if(m.limits)w.postMessage('go');});
++        w.on('error',e=>{result.events.push('error');result.error={name:e.name,code:e.code,message:e.message,limits:w.resourceLimits};});
++        w.on('exit',code=>{result.events.push('exit');result.exit=code;result.after=w.resourceLimits;console.log(JSON.stringify(result));});
++      `],
++      env: bunEnv,
++      stdout: "pipe",
++      stderr: "pipe",
++    });
++    const [stdout, stderr, exitCode] = await Promise.all([child.stdout.text(), child.stderr.text(), child.exited]);
++    expect({ stderr, exitCode }).toEqual({ stderr: "", exitCode: 0 });
++    return JSON.parse(stdout);
++  }
++
++  test("reports requested values in the parent and worker, then clears on exit", async () => {
++    const limits = { maxYoungGenerationSizeMb: 16, maxOldGenerationSizeMb: 64, codeRangeSizeMb: 32, stackSizeMb: 2 };
++    expect(await runLimitedWorker(limits, "")).toEqual({
++      main: {}, before: limits, online: limits, messages: [{ limits }], events: ["exit"], exit: 0, after: {},
++    });
++  });
++
++  test("terminates only the worker with the Node heap OOM event contract", async () => {
++    const result = await runLimitedWorker({ maxOldGenerationSizeMb: 32, maxYoungGenerationSizeMb: 4 },
++      "globalThis.held=[];for(let i=0;i<64;i++)held.push(new Array(1024*1024).fill(i));parentPort.postMessage('survived');");
++    expect({ events: result.events, error: result.error, exit: result.exit, after: result.after, messages: result.messages.length }).toEqual({
++      events: ["error", "exit"],
++      error: { name: "Error", code: "ERR_WORKER_OUT_OF_MEMORY", message: "Worker terminated due to reaching memory limit: JS heap out of memory", limits: {} },
++      exit: 1, after: {}, messages: 1,
++    });
++    expect((await runLimitedWorker({ maxOldGenerationSizeMb: 64 }, "parentPort.postMessage('alive');")).messages.at(-1)).toBe("alive");
++  });
++
++  test.each(["large", "small", "materialized", "shared"])("excludes %s external backing stores", async kind => {
++    const allocation = kind === "small"
++      ? "for(let i=0;i<65536;i++)held.push(new Uint8Array(2048).fill(7));"
++      : kind === "materialized"
++        ? "for(let i=0;i<32;i++)held.push(new Uint8Array(new ArrayBuffer(4*1024*1024)).fill(7));"
++        : kind === "shared"
++          ? "for(let i=0;i<32;i++)held.push(new Uint8Array(new SharedArrayBuffer(4*1024*1024)).fill(7));"
++          : "for(let i=0;i<32;i++)held.push(new Uint8Array(4*1024*1024).fill(7));";
++    const result = await runLimitedWorker({ maxOldGenerationSizeMb: 32, maxYoungGenerationSizeMb: 4 },
++      "globalThis.held=[];" + allocation + "Bun.gc(true);parentPort.postMessage(held.reduce((n,a)=>n+a.byteLength,0));");
++    expect({ events: result.events, exit: result.exit, bytes: result.messages.at(-1) }).toEqual({ events: ["exit"], exit: 0, bytes: 128 * 1024 * 1024 });
++  });
++
++  test("external allocations do not hide managed heap growth", async () => {
++    const result = await runLimitedWorker({ maxOldGenerationSizeMb: 32, maxYoungGenerationSizeMb: 4 },
++      "globalThis.held=[new Uint8Array(128*1024*1024).fill(7)];Bun.gc(true);for(let i=0;i<64;i++)held.push(new Array(1024*1024).fill(i));");
++    expect({ code: result.error?.code, exit: result.exit }).toEqual({ code: "ERR_WORKER_OUT_OF_MEMORY", exit: 1 });
++  });
++
++  test("a young-only limit sizes the nursery without capping retained objects", async () => {
++    const result = await runLimitedWorker({ maxYoungGenerationSizeMb: 4 },
++      "globalThis.held=[];for(let i=0;i<8;i++)held.push(new Array(1024*1024).fill(i));Bun.gc(true);parentPort.postMessage('retained');");
++    expect({ events: result.events, exit: result.exit, value: result.messages.at(-1) }).toEqual({ events: ["exit"], exit: 0, value: "retained" });
++  });
++
++  test("stackSizeMb changes the worker stack capacity", async () => {
++    const body = "let depth=0;function recur(){depth++;return recur()+1;}try{recur();}catch(e){parentPort.postMessage({depth,name:e.name});}";
++    const small = await runLimitedWorker({ stackSizeMb: 1 }, body);
++    const large = await runLimitedWorker({ stackSizeMb: 4 }, body);
++    expect({ small: small.exit, large: large.exit, smallError: small.messages.at(-1).name, largeError: large.messages.at(-1).name }).toEqual({ small: 0, large: 0, smallError: "RangeError", largeError: "RangeError" });
++    expect(large.messages.at(-1).depth).toBeGreaterThan(small.messages.at(-1).depth * 2);
++  });
++
++  test("a vm timeout remains usable before a worker heap OOM", async () => {
++    const result = await runLimitedWorker({ maxOldGenerationSizeMb: 32, maxYoungGenerationSizeMb: 4 },
++      "try{require('node:vm').runInNewContext('while(true){}',{},{timeout:10});}catch(e){parentPort.postMessage(e.code);}globalThis.held=[];for(let i=0;i<64;i++)held.push(new Array(1024*1024).fill(i));");
++    expect({ timeout: result.messages[1], code: result.error?.code, exit: result.exit }).toEqual({ timeout: "ERR_SCRIPT_EXECUTION_TIMEOUT", code: "ERR_WORKER_OUT_OF_MEMORY", exit: 1 });
++  });
++});
+-- 
+2.54.0 (Apple Git-157)
+

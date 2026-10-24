@@ -1,0 +1,282 @@
+diff --git a/scripts/build/deps/webkit.ts b/scripts/build/deps/webkit.ts
+index d2f910c888..3a22691543 100644
+--- a/scripts/build/deps/webkit.ts
++++ b/scripts/build/deps/webkit.ts
+@@ -40,10 +40,12 @@ export const WEBKIT_VERSION = "1600131e46b5af48bbda3559af8d8a3327230b6e";
+  */
+ 
+ import { homedir } from "node:os";
++import { readFileSync } from "node:fs";
+ import { join, resolve } from "node:path";
+ import type { Config } from "../config.ts";
+ import { computeCpuTargetFlags } from "../flags.ts";
+ import { slash } from "../shell.ts";
++import { assert } from "../error.ts";
+ import { type Dependency, type NestedCmakeBuild, type Source, depBuildDir, depSourceDir } from "../source.ts";
+ 
+ // ───────────────────────────────────────────────────────────────────────────
+@@ -200,6 +202,24 @@ export const webkit: Dependency = {
+         identity: `${cfg.webkitVersion}${prebuiltSuffix(cfg)}`,
+         destDir: prebuiltDestDir(cfg),
+       };
++      const manifestPath = process.env.BUN_WEBKIT_ARTIFACT_MANIFEST;
++      if (manifestPath) {
++        const manifest = JSON.parse(readFileSync(resolve(cfg.cwd, manifestPath), "utf8"));
++        assert(manifest.version === cfg.webkitVersion, "WebKit artifact manifest version does not match the configured pin");
++        const name = new URL(src.url).pathname.split("/").at(-1)!;
++        const artifact = manifest.artifacts?.[name];
++        assert(artifact && /^[a-f0-9]{64}$/.test(artifact.sha256), `Missing SHA-256 for ${name}`);
++        assert(typeof artifact.url === "string" && /^https?:\/\//.test(artifact.url), `Missing HTTP(S) URL for ${name}`);
++        assert(URL.canParse(artifact.url), "Invalid WebKit artifact URL");
++        const parsedUrl = new URL(artifact.url);
++        assert(
++          !parsedUrl.username && !parsedUrl.password && !parsedUrl.search && !parsedUrl.hash,
++          "WebKit proof manifests require public URLs without credentials, query strings, or fragments",
++        );
++        src.url = artifact.url;
++        src.sha256 = artifact.sha256;
++        src.destDir += `-${artifact.sha256.slice(0, 16)}`;
++      }
+       // macOS: bundled ICU headers conflict with system ICU.
+       if (cfg.darwin) {
+         src.rmAfterExtract = ["include/unicode"];
+diff --git a/scripts/build/download.ts b/scripts/build/download.ts
+index 42d8184677..c04c2ad702 100644
+--- a/scripts/build/download.ts
++++ b/scripts/build/download.ts
+@@ -46,7 +46,7 @@
+ 
+ import { spawnSync } from "node:child_process";
+ import { createHash } from "node:crypto";
+-import { createWriteStream, existsSync, readFileSync } from "node:fs";
++import { createReadStream, createWriteStream, existsSync, readFileSync } from "node:fs";
+ import { chmod, copyFile, cp, lstat, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
+ import { basename, resolve } from "node:path";
+ import { Readable } from "node:stream";
+@@ -369,7 +369,12 @@ export async function fetchPrebuilt(
+   dest: string,
+   identity: string,
+   rmPaths: string[] = [],
++  sha256?: string,
+ ): Promise<void> {
++  if (sha256 !== undefined) {
++    assert(/^[a-f0-9]{64}$/.test(sha256), "prebuilt: invalid SHA-256");
++    identity = `${identity}:sha256:${sha256}`;
++  }
+   const stampPath = resolve(dest, ".identity");
+ 
+   // ─── Short-circuit: already at this identity? ───
+@@ -383,7 +388,8 @@ export async function fetchPrebuilt(
+   }
+ 
+   // ─── Prefetch cache: pre-extracted tree with matching identity? ───
+-  if (await tryPrefetchExtracted(dest, ".identity", identity)) return;
++  // A pre-extracted image cache cannot prove the archive digest.
++  if (sha256 === undefined && (await tryPrefetchExtracted(dest, ".identity", identity))) return;
+ 
+   console.log(`fetching ${url}`);
+   const started = performance.now();
+@@ -410,6 +416,11 @@ export async function fetchPrebuilt(
+   await mkdir(stagingDir, { recursive: true });
+ 
+   try {
++    if (sha256 !== undefined) {
++      const hash = createHash("sha256");
++      for await (const chunk of createReadStream(tarballPath)) hash.update(chunk);
++      assert(hash.digest("hex") === sha256, `SHA-256 mismatch for ${name}`, { file: url });
++    }
+     // stripComponents=0: keep top-level dir for hoisting.
+     await extractTarGz(tarballPath, stagingDir, 0);
+     await rm(tarballPath, { force: true });
+diff --git a/scripts/build/fetch-cli.ts b/scripts/build/fetch-cli.ts
+index eebc97cc79..72bc406d85 100644
+--- a/scripts/build/fetch-cli.ts
++++ b/scripts/build/fetch-cli.ts
+@@ -91,13 +91,15 @@ async function main(): Promise<void> {
+     }
+ 
+     case "prebuilt": {
+-      // fetch-cli.ts prebuilt <name> <url> <dest> <identity> [...rm_paths]
+-      const [name, url, dest, identity, ...rmPaths] = args;
++      // fetch-cli.ts prebuilt <name> <base64url-url> <dest> <identity> <sha256|-> [...rm_paths]
++      const [name, encodedUrl, dest, identity, sha256, ...rmPaths] = args;
+       assert(
+-        name !== undefined && url !== undefined && dest !== undefined && identity !== undefined,
++        name !== undefined && encodedUrl !== undefined && dest !== undefined && identity !== undefined,
+         "prebuilt: missing name/url/dest/identity",
+       );
+-      return fetchPrebuilt(name, url, dest, identity, rmPaths);
++      assert(sha256 !== undefined, "prebuilt: missing sha256 or '-' sentinel");
++      const url = Buffer.from(encodedUrl, "base64url").toString("utf8");
++      return fetchPrebuilt(name, url, dest, identity, rmPaths, sha256 === "-" ? undefined : sha256);
+     }
+ 
+     case undefined:
+@@ -117,7 +119,7 @@ Usage: bun fetch-cli.ts <kind> <args...>
+ 
+ Kinds:
+   dep             <name> <repo> <commit> <dest> <cache> [...patches]
+-  prebuilt        <name> <url> <dest> <identity> [...rm_paths]
++  prebuilt        <name> <base64url-url> <dest> <identity> <sha256|-> [...rm_paths]
+   subst           <in> <out> [<from> <to>]...
+   check-undefined <name> <nm> <rspfile> <stamp> <symbol,...>
+ 
+diff --git a/scripts/build/ninja.ts b/scripts/build/ninja.ts
+index 5a02f2d67e..98478739a3 100644
+--- a/scripts/build/ninja.ts
++++ b/scripts/build/ninja.ts
+@@ -67,7 +67,7 @@ const ruleVars = {
+   dep_codegen: ["name", "cwd", "tool", "args"],
+   dep_configure: ["name", "srcdir", "builddir", "args"],
+   dep_fetch: ["name", "repo", "commit", "dest", "cache", "patches"],
+-  dep_fetch_prebuilt: ["name", "url", "dest", "identity", "rm_paths"],
++  dep_fetch_prebuilt: ["name", "url", "dest", "identity", "sha256", "rm_paths"],
+   dep_host_cc: ["flags"],
+   dep_prebuild: ["name", "cwd", "cmd"],
+   dep_subst: ["pairs"],
+diff --git a/scripts/build/source.ts b/scripts/build/source.ts
+index ee3163e9f4..663c7ea31c 100644
+--- a/scripts/build/source.ts
++++ b/scripts/build/source.ts
+@@ -140,6 +140,8 @@ export type Source =
+        * affect which tarball you need).
+        */
+       identity: string;
++      /** SHA-256 of the archive, checked before extraction. */
++      sha256?: string;
+       /**
+        * Paths to delete (relative to destDir) after extraction. WebKit
+        * deletes `include/unicode` on macOS (conflicts with system ICU
+@@ -613,7 +615,7 @@ export function registerDepRules(n: Ninja, cfg: Config): void {
+   // $rm_paths: space-separated paths (relative to dest) to delete after
+   // extraction. Trailing positional args to fetch-cli, may be empty.
+   n.rule("dep_fetch_prebuilt", {
+-    command: `${stream} ${cfg.jsRuntime} ${fetchCli} prebuilt $name $url $dest $identity $rm_paths`,
++    command: `${stream} ${cfg.jsRuntime} ${fetchCli} prebuilt $name $url $dest $identity $sha256 $rm_paths`,
+     description: "fetch $name (prebuilt)",
+     restat: true,
+     pool: "dep",
+@@ -1088,9 +1090,11 @@ function emitPrebuilt(
+     implicitInputs: [fetchCliPath],
+     vars: {
+       name,
+-      url: source.url,
++      // A manifest URL may contain shell metacharacters; decode it inside fetch-cli.
++      url: Buffer.from(source.url, "utf8").toString("base64url"),
+       dest: destDir,
+       identity: source.identity,
++      sha256: source.sha256 ?? "-",
+       // Space-separated relative paths. No quoting needed — paths are
+       // under our control (include/node/openssl etc.), no spaces.
+       rm_paths: (source.rmAfterExtract ?? []).join(" "),
+diff --git a/test/internal/build-download-retry.test.ts b/test/internal/build-download-retry.test.ts
+index 76861c4ce6..b7bdb094cc 100644
+--- a/test/internal/build-download-retry.test.ts
++++ b/test/internal/build-download-retry.test.ts
+@@ -17,12 +17,37 @@ import { tempDir } from "harness";
+ import { existsSync, readFileSync } from "node:fs";
+ import { createServer, type AddressInfo } from "node:net";
+ import { join } from "node:path";
++import { createHash } from "node:crypto";
++import { spawnSync } from "node:child_process";
+ 
+-import { downloadRetry, downloadWithRetry, type RetryPolicy } from "../../scripts/build/download.ts";
++import { downloadRetry, downloadWithRetry, fetchPrebuilt, type RetryPolicy } from "../../scripts/build/download.ts";
+ import { BuildError, describeError } from "../../scripts/build/error.ts";
+ 
+ const BODY = "tarball bytes";
+ 
++test("prebuilt archives reject a wrong digest before replacing the installed tree", async () => {
++  using dir = tempDir("prebuilt-sha256", { "package/value": "verified" });
++  const archive = join(String(dir), "package.tar.gz");
++  expect(spawnSync("tar", ["-czf", archive, "-C", String(dir), "package"]).status).toBe(0);
++  const bytes = readFileSync(archive);
++  const digest = createHash("sha256").update(bytes).digest("hex");
++  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(bytes) });
++  const dest = join(String(dir), "installed");
++  try {
++    await fetchPrebuilt("fixture", server.url.href, dest, "pin", [], digest);
++    expect(readFileSync(join(dest, "value"), "utf8")).toBe("verified");
++    await expect(fetchPrebuilt("fixture", server.url.href, dest, "pin", [], "0".repeat(64))).rejects.toThrow(
++      "SHA-256 mismatch for fixture",
++    );
++    expect(readFileSync(join(dest, "value"), "utf8")).toBe("verified");
++    await expect(fetchPrebuilt("fixture", server.url.href, dest, "pin", [], "invalid")).rejects.toThrow(
++      "prebuilt: invalid SHA-256",
++    );
++  } finally {
++    server.stop(true);
++  }
++});
++
+ /** The production attempt count with no waiting between attempts. */
+ const noBackoff: RetryPolicy = { ...downloadRetry, backoffMs: () => 0 };
+ 
+diff --git a/test/internal/source-lints/webkit-prebuilt-url.test.ts b/test/internal/source-lints/webkit-prebuilt-url.test.ts
+index dea23b7f0e..919cdbdfbd 100644
+--- a/test/internal/source-lints/webkit-prebuilt-url.test.ts
++++ b/test/internal/source-lints/webkit-prebuilt-url.test.ts
+@@ -2,9 +2,14 @@
+  * WEBKIT_VERSION is used as the release tag; --webkit-version overrides still
+  * hit the plain `autobuild-<sha>` tag. Configure-time only. */
+ import { describe, expect, test } from "bun:test";
++import { tempDir } from "harness";
++import { writeFileSync } from "node:fs";
++import { join } from "node:path";
+ 
+ import { resolveConfig, type Config, type PartialConfig, type Toolchain } from "../../../scripts/build/config.ts";
+ import { webkit, WEBKIT_VERSION } from "../../../scripts/build/deps/webkit.ts";
++import { Ninja } from "../../../scripts/build/ninja.ts";
++import { registerDepRules, resolveDep } from "../../../scripts/build/source.ts";
+ 
+ /** A fully-populated fake toolchain — resolveConfig never spawns any of these. */
+ function mockToolchain(): Toolchain {
+@@ -69,6 +74,48 @@ function prebuiltUrlOf(cfg: Config): string {
+ }
+ 
+ describe("WebKit prebuilt URL", () => {
++  test("an explicit artifact manifest pins URL, checksum and cache, and rejects missing variants", () => {
++    using dir = tempDir("webkit-manifest", {});
++    const path = join(String(dir), "artifacts.json");
++    const prior = process.env.BUN_WEBKIT_ARTIFACT_MANIFEST;
++    const digest = "a".repeat(64);
++    const url = "https://example.invalid/engine%20release&candidate.tar.gz";
++    const manifest = {
++      version: WEBKIT_VERSION,
++      artifacts: { "bun-webkit-linux-amd64.tar.gz": { url, sha256: digest } },
++    };
++    try {
++      process.env.BUN_WEBKIT_ARTIFACT_MANIFEST = path;
++      writeFileSync(path, JSON.stringify(manifest));
++      const source = webkit.source(resolveLinuxRelease());
++      expect(source.kind).toBe("prebuilt");
++      if (source.kind !== "prebuilt") throw new Error("expected prebuilt");
++      expect(source.url).toBe(url);
++      expect(source.sha256).toBe(digest);
++      expect(source.destDir).toEndWith(`-${digest.slice(0, 16)}`);
++      const cfg = resolveLinuxRelease({ buildDir: join(String(dir), "build") });
++      const ninja = new Ninja({ buildDir: cfg.buildDir });
++      registerDepRules(ninja, cfg);
++      resolveDep(ninja, cfg, webkit, new Map());
++      const encodedUrl = /^  url = (.*)$/m.exec(ninja.toString())![1]!;
++      expect(encodedUrl).toMatch(/^[A-Za-z0-9_-]+$/);
++      expect(Buffer.from(encodedUrl, "base64url").toString("utf8")).toBe(url);
++      for (const rejectedUrl of ["https://user:secret@example.invalid/a", `${url}?signature=secret`, `${url}#secret`]) {
++        writeFileSync(path, JSON.stringify({
++          ...manifest,
++          artifacts: { "bun-webkit-linux-amd64.tar.gz": { url: rejectedUrl, sha256: digest } },
++        }));
++        expect(() => webkit.source(resolveLinuxRelease())).toThrow("without credentials, query strings, or fragments");
++      }
++      writeFileSync(path, JSON.stringify(manifest));
++      expect(() => webkit.source(resolveLinuxRelease({ lto: true }))).toThrow("Missing SHA-256");
++      writeFileSync(path, JSON.stringify({ ...manifest, version: "wrong" }));
++      expect(() => webkit.source(resolveLinuxRelease())).toThrow("manifest version does not match");
++    } finally {
++      if (prior === undefined) delete process.env.BUN_WEBKIT_ARTIFACT_MANIFEST;
++      else process.env.BUN_WEBKIT_ARTIFACT_MANIFEST = prior;
++    }
++  });
+   // Mirrors prebuiltUrl(): 40-hex shas get the autobuild- prefix, tags pass
+   // through, so these assertions hold for both WEBKIT_VERSION forms.
+   const defaultTag = WEBKIT_VERSION.startsWith("autobuild-") ? WEBKIT_VERSION : `autobuild-${WEBKIT_VERSION}`;
