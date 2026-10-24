@@ -394,8 +394,12 @@ static void printCounters(PrintStream& out, const CodeGenerationInputs& inputs, 
 {
     if (!inputs.branchCounters.isCounting())
         return;
-    if (std::optional<uint32_t> entries = inputs.branchCounters.counterOfEntries(id); entries && function.module)
-        out.print("\nQE\t", *entries, "\t", function.module.index(), "\t", function.position, "\t", pathOf(inputs.program, function.module));
+    if (std::optional<uint32_t> entries = inputs.branchCounters.counterOfEntries(id)) {
+        if (function.module)
+            out.print("\nQE\t", *entries, "\t", function.module.index(), "\t", function.position, "\t", pathOf(inputs.program, function.module));
+        else
+            out.print("\nQE\t", *entries, "\t-\t", function.position, "\t");
+    }
     Vector<CountedBranch> branches = findCountedBranches(inputs.program, function);
     CFG cfg(function);
     UseLists useLists(function, cfg);
