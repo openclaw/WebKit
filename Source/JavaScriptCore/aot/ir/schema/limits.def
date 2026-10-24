@@ -195,7 +195,7 @@ enum LimitID (stage: Stage, protects: Protects, degradesTo: DegradesTo, valueOnA
     MaxClobberSitesPerSplit(GenerateCode, CompileTime, NotOptimized, 32, 32, "calls a live range is split around")
 
     ClosureAllocationSites(BuildImage, BitWidth, BuildError, 16777216, 16777216, "places that create closures")
-    ImageFunctions(BuildImage, BitWidth, BuildError, 2097136, 2097136, "functions in a program")
+    ImageFunctions(BuildImage, BitWidth, BuildError, 4128752, 4128752, "functions in a program")
     CodeBytes(BuildImage, BitWidth, BuildError, 4294967296, 2147483648, "machine code size")
     SitesPerFunction(BuildImage, BitWidth, BuildError, 8388607, 8388607, "call and throw sites per function")
     InlineFramesPerFunction(BuildImage, BitWidth, NotOptimized, 16777215, 16777215, "inlined calls per function")
