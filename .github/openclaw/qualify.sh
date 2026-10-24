@@ -37,7 +37,9 @@ baseline="$repo/build/qualify-baseline/bun"
 sha256sum "$baseline" > "$QUALIFICATION_DIR/bun-baseline.sha256"
 unset BUN_WEBKIT_ARTIFACT_MANIFEST BUN_BUILD_PREFETCH_DIR BUN_BUILD_CACHE_DIR
 for arm in baseline candidate; do
+  qualification_node="${QUALIFICATION_BASELINE_NODE:-$(command -v node)}"
   if test "$arm" = candidate; then
+    qualification_node="${QUALIFICATION_CANDIDATE_NODE:-$(command -v node)}"
     repo="$QUALIFICATION_DIR/bun"
     checkout_matched
     build_matched candidate
@@ -61,7 +63,7 @@ for arm in baseline candidate; do
   cp "$inputs/selected.json" "$results/selected.json"
   rm -f build/openclaw-ci/results.json
   python3 "$inputs/stage-fork-ci.py" "$repo" "$results"
-  env OPENCLAW_QUALIFICATION_RESULTS="$results" HOME="$results/home" TMPDIR="$results/tmp" PATH="$results/bin:$PATH" OPENCLAW_CI_PLATFORM=linux \
+  env OPENCLAW_QUALIFICATION_RESULTS="$results" HOME="$results/home" TMPDIR="$results/tmp" PATH="$results/bin:$(dirname "$qualification_node"):$PATH" OPENCLAW_CI_PLATFORM=linux \
     "$candidate" scripts/openclaw-ci/qualification-tests.ts test > "$results/tests.log" 2>&1
   cp build/openclaw-ci/results.json "$results/results.json"
   python3 "$inputs/collect-fork-outcomes.py" "$results"
