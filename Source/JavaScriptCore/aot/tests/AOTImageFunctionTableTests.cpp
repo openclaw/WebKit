@@ -568,6 +568,20 @@ static void testNoClosureWords()
     AOT_TEST_CHECK(!image.image->closureWord(FunctionID(0u)));
 }
 
+static void testImageFunctionLimit()
+{
+    BuildContext context(wireOptions());
+    uint64_t limit = context.limit(LimitID::ImageFunctions);
+    AOT_TEST_CHECK(checkImageFunctionLimit(limit, context));
+    AOT_TEST_CHECK(!context.diagnostics().hasErrors());
+    AOT_TEST_CHECK(!checkImageFunctionLimit(limit + 1, context));
+    const auto& diagnostics = context.diagnostics().userDiagnostics();
+    AOT_TEST_CHECK(diagnostics.size() == 1);
+    AOT_TEST_CHECK(diagnostics[0].kind == UserDiagnosticKind::TooManyFunctions);
+    AOT_TEST_CHECK(diagnostics[0].limit == LimitID::ImageFunctions);
+    AOT_TEST_CHECK(diagnostics[0].count == limit + 1);
+}
+
 std::span<const NativeTest> imageFunctionTableTests()
 {
     static constexpr NativeTest tests[] = {
@@ -590,6 +604,7 @@ std::span<const NativeTest> imageFunctionTableTests()
         { "image/functions/closure-word-of-body-with-prefix"_s, testClosureWordOfBodyWithPrefix },
         { "image/functions/closure-words-of-aliases"_s, testClosureWordsOfAliases },
         { "image/functions/no-closure-words"_s, testNoClosureWords },
+        { "image/functions/id-limit-diagnostic"_s, testImageFunctionLimit },
     };
     return tests;
 }

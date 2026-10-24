@@ -41,6 +41,14 @@ struct FrameShape {
 
 } // anonymous namespace
 
+bool checkImageFunctionLimit(uint64_t count, BuildContext& context)
+{
+    if (!context.exceeds(LimitID::ImageFunctions, count))
+        return true;
+    context.diagnostics().add(UserDiagnostic { .kind = UserDiagnosticKind::TooManyFunctions, .limit = LimitID::ImageFunctions, .count = clampTo<uint32_t>(count) });
+    return false;
+}
+
 static bool checkFunctionLimit(const LinkedFunctions& functions, const Vector<EntryAlias>& aliases, BuildContext& context)
 {
     uint64_t endOfFunctionIDs = 0;
@@ -49,10 +57,7 @@ static bool checkFunctionLimit(const LinkedFunctions& functions, const Vector<En
     for (const EntryAlias& alias : aliases)
         endOfFunctionIDs = std::max(endOfFunctionIDs, static_cast<uint64_t>(alias.function.index()) + 1);
     uint64_t count = std::max<uint64_t>(functions.size(), endOfFunctionIDs);
-    if (!context.exceeds(LimitID::ImageFunctions, count))
-        return true;
-    context.diagnostics().add(UserDiagnostic { .kind = UserDiagnosticKind::TooManyFunctions, .limit = LimitID::ImageFunctions, .count = clampTo<uint32_t>(count) });
-    return false;
+    return checkImageFunctionLimit(count, context);
 }
 
 static uint64_t unwindableRegisterMask()

@@ -141,6 +141,8 @@ static CodeAndTables generateCodeAndTables(Typed::PipelineOutput& pipeline, cons
 {
     Typed::CodeGenerationInputs inputs = createCodeGenerationInputs(pipeline, plan);
     CodeGenerationJob codeGeneration(inputs, *pipeline.program, context, &plan.bodiesWithoutCode);
+    if (context.diagnostics().hasErrors())
+        return { };
 
     CodeAndTables result;
     // Most of encoding the text runs on one thread, so it runs beside code generation, which is longer.
