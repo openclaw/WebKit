@@ -1466,9 +1466,9 @@ static void incrementalRunsReportEachDependencyOnce()
         ValueSets sets(numberOfArrivals + 2);
         ValueFlowSolver solver(input, sets, rule, loops);
         AOT_TEST_CHECK(solver.solve());
-        AOT_TEST_CHECK(sets.size(solver.valueOf(ValueFlowNodeID(0u))) == numberOfArrivals);
-        AOT_TEST_CHECK(sets.size(solver.valueOf(ValueFlowNodeID(1u))) == 1);
-        AOT_TEST_CHECK(sets.contains(solver.valueOf(ValueFlowNodeID(1u)), ValueFlowObjectID(numberOfArrivals + 1)));
+        AOT_TEST_CHECK(sets.size(solver.possibleValuesOf(ValueFlowNodeID(0u))) == numberOfArrivals);
+        AOT_TEST_CHECK(sets.size(solver.possibleValuesOf(ValueFlowNodeID(1u))) == 1);
+        AOT_TEST_CHECK(sets.contains(solver.possibleValuesOf(ValueFlowNodeID(1u)), ValueFlowObjectID(numberOfArrivals + 1)));
         unsigned dependencies = 0;
         solver.forEachMadeNodeAskedForBy(ValueFlowStatementID(0u), [&](const ValueFlowNodeKey& key, ValueFlowStatementID) {
             AOT_TEST_CHECK(key.kind == ValueFlowMadeNodeKind::Read);
@@ -1521,9 +1521,9 @@ static void incrementalDependenciesGrowAndRetireOnFullRuns()
             ValueSets sets(numberOfArrivals + 2);
             ValueFlowSolver solver(input, sets, rule, loops);
             AOT_TEST_CHECK(solver.solve());
-            AOT_TEST_CHECK(sets.size(solver.valueOf(ValueFlowNodeID(0u))) == numberOfArrivals);
-            AOT_TEST_CHECK(sets.size(solver.valueOf(ValueFlowNodeID(1u))) == 1);
-            AOT_TEST_CHECK(sets.contains(solver.valueOf(ValueFlowNodeID(1u)), ValueFlowObjectID(numberOfArrivals + 1)));
+            AOT_TEST_CHECK(sets.size(solver.possibleValuesOf(ValueFlowNodeID(0u))) == numberOfArrivals);
+            AOT_TEST_CHECK(sets.size(solver.possibleValuesOf(ValueFlowNodeID(1u))) == 1);
+            AOT_TEST_CHECK(sets.contains(solver.possibleValuesOf(ValueFlowNodeID(1u)), ValueFlowObjectID(numberOfArrivals + 1)));
             unsigned dependencies = 0;
             std::array<bool, numberOfArrivals + 1> reportedProperties {};
             solver.forEachMadeNodeAskedForBy(ValueFlowStatementID(0u), [&](const ValueFlowNodeKey& key, ValueFlowStatementID) {
