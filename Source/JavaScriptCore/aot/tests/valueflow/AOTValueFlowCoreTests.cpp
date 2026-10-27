@@ -1756,7 +1756,27 @@ static void numbersByKeyAgreeWithAHashMap()
     }
 }
 
+static void useStorageKeepsAddressesPastOneGiB()
+{
+    using Uses = ListThatStaysInPlace<uint64_t, UINT32_MAX>;
+    static_assert(ListThatStaysInPlace<uint64_t>::mostElements == 1u << 27);
+    static_assert(Uses::mostElements < UINT32_MAX && !(Uses::mostElements % Uses::elementsPerStep));
+    constexpr size_t oldBound = 1u << 27;
+    constexpr size_t block = 256;
+    Uses uses;
+    AOT_TEST_CHECK(!uses.makeRoomToFill(oldBound - block));
+    uses[0] = 17;
+    uses[oldBound - block - 1] = 29;
+    const uint64_t* first = &uses[0];
+    AOT_TEST_CHECK(uses.makeRoomToFill(2 * block) == oldBound - block);
+    uses[oldBound + block - 1] = 41;
+    AOT_TEST_CHECK(&uses[0] == first && uses[0] == 17 && uses[oldBound - block - 1] == 29);
+    AOT_TEST_CHECK(uses[oldBound + block - 1] == 41 && uses.size() == oldBound + block);
+    AOT_TEST_CHECK(uses.capacity() >= uses.size());
+}
+
 #define FOR_EACH_AOT_VALUE_FLOW_CORE_TEST(v) \
+    v(useStorageKeepsAddressesPastOneGiB) \
     v(valueSetsAgreeWithPlainSets) v(valueSetsOfFewAndOfManyBlocksAgreeWithPlainSets) v(valueSetsOfSeveralGroupsOfBlocksAgreeWithPlainSets) v(valueSetsOfBothFormsAgreeWithPlainSets) v(valueSetsAreTheSameFromEveryThread) v(sampleOfBlocksDependsOnTheMembersAlone) v(valueFlowGraphFindsTheLeastSolution) v(whatTheGraphHoldsDoesNotHangOnTheOrderOfTheEdges) v(rowsOfNodesInsideOneShardAreWalkedInOneWave) \
     v(masksTreatPlaceholdersByTheirKind) v(nodesThatPlaceholdersCoverAreRetired) v(theCallerMayConnectWhatLeadsIntoRetiredNodes) v(whatACoveredNodeHoldsIsNotSentToItAgain) \
     v(valueFlowGraphSolvesLongChainsAndWideLevelsOnThreads) v(valueFlowRoundsAgreeWithAnAnalysisObjectByObject) v(whatATurnMakesAndReachesRunsInThatTurn) v(incrementalRunsReportEachDependencyOnce) v(incrementalDependenciesGrowAndRetireOnFullRuns) \

@@ -460,35 +460,6 @@ ALWAYS_INLINE ValueFlowNodeID ValueFlowSolver::nodeAwaitedBy(ValueFlowStatementI
 
 ValueFlowSolver::~ValueFlowSolver() = default;
 
-template<typename T>
-ListThatStaysInPlace<T>::~ListThatStaysInPlace()
-{
-    if (!m_elements)
-        return;
-    releasePages(m_elements, m_numberReserved * sizeof(T));
-}
-
-template<typename T>
-void ListThatStaysInPlace<T>::takeMemoryFor(size_t size)
-{
-    constexpr size_t elementsPerStep = 1u << 16;
-    static_assert(!(elementsPerStep * sizeof(T) % (64 * KB)) && !(mostElements % elementsPerStep));
-    RELEASE_ASSERT(size <= mostElements);
-    Locker locker { m_lock };
-    if (!m_elements) {
-        m_numberReserved = std::max(elementsPerStep, bytesToReserve(mostElements * sizeof(T)) / sizeof(T) / elementsPerStep * elementsPerStep);
-        m_elements = static_cast<T*>(reservePages(m_numberReserved * sizeof(T)));
-    }
-    if (size > m_numberReserved) [[unlikely]]
-        exitOutOfMemory();
-    size_t withMemory = m_numberWithMemory.load(std::memory_order_relaxed);
-    if (size <= withMemory)
-        return;
-    size_t end = roundUpToMultipleOf<elementsPerStep>(size);
-    commitPages(m_elements + withMemory, (end - withMemory) * sizeof(T));
-    m_numberWithMemory.store(end, std::memory_order_release);
-}
-
 ValueFlowSolver::IndexOfMadeNodes::~IndexOfMadeNodes()
 {
     for (Table table : tables)
