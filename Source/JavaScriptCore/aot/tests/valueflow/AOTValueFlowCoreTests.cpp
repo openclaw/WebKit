@@ -1794,7 +1794,29 @@ static void compilerVectorReservesPastTwoGiB()
     AOT_TEST_CHECK(shared.isEmpty() && returned[0].value == 17 && returned[1].value == 29);
 }
 
+static void valueSetCacheKeepsAdjacentRunsSeparate()
+{
+    ValueSets sets(64);
+    ValueSetMaker maker(sets);
+    std::array<ValueSetID, 6> values;
+    for (uint32_t index = 0; index < 3; ++index) {
+        std::array<ValueFlowObjectID, 2> members { ValueFlowObjectID(index * 2), ValueFlowObjectID(index * 2 + 1) };
+        values[index * 2] = maker.of(members);
+        values[index * 2 + 1] = ValueSets::complement(values[index * 2]);
+    }
+    for (unsigned first = 0; first < values.size(); ++first) {
+        uint32_t index = ValueSets::indexInTableBySet(values[first]);
+        AOT_TEST_CHECK(index < sets.endOfTableBySet());
+        for (unsigned second = first + 1; second < values.size(); ++second)
+            AOT_TEST_CHECK(index != ValueSets::indexInTableBySet(values[second]));
+    }
+    ValueSetID singleton = maker.of(ValueFlowObjectID(0u));
+    AOT_TEST_CHECK(ValueSets::indexInTableBySet(singleton) >= sets.endOfTableBySet());
+    AOT_TEST_CHECK(ValueSets::indexInTableBySet(ValueSets::complement(singleton)) >= sets.endOfTableBySet());
+}
+
 #define FOR_EACH_AOT_VALUE_FLOW_CORE_TEST(v) \
+    v(valueSetCacheKeepsAdjacentRunsSeparate) \
     v(compilerVectorReservesPastTwoGiB) \
     v(useStorageKeepsAddressesPastOneGiB) \
     v(valueSetsAgreeWithPlainSets) v(valueSetsOfFewAndOfManyBlocksAgreeWithPlainSets) v(valueSetsOfSeveralGroupsOfBlocksAgreeWithPlainSets) v(valueSetsOfBothFormsAgreeWithPlainSets) v(valueSetsAreTheSameFromEveryThread) v(sampleOfBlocksDependsOnTheMembersAlone) v(valueFlowGraphFindsTheLeastSolution) v(whatTheGraphHoldsDoesNotHangOnTheOrderOfTheEdges) v(rowsOfNodesInsideOneShardAreWalkedInOneWave) \
