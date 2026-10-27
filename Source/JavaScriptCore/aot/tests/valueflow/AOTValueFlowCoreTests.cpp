@@ -1775,7 +1775,27 @@ static void useStorageKeepsAddressesPastOneGiB()
     AOT_TEST_CHECK(uses.capacity() >= uses.size());
 }
 
+static void compilerVectorReservesPastTwoGiB()
+{
+    struct Element {
+        uint64_t value;
+    };
+    constexpr size_t oldLimit = (std::numeric_limits<unsigned>::max() >> 1) / sizeof(Element);
+    constexpr size_t requested = oldLimit + 2;
+    Vector<Element> values;
+    values.reserveCapacity(requested);
+    values.append(Element { 17 });
+    values.append(Element { 29 });
+    AOT_TEST_CHECK(values.capacity() >= requested && values.capacity() < 1u << 31);
+    AOT_TEST_CHECK(values.size() == 2 && values[0].value == 17 && values[1].value == 29);
+    WTF::Vector<Element> shared(static_cast<WTF::Vector<Element>&&>(WTF::move(values)));
+    AOT_TEST_CHECK(values.isEmpty() && shared.size() == 2 && shared[1].value == 29);
+    Vector<Element> returned(WTF::move(shared));
+    AOT_TEST_CHECK(shared.isEmpty() && returned[0].value == 17 && returned[1].value == 29);
+}
+
 #define FOR_EACH_AOT_VALUE_FLOW_CORE_TEST(v) \
+    v(compilerVectorReservesPastTwoGiB) \
     v(useStorageKeepsAddressesPastOneGiB) \
     v(valueSetsAgreeWithPlainSets) v(valueSetsOfFewAndOfManyBlocksAgreeWithPlainSets) v(valueSetsOfSeveralGroupsOfBlocksAgreeWithPlainSets) v(valueSetsOfBothFormsAgreeWithPlainSets) v(valueSetsAreTheSameFromEveryThread) v(sampleOfBlocksDependsOnTheMembersAlone) v(valueFlowGraphFindsTheLeastSolution) v(whatTheGraphHoldsDoesNotHangOnTheOrderOfTheEdges) v(rowsOfNodesInsideOneShardAreWalkedInOneWave) \
     v(masksTreatPlaceholdersByTheirKind) v(nodesThatPlaceholdersCoverAreRetired) v(theCallerMayConnectWhatLeadsIntoRetiredNodes) v(whatACoveredNodeHoldsIsNotSentToItAgain) \

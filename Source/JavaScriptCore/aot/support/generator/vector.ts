@@ -67,6 +67,7 @@ const head = `#pragma once
 
 #include <wtf/HashTraits.h>
 #include <wtf/Vector.h>
+#include <numeric>
 
 // wtf/Vector.h for the compiler's own lists. Nobody borrows them, so there is no borrowed bit to test and to mask, and a destructor
 // frees the buffer and is done.
@@ -83,10 +84,21 @@ using WTF::VectorMalloc;
 using WTF::VectorTypeOperations;
 using WTF::addressOfArgument;
 using WTF::containerSize;
-using WTF::isValidCapacityForVector;
 using WTF::typelessPointersAreEqual;
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+
+template<typename T>
+constexpr bool isValidCapacityForVector(size_t capacity)
+{
+    if constexpr (sizeof(T) == 1)
+        return WTF::isValidCapacityForVector<T>(capacity);
+    // Keep the borrowed bit clear across WTF conversions, without imposing its byte-sized limit on compiler tables.
+    constexpr size_t maxIndex = std::numeric_limits<unsigned>::max() >> 1;
+    constexpr size_t elementsPerGranule = 65536 / std::gcd(size_t { 65536 }, sizeof(T));
+    constexpr size_t maxCapacity = maxIndex / elementsPerGranule * elementsPerGranule;
+    return capacity <= maxCapacity && capacity <= std::numeric_limits<size_t>::max() / sizeof(T);
+}
 
 template<typename T, size_t inlineCapacity = 0, typename OverflowHandler = CrashOnOverflow, size_t minCapacity = 16, typename Malloc = VectorBufferMalloc> class Vector;
 
