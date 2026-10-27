@@ -343,6 +343,9 @@ void removeJumpOnlyFunctions(LinkedFunctions& functions, Vector<EntryAlias>& ali
         trimPadding(functions[position], templates);
         jumpsTo[position] = findJumpTarget(functions[position], position, index);
     });
+    // Moved entrance code keeps its counters, but the map belongs to the removed body.
+    if (context.recordedOptions().countsBranches)
+        return;
     Vector<OptionalIndex> chainEnd = findChainEnds(functions, jumpsTo);
     Vector<uint32_t> uses = computeUseCounts(functions, index, chainEnd, loops);
     RemovedBodies removed = createAliases(functions, jumpsTo, chainEnd, uses, aliases);
