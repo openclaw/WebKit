@@ -4,6 +4,8 @@ These entries describe the experimental `openclaw/aot-main` integration fork.
 
 ## Unreleased
 
+- Sequence code-emitting arguments explicitly to keep AOT instruction order deterministic across C++ evaluation orders.
+
 - Resolve named runtime functions in IR fixtures and keep numeric-return checks portable across arm64 conversion instructions.
 
 - Sync AOT proxy and collection flow, JSON key ordering, exception frames, and startup table mappings with upstream.

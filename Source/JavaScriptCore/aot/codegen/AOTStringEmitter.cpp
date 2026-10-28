@@ -219,8 +219,11 @@ Word32 StringEmitter::lengthOf(LiteralStringWord word, const Type& type)
     auto lengthByNumber = [&] {
         Word32 length = word32(lengths.isEmpty() ? 0 : static_cast<int32_t>(lengths.last().second));
         for (auto [literal, lengthOfLiteral] : lengths.span().first(lengths.isEmpty() ? 0 : lengths.size() - 1)) {
-            if (lengthOfLiteral != lengths.last().second)
-                length = Word32(m_out.select(isLiteral(literal).value(), m_out.constInt32(static_cast<int32_t>(lengthOfLiteral)), length.value()));
+            if (lengthOfLiteral != lengths.last().second) {
+                Condition matches = isLiteral(literal);
+                LValue literalLength = m_out.constInt32(static_cast<int32_t>(lengthOfLiteral));
+                length = Word32(m_out.select(matches.value(), literalLength, length.value()));
+            }
         }
         return length;
     };
