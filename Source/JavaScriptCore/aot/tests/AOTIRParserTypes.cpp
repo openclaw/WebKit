@@ -651,7 +651,18 @@ RuntimeModuleID TextParser::parseRuntimeModule()
 
 RuntimeFunctionID TextParser::parseRuntimeFunction()
 {
-    return parseBuiltinNumber<RuntimeFunctionID>(*this);
+    if (!at(TokenKind::Word))
+        return parseBuiltinNumber<RuntimeFunctionID>(*this);
+    TextPosition position = token().position;
+    BuiltinOverloadID overload = parseBuiltinOverload();
+    if (hasFailed())
+        return { };
+    RuntimeFunctionID function = m_builtins.at(overload).code.implementation.function;
+    if (!function || !m_builtins.contains(function)) {
+        fail(InternalErrorKind::IRTextError, position);
+        return { };
+    }
+    return function;
 }
 
 } } } // namespace JSC::AOT::Typed

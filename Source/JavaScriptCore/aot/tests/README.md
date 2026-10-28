@@ -482,6 +482,9 @@ entry, a class, a slot, a result layout, a runtime module and an overload by its
 `overload=MathMax/0`). A test that needs a built-in with some attribute (starts an instance, loads a module, runs unseen code, reads
 `this`) names a real entry that has it.
 
+Runtime function IDs accept an overload token (`runtimefunction id=ArrayPrototypeMap/0`,
+`enclosingRuntimeFunction=ArrayPrototypeMap/0`) or a numeric ID. Use tokens for named library functions so the fixture works with either host table and disabled features. A token must name an overload with a runtime implementation.
+
 A test in this folder says the same under both tables:
 
 - It names entries of the engine and of the stand-in host alone. A token that only Bun's table has (`builtin=QueueMicrotask`) does not

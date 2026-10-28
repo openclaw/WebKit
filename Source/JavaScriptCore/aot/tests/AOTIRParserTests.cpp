@@ -555,6 +555,22 @@ static void parserChecksRuntimeFunctionNumbers()
     checkFailure("function f0 role=Library enclosingRuntimeFunction=4000000000\n"_s, InternalErrorKind::IRTextError, { 1, 51 });
 }
 
+static void parserResolvesNamedRuntimeFunctions()
+{
+    const BuiltinTable& table = BuiltinTable::singleton();
+    auto overload = table.overloadFromToken("ArrayPrototypeMap/0"_s);
+    AOT_TEST_CHECK(overload);
+    RuntimeFunctionID id = table.at(overload).code.implementation.function;
+    AOT_TEST_CHECK(id && table.contains(id));
+    BuildContext build(makeDefaultCompileOptions());
+    auto program = parseProgram(makeString(moduleLine, "function f0 role=Library enclosingRuntimeFunction=ArrayPrototypeMap/0 results=[{type=anything}]\nruntimefunction id=ArrayPrototypeMap/0 function=f0\n"_s), IRForm::AsRead, build);
+    AOT_TEST_CHECK(program && program->functions[0].enclosingRuntimeFunction == id);
+    const RuntimeFunctionEntry* entry = findRuntimeFunction(*program, id);
+    AOT_TEST_CHECK(entry && entry->function == FunctionID(0u));
+    checkFailure("function f0 role=Library enclosingRuntimeFunction=MathAbs/0\n"_s, InternalErrorKind::IRTextError, { 1, 51 });
+    checkFailure("function f0 role=Library enclosingRuntimeFunction=NoSuchBuiltin/0\n"_s, InternalErrorKind::IRTextError, { 1, 51 });
+}
+
 static void parserGoesThroughTheReader()
 {
     BuildContext build(makeDefaultCompileOptions());
@@ -624,7 +640,7 @@ static void parserLetsStatedTypeWinOverRule()
     v(parserReportsPositionInBodies) v(parserReportsPositionInBlocksAndTerminators) v(parserPutsTextPositionInMessage) \
     v(parserLeavesIDsOfListsToTheReader) v(parserGivesNoPositionToErrorsOfTheReader) v(parserLeavesCaptureLimitToTheReader) \
     v(parserSurvivesDeepData) v(parserOwnsFunctionText) v(parserRejectsCharacterEscapesInBytes) \
-    v(parserFillsUntypedThis) v(parserChecksRuntimeFunctionNumbers) v(parserGoesThroughTheReader) \
+    v(parserFillsUntypedThis) v(parserChecksRuntimeFunctionNumbers) v(parserResolvesNamedRuntimeFunctions) v(parserGoesThroughTheReader) \
     v(parserAppliesEngineFieldsAfterTheRead) v(parserLetsStatedTypeWinOverRule)
 
 std::span<const NativeTest> irParserTests()
