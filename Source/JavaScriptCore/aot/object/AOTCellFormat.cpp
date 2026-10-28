@@ -43,7 +43,7 @@ static_assert(!canPassShapeTest(pointerUpperHalfBits));
 static constexpr uint32_t valueUpperHalfBits = static_cast<uint32_t>(~JSValue::NumberTag >> 32);
 static_assert(!canPassShapeTest(valueUpperHalfBits) && !mayBeUpperHalfOfSlimClosureWord(valueUpperHalfBits));
 
-static_assert(!canPassShapeTest(closureWordUpperHalfBits));
+static_assert(!canPassShapeTest(maxSlimClosureWordUpperHalf));
 
 static_assert(!canPassShapeTest(bigIntHashMask));
 
@@ -145,7 +145,7 @@ static constexpr bool isValidWord(WordAtShapeOffset content, uint32_t word)
     case WordAtShapeOffset::UpperHalfOfValue:
         return !(word & ~valueUpperHalfBits);
     case WordAtShapeOffset::UpperHalfOfClosureWord:
-        return !word || (!(word & ~closureWordUpperHalfBits) && mayBeUpperHalfOfSlimClosureWord(word));
+        return !word || (!(word & ~closureWordUpperHalfBits) && (word & ClosureWord::functionMask) < ClosureWord::firstReservedFunction && mayBeUpperHalfOfSlimClosureWord(word));
     case WordAtShapeOffset::BigIntHash:
         return !(word & ~bigIntHashMask);
     case WordAtShapeOffset::VectorLength:
@@ -164,6 +164,8 @@ static_assert(isValidWord(WordAtShapeOffset::ShapeWord, shapeWordOf(1)) && !isVa
 static_assert(isValidWord(WordAtShapeOffset::UpperHalfOfPointer, 0) && isValidWord(WordAtShapeOffset::UpperHalfOfPointer, pointerUpperHalfBits) && !isValidWord(WordAtShapeOffset::UpperHalfOfPointer, 0u - 5));
 static_assert(isValidWord(WordAtShapeOffset::UpperHalfOfValue, 0) && !isValidWord(WordAtShapeOffset::UpperHalfOfValue, static_cast<uint32_t>(JSValue::NumberTag >> 32)) && !isValidWord(WordAtShapeOffset::UpperHalfOfValue, 1u << (JSValue::DoubleEncodeOffsetBit - 32)));
 static_assert(isValidWord(WordAtShapeOffset::UpperHalfOfClosureWord, closureWordMarker | (ClosureWord::firstReservedFunction - 1)) && !isValidWord(WordAtShapeOffset::UpperHalfOfClosureWord, ClosureWord::firstReservedFunction - 1) && !isValidWord(WordAtShapeOffset::UpperHalfOfClosureWord, compiledObjectShapeBit));
+static_assert(isValidWord(WordAtShapeOffset::UpperHalfOfClosureWord, closureWordMarker | (1u << 21)) && isValidWord(WordAtShapeOffset::UpperHalfOfClosureWord, maxSlimClosureWordUpperHalf));
+static_assert(!isValidWord(WordAtShapeOffset::UpperHalfOfClosureWord, closureWordMarker | ClosureWord::firstReservedFunction));
 static_assert(isValidWord(WordAtShapeOffset::BigIntHash, 0) && isValidWord(WordAtShapeOffset::BigIntHash, bigIntHashMask) && !isValidWord(WordAtShapeOffset::BigIntHash, 0u - 5) && !isValidWord(WordAtShapeOffset::BigIntHash, shapeBlockMarker));
 static_assert(isValidWord(WordAtShapeOffset::VectorLength, classTokenLengthBits) && isValidWord(WordAtShapeOffset::VectorLength, shapeBlockMarker) && !isValidWord(WordAtShapeOffset::VectorLength, 0u - 5));
 static_assert(isValidWord(WordAtShapeOffset::Zero, 0) && !isValidWord(WordAtShapeOffset::Zero, 1));
