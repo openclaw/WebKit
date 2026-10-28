@@ -467,35 +467,6 @@ ALWAYS_INLINE ValueFlowNodeID ValueFlowSolver::nodeAwaitedBy(ValueFlowStatementI
 
 ValueFlowSolver::~ValueFlowSolver() = default;
 
-template<typename T>
-ListThatStaysInPlace<T>::~ListThatStaysInPlace()
-{
-    if (!m_elements)
-        return;
-    releasePages(m_elements, m_numberReserved * sizeof(T));
-}
-
-template<typename T>
-void ListThatStaysInPlace<T>::takeMemoryFor(size_t size)
-{
-    constexpr size_t elementsPerStep = 1u << 16;
-    static_assert(!(elementsPerStep * sizeof(T) % (64 * KB)) && !(mostElements % elementsPerStep));
-    RELEASE_ASSERT(size <= mostElements);
-    Locker locker { m_lock };
-    if (!m_elements) {
-        m_numberReserved = std::max(elementsPerStep, bytesToReserve(mostElements * sizeof(T)) / sizeof(T) / elementsPerStep * elementsPerStep);
-        m_elements = static_cast<T*>(reservePages(m_numberReserved * sizeof(T)));
-    }
-    if (size > m_numberReserved) [[unlikely]]
-        exitOutOfMemory();
-    size_t withMemory = m_numberWithMemory.load(std::memory_order_relaxed);
-    if (size <= withMemory)
-        return;
-    size_t end = roundUpToMultipleOf<elementsPerStep>(size);
-    commitPages(m_elements + withMemory, (end - withMemory) * sizeof(T));
-    m_numberWithMemory.store(end, std::memory_order_release);
-}
-
 ValueFlowSolver::IndexOfMadeNodes::~IndexOfMadeNodes()
 {
     for (Table table : tables)
@@ -3161,6 +3132,23 @@ void ValueFlowSolver::noteNodesAskedFor()
             const ValueFlowRoundLog::Run& run = thread.log.runs[number];
             size_t first = share.askedForAnew.size();
             seen.clear();
+            // Incremental runs keep earlier requests, so those already hold a use of each node.
+            bool addsToEarlierRuns = std::exchange(valuesShown, run.endOfValuesShown) < run.endOfValuesShown;
+            Vector<uint32_t, mostComparedOneByOne> askedBefore;
+            if (addsToEarlierRuns && nodeAskedFor < run.endOfNodesAskedFor) {
+                for (uint32_t use = m_firstUseOfStatement[run.statement.index()]; use != noSolverIndex; use = m_uses[use].next) {
+                    uint32_t madeNodes = m_uses[use].madeNodes;
+                    if (askedBefore.size() < mostComparedOneByOne)
+                        askedBefore.append(madeNodes);
+                    else {
+                        if (seen.isEmpty()) {
+                            for (uint32_t earlier : askedBefore)
+                                seen.add(earlier);
+                        }
+                        seen.add(madeNodes);
+                    }
+                }
+            }
             for (; nodeAskedFor < run.endOfNodesAskedFor; ++nodeAskedFor) {
                 uint32_t madeNodes = thread.log.madeNodesAskedFor[nodeAskedFor];
                 if (madeNodes & ValueFlowRoundLog::numberedByLog) [[unlikely]] {
@@ -3169,11 +3157,13 @@ void ValueFlowSolver::noteNodesAskedFor()
                         continue;
                 }
                 std::span<const uint32_t> askedFor = share.askedForAnew.span().subspan(first);
-                if (askedFor.size() < mostComparedOneByOne) {
-                    if (std::ranges::find(askedFor, madeNodes) != askedFor.end())
+                if (seen.isEmpty() && askedBefore.size() + askedFor.size() < mostComparedOneByOne) {
+                    if (askedBefore.contains(madeNodes) || std::ranges::find(askedFor, madeNodes) != askedFor.end())
                         continue;
                 } else {
                     if (seen.isEmpty()) {
+                        for (uint32_t earlier : askedBefore)
+                            seen.add(earlier);
                         for (uint32_t earlier : askedFor)
                             seen.add(earlier);
                     }
@@ -3182,7 +3172,6 @@ void ValueFlowSolver::noteNodesAskedFor()
                 }
                 share.askedForAnew.append(madeNodes);
             }
-            bool addsToEarlierRuns = std::exchange(valuesShown, run.endOfValuesShown) < run.endOfValuesShown;
             if (!addsToEarlierRuns) {
                 uint32_t use = m_firstUseOfStatement[run.statement.index()];
                 size_t left = share.askedForAnew.size();
