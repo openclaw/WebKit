@@ -882,26 +882,29 @@ void HeapRule::handOutPrototypeObjectsAtCreation(ClimbingSet receivers, const He
 
 void HeapRule::readPropertiesAtCreation(ClimbingSet objects, const HeapKey& key, ValueFlowNodeID result)
 {
+    Members heldAtCreation;
     if (key.mayNameNonEnumerable(m_tables.prototypeKey())) {
         m_context.forEachMember(m_context.restrict(objects, m_universe.closures()), [&](ValueFlowObjectID closure) {
             const Function& function = m_program.at(m_universe.closureFunction(closure));
             if (function.constructedClass)
-                add(result, only(m_universe.prototypeOf(function.constructedClass)));
+                heldAtCreation.append(m_universe.prototypeOf(function.constructedClass));
             else if (function.has(FunctionFlags::IsGenerator))
-                add(result, only(m_universe.coroutineResultOf(m_universe.closureFunction(closure))));
+                heldAtCreation.append(m_universe.coroutineResultOf(m_universe.closureFunction(closure)));
             else if (functionHasPrototypeProperty(m_program, function))
-                add(result, only(m_universe.prototypeObjectOf(m_universe.closureFunction(closure))));
+                heldAtCreation.append(m_universe.prototypeObjectOf(m_universe.closureFunction(closure)));
         });
     }
     if (key.mayNameNonEnumerable(m_tables.constructorKey())) {
         m_context.forEachMember(objects, [&](ValueFlowObjectID object) {
             LayoutID layout = m_universe.classLayoutOf(object);
             if (FunctionID constructor = layout ? m_program.at(layout).constructor : FunctionID())
-                add(result, only(m_universe.closureOf(constructor)));
+                heldAtCreation.append(m_universe.closureOf(constructor));
             else if (m_universe.kindOf(object) == ValueFlowObjectKind::FunctionPrototype)
-                add(result, only(m_universe.closureOf(m_universe.functionOf(object))));
+                heldAtCreation.append(m_universe.closureOf(m_universe.functionOf(object)));
         });
     }
+    // One shared constant set avoids a receiver-by-read matrix of edges.
+    add(result, m_context.maker().of(heldAtCreation.span()));
     if (!m_context.meet(objects, m_tables.templateObjects()))
         return;
     if (key.mayNameNonEnumerable(m_tables.rawKey()))
