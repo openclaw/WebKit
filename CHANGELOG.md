@@ -4,6 +4,8 @@ These entries describe the experimental `openclaw/aot-main` integration fork.
 
 ## Unreleased
 
+- Keep builtin code indices aligned when ShadowRealm is disabled after its AOT declarations are removed.
+
 - Preserve explicit permission to load disk code when AOT flow-results analysis is disabled.
 
 - Sync with the current matching Bun/WebKit pair while preserving regression-tested AnalyzeFlow capacity and edge bounds.
