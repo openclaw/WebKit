@@ -678,6 +678,8 @@ static void writeHeader(ImageHeader& header, const ImageWriterInputs& parts, con
         .constantsSize = safeCast<uint32_t>(parts.linker.constants.bytes.size()),
     };
     OptionSet<ImageFlag> flags = flagsForUnseenCode(parts.inputs.pipeline);
+    if (!parts.inputs.pipeline.flow->hasResults() && !context.options().excludesCodeOutsideImage())
+        flags.add(ImageFlag::LoadsCodeOutsideImage);
     if (context.options().obfuscates())
         flags.add(ImageFlag::IsObfuscated);
     if (Typed::namesWaysToModuleObjects(*parts.inputs.pipeline.program))
