@@ -8,6 +8,7 @@
 #if ENABLE(AOT)
 
 #include "AOTBackgroundTask.h"
+#include "AOTSystemResources.h"
 #include "AOTThreshold.h"
 #include "AOTValueFlowGraph.h"
 #include "AOTValueFlowLog.h"
@@ -147,15 +148,21 @@ private:
     size_t m_size { 0 };
 };
 
-template<typename T>
+template<typename T, size_t maximumElements = 1u << 27>
 class ListThatStaysInPlace {
     WTF_MAKE_NONCOPYABLE(ListThatStaysInPlace);
     static_assert(std::is_trivially_copyable_v<T> && std::is_trivially_destructible_v<T>);
 public:
-    static constexpr size_t mostElements = 1u << 27;
+    static constexpr size_t elementsPerStep = 1u << 16;
+    static constexpr size_t mostElements = maximumElements / elementsPerStep * elementsPerStep;
+    static_assert(mostElements && !(elementsPerStep * sizeof(T) % (64 * KB)));
 
     ListThatStaysInPlace() = default;
-    ~ListThatStaysInPlace();
+    ~ListThatStaysInPlace()
+    {
+        if (m_elements)
+            releasePages(m_elements, m_numberReserved * sizeof(T));
+    }
 
     size_t size() const { return m_size.load(std::memory_order_relaxed); }
     std::span<const T> span() const LIFETIME_BOUND { return unsafeMakeSpan(m_elements, size()); }
@@ -182,7 +189,23 @@ public:
     }
 
 private:
-    void takeMemoryFor(size_t);
+    void takeMemoryFor(size_t size)
+    {
+        RELEASE_ASSERT(size <= mostElements);
+        Locker locker { m_lock };
+        if (!m_elements) {
+            m_numberReserved = std::max(elementsPerStep, bytesToReserve(mostElements * sizeof(T)) / sizeof(T) / elementsPerStep * elementsPerStep);
+            m_elements = static_cast<T*>(reservePages(m_numberReserved * sizeof(T)));
+        }
+        if (size > m_numberReserved) [[unlikely]]
+            exitOutOfMemory();
+        size_t withMemory = m_numberWithMemory.load(std::memory_order_relaxed);
+        if (size <= withMemory)
+            return;
+        size_t end = roundUpToMultipleOf<elementsPerStep>(size);
+        commitPages(m_elements + withMemory, (end - withMemory) * sizeof(T));
+        m_numberWithMemory.store(end, std::memory_order_release);
+    }
 
     T* m_elements { nullptr };
     size_t m_numberReserved { 0 };
@@ -818,7 +841,7 @@ private:
     std::array<NodesOfManyObjects, numberOfNodeMakers> m_nodesOfManyObjects;
     Vector<uint32_t> m_madeNodesOfStatement;
     ListWithRoomToFill<uint32_t> m_firstUseOfStatement;
-    ListThatStaysInPlace<Use> m_uses;
+    ListThatStaysInPlace<Use, UINT32_MAX> m_uses;
     Vector<uint32_t> m_freeUses;
     uint32_t m_numberOfNodesBeforeRound { 0 };
     uint32_t m_turnsOfRound { 0 };
