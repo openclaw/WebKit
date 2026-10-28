@@ -248,8 +248,10 @@ function removeExcludedFunctions(
 ): EngineFunction[] {
   const upstreamKeys = new Set(upstreamFunctions.map(keyOf));
   const excludedKeys = new Set<string>();
+  const omittedObjects = objectsLeftOut(declared);
   for (const { declaration, source } of declared) {
     if (declaration.declares !== "ExcludedFunction" || source.origin !== "Engine") continue;
+    if (omittedObjects.has(declaration.function.file)) continue;
     const key = keyOf(declaration.function);
     if (!upstreamKeys.has(key)) {
       problems.add(source, `${declaration.function.file}.js has no function ${declaration.function.name}`);
