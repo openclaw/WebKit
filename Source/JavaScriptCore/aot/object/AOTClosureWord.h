@@ -39,7 +39,8 @@ struct ClosureWord {
 
     static constexpr uint64_t offsetMask = (1ULL << numberOfOffsetBits) - 1;
     static constexpr uint32_t functionMask = (1u << numberOfFunctionBits) - 1;
-    static constexpr uint32_t firstReservedFunction = (functionMask >> 1) + 1 - 16;
+    // A slim closure must not contain every bit of the shape block marker.
+    static constexpr uint32_t firstReservedFunction = (functionMask & shapeBlockMarker) - 16;
     static constexpr uint64_t maxSizeOfCode = (offsetMask + 1) * offsetUnit;
     static constexpr unsigned maxNumberOfParameters = (1u << numberOfParametersBits) - 1;
 
@@ -97,9 +98,10 @@ struct ClosureWord {
     static constexpr uint8_t borrowedArgumentsOf(uint64_t word) { return word >> borrowsArgumentShift & ((1u << numberOfBorrowedArguments) - 1); }
 };
 
-static_assert(ClosureWord::functionShift == 32 && ClosureWord::firstReservedFunction <= 1u << (ClosureWord::numberOfFunctionBits - 1));
-static constexpr uint32_t closureWordUpperHalfBits = ~(1u << (ClosureWord::isNotCallableBit - 32) | 1u << (ClosureWord::numberOfFunctionBits - 1));
-static_assert(!canPassShapeTest(closureWordUpperHalfBits));
+static_assert(ClosureWord::functionShift == 32 && ClosureWord::firstReservedFunction < (ClosureWord::functionMask & shapeBlockMarker));
+static constexpr uint32_t closureWordUpperHalfBits = ~(1u << (ClosureWord::isNotCallableBit - 32));
+static constexpr uint32_t maxSlimClosureWordUpperHalf = (closureWordUpperHalfBits & ~ClosureWord::functionMask) | (ClosureWord::firstReservedFunction - 1);
+static_assert(!canPassShapeTest(maxSlimClosureWordUpperHalf));
 static_assert(closureWordMarker == 1u << (ClosureWord::isClosureWordBit - 32) && compiledObjectShapeBit == 1u << (ClosureWord::isNotCallableBit - 32));
 static_assert(ClosureWord::numberOfParametersOf(ClosureWord::encode({ 16, 3 }, 7, { })) == 3 && mayBeUpperHalfOfSlimClosureWord(ClosureWord::encodeUpperHalf(3, 7, { })));
 static_assert(static_cast<int64_t>(ClosureWord::encode({ 16, 3 }, 7, { })) >= ClosureWord::minWordOfCalleeTaking(3) && static_cast<int64_t>(ClosureWord::encode({ 16, 3 }, 7, { .takesNewTarget = true })) < ClosureWord::minWordOfCalleeTaking(2));
