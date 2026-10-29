@@ -4,6 +4,8 @@ These entries describe the experimental `openclaw/aot-main` integration fork.
 
 ## Unreleased
 
+- Sync upstream analysis budgets, built-in frames, and function capacity; use upstream disk-code flags and closure encoding while retaining regression coverage.
+
 - Use upstream compiler-vector allocation growth while retaining the regression beyond 2 GiB.
 
 - Sync upstream linear flow analyses and OOM handling; use upstream address-stable list capacity with the retained regression.
