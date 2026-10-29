@@ -4,6 +4,8 @@ These entries describe the experimental `openclaw/aot-main` integration fork.
 
 ## Unreleased
 
+- Match the missing-runtime-function regression to the current Bun arrayFromLength function ID.
+
 - Sequence private-field location operands explicitly so compiler instruction order is independent of C++ argument evaluation order.
 
 - Sync upstream main, AOT object-access optimizations and allocation polling fixes while retaining fork regressions.
