@@ -85,7 +85,6 @@ const head = `#pragma once
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#include <numeric>
 #include <type_traits>
 #include <utility>
 #include <wtf/Assertions.h>
@@ -110,28 +109,10 @@ using WTF::VectorMalloc;
 using WTF::VectorTypeOperations;
 using WTF::addressOfArgument;
 using WTF::containerSize;
+using WTF::isValidCapacityForVector;
 using WTF::typelessPointersAreEqual;
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
-
-constexpr bool isValidCompilerVectorCapacity(size_t capacity, size_t elementSize)
-{
-    if (elementSize == 1)
-        return WTF::isValidCapacityForVector<char>(capacity);
-    if (!elementSize)
-        return false;
-    // Keep the borrowed bit clear across WTF conversions, without imposing its byte-sized limit on compiler tables.
-    constexpr size_t maxIndex = std::numeric_limits<unsigned>::max() >> 1;
-    size_t elementsPerGranule = 65536 / std::gcd(size_t { 65536 }, elementSize);
-    size_t maxCapacity = maxIndex / elementsPerGranule * elementsPerGranule;
-    return capacity <= maxCapacity && capacity <= std::numeric_limits<size_t>::max() / elementSize;
-}
-
-template<typename T>
-constexpr bool isValidCapacityForVector(size_t capacity)
-{
-    return isValidCompilerVectorCapacity(capacity, sizeof(T));
-}
 
 template<typename T, size_t inlineCapacity = 0, typename OverflowHandler = CrashOnOverflow, size_t minCapacity = 16, typename Malloc = VectorBufferMalloc> class Vector;
 
@@ -160,7 +141,7 @@ struct VectorLayout {
 template<typename Malloc>
 ALWAYS_INLINE void allocateVectorBufferInline(VectorWords& vector, size_t newCapacity, size_t elementSize)
 {
-    if (!isValidCompilerVectorCapacity(newCapacity, elementSize)) [[unlikely]]
+    if (newCapacity > std::numeric_limits<unsigned>::max()) [[unlikely]]
         exitProgramTooLarge();
     vector.buffer = Malloc::malloc(newCapacity * elementSize);
     vector.capacity = newCapacity;
