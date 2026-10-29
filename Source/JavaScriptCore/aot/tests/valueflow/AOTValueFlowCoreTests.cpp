@@ -1433,6 +1433,130 @@ static void whatATurnMakesAndReachesRunsInThatTurn()
     toyProgram = nullptr;
 }
 
+static void incrementalRunsReportEachDependencyOnce()
+{
+    static constexpr uint32_t numberOfArrivals = 8;
+    ValueFlowStatement statements[2];
+    statements[0].function = statements[1].function = FunctionID(0u);
+    statements[0].result = ValueFlowNodeID(0u);
+    statements[1].result = ValueFlowNodeID(1u);
+    ValueFlowBodyRange ranges[2];
+    ranges[1].statement = ranges[1].statementLeavingBody = 2;
+
+    ValueFlowSolverInput input;
+    input.numberOfNodes = 2;
+    input.statements = statements;
+    input.ranges = ranges;
+    ValueFlowRule rule = [](const ValueFlowStatement& statement, ValueFlowRuleContext& context) {
+        ClimbingSet object(context.maker().of(ValueFlowObjectID(numberOfArrivals)));
+        ValueFlowName property = ValueFlowName::property(PropertyKeyID(0u));
+        if (context.statement() == ValueFlowStatementID(1u)) {
+            context.add(context.written(object, property), context.maker().of(ValueFlowObjectID(numberOfArrivals + 1)));
+            return;
+        }
+        if (context.statement() != ValueFlowStatementID(0u))
+            return;
+
+        // The changing input makes the same read necessary in successive incremental runs.
+        context.newSince(statement.result);
+        context.connect(context.readWhatWasWritten(object, property), ValueFlowNodeID(1u));
+        uint32_t next = 0;
+        context.forEachMember(context.valueOf(statement.result), [&](ValueFlowObjectID member) {
+            next = std::max(next, member.index() + 1);
+        });
+        if (next < numberOfArrivals)
+            context.add(statement.result, context.maker().of(ValueFlowObjectID(next)));
+    };
+
+    for (unsigned numberOfThreads : { 1u, 4u }) {
+        ParallelLoops loops(numberOfThreads);
+        ValueSets sets(numberOfArrivals + 2);
+        ValueFlowSolver solver(input, sets, rule, loops);
+        AOT_TEST_CHECK(solver.solve());
+        AOT_TEST_CHECK(sets.size(solver.possibleValuesOf(ValueFlowNodeID(0u))) == numberOfArrivals);
+        AOT_TEST_CHECK(sets.size(solver.possibleValuesOf(ValueFlowNodeID(1u))) == 1);
+        AOT_TEST_CHECK(sets.contains(solver.possibleValuesOf(ValueFlowNodeID(1u)), ValueFlowObjectID(numberOfArrivals + 1)));
+        unsigned dependencies = 0;
+        solver.forEachMadeNodeAskedForBy(ValueFlowStatementID(0u), [&](const ValueFlowNodeKey& key, ValueFlowStatementID) {
+            AOT_TEST_CHECK(key.kind == ValueFlowMadeNodeKind::Read);
+            ++dependencies;
+        });
+        AOT_TEST_CHECK(dependencies == 1);
+    }
+}
+
+static void incrementalDependenciesGrowAndRetireOnFullRuns()
+{
+    static constexpr uint32_t numberOfArrivals = 40;
+    ValueFlowStatement statements[2];
+    statements[0].function = statements[1].function = FunctionID(0u);
+    statements[0].result = ValueFlowNodeID(0u);
+    statements[1].result = ValueFlowNodeID(1u);
+    ValueFlowBodyRange ranges[2];
+    ranges[1].statement = ranges[1].statementLeavingBody = 2;
+
+    ValueFlowSolverInput input;
+    input.numberOfNodes = 2;
+    input.statements = statements;
+    input.ranges = ranges;
+    ValueFlowRule rule = [](const ValueFlowStatement& statement, ValueFlowRuleContext& context) {
+        ClimbingSet object(context.maker().of(ValueFlowObjectID(numberOfArrivals)));
+        if (context.statement() == ValueFlowStatementID(1u)) {
+            for (uint32_t property = 0; property <= numberOfArrivals; ++property)
+                context.add(context.written(object, ValueFlowName::property(PropertyKeyID(property))), context.maker().of(ValueFlowObjectID(numberOfArrivals + 1)));
+            return;
+        }
+        if (context.statement() != ValueFlowStatementID(0u))
+            return;
+
+        uint32_t next = 0;
+        context.forEachMember(context.valueOf(statement.result), [&](ValueFlowObjectID) { ++next; });
+        if (next < numberOfArrivals || !statement.site.index()) {
+            context.newSince(statement.result);
+            for (uint32_t property = 0; property < std::min(next + 1, numberOfArrivals); ++property)
+                context.connect(context.readWhatWasWritten(object, ValueFlowName::property(PropertyKeyID(property))), ValueFlowNodeID(1u));
+            if (next < numberOfArrivals)
+                context.add(statement.result, context.maker().of(ValueFlowObjectID(next)));
+        } else
+            context.connect(context.readWhatWasWritten(object, ValueFlowName::property(PropertyKeyID(numberOfArrivals))), ValueFlowNodeID(1u));
+    };
+
+    for (bool replaceWithFullRun : { false, true }) {
+        statements[0].site = ValueID(replaceWithFullRun ? 1u : 0u);
+        for (unsigned numberOfThreads : { 1u, 4u }) {
+            ParallelLoops loops(numberOfThreads);
+            ValueSets sets(numberOfArrivals + 2);
+            ValueFlowSolver solver(input, sets, rule, loops);
+            AOT_TEST_CHECK(solver.solve());
+            AOT_TEST_CHECK(sets.size(solver.possibleValuesOf(ValueFlowNodeID(0u))) == numberOfArrivals);
+            AOT_TEST_CHECK(sets.size(solver.possibleValuesOf(ValueFlowNodeID(1u))) == 1);
+            AOT_TEST_CHECK(sets.contains(solver.possibleValuesOf(ValueFlowNodeID(1u)), ValueFlowObjectID(numberOfArrivals + 1)));
+            unsigned dependencies = 0;
+            std::array<bool, numberOfArrivals + 1> reportedProperties {};
+            solver.forEachMadeNodeAskedForBy(ValueFlowStatementID(0u), [&](const ValueFlowNodeKey& key, ValueFlowStatementID) {
+                AOT_TEST_CHECK(key.kind == ValueFlowMadeNodeKind::Read);
+                AOT_TEST_CHECK(key.name().payload <= numberOfArrivals);
+                AOT_TEST_CHECK(!std::exchange(reportedProperties[key.name().payload], true));
+                if (replaceWithFullRun)
+                    AOT_TEST_CHECK(key.name() == ValueFlowName::property(PropertyKeyID(numberOfArrivals)));
+                else
+                    AOT_TEST_CHECK(key.name().payload < numberOfArrivals);
+                ++dependencies;
+            });
+            AOT_TEST_CHECK(dependencies == (replaceWithFullRun ? 1u : numberOfArrivals));
+            unsigned earlierReads = 0;
+            for (uint32_t index = 0; index < solver.numberOfRecordsOfMadeNodes(); ++index) {
+                const ValueFlowNodeKey& key = solver.keyOfMadeNodesAt(index);
+                if (key.kind != ValueFlowMadeNodeKind::Read || key.name().payload >= numberOfArrivals)
+                    continue;
+                AOT_TEST_CHECK(solver.graph().isAtRest(solver.firstOfMadeNodesAt(index)) == replaceWithFullRun);
+                ++earlierReads;
+            }
+            AOT_TEST_CHECK(earlierReads == numberOfArrivals);
+        }
+    }
+}
+
 static void valueFlowSolveStopsAtTheLimitOnLoggedEdges()
 {
     WeakRandom random(7);
@@ -1660,11 +1784,74 @@ static void aMakerThatIsGivenBackWaitsForItsThread()
     AOT_TEST_CHECK(&pool.take() == &mine);
 }
 
+static void useStorageKeepsAddressesPastOneGiB()
+{
+    using Uses = ListThatStaysInPlace<uint64_t>;
+    static_assert(Uses::mostElements > (1u << 27) && Uses::mostElements < UINT32_MAX);
+    constexpr size_t oldBound = 1u << 27;
+    constexpr size_t block = 256;
+    Uses uses;
+    AOT_TEST_CHECK(!uses.makeRoomToFill(oldBound - block));
+    uses[0] = 17;
+    uses[oldBound - block - 1] = 29;
+    const uint64_t* first = &uses[0];
+    AOT_TEST_CHECK(uses.makeRoomToFill(2 * block) == oldBound - block);
+    uses[oldBound + block - 1] = 41;
+    AOT_TEST_CHECK(&uses[0] == first && uses[0] == 17 && uses[oldBound - block - 1] == 29);
+    AOT_TEST_CHECK(uses[oldBound + block - 1] == 41 && uses.size() == oldBound + block);
+    AOT_TEST_CHECK(uses.capacity() >= uses.size());
+}
+
+static void compilerVectorReservesPastTwoGiB()
+{
+    struct Element {
+        uint64_t value;
+    };
+    constexpr size_t oldLimit = (std::numeric_limits<unsigned>::max() >> 1) / sizeof(Element);
+    constexpr size_t requested = oldLimit + 2;
+    Vector<Element> values;
+    values.reserveCapacity(requested);
+    values.append(Element { 17 });
+    values.append(Element { 29 });
+    AOT_TEST_CHECK(values.capacity() >= requested && values.capacity() < 1u << 31);
+    AOT_TEST_CHECK(values.size() == 2 && values[0].value == 17 && values[1].value == 29);
+    WTF::Vector<Element> shared(static_cast<WTF::Vector<Element>&&>(WTF::move(values)));
+    AOT_TEST_CHECK(values.isEmpty() && shared.size() == 2 && shared[1].value == 29);
+    Vector<Element> returned(WTF::move(shared));
+    AOT_TEST_CHECK(shared.isEmpty() && returned[0].value == 17 && returned[1].value == 29);
+
+}
+
+static void valueSetCacheKeepsAdjacentRunsSeparate()
+{
+    ValueSets sets(64);
+    ValueSetMaker maker(sets);
+    std::array<ValueSetID, 6> values;
+    for (uint32_t index = 0; index < 3; ++index) {
+        std::array<ValueFlowObjectID, 2> members { ValueFlowObjectID(index * 2), ValueFlowObjectID(index * 2 + 1) };
+        values[index * 2] = maker.of(members);
+        values[index * 2 + 1] = ValueSets::complement(values[index * 2]);
+    }
+    for (unsigned first = 0; first < values.size(); ++first) {
+        uint32_t index = ValueSets::indexInTableBySet(values[first]);
+        AOT_TEST_CHECK(index < sets.endOfTableBySet());
+        for (unsigned second = first + 1; second < values.size(); ++second)
+            AOT_TEST_CHECK(index != ValueSets::indexInTableBySet(values[second]));
+    }
+    ValueSetID singleton = maker.of(ValueFlowObjectID(0u));
+    AOT_TEST_CHECK(ValueSets::indexInTableBySet(singleton) >= sets.endOfTableBySet());
+    AOT_TEST_CHECK(ValueSets::indexInTableBySet(ValueSets::complement(singleton)) >= sets.endOfTableBySet());
+}
+
 #define FOR_EACH_AOT_VALUE_FLOW_CORE_TEST(v) \
+    v(valueSetCacheKeepsAdjacentRunsSeparate) \
+    v(compilerVectorReservesPastTwoGiB) \
+    v(useStorageKeepsAddressesPastOneGiB) \
     v(valueSetsAgreeWithPlainSets) v(valueSetsOfFewAndOfManyBlocksAgreeWithPlainSets) v(valueSetsOfSeveralGroupsOfBlocksAgreeWithPlainSets) v(valueSetsOfBothFormsAgreeWithPlainSets) v(valueSetsAreTheSameFromEveryThread) v(sampleOfBlocksDependsOnTheMembersAlone) v(valueFlowGraphFindsTheLeastSolution) v(whatTheGraphHoldsDoesNotHangOnTheOrderOfTheEdges) v(rowsOfNodesInsideOneShardAreWalkedInOneWave) \
     v(masksTreatPlaceholdersByTheirKind) v(nodesThatPlaceholdersCoverAreRetired) v(theCallerMayConnectWhatLeadsIntoRetiredNodes) v(whatACoveredNodeHoldsIsNotSentToItAgain) \
-    v(valueFlowGraphSolvesLongChainsAndWideLevelsOnThreads) v(valueFlowRoundsAgreeWithAnAnalysisObjectByObject) v(whatATurnMakesAndReachesRunsInThatTurn) \
+    v(valueFlowGraphSolvesLongChainsAndWideLevelsOnThreads) v(valueFlowRoundsAgreeWithAnAnalysisObjectByObject) v(whatATurnMakesAndReachesRunsInThatTurn) v(incrementalRunsReportEachDependencyOnce) v(incrementalDependenciesGrowAndRetireOnFullRuns) \
     v(valueFlowSolveStopsAtTheLimitOnLoggedEdges) v(valueFlowSolverFindsObjectsOutsideDeclaredTypes) v(whatAShorterWayOfARuleLeavesOutIsFound) v(whatIsAskedLastIsAnsweredWhenNothingElseIsDue) v(numbersByKeyAgreeWithAHashMap) v(aMakerThatIsGivenBackWaitsForItsThread)
+
 
 std::span<const NativeTest> valueFlowCoreTests()
 {
