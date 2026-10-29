@@ -29,6 +29,7 @@ static constexpr Flags findsModulesByName { ImageFlag::LoadsModulesByName, Image
 static constexpr Flags loadsCodeFromOutside { ImageFlag::AdmitsUnknownJavaScript, ImageFlag::LoadsModulesByName, ImageFlag::AdmitsLibraryText, ImageFlag::LoadsCodeOutsideImage, ImageFlag::FindsDataFilesByName };
 static constexpr Flags showsWaysBetweenModuleObjects { ImageFlag::ShowsWaysBetweenModuleObjects };
 static constexpr Flags open { ImageFlag::AdmitsUnknownJavaScript, ImageFlag::LoadsModulesByName, ImageFlag::AdmitsLibraryText, ImageFlag::FindsDataFilesByName };
+static constexpr Flags withoutFlow = runsOnlyCodeOfImage ? open : loadsCodeFromOutside;
 
 #define AOT_APPLY_EVALUATOR_TEXT R"IR(function f1 name="apply" parameters=[{type=anything}] results=[{type=anything}] {
   b0(v0: anything):
@@ -533,7 +534,7 @@ static void testFrontEndAloneSaysWhetherWaysBetweenModuleObjectsAreShown()
 {
     AOT_TEST_CHECK(flagsOf(takesMainModuleAsFrontEndSays) == showsWaysBetweenModuleObjects);
     AOT_TEST_CHECK(flagsOf(takesMainModuleBehindFrontEnd) == closed);
-    AOT_TEST_CHECK(flagsOf(takesMainModuleAsFrontEndSays, { "disable=flow-results"_s }) == (open | showsWaysBetweenModuleObjects));
+    AOT_TEST_CHECK(flagsOf(takesMainModuleAsFrontEndSays, { "disable=flow-results"_s }) == (withoutFlow | showsWaysBetweenModuleObjects));
 }
 
 static void testExcludedTextLeavesTheProgramClosed()
@@ -551,7 +552,12 @@ static void testLossesOfTheAnalysisAdmitNothing()
 
 static void testProgramThatWasNotAnalyzedIsOpen()
 {
-    AOT_TEST_CHECK(flagsOf(printsSum, { "disable=flow-results"_s }) == open);
+    AOT_TEST_CHECK(flagsOf(printsSum, { "disable=flow-results"_s }) == withoutFlow);
+}
+
+static void testProgramThatWasNotAnalyzedStillExcludesDiskCodeWhenRequested()
+{
+    AOT_TEST_CHECK(flagsOf(printsSum, { "disable=flow-results"_s, "exclude=CodeOutsideImage"_s }) == open);
 }
 
 static void testObfuscationIsAnotherFlag()
@@ -671,6 +677,7 @@ std::span<const NativeTest> closedWorldTests()
         { "closed-world/flags/excluded-text-leaves-the-program-closed"_s, testExcludedTextLeavesTheProgramClosed },
         { "closed-world/flags/losses-of-the-analysis-admit-nothing"_s, testLossesOfTheAnalysisAdmitNothing },
         { "closed-world/flags/program-that-was-not-analyzed-is-open"_s, testProgramThatWasNotAnalyzedIsOpen },
+        { "closed-world/flags/program-that-was-not-analyzed-still-excludes-disk-code-when-requested"_s, testProgramThatWasNotAnalyzedStillExcludesDiskCodeWhenRequested },
         { "closed-world/flags/obfuscation-is-another-flag"_s, testObfuscationIsAnotherFlag },
         { "closed-world/evaluation/closed-program-refuses-every-evaluator"_s, testClosedProgramRefusesEveryEvaluator },
         { "closed-world/evaluation/program-that-evaluates-text-keeps-every-evaluator"_s, testProgramThatEvaluatesTextKeepsEveryEvaluator },
