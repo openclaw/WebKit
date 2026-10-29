@@ -199,8 +199,11 @@ Condition RuntimeValidationEmitter::hasShapeAmong(CellPointer cell, LayoutSetID 
 void RuntimeValidationEmitter::checkIsCompiledObjectOf(CellPointer cell, LayoutSetID layouts)
 {
     std::span<const uint32_t> shapes = m_placement.shapes().memberShapes(layouts);
-    if (!shapes.empty())
-        failUnless(hasShapeAmong(cell, layouts, shapes), ValidationFailureKind::ReceiverShape, cell, generator().operationBeingGenerated());
+    if (!shapes.empty()) {
+        Condition hasShape = hasShapeAmong(cell, layouts, shapes);
+        ValueID operation = generator().operationBeingGenerated();
+        failUnless(hasShape, ValidationFailureKind::ReceiverShape, cell, operation);
+    }
 }
 
 // A guard may rely on a guard: whether the fields are in the order of the layout is asked of an object that an earlier test found to have the layout.

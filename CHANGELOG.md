@@ -4,6 +4,8 @@ These entries describe the experimental `openclaw/aot-main` integration fork.
 
 ## Unreleased
 
+- Sequence instruction emission explicitly in new hash-table, property, array, and string optimizations.
+
 - Match the missing-runtime-function regression to the current Bun arrayFromLength function ID.
 
 - Sequence private-field location operands explicitly so compiler instruction order is independent of C++ argument evaluation order.

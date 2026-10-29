@@ -239,8 +239,11 @@ Word32 StringEmitter::lengthOf(LiteralStringWord word, const Type& type)
         for (auto [literal, lengthOfLiteral] : lengths)
             lengthsByNumber |= lengthOfLiteral << (8 * (inputs().literalStrings.numberOf(literal) - least));
         static_assert(literalStringShift == 2, "twice the distance between two words is eight times the distance between their numbers");
-        LValue distance = m_out.sub(narrow ? narrow->value() : m_out.castToInt32(word.value()), m_out.constInt32(static_cast<int32_t>(literalStringWord(least))));
-        LValue shifted = m_out.lShr(m_out.constInt32(static_cast<int32_t>(lengthsByNumber)), m_out.shl(distance, m_out.constInt32(1)));
+        LValue narrowWord = narrow ? narrow->value() : m_out.castToInt32(word.value());
+        LValue distance = m_out.sub(narrowWord, m_out.constInt32(static_cast<int32_t>(literalStringWord(least))));
+        LValue packedLengths = m_out.constInt32(static_cast<int32_t>(lengthsByNumber));
+        LValue shift = m_out.shl(distance, m_out.constInt32(1));
+        LValue shifted = m_out.lShr(packedLengths, shift);
         return Word32(m_out.bitAnd(shifted, m_out.constInt32(std::numeric_limits<uint8_t>::max())));
     };
     auto lengthByNumber = [&] {
