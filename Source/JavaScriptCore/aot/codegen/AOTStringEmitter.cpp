@@ -248,8 +248,11 @@ Word32 StringEmitter::lengthOf(LiteralStringWord word, const Type& type)
             return *length;
         Word32 length = word32(static_cast<int32_t>(commonest));
         for (auto [literal, lengthOfLiteral] : lengths) {
-            if (lengthOfLiteral != commonest)
-                length = Word32(m_out.select(isLiteral(literal).value(), m_out.constInt32(static_cast<int32_t>(lengthOfLiteral)), length.value()));
+            if (lengthOfLiteral != commonest) {
+                Condition matches = isLiteral(literal);
+                LValue literalLength = m_out.constInt32(static_cast<int32_t>(lengthOfLiteral));
+                length = Word32(m_out.select(matches.value(), literalLength, length.value()));
+            }
         }
         return length;
     };

@@ -26,9 +26,13 @@ Integer BuiltinCallEmitter::divide(Integer dividend, Range dividends, Integer di
             return dividend;
         if (dividends.minimum < 0 && dividends.isSubsetOf(Range::int32()) && shift < 32) {
             Word32 narrowDividend = low32(dividend);
-            Word32 roundedTowardZero = isX86()
-                ? select(lessThan(narrowDividend, 0), add(narrowDividend, word32(static_cast<int32_t>(divisors.minimum - 1))), narrowDividend)
-                : add(narrowDividend, Word32(m_out.lShr(m_out.aShr(narrowDividend.value(), 31), 32 - shift)));
+            Word32 roundedTowardZero;
+            if (isX86()) {
+                Condition isNegative = lessThan(narrowDividend, 0);
+                Word32 adjusted = add(narrowDividend, word32(static_cast<int32_t>(divisors.minimum - 1)));
+                roundedTowardZero = select(isNegative, adjusted, narrowDividend);
+            } else
+                roundedTowardZero = add(narrowDividend, Word32(m_out.lShr(m_out.aShr(narrowDividend.value(), 31), 32 - shift)));
             return signExtended(Word32(m_out.aShr(roundedTowardZero.value(), m_out.constInt32(shift))));
         }
         if (dividends.minimum < 0)

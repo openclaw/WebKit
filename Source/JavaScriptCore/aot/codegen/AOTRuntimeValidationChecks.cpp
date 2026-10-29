@@ -417,7 +417,9 @@ void RuntimeValidationEmitter::generateValidateSameValue(const ValueContext& val
     // A string converted to LiteralString and back is the cell of the literal, which may not be the cell it started as.
     m_out.appendTo(differ);
     const Type& anything = m_program.at(TypeTable::anything);
-    m_out.branch(equal(conversions.toLiteralString(keptValue, anything), conversions.toLiteralString(replacingValue, anything)).value(), normalEdge(continuation), rareEdge(differAsLiteralStrings));
+    LiteralStringWord keptString = conversions.toLiteralString(keptValue, anything);
+    LiteralStringWord replacingString = conversions.toLiteralString(replacingValue, anything);
+    m_out.branch(equal(keptString, replacingString).value(), normalEdge(continuation), rareEdge(differAsLiteralStrings));
 
     m_out.appendTo(differAsLiteralStrings);
     Condition keptIsNumber = hasType(keptValue, isNumber);
@@ -696,7 +698,8 @@ Condition RuntimeValidationEmitter::isInStack(Pointer pointer)
     Pointer top(m_out.loadPtr(m_out.address(m_heaps.entire(AbstractHeap::RuntimeState), vm().value(), VM::topEntryFrameOffset())));
     Condition isAboveStackPointer = aboveOrEqual(pointer, stackPointer());
     // AOTCheckedFrameCells.h
-    Condition isInRangeOfFrameCells(m_out.equal(m_out.lShr(pointer.value(), m_out.constInt32(CheckedFrameCells::bitsOfOffsetInRange)), m_out.constInt64(CheckedFrameCells::startOfRange >> CheckedFrameCells::bitsOfOffsetInRange)));
+    LValue shiftedPointer = m_out.lShr(pointer.value(), m_out.constInt32(CheckedFrameCells::bitsOfOffsetInRange));
+    Condition isInRangeOfFrameCells(m_out.equal(shiftedPointer, m_out.constInt64(CheckedFrameCells::startOfRange >> CheckedFrameCells::bitsOfOffsetInRange)));
     return logicalOr(isInRangeOfFrameCells, logicalAnd(isAboveStackPointer, below(pointer, top)));
 }
 
