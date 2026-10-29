@@ -4,6 +4,8 @@ These entries describe the experimental `openclaw/aot-main` integration fork.
 
 ## Unreleased
 
+- Preserve deterministic emission order for property enumeration and runtime validation.
+
 - Sync upstream loader retention, exception and JSON fixes; use upstream named runtime-function fixtures while retaining the arm64 conversion regression.
 
 - Sequence code-emitting arguments explicitly to keep AOT instruction order deterministic across C++ evaluation orders.
