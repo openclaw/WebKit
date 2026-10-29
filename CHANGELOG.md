@@ -4,6 +4,8 @@ These entries describe the experimental `openclaw/aot-main` integration fork.
 
 ## Unreleased
 
+- Sync upstream linear flow analyses and OOM handling; use upstream address-stable list capacity with the retained regression.
+
 - Sync AOT async tail calls, segmented cell-cage allocation, strict IR checks, and upstream runtime fixes while preserving retained runtime and loader support.
 
 - Preserve deterministic emission order for property enumeration and runtime validation.
