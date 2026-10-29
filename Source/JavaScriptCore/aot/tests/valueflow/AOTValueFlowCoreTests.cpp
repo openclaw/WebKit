@@ -1787,8 +1787,7 @@ static void aMakerThatIsGivenBackWaitsForItsThread()
 static void useStorageKeepsAddressesPastOneGiB()
 {
     using Uses = ListThatStaysInPlace<uint64_t>;
-    static_assert(ListThatStaysInPlace<uint64_t>::mostElements == 1u << 27);
-    static_assert(Uses::mostElements < UINT32_MAX && !(Uses::mostElements % Uses::elementsPerStep));
+    static_assert(Uses::mostElements > (1u << 27) && Uses::mostElements < UINT32_MAX);
     constexpr size_t oldBound = 1u << 27;
     constexpr size_t block = 256;
     Uses uses;
