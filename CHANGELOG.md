@@ -4,6 +4,8 @@ These entries describe the experimental `openclaw/aot-main` integration fork.
 
 ## Unreleased
 
+- Sequence private-field location operands explicitly so compiler instruction order is independent of C++ argument evaluation order.
+
 - Sync upstream main, AOT object-access optimizations and allocation polling fixes while retaining fork regressions.
 
 - Sync upstream analysis budgets, built-in frames, and function capacity; use upstream disk-code flags and closure encoding while retaining regression coverage.
