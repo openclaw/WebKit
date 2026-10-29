@@ -242,7 +242,13 @@ Pointer RuntimeValidationEmitter::addressOfObjectOrOfCode(Operand operand, Compa
     Pointer cell = select(logicalAnd(isCellOrEmpty, isNotZero(bits)), Pointer(operand.value), code);
     Word32 type(m_out.load8ZeroExt32(m_out.address(m_heaps.JSCell_header, cell.value(), JSCell::typeInfoTypeOffset())));
     static_assert(DerivedArrayType == ArrayType + 1);
-    Condition isCompared = compared == ComparedCells::Objects ? aboveOrEqual(type, word32(ObjectType)) : belowOrEqual(sub(type, word32(ArrayType)), word32(DerivedArrayType - ArrayType));
+    Condition isCompared;
+    if (compared == ComparedCells::Objects)
+        isCompared = aboveOrEqual(type, word32(ObjectType));
+    else {
+        Word32 typeFromArray = sub(type, word32(ArrayType));
+        isCompared = belowOrEqual(typeFromArray, word32(DerivedArrayType - ArrayType));
+    }
     return select(isCompared, cell, code);
 }
 
