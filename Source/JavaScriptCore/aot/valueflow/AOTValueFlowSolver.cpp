@@ -509,6 +509,9 @@ void ListThatStaysInPlace<T>::takeMemoryFor(size_t size)
     m_numberWithMemory.store(end, std::memory_order_release);
 }
 
+// Native tests exercise stable-address storage with a public word type.
+template class ListThatStaysInPlace<uint64_t>;
+
 ValueFlowSolver::IndexOfMadeNodes::~IndexOfMadeNodes()
 {
     for (Table table : tables)
