@@ -4,6 +4,8 @@ These entries describe the experimental `openclaw/aot-main` integration fork.
 
 ## Unreleased
 
+- Adapt retained incremental dependency tracking to compact solver lists and sequence new emitter operands.
+
 - Preserve operand emission order in compact-table lookups, array stores, collection iterators, and saved-frame headers.
 
 - Sequence instruction emission explicitly in new hash-table, property, array, and string optimizations.

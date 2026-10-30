@@ -3337,8 +3337,7 @@ void ValueFlowSolver::noteNodesAskedFor()
             bool addsToEarlierRuns = std::exchange(valuesShown, run.endOfValuesShown) < run.endOfValuesShown;
             Vector<uint32_t, mostComparedOneByOne> askedBefore;
             if (addsToEarlierRuns && nodeAskedFor < run.endOfNodesAskedFor) {
-                for (uint32_t use = m_firstUseOfStatement[run.statement.index()]; use != noSolverIndex; use = m_uses[use].next) {
-                    uint32_t madeNodes = m_uses[use].madeNodes;
+                forEachUseIn(m_usesOfStatement[run.statement.index()], [&](uint32_t madeNodes) {
                     if (askedBefore.size() < mostComparedOneByOne)
                         askedBefore.append(madeNodes);
                     else {
@@ -3348,7 +3347,7 @@ void ValueFlowSolver::noteNodesAskedFor()
                         }
                         seen.add(madeNodes);
                     }
-                }
+                });
             }
             for (; nodeAskedFor < run.endOfNodesAskedFor; ++nodeAskedFor) {
                 uint32_t madeNodes = thread.log.madeNodesAskedFor[nodeAskedFor];
