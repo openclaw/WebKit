@@ -283,13 +283,15 @@ void CollectionIntrinsicEmitter::generateCollectionIteratorClosedMark(const Valu
 void CollectionIntrinsicEmitter::generateGetCollectionIteratorTable(const ValueContext& value)
 {
     LValue table = m_out.load64(m_out.address(in<CellPointer>(value->objectOperand()).value(), m_heaps.JSInternalFieldObjectImpl_internalFields[static_cast<unsigned>(JSSetIterator::Field::Storage)]));
-    define(value, Boxed(m_out.select(m_out.notNull(table), table, m_out.constInt64(JSValue::encode(jsNull())))));
+    LValue hasTable = m_out.notNull(table);
+    define(value, Boxed(m_out.select(hasTable, table, m_out.constInt64(JSValue::encode(jsNull())))));
 }
 
 void CollectionIntrinsicEmitter::generatePutCollectionIteratorTable(const ValueContext& value)
 {
     Boxed table = in<Boxed>(value->valueOperand());
-    LValue stored = m_out.select(m_out.equal(table.value(), m_out.constInt64(JSValue::encode(jsNull()))), m_out.constInt64(0), table.value());
+    LValue isNull = m_out.equal(table.value(), m_out.constInt64(JSValue::encode(jsNull())));
+    LValue stored = m_out.select(isNull, m_out.constInt64(0), table.value());
     CellPointer iterator = in<CellPointer>(value->objectOperand());
     m_out.store64(stored, m_out.address(iterator.value(), m_heaps.JSInternalFieldObjectImpl_internalFields[static_cast<unsigned>(JSSetIterator::Field::Storage)]));
     barrierAfterStore(value, iterator, table, typeOf(value->valueOperand()));

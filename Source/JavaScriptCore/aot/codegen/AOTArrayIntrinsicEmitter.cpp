@@ -122,14 +122,19 @@ void ArrayIntrinsicEmitter::generatePutOwnContiguousIndex(const ValueContext& va
     CellPointer array = in<CellPointer>(value->arrayOperand());
     ValueID stored = value->valueOperand();
     Operand rawElement = get(stored);
-    elements().storeRawElement(contiguous, elements().elementsOf(array), integerOperand(value->positionOperand()), rawElement);
+    ArrayElements storage = elements().elementsOf(array);
+    Integer index = integerOperand(value->positionOperand());
+    elements().storeRawElement(contiguous, storage, index, rawElement);
     barrierAfterStore(value, array, rawElement, typeOf(stored));
 }
 
 void ArrayIntrinsicEmitter::generatePutOwnDoubleIndex(const ValueContext& value)
 {
     CellPointer array = in<CellPointer>(value->arrayOperand());
-    elements().storeRawElement(doubles, elements().elementsOf(array), integerOperand(value->positionOperand()), get(value->valueOperand()));
+    ArrayElements storage = elements().elementsOf(array);
+    Integer index = integerOperand(value->positionOperand());
+    Operand rawElement = get(value->valueOperand());
+    elements().storeRawElement(doubles, storage, index, rawElement);
 }
 
 void ArrayIntrinsicEmitter::putInBounds(const ValueContext& value, const ArrayStorageForm& form)

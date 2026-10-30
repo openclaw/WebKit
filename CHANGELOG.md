@@ -4,6 +4,8 @@ These entries describe the experimental `openclaw/aot-main` integration fork.
 
 ## Unreleased
 
+- Preserve operand emission order in compact-table lookups, array stores, collection iterators, and saved-frame headers.
+
 - Sequence instruction emission explicitly in new hash-table, property, array, and string optimizations.
 
 - Match the missing-runtime-function regression to the current Bun arrayFromLength function ID.
