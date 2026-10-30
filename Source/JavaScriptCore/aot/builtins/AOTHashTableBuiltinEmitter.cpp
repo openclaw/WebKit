@@ -375,23 +375,38 @@ Boxed HashTableBuiltinEmitter::lookUpInHomeSlot(const InlineCall& call, CellPoin
 
     // All that the table alone says is worked out here, where B3 can move it out of the loop. One test is left in the loop.
     LValue capacity = m_out.zeroExtPtr(m_out.castToInt32(kinds));
-    LValue indexBits = m_out.bitAnd(m_out.lShr(kinds, m_out.constInt32(32)), m_out.constInt64(0xff));
-    LValue slots = m_out.shl(m_out.constInt64(1), m_out.castToInt32(indexBits));
+    LValue shiftedKinds = m_out.lShr(kinds, m_out.constInt32(32));
+    LValue indexBits = m_out.bitAnd(shiftedKinds, m_out.constInt64(0xff));
+    LValue one = m_out.constInt64(1);
+    LValue slots = m_out.shl(one, m_out.castToInt32(indexBits));
     LValue slotMask = m_out.sub(slots, m_out.constInt64(1));
     LValue hasLongSlots = m_out.above(capacity, m_out.constInt64(CompactTable::maxCapacityWithShortSlots));
-    LValue bytesOfNumber = m_out.select(hasLongSlots, m_out.constInt64(3), m_out.constInt64(1));
+    LValue three = m_out.constInt64(3);
+    LValue oneByte = m_out.constInt64(1);
+    LValue bytesOfNumber = m_out.select(hasLongSlots, three, oneByte);
     LValue numbers = m_out.add(table, m_out.constIntPtr(index));
     LValue tags = m_out.add(numbers, m_out.mul(slots, bytesOfNumber));
     LValue hasNoSlots = m_out.testIsZero64(kinds, m_out.constInt64(indexBitsMask));
-    LValue keys = m_out.select(hasNoSlots, m_out.add(numbers, m_out.constIntPtr(CompactTable::maxCapacityWithTags)), m_out.add(tags, slots));
+    LValue keysAfterTags = m_out.add(numbers, m_out.constIntPtr(CompactTable::maxCapacityWithTags));
+    LValue keysAfterSlots = m_out.add(tags, slots);
+    LValue keys = m_out.select(hasNoSlots, keysAfterTags, keysAfterSlots);
     auto loadWordOfTags = [&] { return m_out.load64(inColumns(numbers)); };
-    auto loadBitsOfUsedTags = [&] { return m_out.shl(m_out.zeroExtPtr(m_out.load32(inHeader(table, CompactTable::offsetOfUsed()))), m_out.constInt32(3)); };
+    auto loadBitsOfUsedTags = [&] {
+        LValue used = m_out.zeroExtPtr(m_out.load32(inHeader(table, CompactTable::offsetOfUsed())));
+        return m_out.shl(used, m_out.constInt32(3));
+    };
     // A map of number keys is rarely small enough for tags: their reads stay out of the way of the slots' registers.
     LValue wordOfTags = keysAreWide ? nullptr : loadWordOfTags();
     LValue bitsOfUsedTags = keysAreWide ? nullptr : loadBitsOfUsedTags();
     LValue values = returnsValue ? m_out.add(keys, m_out.shl(capacity, m_out.constInt32(keysAreWide ? 3 : 2))) : nullptr;
-    LValue valuesAreNarrow = returnsValue ? m_out.equal(m_out.bitAnd(m_out.lShr(kinds, m_out.constInt32(48)), m_out.constInt64(0xff)), m_out.constInt64(static_cast<int64_t>(CompactTable::Width::Narrow))) : nullptr;
-    LValue isOfKind = m_out.equal(m_out.bitAnd(kinds, m_out.constInt64(imageFlag | wideFlag)), m_out.constInt64(keysAreWide ? wideFlag : 0));
+    LValue valuesAreNarrow = nullptr;
+    if (returnsValue) {
+        LValue shiftedWidth = m_out.lShr(kinds, m_out.constInt32(48));
+        LValue width = m_out.bitAnd(shiftedWidth, m_out.constInt64(0xff));
+        valuesAreNarrow = m_out.equal(width, m_out.constInt64(static_cast<int64_t>(CompactTable::Width::Narrow)));
+    }
+    LValue kind = m_out.bitAnd(kinds, m_out.constInt64(imageFlag | wideFlag));
+    LValue isOfKind = m_out.equal(kind, m_out.constInt64(keysAreWide ? wideFlag : 0));
     LValue isNotHuge = m_out.belowOrEqual(capacity, m_out.constInt64(CompactTable::maxCapacityWithLongSlots));
     // One word says how to search. It takes one register in the loop, where the tests it stands for would take three.
     // Number keys rarely meet a table small enough for tags, so one test sends them to the slots.
@@ -399,8 +414,13 @@ Boxed HashTableBuiltinEmitter::lookUpInHomeSlot(const InlineCall& call, CellPoin
     const int32_t ShortSlots = keysAreWide ? 0 : 1;
     const int32_t LongSlots = keysAreWide ? 1 : 2;
     const int32_t OtherTable = 3;
-    LValue searchableForm = m_out.select(hasNoSlots, m_out.constInt32(Tags), m_out.select(hasLongSlots, m_out.constInt32(LongSlots), m_out.constInt32(ShortSlots)));
-    LValue form = m_out.select(m_out.bitAnd(isOfKind, isNotHuge), searchableForm, m_out.constInt32(OtherTable));
+    LValue tagsForm = m_out.constInt32(Tags);
+    LValue longForm = m_out.constInt32(LongSlots);
+    LValue shortForm = m_out.constInt32(ShortSlots);
+    LValue slotForm = m_out.select(hasLongSlots, longForm, shortForm);
+    LValue searchableForm = m_out.select(hasNoSlots, tagsForm, slotForm);
+    LValue isSearchable = m_out.bitAnd(isOfKind, isNotHuge);
+    LValue form = m_out.select(isSearchable, searchableForm, m_out.constInt32(OtherTable));
     if (keysAreWide)
         m_out.jump(isOfKindAndSize);
     else
@@ -409,7 +429,8 @@ Boxed HashTableBuiltinEmitter::lookUpInHomeSlot(const InlineCall& call, CellPoin
     m_out.appendTo(isOfKindAndSize);
     LValue hash;
     if (keysAreWide) {
-        hash = m_out.bitAnd(hashOfBitsByOneMultiplication(key).value(), m_out.constInt32(CompactTable::hashMask));
+        Word32 rawHash = hashOfBitsByOneMultiplication(key);
+        hash = m_out.bitAnd(rawHash.value(), m_out.constInt32(CompactTable::hashMask));
         m_out.jump(hasHash);
     } else {
         LBasicBlock isCell = newBlock();
@@ -433,7 +454,8 @@ Boxed HashTableBuiltinEmitter::lookUpInHomeSlot(const InlineCall& call, CellPoin
         LBasicBlock loaded = newBlock();
         m_out.branch(m_out.equal(form, m_out.constInt32(LongSlots)), unlikelyEdge(isLong), normalEdge(isShort));
         m_out.appendTo(isLong);
-        LValue threeBytes = m_out.bitAnd(m_out.load32(inColumns(m_out.add(numbers, m_out.mul(slot, m_out.constInt64(3))))), m_out.constInt32(0xffffff));
+        LValue loadedNumber = m_out.load32(inColumns(m_out.add(numbers, m_out.mul(slot, m_out.constInt64(3)))));
+        LValue threeBytes = m_out.bitAnd(loadedNumber, m_out.constInt32(0xffffff));
         ValueFromBlock fromLong = m_out.anchor(threeBytes);
         m_out.jump(loaded);
         m_out.appendTo(isShort);
@@ -461,8 +483,12 @@ Boxed HashTableBuiltinEmitter::lookUpInHomeSlot(const InlineCall& call, CellPoin
     m_out.appendTo(hasTags);
     if (keysAreWide)
         wordOfTags = loadWordOfTags();
-    LValue differenceOfTags = m_out.bitXor(wordOfTags, m_out.mul(m_out.zeroExtPtr(m_out.lShr(hash, m_out.constInt32(CompactTable::tagShiftOfTags))), m_out.constInt64(ones)));
-    LValue matchesAmongTags = m_out.bitAnd(m_out.bitAnd(m_out.sub(differenceOfTags, m_out.constInt64(ones)), m_out.bitNot(differenceOfTags)), m_out.constInt64(ones << 7));
+    LValue tagBits = m_out.zeroExtPtr(m_out.lShr(hash, m_out.constInt32(CompactTable::tagShiftOfTags)));
+    LValue differenceOfTags = m_out.bitXor(wordOfTags, m_out.mul(tagBits, m_out.constInt64(ones)));
+    LValue decrementedTags = m_out.sub(differenceOfTags, m_out.constInt64(ones));
+    LValue invertedTags = m_out.bitNot(differenceOfTags);
+    LValue candidateTags = m_out.bitAnd(decrementedTags, invertedTags);
+    LValue matchesAmongTags = m_out.bitAnd(candidateTags, m_out.constInt64(ones << 7));
     m_out.branch(m_out.isZero64(matchesAmongTags), normalEdge(absent), normalEdge(matchAmongTags));
 
     m_out.appendTo(matchAmongTags);
@@ -479,7 +505,8 @@ Boxed HashTableBuiltinEmitter::lookUpInHomeSlot(const InlineCall& call, CellPoin
 
     m_out.appendTo(hasSlots);
     LValue slot = m_out.bitAnd(m_out.zeroExtPtr(hash), slotMask);
-    LValue tag = m_out.bitOr(m_out.lShr(hash, m_out.constInt32(CompactTable::tagShiftOfSlots)), m_out.constInt32(CompactTable::takenSlot));
+    LValue slotTag = m_out.lShr(hash, m_out.constInt32(CompactTable::tagShiftOfSlots));
+    LValue tag = m_out.bitOr(slotTag, m_out.constInt32(CompactTable::takenSlot));
     LValue tagAtHome = m_out.load8ZeroExt32(inColumns(m_out.add(tags, slot)));
     m_out.branch(m_out.equal(tagAtHome, tag), normalEdge(atHome), unlikelyEdge(notAtHome));
 
@@ -496,8 +523,12 @@ Boxed HashTableBuiltinEmitter::lookUpInHomeSlot(const InlineCall& call, CellPoin
     m_out.appendTo(searchesEight);
     LValue first = m_out.bitAnd(slot, m_out.constInt64(~static_cast<int64_t>(CompactTable::slotsPerGroup - 1)));
     LValue eightTags = m_out.load64(inColumns(m_out.add(tags, first)));
-    LValue difference = m_out.bitXor(eightTags, m_out.mul(m_out.zeroExtPtr(tag), m_out.constInt64(ones)));
-    LValue matches = m_out.bitAnd(m_out.bitAnd(m_out.sub(difference, m_out.constInt64(ones)), m_out.bitNot(difference)), m_out.constInt64(ones << 7));
+    LValue wideTag = m_out.zeroExtPtr(tag);
+    LValue difference = m_out.bitXor(eightTags, m_out.mul(wideTag, m_out.constInt64(ones)));
+    LValue decremented = m_out.sub(difference, m_out.constInt64(ones));
+    LValue inverted = m_out.bitNot(difference);
+    LValue candidates = m_out.bitAnd(decremented, inverted);
+    LValue matches = m_out.bitAnd(candidates, m_out.constInt64(ones << 7));
     m_out.branch(m_out.isZero64(matches), normalEdge(noMatchAmongEight), normalEdge(matchAmongEight));
 
     m_out.appendTo(matchAmongEight);
@@ -523,7 +554,10 @@ Boxed HashTableBuiltinEmitter::lookUpInHomeSlot(const InlineCall& call, CellPoin
 
         m_out.appendTo(isNarrow);
         NarrowReference narrow(m_out.load32(inColumns(m_out.add(values, m_out.shl(number, m_out.constInt32(2))))));
-        join.add(select(isCellReferenceAmongAllWords(narrow), boxCell(decode(narrow)), Boxed(m_out.zeroExtPtr(narrow.value()))));
+        Condition isCell = isCellReferenceAmongAllWords(narrow);
+        Boxed cell = boxCell(decode(narrow));
+        Boxed immediate(m_out.zeroExtPtr(narrow.value()));
+        join.add(select(isCell, cell, immediate));
 
         m_out.appendTo(isWide);
         join.add(Boxed(m_out.load64(inColumns(m_out.add(values, m_out.shl(number, m_out.constInt32(3)))))));
