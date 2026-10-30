@@ -4,6 +4,8 @@ These entries describe the experimental `openclaw/aot-main` integration fork.
 
 ## Unreleased
 
+- Keep large closure-word boundary coverage with upstream closure numbering.
+
 - Keep incremental dependency regressions compatible with the unconditional flow solver.
 
 - Adapt retained incremental dependency tracking to compact solver lists and sequence new emitter operands.

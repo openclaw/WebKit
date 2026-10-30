@@ -270,7 +270,7 @@ static void testLargeFunctionWords()
                         for (bool isNotCallable : { false, true }) {
                             ClosureWord::Flags flags { isNotCallable, takesNewTarget, borrowed, endsTailCalls };
                             uint64_t word = ClosureWord::encode({ offsetInCode, parameters }, function, flags);
-                            AOT_TEST_CHECK(ClosureWord::functionOf(word) == function);
+                            AOT_TEST_CHECK(ClosureWord::closureNumberOf(word) == function);
                             AOT_TEST_CHECK(ClosureWord::addressOf(word, 4096) == 4096 + offsetInCode);
                             AOT_TEST_CHECK(ClosureWord::numberOfParametersOf(word) == parameters);
                             AOT_TEST_CHECK(ClosureWord::borrowedArgumentsOf(word) == borrowed);
@@ -289,9 +289,9 @@ static void testLargeFunctionWords()
             }
         }
         uint64_t request = ClosureRequest::encode(function, 2, 9);
-        AOT_TEST_CHECK(ClosureRequest::functionOf(request) == function && ClosureRequest::executableOf(request) == 2 && ClosureRequest::allocationOf(request) == 9);
+        AOT_TEST_CHECK(ClosureRequest::closureNumberOf(request) == function && ClosureRequest::executableOf(request) == 2 && ClosureRequest::allocationOf(request) == 9);
         uint64_t resume = ResumeClosureRequest::encode(function, 1, 9, 3);
-        AOT_TEST_CHECK(ClosureRequest::functionOf(resume) == function && ResumeClosureRequest::executableOf(resume) == 1 && ResumeClosureRequest::frameWordOf(resume) == 3);
+        AOT_TEST_CHECK(ClosureRequest::closureNumberOf(resume) == function && ResumeClosureRequest::executableOf(resume) == 1 && ResumeClosureRequest::frameWordOf(resume) == 3);
     }
     for (uint32_t function = ClosureWord::firstReservedFunction; function <= firstShapeCollision; ++function)
         AOT_TEST_CHECK(!ClosureWord::canEncode({ offsetInCode, 0 }, function));
