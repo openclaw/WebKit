@@ -197,9 +197,17 @@ Boxed HashTableBuiltinEmitter::lookUpAmongTags(const InlineCall& call, CellPoint
     // B3 moves out of a loop what stands on every likely path through it, so the rest of the header is read here.
     m_out.appendTo(hasTags);
     LValue tags = m_out.load64(inColumns(table, offsetOfTags));
-    LValue bitsOfUsedTags = m_out.shl(m_out.zeroExtPtr(m_out.load32(inHeader(table, CompactTable::offsetOfUsed()))), m_out.constInt32(3));
-    LValue values = returnsValue ? m_out.add(table, m_out.shl(m_out.zeroExtPtr(m_out.castToInt32(kinds)), m_out.constInt32(2))) : nullptr;
-    LValue valuesAreNarrow = returnsValue ? m_out.equal(m_out.bitAnd(m_out.lShr(kinds, m_out.constInt32(48)), m_out.constInt64(0xff)), m_out.constInt64(static_cast<int64_t>(CompactTable::Width::Narrow))) : nullptr;
+    LValue usedTags = m_out.zeroExtPtr(m_out.load32(inHeader(table, CompactTable::offsetOfUsed())));
+    LValue bitsOfUsedTags = m_out.shl(usedTags, m_out.constInt32(3));
+    LValue values = nullptr;
+    LValue valuesAreNarrow = nullptr;
+    if (returnsValue) {
+        LValue capacity = m_out.zeroExtPtr(m_out.castToInt32(kinds));
+        values = m_out.add(table, m_out.shl(capacity, m_out.constInt32(2)));
+        LValue width = m_out.lShr(kinds, m_out.constInt32(48));
+        width = m_out.bitAnd(width, m_out.constInt64(0xff));
+        valuesAreNarrow = m_out.equal(width, m_out.constInt64(static_cast<int64_t>(CompactTable::Width::Narrow)));
+    }
     Pointer impl = emitter<StringEmitter>().implOfFlatString(key);
     LValue hashAndFlags = loadField<Word32>(impl, m_heaps.StringImpl_hashAndFlags).value();
     m_out.branch(m_out.aboveOrEqual(hashAndFlags, m_out.constInt32(1 << StringImpl::s_flagCount)), normalEdge(isHashed), unlikelyEdge(byStub));
@@ -207,7 +215,10 @@ Boxed HashTableBuiltinEmitter::lookUpAmongTags(const InlineCall& call, CellPoint
     m_out.appendTo(isHashed);
     LValue tag = m_out.zeroExtPtr(m_out.lShr(hashAndFlags, m_out.constInt32(StringImpl::s_flagCount + CompactTable::tagShiftOfTags)));
     LValue difference = m_out.bitXor(m_out.mul(tag, m_out.constInt64(ones)), tags);
-    LValue matches = m_out.bitAnd(m_out.bitAnd(m_out.sub(difference, m_out.constInt64(ones)), m_out.bitNot(difference)), m_out.constInt64(ones << 7));
+    LValue lowered = m_out.sub(difference, m_out.constInt64(ones));
+    LValue inverted = m_out.bitNot(difference);
+    LValue lowBits = m_out.bitAnd(lowered, inverted);
+    LValue matches = m_out.bitAnd(lowBits, m_out.constInt64(ones << 7));
     m_out.branch(m_out.isZero64(matches), normalEdge(absent), normalEdge(hasMatch));
 
     m_out.appendTo(hasMatch);
@@ -225,7 +236,8 @@ Boxed HashTableBuiltinEmitter::lookUpAmongTags(const InlineCall& call, CellPoint
     m_out.branch(isCellReferenceAmongAllWords(word).value(), normalEdge(isOtherCell), unlikelyEdge(byStub));
 
     m_out.appendTo(isOtherCell);
-    m_out.branch(m_out.equal(m_out.load8ZeroExt32(candidate.value(), m_heaps.JSCell_typeInfoType), m_out.constInt32(StringType)), normalEdge(isOtherString), unlikelyEdge(byStub));
+    LValue candidateType = m_out.load8ZeroExt32(candidate.value(), m_heaps.JSCell_typeInfoType);
+    m_out.branch(m_out.equal(candidateType, m_out.constInt32(StringType)), normalEdge(isOtherString), unlikelyEdge(byStub));
 
     m_out.appendTo(isOtherString);
     m_out.branch(m_out.equal(loadField<Pointer>(candidate, m_heaps.JSString_value).value(), impl.value()), normalEdge(found), unlikelyEdge(byStub));
@@ -242,7 +254,10 @@ Boxed HashTableBuiltinEmitter::lookUpAmongTags(const InlineCall& call, CellPoint
 
         m_out.appendTo(isNarrow);
         NarrowReference narrow(m_out.load32(inColumns(m_out.add(values, offsetInNarrowColumn), offsetOfKeys - 3)));
-        join.add(select(isCellReferenceAmongAllWords(narrow), boxCell(decode(narrow)), Boxed(m_out.zeroExtPtr(narrow.value()))));
+        Condition isCell = isCellReferenceAmongAllWords(narrow);
+        Boxed cell = boxCell(decode(narrow));
+        Boxed immediate(m_out.zeroExtPtr(narrow.value()));
+        join.add(select(isCell, cell, immediate));
 
         m_out.appendTo(isWide);
         join.add(Boxed(m_out.load64(inColumns(m_out.add(values, firstMatch), offsetOfKeys - 7))));

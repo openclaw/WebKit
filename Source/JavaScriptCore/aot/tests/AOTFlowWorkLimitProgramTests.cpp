@@ -7,6 +7,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTAddGenericVersion.h"
 #include "AOTBuildContext.h"
 #include "AOTCompile.h"
 #include "AOTCompileOptionWords.h"
@@ -15,7 +16,9 @@
 #include "AOTProgramFile.h"
 #include "AOTShellProcess.h"
 #include "AOTTemporaryFile.h"
+#include "AOTTestCommand.h"
 #include "AOTThreads.h"
+#include "AOTValueFlowAnalysis.h"
 #include "AOTVector.h"
 #include <initializer_list>
 #include <stdlib.h>
@@ -386,6 +389,99 @@ static void testWithinLimit()
     checkAnswers({ "disable=flow:ConstantBuiltinLocations"_s });
 }
 
+static void testCreatedPropertiesHaveBoundedEdges()
+{
+    runOnBuildThread([] {
+        constexpr unsigned numberOfFunctions = 64;
+        constexpr unsigned numberOfReads = 64;
+        StringBuilder text;
+        text.append("module m0 path=\"main.js\" displayPath=\"main.js\" body=f0\nentry module=m0\n"_s);
+        for (unsigned index = 0; index < numberOfFunctions; ++index) {
+            text.append("layout L"_s, index);
+            if (!(index % 3))
+                text.append(" kind=Instance constructor=f"_s, index + 1, " flags=[IsConstructorFunction]"_s);
+            text.append('\n');
+        }
+        for (unsigned index = 0; index < numberOfReads + 4; ++index)
+            text.append("variable g"_s, index, " module=m0 declared={type=anything} initialization=Undefined\n"_s);
+        text.append("function f0 name=\"main\" kind=Module results=[{type=anything}] {\n"_s);
+        unsigned nextValue = 0;
+        for (unsigned index = 0; index + 1 < numberOfFunctions; ++index) {
+            unsigned closure = nextValue++;
+            text.append("  v"_s, closure, " = NewClosure function=f"_s, index + 1, '\n');
+            for (unsigned receiver = 0; receiver < numberOfReads; ++receiver) {
+                if (receiver == index)
+                    continue;
+                text.append("  PutModuleVariable v"_s, closure, " variable=g"_s, receiver, '\n');
+                ++nextValue;
+            }
+        }
+        // Distinct receiver sets keep the lookups from sharing one flow node.
+        for (unsigned index = 0; index < numberOfReads; ++index) {
+            text.append("  v"_s, nextValue, " = GetModuleVariable variable=g"_s, index, "\n  v"_s, nextValue + 1, " = PropGet v"_s, nextValue, " key=\"prototype\"\n  PutModuleVariable v"_s, nextValue + 1, " variable=g"_s, numberOfReads, '\n');
+            nextValue += 3;
+        }
+        text.append("  v"_s, nextValue, " = GetModuleVariable variable=g"_s, numberOfReads, "\n  v"_s, nextValue + 1, " = PropGet v"_s, nextValue, " key=\"constructor\"\n  PutModuleVariable v"_s, nextValue + 1, " variable=g"_s, numberOfReads + 1, '\n');
+        nextValue += 3;
+        text.append("  v"_s, nextValue, " = String string=\"prototype\"\n  PutModuleVariable v"_s, nextValue, " variable=g"_s, numberOfReads + 2, "\n  v"_s, nextValue + 2, " = String string=\"constructor\"\n  PutModuleVariable v"_s, nextValue + 2, " variable=g"_s, numberOfReads + 2, '\n');
+        nextValue += 4;
+        text.append("  v"_s, nextValue, " = GetModuleVariable variable=g"_s, numberOfReads + 2, "\n  v"_s, nextValue + 1, " = GetModuleVariable variable=g0\n  v"_s, nextValue + 2, " = ElemGet v"_s, nextValue + 1, ", v"_s, nextValue, "\n  PutModuleVariable v"_s, nextValue + 2, " variable=g"_s, numberOfReads + 3, '\n');
+        text.append("  v"_s, nextValue + 4, " = CallDirect function=f"_s, numberOfFunctions + 1, "\n  Return\n}\n"_s);
+        for (unsigned index = 0; index < numberOfFunctions; ++index) {
+            text.append("function f"_s, index + 1, " name=\"member\""_s);
+            if (!(index % 3))
+                text.append(" kind=BaseConstructor flags=[HasNewTarget]"_s);
+            else if (index % 3 == 1)
+                text.append(" flags=[IsGenerator, TakesCallee]"_s);
+            text.append(" results=[{type=anything}]"_s);
+            if (!(index % 3))
+                text.append(" constructedClass=L"_s, index);
+            text.append(" {\n"_s);
+            if (index % 3 == 1)
+                text.append("  InitialYield\n"_s);
+            text.append("  Return\n}\n"_s);
+        }
+        text.append("function f"_s, numberOfFunctions + 1, " name=\"late\" results=[{type=anything}] {\n  v0 = NewClosure function=f"_s, numberOfFunctions, '\n');
+        for (unsigned receiver = 0; receiver + 1 < numberOfReads; ++receiver)
+            text.append("  PutModuleVariable v0 variable=g"_s, receiver, '\n');
+        text.append("  Return\n}\n"_s);
+
+        BuildContext build(makeDefaultCompileOptions());
+        auto program = Typed::parseProgram(Typed::withStandInLibrary(text.toString()), Typed::IRForm::AsRead, build);
+        if (!program) {
+            build.diagnostics().finish(nullptr);
+            Typed::printDiagnostics(build.diagnostics(), WTF::dataFile());
+        }
+        AOT_TEST_CHECK(program);
+        AOT_TEST_CHECK(Typed::runReadStage(*program, build));
+        Typed::guardTaintedPositions(*program, build, Typed::TaintedPositionsRun::BeforeFlow);
+        Typed::ValueFlowSolution solution(*program, build);
+        AOT_TEST_CHECK(solution.hasResult());
+        const auto& universe = solution.bodies().universe();
+        const auto& nodes = solution.bodies().nodes();
+        const auto& sets = solution.sets();
+        auto prototypes = solution.solver().possibleValuesOf(nodes.variable(Typed::VariableID(numberOfReads)));
+        auto constructors = solution.solver().possibleValuesOf(nodes.variable(Typed::VariableID(numberOfReads + 1)));
+        auto computed = solution.solver().possibleValuesOf(nodes.variable(Typed::VariableID(numberOfReads + 3)));
+        dataLogLn("created-properties set sizes: ", sets.size(prototypes), ", ", sets.size(constructors), ", ", sets.size(computed));
+        AOT_TEST_CHECK(!Typed::ValueSets::isComplement(prototypes) && sets.size(prototypes) == numberOfFunctions + 2);
+        AOT_TEST_CHECK(sets.meet(prototypes, universe.undefinedValue()));
+        AOT_TEST_CHECK(sets.contains(prototypes, Typed::ValueFlowUniverse::unknownObject()));
+        AOT_TEST_CHECK(!Typed::ValueSets::isComplement(constructors) && !Typed::ValueSets::isComplement(computed));
+        for (unsigned index = 0; index < numberOfFunctions; ++index) {
+            Typed::FunctionID function(index + 1);
+            auto prototype = !(index % 3) ? universe.prototypeOf(Typed::LayoutID(index)) : index % 3 == 1 ? universe.coroutineResultOf(function) : universe.prototypeObjectOf(function);
+            AOT_TEST_CHECK(sets.contains(prototypes, prototype));
+            if (index)
+                AOT_TEST_CHECK(sets.contains(computed, prototype));
+            if (index % 3 != 1)
+                AOT_TEST_CHECK(sets.contains(constructors, universe.closureOf(function)));
+        }
+        dataLogLn("created-properties logged edges: ", solution.solver().counters().edgesLogged);
+        AOT_TEST_CHECK(solution.solver().counters().edgesLogged < numberOfFunctions * numberOfReads / 2);
+    });
+}
+
 static void testLargeSetsAreGivenUp()
 {
     checkAnswers({ "disable=flow:ConstantBuiltinLocations"_s, "limit=MaxValueFlowSetMembers:1"_s });
@@ -396,6 +492,7 @@ std::span<const NativeTest> flowWorkLimitProgramTests()
 {
     static constexpr NativeTest tests[] = {
         { "flow-work-limit-program/within-limit"_s, testWithinLimit },
+        { "flow-work-limit-program/created-properties-have-bounded-edges"_s, testCreatedPropertiesHaveBoundedEdges },
         { "flow-work-limit-program/large-sets-are-given-up"_s, testLargeSetsAreGivenUp },
     };
     return tests;

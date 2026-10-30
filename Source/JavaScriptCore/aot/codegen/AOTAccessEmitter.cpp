@@ -169,9 +169,10 @@ Boxed AccessEmitter::getMemberAboveEmptySlot(const ValueContext& value)
     };
     LBasicBlock asksStub = newBlock();
     Join<Boxed> join(m_out);
-    // Arguments of one call load in an order that differs by compiler.
-    Word32 structureInSlot(m_out.load32(partOfSlot(Slot::offsetOfStructureID())));
-    branchUnless(equal(structureInSlot, loadStructureID(object)), asksStub);
+    Word32 cachedStructure(m_out.load32(partOfSlot(Slot::offsetOfStructureID())));
+    Word32 structure = loadStructureID(object);
+    branchUnless(equal(cachedStructure, structure), asksStub);
+
     branchUnless(equal(Word32(m_out.load8ZeroExt32(partOfSlot(Slot::offsetOfKind()))), static_cast<int32_t>(Slot::Kind::FieldOrInherited)), asksStub);
     // A getter needs a call, and where an empty slot may stand for undefined the key order decides.
     Word32 flags(m_out.load8ZeroExt32(partOfSlot(Slot::offsetOfFlags())));

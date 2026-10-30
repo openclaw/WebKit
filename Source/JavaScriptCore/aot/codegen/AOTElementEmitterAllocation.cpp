@@ -213,7 +213,9 @@ CellPointer ArrayAllocationEmitter::allocateArrayOfHoles(const OperationContext&
 {
     auto setLength = [&](CellPointer array) {
         CodeGenerator::InitializationScope scope(generator());
-        m_out.store32(low32(length).value(), m_out.loadPtr(array.value(), m_heaps.JSArray_butterfly), m_heaps.Butterfly_publicLength);
+        Word32 publicLength = low32(length);
+        LValue butterfly = m_out.loadPtr(array.value(), m_heaps.JSArray_butterfly);
+        m_out.store32(publicLength.value(), butterfly, m_heaps.Butterfly_publicLength);
         return array;
     };
     // `new Array(3)`: the stub for an empty array with that room knows its size and its allocator.
