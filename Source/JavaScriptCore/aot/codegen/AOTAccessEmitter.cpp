@@ -162,7 +162,9 @@ Boxed AccessEmitter::getMemberAboveEmptySlot(const ValueContext& value)
     });
     if (fillsSite) {
         recordArrival(value, receiver);
-        return Boxed(callStub(value, stubThatReadsAtSite(*identifier, value->receiverOperand()), { receiver.value(), siteCacheAddress(cache).value() }, { .immediate = *identifier, .isOnRarePath = true }).first);
+        auto stub = stubThatReadsAtSite(*identifier, value->receiverOperand());
+        Pointer site = siteCacheAddress(cache);
+        return Boxed(callStub(value, stub, { receiver.value(), site.value() }, { .immediate = *identifier, .isOnRarePath = true }).first);
     }
     bool readsAtSite = cache && identifier && value.shape() == CodeShape::Fast && RowDisplacementTable::hasColumn(*identifier) && comesAgain(value);
     std::optional<PlacedSlot> slot = readsAtSite ? findSlotInCellOfEveryMember(m_program, m_placement, typeOf(value->receiverOperand()), key) : std::nullopt;
