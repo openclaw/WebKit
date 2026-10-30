@@ -11,6 +11,8 @@
 #include "AOTCompileFunctions.h"
 #include "AOTExactBuffer.h"
 #include "AOTFlowResults.h"
+#include "AOTFunctionTable.h"
+#include "AOTIRProgram.h"
 #include "AOTIdentifierNumbering.h"
 #include "AOTPipeline.h"
 #include "AOTPlacement.h"
@@ -146,7 +148,7 @@ void LinkedFunctions::reorder(std::span<const uint32_t> order, BuildContext& con
     context.destroyLater(std::exchange(*this, WTF::move(reordered)));
 }
 
-static Candidates collectCandidates(const Typed::Program& program, const BuildContext& context, const BitVector* bodiesWithoutCode)
+static Candidates collectCandidates(const Typed::Program& program, BuildContext& context, const BitVector* bodiesWithoutCode)
 {
     const ParallelLoops& loops = context.parallelLoops();
     BitVector hasNoCode = bodiesWithoutCode ? *bodiesWithoutCode : Typed::findBodiesWithoutCode(program, context);
@@ -154,6 +156,12 @@ static Candidates collectCandidates(const Typed::Program& program, const BuildCo
     Vector<uint32_t> functionsWithCode = findIndicesInParallel(loops, program.functions.size(), [&](unsigned index) {
         return program.functions[index].hasBody() && !hasNoCode.get(index);
     });
+    uint64_t numberOfIDs = 0;
+    for (uint32_t function : functionsWithCode)
+        numberOfIDs = std::max(numberOfIDs, static_cast<uint64_t>(function) + 1);
+    // Closure guards embed function IDs before the image's final table check.
+    if (!checkImageFunctionLimit(numberOfIDs, context))
+        return {};
     Vector<Candidate> largestFirst(functionsWithCode.size());
     forEachIndexInParallel(loops, largestFirst.size(), [&](unsigned index) {
         uint32_t function = functionsWithCode[index];
@@ -331,6 +339,8 @@ CodeGenerationJob::~CodeGenerationJob()
 GeneratedCode CodeGenerationJob::run()
 {
     auto& [inputs, program, context, batches, ids, hiddenBodies, result, phase, caches] = *m_state;
+    if (context.diagnostics().hasErrors())
+        return WTF::move(result);
     const ParallelLoops& loops = context.parallelLoops();
     result.functions.grow(ids.size(), context);
     std::span<CompiledCode> functions = result.functions.mutableSpan();

@@ -510,6 +510,9 @@ void ListThatStaysInPlace<T>::takeMemoryFor(size_t size)
     m_numberWithMemory.store(end, std::memory_order_release);
 }
 
+// Native tests exercise stable-address storage with a public word type.
+template class ListThatStaysInPlace<uint64_t>;
+
 ValueFlowSolver::IndexOfMadeNodes::~IndexOfMadeNodes()
 {
     for (Table table : tables)
@@ -3335,6 +3338,22 @@ void ValueFlowSolver::noteNodesAskedFor()
             const ValueFlowRoundLog::Run& run = thread.log.runs[number];
             size_t first = share.askedForAnew.size();
             seen.clear();
+            // Incremental runs keep earlier requests, so those already hold a use of each node.
+            bool addsToEarlierRuns = std::exchange(valuesShown, run.endOfValuesShown) < run.endOfValuesShown;
+            Vector<uint32_t, mostComparedOneByOne> askedBefore;
+            if (addsToEarlierRuns && nodeAskedFor < run.endOfNodesAskedFor) {
+                forEachUseIn(m_usesOfStatement[run.statement.index()], [&](uint32_t madeNodes) {
+                    if (askedBefore.size() < mostComparedOneByOne)
+                        askedBefore.append(madeNodes);
+                    else {
+                        if (seen.isEmpty()) {
+                            for (uint32_t earlier : askedBefore)
+                                seen.add(earlier);
+                        }
+                        seen.add(madeNodes);
+                    }
+                });
+            }
             for (; nodeAskedFor < run.endOfNodesAskedFor; ++nodeAskedFor) {
                 uint32_t madeNodes = thread.log.madeNodesAskedFor[nodeAskedFor];
                 if (madeNodes & ValueFlowRoundLog::numberedByLog) [[unlikely]] {
@@ -3343,11 +3362,13 @@ void ValueFlowSolver::noteNodesAskedFor()
                         continue;
                 }
                 std::span<const uint32_t> askedFor = share.askedForAnew.span().subspan(first);
-                if (askedFor.size() < mostComparedOneByOne) {
-                    if (std::ranges::find(askedFor, madeNodes) != askedFor.end())
+                if (seen.isEmpty() && askedBefore.size() + askedFor.size() < mostComparedOneByOne) {
+                    if (askedBefore.contains(madeNodes) || std::ranges::find(askedFor, madeNodes) != askedFor.end())
                         continue;
                 } else {
                     if (seen.isEmpty()) {
+                        for (uint32_t earlier : askedBefore)
+                            seen.add(earlier);
                         for (uint32_t earlier : askedFor)
                             seen.add(earlier);
                     }
@@ -3356,7 +3377,6 @@ void ValueFlowSolver::noteNodesAskedFor()
                 }
                 share.askedForAnew.append(madeNodes);
             }
-            bool addsToEarlierRuns = std::exchange(valuesShown, run.endOfValuesShown) < run.endOfValuesShown;
             if (!addsToEarlierRuns) {
                 size_t left = share.askedForAnew.size();
                 bool differs = anyUseIn(m_usesOfStatement[run.statement.index()], [&](uint32_t madeNodes) {

@@ -138,6 +138,10 @@ static GeneratedProgram generateProgram(Typed::PipelineOutput& pipeline, Prepare
         inputs.effectsByOperandTypes = &effectsByOperandTypes;
     }
     CodeGenerationJob codeGeneration(inputs, *pipeline.program, context, &plan.bodiesWithoutCode);
+    if (context.diagnostics().hasErrors()) {
+        buildReport();
+        return result;
+    }
     // Most of encoding the text runs on one thread, so it runs beside code generation, which is longer. So does most of the flow report, which reads what flow has left and no body.
     runTasksInParallel(context.parallelLoops(), {
         [&] {

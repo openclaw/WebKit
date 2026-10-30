@@ -40,6 +40,14 @@ struct FrameShape {
 
 } // anonymous namespace
 
+bool checkImageFunctionLimit(uint64_t count, BuildContext& context)
+{
+    if (!context.exceeds(LimitID::ImageFunctions, count))
+        return true;
+    context.diagnostics().add(UserDiagnostic { .kind = UserDiagnosticKind::TooManyFunctions, .limit = LimitID::ImageFunctions, .count = clampTo<uint32_t>(count) });
+    return false;
+}
+
 static bool checkFunctionLimits(const FunctionTableInputs& inputs, BuildContext& context)
 {
     uint64_t endOfFunctionIDs = 0;
