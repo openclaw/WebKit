@@ -1489,7 +1489,7 @@ static void incrementalRunsReportEachDependencyOnce()
         ParallelLoops loops(numberOfThreads);
         ValueSets sets(numberOfArrivals + 2);
         ValueFlowSolver solver(input, sets, rule, loops);
-        AOT_TEST_CHECK(solver.solve());
+        solver.solve();
         AOT_TEST_CHECK(sets.size(solver.possibleValuesOf(ValueFlowNodeID(0u))) == numberOfArrivals);
         AOT_TEST_CHECK(sets.size(solver.possibleValuesOf(ValueFlowNodeID(1u))) == 1);
         AOT_TEST_CHECK(sets.contains(solver.possibleValuesOf(ValueFlowNodeID(1u)), ValueFlowObjectID(numberOfArrivals + 1)));
@@ -1544,7 +1544,7 @@ static void incrementalDependenciesGrowAndRetireOnFullRuns()
             ParallelLoops loops(numberOfThreads);
             ValueSets sets(numberOfArrivals + 2);
             ValueFlowSolver solver(input, sets, rule, loops);
-            AOT_TEST_CHECK(solver.solve());
+            solver.solve();
             AOT_TEST_CHECK(sets.size(solver.possibleValuesOf(ValueFlowNodeID(0u))) == numberOfArrivals);
             AOT_TEST_CHECK(sets.size(solver.possibleValuesOf(ValueFlowNodeID(1u))) == 1);
             AOT_TEST_CHECK(sets.contains(solver.possibleValuesOf(ValueFlowNodeID(1u)), ValueFlowObjectID(numberOfArrivals + 1)));

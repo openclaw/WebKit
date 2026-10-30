@@ -4,6 +4,8 @@ These entries describe the experimental `openclaw/aot-main` integration fork.
 
 ## Unreleased
 
+- Keep incremental dependency regressions compatible with the unconditional flow solver.
+
 - Adapt retained incremental dependency tracking to compact solver lists and sequence new emitter operands.
 
 - Preserve operand emission order in compact-table lookups, array stores, collection iterators, and saved-frame headers.
