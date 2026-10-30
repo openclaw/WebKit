@@ -456,7 +456,7 @@ static void testCreatedPropertiesHaveBoundedEdges()
         AOT_TEST_CHECK(Typed::runReadStage(*program, build));
         Typed::guardTaintedPositions(*program, build, Typed::TaintedPositionsRun::BeforeFlow);
         Typed::ValueFlowSolution solution(*program, build);
-        AOT_TEST_CHECK(solution.hasResult());
+        AOT_TEST_CHECK(!build.diagnostics().hasErrors());
         const auto& universe = solution.bodies().universe();
         const auto& nodes = solution.bodies().nodes();
         const auto& sets = solution.sets();
