@@ -177,6 +177,8 @@ worker inspection and external-buffer cases alongside the fork selection.
 
 ## Unreleased
 
+- Release class-field identifiers with their parser arena by allocating DefineFieldNode on the deletable arena path.
+
 - Merge upstream `e66916298091dd12469076fd854e135b03fb16ff` with both commit histories intact. Adapt worker verification and ArrayBuffer deductions to upstream per-heap collector accounting, preserve runtime AVX detection with upstream CPU feature reporting, and retain namespace facades alongside AOT exports.
 - Use upstream's retained mimalloc pthread key at shutdown, replacing the fork's key-deletion protocol. Keep deterministic late-allocation and in-flight setter regressions without a production drain hook.
 - Invalidate older bytecode cache layouts when combining upstream control-flow loop-header metadata with fork syntax-position tables (format revision 18).
