@@ -1,0 +1,51 @@
+diff --git a/Source/JavaScriptCore/CMakeLists.txt b/Source/JavaScriptCore/CMakeLists.txt
+--- a/Source/JavaScriptCore/CMakeLists.txt
++++ b/Source/JavaScriptCore/CMakeLists.txt
+@@ -2447,6 +2447,15 @@
+ 
+ WEBKIT_FRAMEWORK(JavaScriptCore)
+ 
++# A static JavaScriptCore leaves the table of built-ins to the program that links it. Compiled once, for all of them.
++if (ENABLE_STATIC_JSC)
++    add_library(aot-builtin-table-obj OBJECT EXCLUDE_FROM_ALL ${JavaScriptCore_AOT_BUILTIN_TABLE_DATA_SOURCES})
++    target_include_directories(aot-builtin-table-obj PRIVATE $<TARGET_PROPERTY:JavaScriptCore,INCLUDE_DIRECTORIES>)
++    target_compile_definitions(aot-builtin-table-obj PRIVATE $<TARGET_PROPERTY:JavaScriptCore,COMPILE_DEFINITIONS>)
++    target_compile_options(aot-builtin-table-obj PRIVATE $<TARGET_PROPERTY:JavaScriptCore,COMPILE_OPTIONS>)
++    add_dependencies(aot-builtin-table-obj JavaScriptCore)
++endif ()
++
+ if (USE_APPLE_INTERNAL_SDK)
+     WEBKIT_TARGET_USE_PGO(JavaScriptCore PROFILE JavaScriptCore)
+ endif ()
+diff --git a/Source/JavaScriptCore/shell/CMakeLists.txt b/Source/JavaScriptCore/shell/CMakeLists.txt
+--- a/Source/JavaScriptCore/shell/CMakeLists.txt
++++ b/Source/JavaScriptCore/shell/CMakeLists.txt
+@@ -3,13 +3,7 @@
+ list(TRANSFORM JavaScriptCore_AOT_TEST_SOURCES PREPEND ../ OUTPUT_VARIABLE aotTestSources)
+ list(APPEND aotTestSources ${JavaScriptCore_AOT_SCHEMA_GENERATED_TEST_SOURCES})
+ 
+-# A static JavaScriptCore leaves the table of built-ins to the program that links it. Compiled once, for all of them.
+ if (ENABLE_STATIC_JSC)
+-    add_library(aot-builtin-table-obj OBJECT ${JavaScriptCore_AOT_BUILTIN_TABLE_DATA_SOURCES})
+-    target_include_directories(aot-builtin-table-obj PRIVATE $<TARGET_PROPERTY:JavaScriptCore,INCLUDE_DIRECTORIES>)
+-    target_compile_definitions(aot-builtin-table-obj PRIVATE $<TARGET_PROPERTY:JavaScriptCore,COMPILE_DEFINITIONS>)
+-    target_compile_options(aot-builtin-table-obj PRIVATE $<TARGET_PROPERTY:JavaScriptCore,COMPILE_OPTIONS>)
+-    add_dependencies(aot-builtin-table-obj JavaScriptCore)
+     set(aotBuiltinTableObjects $<TARGET_OBJECTS:aot-builtin-table-obj>)
+     list(APPEND aotProgramSources ${aotBuiltinTableObjects})
+ endif ()
+diff --git a/Tools/TestWebKitAPI/PlatformJSCOnly.cmake b/Tools/TestWebKitAPI/PlatformJSCOnly.cmake
+--- a/Tools/TestWebKitAPI/PlatformJSCOnly.cmake
++++ b/Tools/TestWebKitAPI/PlatformJSCOnly.cmake
+@@ -10,3 +10,11 @@
+         GLib::Gio
+     )
+ endif ()
++
++get_directory_property(TestJavaScriptCore_AOT_PROGRAM_SOURCES
++    DIRECTORY "${JAVASCRIPTCORE_DIR}" DEFINITION JavaScriptCore_AOT_PROGRAM_SOURCES)
++list(TRANSFORM TestJavaScriptCore_AOT_PROGRAM_SOURCES PREPEND "${JAVASCRIPTCORE_DIR}/")
++list(APPEND TestJavaScriptCore_SOURCES ${TestJavaScriptCore_AOT_PROGRAM_SOURCES})
++if (ENABLE_STATIC_JSC)
++    list(APPEND TestJavaScriptCore_SOURCES $<TARGET_OBJECTS:aot-builtin-table-obj>)
++endif ()
