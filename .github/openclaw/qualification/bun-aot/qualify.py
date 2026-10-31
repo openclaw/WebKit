@@ -7,8 +7,11 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import tarfile
+import io
+import tomllib
 import time
 from xml.etree import ElementTree
 
@@ -80,15 +83,44 @@ def source_state(adapted):
     assert git(ENGINE, 'rev-parse', 'HEAD') == WEBKIT
     assert git(SOURCE, 'write-tree') == original_tree
     assert not git(ENGINE, 'diff', '--name-only', 'HEAD')
-    changed = set(git(SOURCE, 'diff', '--name-only', 'HEAD').splitlines())
+    changed = set(git(SOURCE, 'diff', '--no-renames', '--name-only', 'HEAD').splitlines())
+    changed.update(git(SOURCE, 'ls-files', '--others', '--exclude-standard').splitlines())
     assert changed == (set(spec['files']) if adapted else set()), changed
     for name, identity in spec['files'].items():
-        path = SOURCE / name
+        relative = Path(name)
+        assert not relative.is_absolute() and '..' not in relative.parts and relative.parts[0] != '.git'
+        path = SOURCE / relative
+        indexed = git(SOURCE, 'ls-files', '-s', '--', name).split()
+        if identity['base_blob'] is None:
+            assert not indexed and identity['before'] is None, name
+        else:
+            assert indexed[:2] == [identity['mode'], identity['base_blob']], name
+        expected = identity['after' if adapted else 'before']
+        expected_blob = identity['adapted_blob' if adapted else 'base_blob']
+        assert (expected is None) == (expected_blob is None), name
+        if expected is None:
+            assert not os.path.lexists(path), name
+            continue
+        metadata = path.lstat()
+        assert stat.S_ISREG(metadata.st_mode), name
+        assert ('100755' if metadata.st_mode & 0o111 else '100644') == identity['mode'], name
         data = path.read_bytes()
-        assert sha(path) == identity['after' if adapted else 'before'], name
+        assert hashlib.sha256(data).hexdigest() == expected, name
         blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
-        assert blob == identity['adapted_blob' if adapted else 'base_blob'], name
-        assert git(SOURCE, 'ls-files', '-s', '--', name).split()[0] == identity['mode']
+        assert blob == expected_blob, name
+
+
+def restore_source():
+    # The admitted index is untouched. Restore tracked preimages and remove only
+    # exact candidate files proven absent from that index before this run.
+    source_state(True)
+    tracked = [name for name, identity in spec['files'].items() if identity['base_blob'] is not None]
+    if tracked:
+        run('restore-source', ['git', 'restore', '--source=' + BUN, '--worktree', '--', *tracked], 120)
+    for name, identity in spec['files'].items():
+        if identity['base_blob'] is None:
+            (SOURCE / name).unlink()
+    source_state(False)
 
 
 def junit(path, expected=None, selected=None):
@@ -104,6 +136,74 @@ def junit(path, expected=None, selected=None):
     if expected is not None:
         assert names == [expected], names
     return names
+
+
+def prepare_source():
+    # Preparation produces reviewable source bytes, never a qualified executable.
+    source_state(True)
+    inputs = {name: identity['after'] for name, identity in spec['files'].items()}
+    lock_path = SOURCE / 'Cargo.lock'
+    lock_before = lock_path.read_bytes()
+    inputs.setdefault('Cargo.lock', hashlib.sha256(lock_before).hexdigest())
+    rust_paths = [name for name, identity in spec['files'].items()
+                  if name.endswith('.rs') and identity['after'] is not None]
+    if rust_paths:
+        run('prepare-rustfmt', ['rustup', 'run', 'nightly-2026-09-15', 'rustfmt',
+            '--edition', '2024', '--config-path', 'rustfmt.toml', '--config', 'skip_children=true',
+            '--', *rust_paths], 600)
+    cache = str(BUILD / 'prep-tarballs')
+    run('prepare-lolhtml', ['bun', 'scripts/build/fetch-cli.ts', 'dep', 'lolhtml', 'oven-sh/lol-html',
+        '725ce499aa9b71e38b7a2d0a9fbb6d7294a4079e', str(SOURCE / 'vendor/lolhtml'), cache], 600)
+    run('prepare-argon2', ['bun', 'scripts/build/fetch-cli.ts', 'dep', 'rust-argon2', 'sru-systems/rust-argon2',
+        'ed81866f163f0c7026aa6fd8388adf37242eb32a', str(SOURCE / 'vendor/rust-argon2'), cache,
+        str(SOURCE / 'patches/rust-argon2/legacy-low-memory.patch'),
+        str(SOURCE / 'patches/rust-argon2/fallible-memory.patch')], 600)
+    run('prepare-lockfile', ['cargo', '+nightly-2026-09-15', 'update', '--manifest-path', 'Cargo.toml', '-p', 'bun_aot'], 600)
+    before, after = tomllib.loads(lock_before.decode()), tomllib.loads(lock_path.read_text())
+    def packages(lock):
+        return {(p['name'], p['version'], p.get('source')): p for p in lock['package']}
+    old, current = packages(before), packages(after)
+    assert old.keys() == current.keys(), 'lockfile package identities changed'
+    assert {k: v for k, v in before.items() if k != 'package'} == {k: v for k, v in after.items() if k != 'package'}
+    for key, package in old.items():
+        if key[0] != 'bun_aot':
+            assert current[key] == package, key
+            continue
+        assert {k: v for k, v in package.items() if k != 'dependencies'} == {k: v for k, v in current[key].items() if k != 'dependencies'}
+        assert set(current[key]['dependencies']) == set(package['dependencies']) | {'bun_js_parser'}
+    changed = set(git(SOURCE, 'diff', '--no-renames', '--name-only', 'HEAD').splitlines())
+    changed.update(git(SOURCE, 'ls-files', '--others', '--exclude-standard').splitlines())
+    assert changed <= set(spec['files']) | {'Cargo.lock'}, changed
+    prepared = {}
+    for name in [*rust_paths, 'Cargo.lock']:
+        path = SOURCE / name
+        assert stat.S_ISREG(path.lstat().st_mode) and not path.lstat().st_mode & 0o111, name
+        data = path.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        if digest == inputs[name]:
+            continue
+        prepared[name] = dict(input_sha256=inputs[name], sha256=digest, bytes=len(data))
+        if name not in spec['files']:
+            indexed = git(SOURCE, 'ls-files', '-s', '--', name).split()
+            assert indexed[0] == '100644'
+            spec['files'][name] = dict(before=inputs[name], base_blob=indexed[1], mode='100644')
+        spec['files'][name].update(after=digest,
+            adapted_blob=hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest())
+    source_state(True)
+    archive = OUT / 'prepared-source.tar.gz'
+    manifest = json.dumps({'patch_sha256': spec['patch_sha256'], 'files': prepared}, indent=2).encode() + b'\n'
+    assert sum(entry['bytes'] for entry in prepared.values()) <= 32 * 1024**2
+    with tarfile.open(archive, 'w:gz') as stream:
+        for name, data in [('manifest.json', manifest), *[(name, (SOURCE / name).read_bytes()) for name in prepared]]:
+            info = tarfile.TarInfo(name)
+            info.size, info.mode = len(data), 0o644
+            stream.addfile(info, io.BytesIO(data))
+    assert archive.stat().st_size <= 16 * 1024**2
+    restore_source()
+    result = json.loads((OUT / 'proof.json').read_text())
+    result.update(passed=False, prepared=True, preparation_files=prepared,
+                  prepared_archive_sha256=sha(archive), patch_sha256=spec['patch_sha256'])
+    (OUT / 'proof.json').write_text(json.dumps(result, indent=2) + '\n')
 
 
 def target_icu():
@@ -164,7 +264,7 @@ OUT.mkdir(exist_ok=True)
 assert git(Path('/work/pipeline'), 'rev-parse', 'HEAD') == PIPELINE
 spec = json.loads((INPUTS / 'source-adapter.json').read_text())
 assert spec['bun'] == BUN and spec['webkit'] == WEBKIT
-assert len(spec['files']) == 21
+assert spec['files']
 assert sha(INPUTS / 'candidate.patch') == spec['patch_sha256']
 original_tree = git(SOURCE, 'rev-parse', 'HEAD^{tree}')
 source_state(False)
@@ -181,6 +281,9 @@ source_state(False)
 run('apply-adapter', ['git', 'apply', '--check', str(INPUTS / 'candidate.patch')], 120)
 run('apply-adapter-write', ['git', 'apply', str(INPUTS / 'candidate.patch')], 120)
 source_state(True)
+if spec.get('prepare_only', False):
+    prepare_source()
+    raise SystemExit(0)
 icu = target_icu()
 build_command = ['bun', 'scripts/build.ts', '--profile=release-local', '--webkit=local',
                  '--webkit-version=' + WEBKIT, '--aot=on', '--ci=on', '--buildkite=off',
@@ -230,8 +333,6 @@ realm_cases = junit(xml, selected=set(realm_names))
 assert set(realm_cases) == set(realm_names) and len(realm_cases) == 2
 internal_cases['aot/builtins/realm-agreement.test.ts'] = realm_cases
 source_state(True)
-run('restore-source', ['git', 'restore', '--source=' + BUN, '--worktree', '--', *spec['files']], 120)
-source_state(False)
 cases = []
 for part, name in [('calls-of-proxies', 'strict--empty--two'), ('calls-of-proxies', 'strict--trap--method'),
                    ('builtin-modules', 'async-local-storage-get-store')]:
@@ -243,7 +344,8 @@ for part, name in [('calls-of-proxies', 'strict--empty--two'), ('calls-of-proxie
                       '--reporter-outfile=' + str(xml)], 600, env=case_env)
     assert not re.search(r'(?:SKIPPED:|TODO:|SHARE:|NOT THROUGH:)', text), expected
     cases += junit(xml, expected)
-    source_state(False)
+    source_state(True)
+restore_source()
 assert identities == {name: sha(BUILD / name) for name in identities}
 result = json.loads((OUT / 'proof.json').read_text())
 result.update(passed=True, binary_sha256=identities, program_cases=cases, build_contract_cases=internal_cases,

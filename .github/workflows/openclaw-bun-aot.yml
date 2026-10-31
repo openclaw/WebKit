@@ -74,7 +74,7 @@ jobs:
           echo "id=$container_id" >> "$GITHUB_OUTPUT"
           docker exec -e SCRIPT bun-aot-consumer sh -euc 'sh "$SCRIPT" fd40ba44187c721ee023062fa153a6a27560e6b1 openclaw-release'
           docker exec bun-aot-consumer sh -euc 'apt-get update; apt-get install --yes --no-install-recommends python3 ruby bison gawk perl libxml2-dev pkg-config'
-      - name: Reproduce the generator incompatibility and qualify the repaired compiler
+      - name: Prepare source or qualify the pinned compiler
         timeout-minutes: 285
         shell: bash
         run: |
