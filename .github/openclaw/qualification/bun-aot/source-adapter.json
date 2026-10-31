@@ -1,7 +1,7 @@
 {
   "bun": "fd40ba44187c721ee023062fa153a6a27560e6b1",
   "webkit": "5ec9ac8557722128588184ed9cf77347d9a30cf1",
-  "patch_sha256": "916794f45a7a1653b8bc2e553427b429be05e061b7b0d74357b3defeee3cdfbb",
+  "patch_sha256": "70cc9ae5b45fd29cdd9b12c3ba81674aaccd92849708d7abdd2487765f44c287",
   "files": {
     "scripts/build/aot-source-lists.ts": {
       "before": "881654b517a593c56bf65ca3f84a238a8825b43c9ad92b1bd3587cb78a579ffa",
@@ -73,6 +73,13 @@
       "adapted_blob": "64ad526674e7810f76797ad7452f4b1ab3ae6420",
       "mode": "100644"
     },
+    "src/codegen/builtins/host/private-globals.builtins.ts": {
+      "before": "d3a3a79f9fec0d7c07b5e448721dead49a996c0423f8af936b2ad1bd9cd71484",
+      "after": "1ab935da06f538e88c58996dc82d66942ee2401f44ce483233c37a3e98aa1860",
+      "base_blob": "63c8550a48b2482a244c3481860346f716cc607c",
+      "adapted_blob": "90e404f94ea3e684ecf39fc099e9e3a7c1876cb1",
+      "mode": "100644"
+    },
     "src/codegen/builtins/host/process.builtins.ts": {
       "before": "04455f8fef0134b4cf102bc467ed3d69776b93c201c280823e2a49e8e5f33896",
       "after": "33dc5374aba6db635b90098781b1b1b1e7db672972312c762213fc9ad65f352e",
@@ -82,9 +89,9 @@
     },
     "src/codegen/builtins/host/unseen-code.builtins.ts": {
       "before": "a9e4507ad555278e38840285f9f613d0302420391b0932a7d2686d7d3196ac98",
-      "after": "2b251860f3b84ba1ef8b0b34104f443384d7996086440f5e5aea5f085c840034",
+      "after": "b627cbc9fd80601d85b2afed90ed532e211c13f70d8584b1b311d24222088860",
       "base_blob": "81f9e67ac6a2eb81095c8c6dcdc2a365ff1a78fb",
-      "adapted_blob": "ccb698d0445f9ed524eac1572c439dcf34cc34ba",
+      "adapted_blob": "66c61f226fb05ea8ed0cc52212972451d4c0e337",
       "mode": "100644"
     },
     "src/codegen/builtins/host/web-classes.builtins.ts": {

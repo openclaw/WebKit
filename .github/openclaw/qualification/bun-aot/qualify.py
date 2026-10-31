@@ -108,7 +108,7 @@ OUT.mkdir(exist_ok=True)
 assert git(Path('/work/pipeline'), 'rev-parse', 'HEAD') == PIPELINE
 spec = json.loads((INPUTS / 'source-adapter.json').read_text())
 assert spec['bun'] == BUN and spec['webkit'] == WEBKIT
-assert len(spec['files']) == 19
+assert len(spec['files']) == 20
 assert sha(INPUTS / 'candidate.patch') == spec['patch_sha256']
 original_tree = git(SOURCE, 'rev-parse', 'HEAD^{tree}')
 source_state(False)

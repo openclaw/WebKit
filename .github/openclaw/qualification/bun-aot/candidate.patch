@@ -713,6 +713,27 @@ index 16ccb71534..64ad526674 100644
      implementation: b.hostCall,
    }),
  
+diff --git a/src/codegen/builtins/host/private-globals.builtins.ts b/src/codegen/builtins/host/private-globals.builtins.ts
+index 63c8550a48..90e404f94e 100644
+--- a/src/codegen/builtins/host/private-globals.builtins.ts
++++ b/src/codegen/builtins/host/private-globals.builtins.ts
+@@ -126,6 +126,8 @@ export default b.declarations(
+     asyncContext: b.property(b.object, {
+       createdOnFirstRead: { capability: "none", uses: { this: [b.returnedFrom(asyncContextCell)] } },
+     }),
++    createInternalModuleById: b.otherwiseBy(b.hostCall),
++    esmLoadSync: b.otherwiseBy(b.hostCall),
+     makeAbortError: makesAbortError,
+     makeErrorWithCode: makesErrorWithCode,
+     peekPromiseSettledValue: looksAtPromise(
+@@ -142,6 +144,7 @@ export default b.declarations(
+       writes: promiseState,
+       implementation: b.hostCall,
+     },
++    requireCommonJS: b.otherwiseBy(b.hostCall),
+     webStreamClosedPromise: {
+       args: { stream: b.any.optional },
+       returns: b.instance("Promise"),
 diff --git a/src/codegen/builtins/host/process.builtins.ts b/src/codegen/builtins/host/process.builtins.ts
 index 3c937ec37b..3b0ccf4b09 100644
 --- a/src/codegen/builtins/host/process.builtins.ts
@@ -774,10 +795,17 @@ index 3c937ec37b..3b0ccf4b09 100644
    result: "Ignored",
  });
 diff --git a/src/codegen/builtins/host/unseen-code.builtins.ts b/src/codegen/builtins/host/unseen-code.builtins.ts
-index 81f9e67ac6..ccb698d044 100644
+index 81f9e67ac6..66c61f226f 100644
 --- a/src/codegen/builtins/host/unseen-code.builtins.ts
 +++ b/src/codegen/builtins/host/unseen-code.builtins.ts
-@@ -19,7 +19,6 @@ const moduleLoaders = [
+@@ -15,11 +15,13 @@ const machineCodeLoaders = [
+ const moduleLoaders = [
+   "%ModuleRequire%",
+   "%ModuleRequire%.extensions",
++  "%PrivateGlobals%.createInternalModuleById",
++  "%PrivateGlobals%.esmLoadSync",
++  "%PrivateGlobals%.requireCommonJS",
+   "Bun.ModuleGraph",
    "Bun.Transpiler",
    "Bun.build",
    "Bun.plugin",
@@ -785,7 +813,7 @@ index 81f9e67ac6..ccb698d044 100644
    "node:module._extensions",
    "node:module._load",
    "node:module.runMain",
-@@ -30,7 +29,6 @@ const textEvaluators = [
+@@ -30,7 +32,6 @@ const textEvaluators = [
    "%NodeVMBinding%.Module",
    "%NodeVMBinding%.Script",
    "%NodeVMBinding%.compileFunction",
