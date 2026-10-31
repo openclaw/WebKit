@@ -1,0 +1,196 @@
+{
+  "version": 1,
+  "origins": {
+    "reporter": "420f48ac7551c8ed451c174326124ff775cc5a53",
+    "logger": "dce637b9cdf1faff06c01e0df6a5b263d4cb7c1c",
+    "termination": "a7947a2a2f82cb002137f68e321654491acee6b9",
+    "remapper": "083b5bedaa50c35e2dde537ab6b9b8e899de18b9"
+  },
+  "arms": {
+    "baseline": {
+      "pin": "b83b544ef744b6ab0dc1feadb59652261d64291d",
+      "build": {
+        "patch": "harness-adapters/baseline-build.patch",
+        "sha256": "e0d3a17de015fa99b976276f9004d743d8a979b71c3e46675b54d934162d465c",
+        "files": {
+          "scripts/buildkite.ts": {
+            "before": "6bb50c957cf09fddcffc43b8035ff4a5d29734835fac0891e8b30297714d241d",
+            "after": "39b1578ba8395e9dbbde5e8cb20518582138320a1d071428fd33950fe3408944",
+            "base_blob": "7ead30178e05c361388174d3f1ee0d34bff8455a",
+            "adapted_blob": "66ce916b0b9fe57d7194ed81ca8d7f25aba99126",
+            "mode": "100644"
+          }
+        }
+      },
+      "test": {
+        "patch": "harness-adapters/baseline-test.patch",
+        "sha256": "906dd294a43a3bdf4a8e138fd4397fa6dac44facfc7f7b312dd673736e032b70",
+        "files": {
+          "scripts/buildkite.ts": {
+            "before": "6bb50c957cf09fddcffc43b8035ff4a5d29734835fac0891e8b30297714d241d",
+            "after": "bb63c8e5c7367f188dabd2ecd8323ada93ebefb6ba21f2ca0a646f6cd3402751",
+            "base_blob": "7ead30178e05c361388174d3f1ee0d34bff8455a",
+            "adapted_blob": "e185710cc08ec7a9a5ba5b3d9829aab9a4705960",
+            "mode": "100644"
+          },
+          "scripts/runner.node.ts": {
+            "before": "e35c7acbf5094720822d6e0caa5ae1ae0d165fc2f4b5f9b80107002437f0bffb",
+            "after": "bd0f555cb0290f2cf384a4a05528a0982a286eedb950dc5610dc67ccf222d258",
+            "base_blob": "798d1d3b066d828498a6a3284e30ba5e164ba289",
+            "adapted_blob": "fc986fd0b5d81f31d3070efc04f2c3e857c879ae",
+            "mode": "100755"
+          },
+          "scripts/openclaw-ci/tests.ts": {
+            "before": "eb7dd3c054ce8749b3869ff66f00af7f9f493867c5aabdd7041be2eb9d11f0cc",
+            "after": "319fc4752379a52d61772be58847a3186d52c818decfcaa7b3d8bc185f7cdf5f",
+            "base_blob": "11141eb9ba4b965881792b61b012cee01d063aad",
+            "adapted_blob": "e1db8688db2f1f640c91a131e301b1a59cf42f1c",
+            "mode": "100644"
+          }
+        }
+      }
+    },
+    "candidate": {
+      "pin": "7b573c05d0c52dffc67d4d25daf108bed5930cf2",
+      "build": {
+        "kind": "source-compatibility",
+        "patch": "harness-adapters/candidate-build.patch",
+        "sha256": "0482c437365d3606b14c9b35222515a6cf3ad95fa0b16d71e4829280e7c1bf53",
+        "compiled_inputs": [
+          "src/codegen/bindgen-lib-internal.ts",
+          "src/codegen/bundle-functions.ts",
+          "src/jsc/JSType.rs",
+          "src/jsc/JSValue.rs",
+          "src/jsc/bindings/BunProcess.cpp",
+          "src/jsc/bindings/JSBuffer.cpp",
+          "src/jsc/bindings/JSCTestingHelpers.cpp",
+          "src/jsc/bindings/bindings.cpp",
+          "src/jsc/bindings/sqlite/NodeSqlite.cpp",
+          "src/jsc/bindings/webcore/SerializedScriptValue.cpp",
+          "src/runtime/test_runner/expect/toBeEven.rs",
+          "src/runtime/test_runner/expect/toBeOdd.rs"
+        ],
+        "files": {
+          "src/codegen/bindgen-lib-internal.ts": {
+            "before": "141273133e8750c41149f0af1706c25239ecb28a0667ae35c8f601bfd1c4e8df",
+            "after": "7bef5387621aa5450c3b00e2872031f21ef0719ac52948774455bdeba82dec39",
+            "base_blob": "655b6083a939a4991744b33c73db5981450baba5",
+            "adapted_blob": "06159dff52b4d8f40ac1dfb61b48c6e6de6142d5",
+            "mode": "100644"
+          },
+          "src/codegen/bundle-functions.ts": {
+            "before": "e2764a60ce6a34b307dfa40c6dd108b718b99ae5ff89da71058a0b12c2289493",
+            "after": "1c82dc91ceb129edab684770eab4455435a49c385c7852b8f5b79a1b93fdcb03",
+            "base_blob": "9c991a68c09a9f9d36238805efc9d19ece9b70cd",
+            "adapted_blob": "91a4ac13a680ec4207a2ac19fb9d8f35051a3801",
+            "mode": "100644"
+          },
+          "src/jsc/JSType.rs": {
+            "before": "03b74867c3243546a3acd61973f2134ff825e0157f3b5ce4de35b893e9afcccb",
+            "after": "3fedf23e63bbcc52553e787bae0d88a97c6d1fa52215191549df7970a76863a6",
+            "base_blob": "3c21ec7b288db26eafad93dd9077d42cc9bfec46",
+            "adapted_blob": "c8fae978d69b55f9c63a7bbb7ea23642ce6e05fc",
+            "mode": "100644"
+          },
+          "src/jsc/JSValue.rs": {
+            "before": "09cda8bb9bae139792aeb0f18da01ec1cd87fad08099face932aa1f443e8da4d",
+            "after": "6e34aa76583324080aab9a0f804f1f89db5edc9dce7e6ab54cc5547957a2b11c",
+            "base_blob": "32d856923b3cd0778f006d4e99ccc5e7e7053f47",
+            "adapted_blob": "41955485d630a6daf561b877fa74658a1cfc44b7",
+            "mode": "100644"
+          },
+          "src/jsc/bindings/BunProcess.cpp": {
+            "before": "6c864f2dccbac5a8ae4f74390b5594336a5a4b32d5e30549f09cce2b108da40f",
+            "after": "61a99ca5932ca5c1e8499dd0f4797fd404b30428ed744a3c50454353c8744713",
+            "base_blob": "d6c91725f091986a343fe0c07d3eb9bb24e900dc",
+            "adapted_blob": "7be0bf3a4a2ed5b74322be06a55fa76f0aa93257",
+            "mode": "100644"
+          },
+          "src/jsc/bindings/JSBuffer.cpp": {
+            "before": "5445db01eac3bb9cc2bfd56de89e9a5c80631d1cde78749d4456148b292400ed",
+            "after": "f84579f0a75fabf71c76e34bc0ea989c938f5c924e0a778433ffe88b4d159f63",
+            "base_blob": "4078e20637104a1f416061071062b1b7c25bc80b",
+            "adapted_blob": "2d6485d17e75af2f544cc35848233bc935b3a946",
+            "mode": "100644"
+          },
+          "src/jsc/bindings/JSCTestingHelpers.cpp": {
+            "before": "b145121f9b830c386afda1fe7546d4ff119bc76d3942c1e9025b79a3dee9ae12",
+            "after": "ce11b0d93c586a6a9bf6179e2741e18ace501c999103fde08dedbc47b54a6c46",
+            "base_blob": "1ec73a62de1bbf9f0b9b8ec614541e0a7fbe1e06",
+            "adapted_blob": "ed62e231dbe67676a5a00ec977423dc9f945ada1",
+            "mode": "100644"
+          },
+          "src/jsc/bindings/bindings.cpp": {
+            "before": "dbd09c9c614849925997140020afefd85489e57c03fb2a7bb9953bba07a3da6e",
+            "after": "2ab1e2b0627488885fea15c5cfd6c9e1c5d25d8b017e2ddda5406f8b82a2bdda",
+            "base_blob": "2e3ef553730ced0200b12c0f21ce9b59e97bd262",
+            "adapted_blob": "073457e39431ed1c1ed290e882566feedc405325",
+            "mode": "100644"
+          },
+          "src/jsc/bindings/headers.h": {
+            "before": "1f9b820e3c7746f637069ec89a87b9980ac2933846e878346e9085e7938e16ad",
+            "after": "e796c2ce432a1fa9746fe76856d30be20a05533d4b0ea4d26691a6b63bdd9e4d",
+            "base_blob": "94a58d21623db636d84098e7660e97271aca0372",
+            "adapted_blob": "98da6a18343dfcb27f9d29f699006c7cc073f44e",
+            "mode": "100644"
+          },
+          "src/jsc/bindings/sqlite/NodeSqlite.cpp": {
+            "before": "646b3e54dd66cc80adce94541ca57b55763b111badb50e7ad2413b42f6beaeb6",
+            "after": "dc29542440db4113fa31970d666f76af3ada75f4ee91bc20c156684a16eea783",
+            "base_blob": "a009685e942de61dca781d37c1e360ab2a4360ee",
+            "adapted_blob": "dcd35d6c798860ebf9e5ddf075c817bb8c8abc8a",
+            "mode": "100644"
+          },
+          "src/jsc/bindings/webcore/SerializedScriptValue.cpp": {
+            "before": "2b94c6c10332ea1920ebbc9eaf8d9a621a16e6bcbd7e4a6360693b5a0c023e82",
+            "after": "1715e3d41c8a5ed976f9ed8f81deae549b43b7948e2d4252447209623300f727",
+            "base_blob": "a456daf857a5391d88cb3a854190d8502cc6c2ca",
+            "adapted_blob": "24db5ea935528ed0bae6c3bc66a2c11cbbeae22c",
+            "mode": "100644"
+          },
+          "src/runtime/test_runner/expect/toBeEven.rs": {
+            "before": "11285c104f679da00a95deb0e8c91f0653a7d2326bb10052bf1778b193a1c20e",
+            "after": "11646740db6bff0853fffcd8f22ccda5afb4618d5904dbf9cc700c0f7fc96a0a",
+            "base_blob": "ec46a941b9f3672382118af3e1e0118805a3e385",
+            "adapted_blob": "1a876a1c97e4bdf213f691f61463b990fd689661",
+            "mode": "100644"
+          },
+          "src/runtime/test_runner/expect/toBeOdd.rs": {
+            "before": "ad8cb5744f97543f9c3815b27222403bec492c9e55703dea79aaa237d4bfad99",
+            "after": "9d7f181a63d2a3ccdf014057a531fd11503fed3ccf7b0119799b2fc3ae1566a7",
+            "base_blob": "9fd38a5d2be4570d105fb1612003537c2794c4dc",
+            "adapted_blob": "06be1374e4b23348297e6f3e74af844c220d10e9",
+            "mode": "100644"
+          }
+        }
+      },
+      "test": {
+        "patch": "harness-adapters/candidate-test.patch",
+        "sha256": "016e80ad52598b03184070789eb9cfa44321c74cbd03a0089042c11325a1457b",
+        "files": {
+          "scripts/buildkite.ts": {
+            "before": "cf1999381cf38d34b9892118266614ae2b81a28066d47a455aa15794fb2c1c3e",
+            "after": "a49d5c491cd65f39c2bd35e3ea6cf7fd9f40e52de209417bd9ee5afed5e7ec4a",
+            "base_blob": "401d5e02728b1966552d6a6357076e50f8203ce9",
+            "adapted_blob": "bdc41d6881b43969d053381afed744a1d907e657",
+            "mode": "100644"
+          },
+          "scripts/runner.node.ts": {
+            "before": "c95dc6ae2ec6cdb63764950b70765a618f9210b548a4b0c188053a9bf0f10b19",
+            "after": "3ff063681359656080d43f73e4ee0febbda584b8cbba7efe256e570467c0bf9d",
+            "base_blob": "c9ff165f351dd1345732d8426f2013d1bd8d27fc",
+            "adapted_blob": "11f00085169a54bcc16d241993ec5bc96ff63cdf",
+            "mode": "100755"
+          },
+          "scripts/openclaw-ci/tests.ts": {
+            "before": "51c9680a8a4c1d88c88096d1c4e2c5cb2707610d5c303457474a311f3b8b0a06",
+            "after": "7d1a06e7298a71342e0237188038591ff90303e31ff986357e527764aadd211e",
+            "base_blob": "6507f885c1cdfdf8937574946d6959fa898a4345",
+            "adapted_blob": "5ce950bee35def7156a1ee7f5d1ac6230c812d2f",
+            "mode": "100644"
+          }
+        }
+      }
+    }
+  }
+}

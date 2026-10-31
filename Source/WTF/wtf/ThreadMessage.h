@@ -45,7 +45,7 @@ enum class MessageStatus {
 // registers, stack, and the code it is stopped in). Because the target is frozen, func must not
 // block on any resource (e.g. a lock) that the suspended thread might currently hold, or it will
 // deadlock. Returns ThreadExited if targetThread had already exited.
-WTF_EXPORT_PRIVATE MessageStatus sendMessageScoped(const ThreadSuspendLocker&, Thread&, const ThreadMessage&);
+WTF_EXPORT_PRIVATE MessageStatus sendMessageScoped(const ThreadSuspendLocker&, Thread&, NOESCAPE const ThreadMessage&);
 
 // Like sendMessageScoped, but a foreign-stack refusal leaves the thread running
 // and returns TemporarilyUnavailable without invoking the message. This is for
@@ -60,7 +60,7 @@ MessageStatus trySendMessage(const ThreadSuspendLocker& locker, Thread& targetTh
 }
 
 template<typename Functor>
-MessageStatus sendMessage(const ThreadSuspendLocker& locker, Thread& targetThread, const Functor& func)
+MessageStatus sendMessage(const ThreadSuspendLocker& locker, Thread& targetThread, NOESCAPE const Functor& func)
 {
     return sendMessageScoped(locker, targetThread, func);
 }

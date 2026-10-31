@@ -2,6 +2,7 @@
 // Observe existing engine state without production hooks or state mutation.
 #include <cmakeconfig.h>
 #include <JavaScriptCore/APICast.h>
+#include <JavaScriptCore/Collector.h>
 #include <JavaScriptCore/GCRequest.h>
 #include <JavaScriptCore/Heap.h>
 #include <JavaScriptCore/HeapHelperPool.h>
@@ -35,11 +36,11 @@ struct ObserveMember {
     friend typename Tag::Type observe(Tag) { return member; }
 };
 
-struct HeapCondition {
-    using Type = WTF::Condition JSC::Heap::*;
-    friend Type observe(HeapCondition);
+struct CollectorCondition {
+    using Type = WTF::Condition JSC::Collector::*;
+    friend Type observe(CollectorCondition);
 };
-template struct ObserveMember<HeapCondition, &JSC::Heap::m_markingConditionVariable>;
+template struct ObserveMember<CollectorCondition, &JSC::Collector::m_markingConditionVariable>;
 
 struct HeapWorldState {
     using Type = WTF::Atomic<unsigned> JSC::Heap::*;
@@ -163,7 +164,7 @@ int main()
         // Settle setup collection while helpers are available. No prior cycle or
         // unrelated VM is allowed to account for the later observed wait.
         heap.collectNow(JSC::Sync, JSC::CollectionScope::Full);
-        auto& condition = heap.*observe(HeapCondition { });
+        auto& condition = heap.collector().*observe(CollectorCondition { });
         auto& world = heap.*observe(HeapWorldState { });
         conditionAddress = &(condition.*observe(ConditionWaitAddress { }));
         worldAddress = &world;

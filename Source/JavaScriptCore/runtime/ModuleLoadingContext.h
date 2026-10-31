@@ -70,6 +70,7 @@ public:
     const AbstractModuleRecord::ModuleRequest& moduleRequest() const { return m_moduleRequest; }
     JSCell* payload() const { return m_payload.get(); }
     ModuleRegistryEntry* entry() const { return m_entry.get(); }
+    void setEntry(VM&, ModuleRegistryEntry*);
     ScriptFetcher* scriptFetcher() const { return m_scriptFetcher.get(); }
     AbstractModuleRecord* module() const { return m_module.get(); }
     void module(VM& vm, AbstractModuleRecord* mod) { m_module.set(vm, this, mod); }

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Assemble checked lane outputs, then create one immutable release without replacement."""
 import argparse
+import artifacts as artifact_source
+from qualification import consumer_identity, compile_cache, compare_fork_ci
 import hashlib
 import json
 import os
@@ -19,29 +21,98 @@ def api(*args):return json.loads(subprocess.check_output(['gh','api',*args],text
 def execute(*args):subprocess.run(args,check=True)
 def save(p,x):p.write_text(json.dumps(x,indent=2)+'\n')
 
+def lane_patch_records(manifest,source):
+    patches=manifest.get('patches')
+    if (manifest.get('base')!=artifact_source.BASE or manifest.get('history_floor')!=artifact_source.HISTORY_FLOOR
+        or not isinstance(patches,list)):
+        raise ValueError('invalid lane history provenance')
+    seen=set()
+    for row in patches:
+        if (not isinstance(row,dict) or set(row)!={'commit','subject','patch_sha256'}
+            or not all(isinstance(row[key],str) for key in ('commit','subject','patch_sha256'))
+            or not re.fullmatch('[0-9a-f]{40}',row['commit']) or not re.fullmatch('[0-9a-f]{64}',row['patch_sha256'])
+            or row['commit'] in seen):
+            raise ValueError('invalid lane history provenance')
+        seen.add(row['commit'])
+    if (patches and patches[-1]['commit']!=source) or (not patches and source!=artifact_source.BASE):
+        raise ValueError('invalid lane history provenance')
+    return patches
+
 def assemble(inputs,out,source):
     out.mkdir(parents=True,exist_ok=False)
     config=json.loads((ROOT/'.github/openclaw/variants.json').read_text())
     tag='autobuild-'+source
     gate_path=inputs/'qualification/gate.json'
     gate=json.loads(gate_path.read_text())
-    if gate.get('passed') is not True or gate['source']!=source or gate['bun_commit']!=config['bun_commit']:
+    proof=inputs/'qualification';binaries=inputs/'linux-bun-executables'
+    identity_path=proof/'candidate-identity.json';baseline_path=proof/'baseline-identity.json'
+    identity=json.loads(identity_path.read_text());baseline=json.loads(baseline_path.read_text())
+    consumer_identity.validate(identity,source)
+    consumer_identity.validate_baseline_evidence(baseline,binaries,proof)
+    identity_sha=sha(identity_path)
+    if (gate.get('passed') is not True or gate['source']!=source
+        or gate.get('comparison')!='bun-plus-engine-upgrade'
+        or gate.get('candidate_identity_sha256')!=identity_sha
+        or gate.get('baseline_identity_sha256')!=sha(baseline_path)
+        or gate.get('selected_files')!=44 or gate.get('result_files')!=46):
         raise ValueError('missing or mismatched qualification gate')
+    comparison=compare_fork_ci.compare(proof/'baseline',proof/'candidate')
+    if (not comparison['passed'] or gate.get('comparison_policy')!=compare_fork_ci.POLICY
+        or gate.get('faithfulness_sha256')!=sha(proof/'faithfulness.json')
+        or comparison!=compare_fork_ci.read_json(proof/'faithfulness.json')):
+        raise ValueError('missing or mismatched paired comparison evidence')
+    sync=gate.get('upstream_sync',{});engine=gate.get('engine',{})
+    if (sync.get('passed') is not True or sync.get('source')!=source
+        or sync.get('candidate_identity_sha256')!=identity_sha
+        or sync.get('historical_selected_files')!=82 or sync.get('selected_files')!=85
+        or sync.get('regressions')!=0 or engine.get('passed') is not True or engine.get('source')!=source):
+        raise ValueError('missing or mismatched upstream-sync/engine qualification')
+    selected=compare_fork_ci.selection(compare_fork_ci.read_json(proof/'sync/selected.json'))
+    historical=set(compare_fork_ci.read_json(consumer_identity.INPUTS/'selected.json'))|set(compare_fork_ci.read_json(consumer_identity.INPUTS/'sync/selected.json'))
+    if (len(historical)!=82 or len(selected)!=85 or not historical<=set(selected)
+        or not {'test/js/web/atomics.test.ts','test/js/bun/wasm/compile-rss.test.ts'}<=set(selected)):
+        raise ValueError('invalid frozen sync selection')
+    sync_observed=compare_fork_ci.validate_arm(proof/'sync',selected)
+    if (not sync_observed['all_passed'] or sync.get('invocation')!=sync_observed['invocation']
+        or sync.get('result_rows')!=len(sync_observed['rows'])):
+        raise ValueError('missing or mismatched sync invocation')
+    if sync.get('compile_cache')!=compile_cache.evidence(proof/'sync/module-junit.xml'):
+        raise ValueError('missing or mismatched compile-cache qualification')
+    compatibility=gate.get('compatibility',{})
+    if (compatibility.get('passed') is not True or compatibility.get('source')!=source
+        or compatibility.get('candidate_identity_sha256')!=identity_sha
+        or compatibility.get('memory_tests')!=3 or compatibility.get('startup') is not True):
+        raise ValueError('missing or mismatched candidate compatibility gate')
     artifacts={}; lanes=[]
+    expected_patches=None
     for lane in config['lanes']:
         label=lane['label']; name=label+'.tar.gz'; directory=inputs/label
         manifest=json.loads((directory/(label+'.manifest.json')).read_text())
         if manifest['source']!=source or manifest['lane']['label']!=label:
             raise ValueError('mixed source or lane')
+        patches=lane_patch_records(manifest,source)
+        if expected_patches is None:expected_patches=patches
+        elif patches!=expected_patches:raise ValueError('lane patch provenance mismatch')
         f=directory/name
         if sha(f)!=manifest['files'][name]['sha256'] or f.stat().st_size!=manifest['files'][name]['size']:
             raise ValueError('lane digest mismatch')
+        if label==consumer_identity.LANE:
+            measured=consumer_identity.engine_input(f,directory/(label+'.manifest.json'),source)
+            consumer_identity.validate_evidence(identity,source,measured,binaries,proof)
         shutil.copyfile(f,out/name)
         artifacts[name]={'url':f'https://github.com/{REPO}/releases/download/{tag}/{name}','sha256':sha(f),'size':f.stat().st_size}
         lanes.append(manifest)
+    windows=json.loads((inputs/'windows-arm64-qualification/gate.json').read_text())
+    if (windows.get('passed') is not True or windows.get('source')!=source
+        or windows.get('lane')!='bun-webkit-windows-arm64' or windows.get('architecture')!='arm64'
+        or windows.get('sha256')!=artifacts['bun-webkit-windows-arm64.tar.gz']['sha256']
+        or any(windows.get(k) is not True for k in ('startup','dfg','ffi','arraybuffer_accounting'))
+        or windows.get('arraybuffer_modes')!=5):
+        raise ValueError('missing or mismatched native Windows ARM64 qualification')
+    gate['windows_arm64']=windows
     # Retain low-level provenance and test logs as a separate archive.
     execute('tar','-czf',str(out/'provenance.tar.gz'),'-C',str(inputs),*[
-        item for lane in config['lanes'] for item in [lane['label']+'/provenance',lane['label']+'/'+lane['label']+'.manifest.json']], 'qualification')
+        item for lane in config['lanes'] for item in [lane['label']+'/provenance',lane['label']+'/'+lane['label']+'.manifest.json']], 'qualification', 'windows-arm64-qualification')
     license_text='OpenClaw WebKit source and licenses\n\n'+f'Source: https://github.com/{REPO}/tree/{source}\nSource archive: https://github.com/{REPO}/archive/{source}.tar.gz\n\n'
     for p in ['Source/JavaScriptCore/COPYING.LIB','Source/WTF/wtf/COPYING.LIB']:
         file=ROOT/p
@@ -75,13 +146,13 @@ def authorize(source,run_id):
     if not api('-H','Cache-Control: max-age=0',f'repos/{REPO}/immutable-releases')['enabled']:
         raise ValueError('immutable releases must be enabled')
     run=api('-H','Cache-Control: max-age=0',f'repos/{REPO}/actions/runs/{run_id}')
-    if (run['head_sha']!=source or run['head_branch'] not in ('openclaw/main','openclaw/batch-1')
+    if (run['head_sha']!=source or run['head_branch'] not in ('openclaw/main','openclaw/batch-1','openclaw/release-5718a6ec')
         or run['event']!='workflow_dispatch' or run['path'].split('@',1)[0]!='.github/workflows/openclaw-artifacts.yml'):
         raise ValueError('publication run does not match the reviewed source/workflow')
     jobs=api('-H','Cache-Control: max-age=0',f'repos/{REPO}/actions/runs/{run_id}/jobs?filter=latest&per_page=100')
     required=[j for j in jobs['jobs'] if j['name']!='publish']
     expected_builds={'build ('+l['label']+')' for l in json.loads((ROOT/'.github/openclaw/variants.json').read_text())['lanes']}
-    if ({j['name'] for j in required}!=expected_builds|{'preflight','test','assemble'}
+    if ({j['name'] for j in required}!=expected_builds|{'preflight','test','windows-arm64','assemble'}
         or any(j['conclusion']!='success' or j['run_attempt']!=run['run_attempt'] for j in required)):
         raise ValueError('all exact build, test and assembly jobs must pass')
     pending=api('-H','Cache-Control: max-age=0',f'repos/{REPO}/actions/runs/{run_id}/pending_deployments')
@@ -106,11 +177,11 @@ def validate_authorization(source):
 def publish(directory,source):
     manifest=verify(directory,source);tag=manifest['tag']
     validate_authorization(source)
-    if os.environ.get('GITHUB_REF') not in ('refs/heads/openclaw/main','refs/heads/openclaw/batch-1') or os.environ.get('GITHUB_SHA')!=source:
+    if os.environ.get('GITHUB_REF') not in ('refs/heads/openclaw/main','refs/heads/openclaw/batch-1','refs/heads/openclaw/release-5718a6ec') or os.environ.get('GITHUB_SHA')!=source:
         raise ValueError('publishing requires reviewed source on an explicitly permitted owned branch')
     # Tag creation fails atomically if the name exists. Neither existing drafts nor releases are resumed.
     api('-X','POST',f'repos/{REPO}/git/refs','-f','ref=refs/tags/'+tag,'-f','sha='+source)
-    body=f'OpenClaw-built WebKit at `{source}`. All selected lanes and Linux qualification passed.\n\nThis release wakes a passive garbage collector when its mutator starts waiting, so collection progresses while shared GC helpers are occupied elsewhere. Native qualification requires completion before helper release and survival of rooted objects.\n\nBatch 1: Segmenter surrogate boundaries; opt-in Proxy global prototypes; module-loader AsyncLocalStorage propagation; per-VM worker heap and stack budgets. Thanks @steipete and @robobun for the source changes and upstream work.\n\nSource and licenses: LICENSE-SOURCES.txt. Checksums: SHA256SUMS and manifest.json. Full build and test provenance: provenance.tar.gz.\n\nRollback by restoring the prior Bun manifest and WebKit pin together; prior releases remain available.\n'
+    body=f'OpenClaw-built WebKit at `{source}`. All {len(manifest["artifacts"])} lanes, Linux qualification and native Windows ARM64 engine probes passed.\n\n'+(ROOT/'.github/openclaw/release-notes.md').read_text()
     draft=api('-X','POST',f'repos/{REPO}/releases','-f','tag_name='+tag,'-f','name='+tag,'-f','body='+body,'-F','draft=true')
     release_id=draft['id']
     execute('gh','release','upload',tag,'-R',REPO,*[str(p) for p in sorted(directory.iterdir())])

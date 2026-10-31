@@ -32,6 +32,7 @@
 #include "CodeBlock.h"
 #include "StackVisitor.h"
 #include "ScriptExecutable.h"
+#include "MarkedBlockInlines.h"
 #include "SubspaceInlines.h"
 #include "SymbolTable.h"
 #include "VM.h"
@@ -41,6 +42,10 @@
 #include <wtf/WeakRandom.h>
 #include <wtf/text/MakeString.h>
 #include <cmath>
+
+#if ENABLE(AOT)
+#include "AOTHeapHooks.h"
+#endif
 
 namespace JSC {
 
@@ -119,6 +124,10 @@ void HeapProfiler::setActiveHeapAnalyzer(HeapAnalyzer* analyzer)
     ASSERT(!!m_activeAnalyzer != !!analyzer);
     if (analyzer)
         materializeLazySymbolTablesForHeapAnalysis(m_vm);
+#if ENABLE(AOT)
+    if (analyzer && m_vm.hasCompiledCode())
+        AOT::HeapHooks::willAnalyzeHeap(m_vm);
+#endif
     m_activeAnalyzer = analyzer;
     m_vm.setActiveHeapAnalyzer(analyzer);
 }

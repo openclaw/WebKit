@@ -1,6 +1,9 @@
 //@ runDefault("--useDollarVM=true", "--useConcurrentGC=false")
 
 $vm.setWorkerHeapLimits(64 * 1024 * 1024, 256 * 1024);
+edenGC();
+if ($vm.lastGCWasFull() !== true)
+    throw new Error("explicit Eden bypassed initial worker full verification");
 const allocatedBefore = $vm.heapTotalBytesAllocated();
 let sawEden = false;
 let checksum = 0;

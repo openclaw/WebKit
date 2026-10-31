@@ -36,7 +36,7 @@ static void* allocateAfterShutdown(void* unused)
         CHECK(!pthread_cond_wait(&condition, &lock));
     CHECK(!pthread_mutex_unlock(&lock));
 
-    // The first new key may reuse mimalloc's deleted key, just as ParkingLot does.
+    // A new key allocated after shutdown must retain its own value, as ParkingLot requires.
     pthread_key_t key;
     CHECK(!pthread_key_create(&key, NULL));
     CHECK(!pthread_setspecific(key, &sentinel));
@@ -65,7 +65,7 @@ static void checkExit(void)
 int main(void)
 {
     // Initialize the allocator on the main thread, leaving the worker's first
-    // allocation until after shutdown has deleted the allocator's pthread key.
+    // allocation until after allocator shutdown.
     void* allocation = mi_malloc(16);
     CHECK(allocation);
     mi_free(allocation);

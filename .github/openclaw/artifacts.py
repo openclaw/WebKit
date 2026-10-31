@@ -11,7 +11,8 @@ import subprocess
 import sys
 import time
 
-BASE = '1600131e46b5af48bbda3559af8d8a3327230b6e'
+BASE = 'e66916298091dd12469076fd854e135b03fb16ff'
+HISTORY_FLOOR = '5718a6ec579b98362ea7276a426deedcc6281ef5'
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = json.loads((ROOT / '.github/openclaw/variants.json').read_text())
 RECIPE = ['.github/scripts/lanes.mjs', 'Dockerfile', 'Dockerfile.musl', 'Dockerfile.macos', 'Dockerfile.windows', 'icu', 'macos-cross']
@@ -30,22 +31,63 @@ def write(path, value):
     path.write_text(json.dumps(value, indent=2) + '\n')
 
 def source():
-    sha = capture('git', 'rev-parse', 'HEAD')
+    git = ('git', '-C', str(ROOT))
+    sha = capture(*git, 'rev-parse', '--verify', 'HEAD^{commit}')
     if not re.fullmatch('[0-9a-f]{40}', sha):
         raise ValueError('full source SHA required')
-    run('git', 'merge-base', '--is-ancestor', BASE, sha)
-    run('git', 'diff', '--exit-code', BASE, sha, '--', *RECIPE)
-    run('git', 'diff', '--exit-code', 'HEAD')
-    return sha
+    run(*git, 'merge-base', '--is-ancestor', HISTORY_FLOOR, BASE)
+    run(*git, 'merge-base', '--is-ancestor', BASE, sha)
+    run(*git, 'diff', '--exit-code', BASE, sha, '--', *RECIPE)
+    run(*git, 'diff', '--exit-code', 'HEAD')
+    commits = capture(*git, 'rev-list', '--reverse', BASE + '..' + sha).splitlines()
+    shallow = Path(capture(*git, 'rev-parse', '--git-path', 'shallow'))
+    if not shallow.is_absolute():
+        shallow = ROOT / shallow
+    boundaries = set(shallow.read_text().splitlines()) if shallow.exists() else set()
+    if boundaries:
+        # Excluded merge parents can hide patches even when the floor is reachable.
+        if boundaries.intersection(capture(*git, 'rev-list', HISTORY_FLOOR + '..' + sha).splitlines()):
+            raise ValueError('incomplete source history: shallow boundary above history floor')
+        # A bypass parent may expose older history without a boundary in that range.
+        for commit in commits:
+            try:
+                run(*git, 'merge-base', '--is-ancestor', HISTORY_FLOOR, commit)
+            except subprocess.CalledProcessError as error:
+                if error.returncode != 1:
+                    raise
+                raise ValueError('incomplete source history: patch commit is not a proven history-floor descendant: ' + commit) from error
+    patches = []
+    for commit in commits:
+        patch = subprocess.check_output([*git, 'show', '--format=', '--binary', commit])
+        patches.append({'commit': commit, 'subject': capture(*git, 'show', '-s', '--format=%s', commit),
+            'patch_sha256': hashlib.sha256(patch).hexdigest()})
+    return {'source': sha, 'base': BASE, 'history_floor': HISTORY_FLOOR, 'patches': patches}
+
+def write_build_defines(artifact, lane, sha):
+    # Lane-only flags affect public class layouts; carry upstream's header contract.
+    with (artifact / 'include/cmakeconfig.h').open('a') as f:
+        f.write('\n#define BUN_WEBKIT_VERSION "' + sha + '"\n')
+        f.write('#define BUN_WEBKIT_ENABLE_AOT ' + str(lane['aot']) + '\n')
+        f.write('#if !defined(ENABLE_AOT)\n#define ENABLE_AOT ' + str(lane['aot']) + '\n#endif\n')
+        for define in lane['defines'].split():
+            name, value = define.split('=', 1)
+            f.write('#if !defined(' + name + ')\n#define ' + name + ' ' + value + '\n#endif\n')
+
 
 def lane_definitions():
     return json.loads(capture('node', '.github/scripts/lanes.mjs', '--json'))
 
 def preflight():
-    sha = source()
+    source_record = source()
+    sha = source_record['source']
     if sha != os.environ['INPUT_SHA'] or sha != os.environ['GITHUB_SHA']:
         raise ValueError('dispatch must use the same reviewed branch head and full input SHA')
-    if os.environ['GITHUB_REF'] not in ('refs/heads/openclaw/main', 'refs/heads/openclaw/batch-1'):
+    ref = os.environ['GITHUB_REF']
+    qualification_only = (
+        ref == 'refs/heads/claude/sync-webkit-upstream-20261014'
+        and os.environ.get('INPUT_PUBLISH') == 'false'
+    )
+    if ref not in ('refs/heads/openclaw/main', 'refs/heads/openclaw/batch-1', 'refs/heads/openclaw/release-5718a6ec') and not qualification_only:
         raise ValueError('only an explicitly permitted owned branch may run this workflow')
     upstream = {l['label'] for l in lane_definitions()}
     wanted = [l['label'] for l in CONFIG['lanes']]
@@ -55,7 +97,8 @@ def preflight():
         f.write('matrix=' + json.dumps({'include': [{'lane': l} for l in wanted]}, separators=(',', ':')) + '\n')
 
 def build(label, destination):
-    sha = source()
+    source_record = source()
+    sha = source_record['source']
     if label not in [l['label'] for l in CONFIG['lanes']]:
         raise ValueError('lane is outside the approved consumer matrix')
     lane = next(l for l in lane_definitions() if l['label'] == label)
@@ -79,8 +122,7 @@ def build(label, destination):
     build_command = json.loads(capture('node', '.github/scripts/lanes.mjs', 'build', label, '--output', str(artifact), '--base-image', base_tag, '--dry-run'))
     build_command[-1:-1] = ['--metadata-file', str(provenance/'artifact-build.json')]
     run(*build_command)
-    with (artifact/'include/cmakeconfig.h').open('a') as f:
-        f.write('\n#define BUN_WEBKIT_VERSION "'+sha+'"\n')
+    write_build_defines(artifact, lane, sha)
     write(artifact/'package.json', {'name':label,'version':'0.0.1-'+sha,'os':[lane['package_os']],'cpu':[lane['package_cpu']],'repository':'https://github.com/openclaw/WebKit'})
     for path in (artifact/'lib').glob('*.so*'):
         if path.is_file() or path.is_symlink():
@@ -88,11 +130,7 @@ def build(label, destination):
     archive = destination/(label+'.tar.gz')
     run('tar', '-czf', str(archive), '-C', str(destination), 'bun-webkit')
     paths = capture('git', 'ls-files', '--', *RECIPE).splitlines()
-    patches = []
-    for commit in capture('git','rev-list','--reverse',BASE+'..'+sha).splitlines():
-        patch = subprocess.check_output(['git','show','--format=','--binary',commit])
-        patches.append({'commit':commit,'subject':capture('git','show','-s','--format=%s',commit),'patch_sha256':hashlib.sha256(patch).hexdigest()})
-    manifest = {'schema_version':1,'source':sha,'base':BASE,'lane':lane,'patches':patches,
+    manifest = {'schema_version':1,**source_record,'lane':lane,
         'recipe_sha256':{p:digest(ROOT/p) for p in paths},'toolchain_image_id':image['Id'],
         'commands':{'base':base_command,'artifact':build_command},
         'tool_versions':tool_versions,'docker_version':capture('docker','version'),'buildx_version':capture('docker','buildx','version'),
