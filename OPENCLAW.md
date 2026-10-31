@@ -145,6 +145,8 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+- Release class-field identifier references when parser arenas are destroyed, preventing native string leaks during class initialization and Worker churn.
+
 - Retry asynchronous VM trap delivery after a foreign-stack suspension refusal without holding the process-wide suspension lock, allowing other VMs to collect while native calls await them. Blocking GC suspension and Mach suspension retain their existing contracts. Carries #25 onto engine main with its native regression.
 
 - Initialize new VM entry scratch buffers and alignment padding, and store deferred microtask entry scopes as two initialized pointers, preventing stale stack values from retaining otherwise unreachable objects; carries #24 onto engine main and adapts the whole-word-state remedy in oven-sh/WebKit#694, thanks @robobun.
