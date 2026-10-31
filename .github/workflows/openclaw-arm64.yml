@@ -51,7 +51,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/arm64-proof"
           cmake -S . -B "$RUNNER_TEMP/api-shell-off" "${configure[@]}" -DENABLE_JAVASCRIPT_SHELL=OFF
           ninja -C "$RUNNER_TEMP/api-shell-off" -t query bin/TestWebKitAPI/TestJavaScriptCore > "$RUNNER_TEMP/arm64-proof/api-shell-off-link.log"
-          cmake --build "$RUNNER_TEMP/jsc-build" --target jsc testmasm testFFI testVMEntryScope testForeignStackSuspension TestJavaScriptCore -j4
+          cmake --build "$RUNNER_TEMP/jsc-build" --target jsc testaot testmasm testFFI testVMEntryScope testForeignStackSuspension TestJavaScriptCore -j4
       - name: Qualify assembler and all JIT tiers
         env:
           ENGINE_BUILD_DIR: ${{ runner.temp }}/jsc-build

@@ -15,6 +15,51 @@ jsc="$ENGINE_BUILD_DIR/bin/jsc"
   --gtest_filter='JavaScriptCore_ParserArena.DefineFieldReleasesIdentifier:JavaScriptCore_HeapTeardown.FinalizesNewCellsWithoutLiveBitmaps:JavaScriptCore_HeapTeardown.FinalizesMarkedCellsWithoutLiveBitmaps' \
   --gtest_output="xml:$QUALIFICATION_DIR/api-regressions.xml" \
   > "$QUALIFICATION_DIR/api-regressions.log" 2>&1
+# Execute compiled images with the matching shell, not the AOT-disabled stub.
+python3 - "$ENGINE_BUILD_DIR" "$QUALIFICATION_DIR" "$(git rev-parse HEAD)" <<'AOT_PY'
+import hashlib, json, os, signal, subprocess, sys, time
+from pathlib import Path
+build, out = Path(sys.argv[1]).resolve(), Path(sys.argv[2])
+selections = {
+    'aot-namespace': [
+        'sharing-mode-and-namespace/compiled-tests',
+        'sharing-mode-and-namespace/compiled-tests-under-validation',
+    ],
+    'aot-modules': ['module-programs/' + name for name in [
+        'required-commonjs-modules', 'imported-commonjs-modules',
+        'commonjs-entry-point', 'records-of-require', 'import-meta-kept',
+        'import-meta-passed-on', 'module-builtins-in-every-position',
+        'termination-during-import-handoff',
+    ]],
+}
+record = {'source': sys.argv[3], 'mode': 'native --single-process', 'binaries': {}, 'cases': {}}
+for name in ('bin/jsc', 'bin/testaot', 'CMakeCache.txt'):
+    file = build / name
+    assert file.is_file() and not file.is_symlink(), name
+    with file.open('rb') as stream:
+        record['binaries'][name] = hashlib.file_digest(stream, 'sha256').hexdigest()
+deadline = time.monotonic() + 600
+for suite, expected in selections.items():
+    selected = 'sharing-mode-and-namespace/compiled-tests' if suite == 'aot-namespace' else 'module-programs/'
+    with (out / (suite + '.log')).open('w') as stdout, (out / (suite + '-stderr.log')).open('w') as stderr:
+        process = subprocess.Popen([str(build / 'bin/testaot'), 'native', '--single-process', selected],
+                                   stdout=stdout, stderr=stderr, start_new_session=True)
+        try:
+            code = process.wait(timeout=max(0, deadline - time.monotonic()))
+        finally:
+            # The shell can outlive a crashed test leader; both share our session.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+    assert code == 0, (suite, code)
+    lines = [line for line in (out / (suite + '.log')).read_text().splitlines() if line]
+    assert lines == expected + [f'{len(expected)} passed, 0 failed, 0 todo'], (suite, lines)
+    record['cases'][suite] = expected
+record['passed'] = True
+(out / 'aot-native.json').write_text(json.dumps(record, indent=2) + '\n')
+AOT_PY
 Tools/Scripts/run-jsc-stress-tests JSTests/stress --jsc "$jsc" --child-processes "${ENGINE_TEST_JOBS:-4}" \
   --filter 'promise|microtask|dynamic-import|bun-async-context|module-loader|top-level-await|async-module|module-namespace|intl-segmenter|callsite-syntax-positions|stack-position-regressions|error-stack|worker-heap-generational-cadence|array-buffer-allocation-should-trigger-gc|extra-memory-allocation-should-trigger-gc|array-buffer-extra-memory-classification' \
   --output-dir "$QUALIFICATION_DIR/jsc-stress" --no-retry > "$QUALIFICATION_DIR/jsc-stress.log" 2>&1
@@ -62,5 +107,8 @@ for suite, minimum in [('jsc-stress', 1400), ('jsc-modules', 1600)]:
     assert len(lines) >= minimum and all(line.endswith(': PASS') for line in lines), suite
     counts[suite] = len(lines)
 assert 'testAdd64RegisterAddress()' in (out / 'testmasm.log').read_text()
-(out / 'arm64-gate.json').write_text(json.dumps({'passed': True, 'source': sys.argv[2], 'machine': platform.machine(), 'system': platform.system(), 'counts': counts, 'api_regressions': len(seen), 'accounting_modes': 5, 'sampling_modes': 5, 'testmasm': True, 'testffi': True, 'vm_entry_scope': True, 'foreign_stack_suspension': True, 'stack_execution_modes': 7, 'stack_cache': json.loads((out / 'jsc-stack/cache-files.json').read_text())}, indent=2) + '\n')
+aot = json.loads((out / 'aot-native.json').read_text())
+assert aot['passed'] is True and aot['source'] == sys.argv[2]
+assert [len(aot['cases'][name]) for name in ('aot-namespace', 'aot-modules')] == [2, 8]
+(out / 'arm64-gate.json').write_text(json.dumps({'passed': True, 'source': sys.argv[2], 'machine': platform.machine(), 'system': platform.system(), 'counts': counts, 'api_regressions': len(seen), 'aot_native': aot, 'accounting_modes': 5, 'sampling_modes': 5, 'testmasm': True, 'testffi': True, 'vm_entry_scope': True, 'foreign_stack_suspension': True, 'stack_execution_modes': 7, 'stack_cache': json.loads((out / 'jsc-stack/cache-files.json').read_text())}, indent=2) + '\n')
 PY

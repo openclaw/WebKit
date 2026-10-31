@@ -12,7 +12,7 @@ index 655b6083a939a4991744b33c73db5981450baba5..06159dff52b4d8f40ac1dfb61b48c6e6
    stringObject: { ofCell: "cell->inherits<JSC::StringObject>()" },
    array: { ofCell: "cell->inherits<JSC::JSArray>()" },
 diff --git a/src/codegen/bundle-functions.ts b/src/codegen/bundle-functions.ts
-index 9c991a68c09a9f9d36238805efc9d19ece9b70cd..7bf180f33af104fe3a18749818049e45ac813819 100644
+index 9c991a68c09a9f9d36238805efc9d19ece9b70cd..91a4ac13a680ec4207a2ac19fb9d8f35051a3801 100644
 --- a/src/codegen/bundle-functions.ts
 +++ b/src/codegen/bundle-functions.ts
 @@ -453,11 +453,11 @@ export async function bundleBuiltinFunctions({ requireTransformer, typesDir }: B
@@ -29,7 +29,21 @@ index 9c991a68c09a9f9d36238805efc9d19ece9b70cd..7bf180f33af104fe3a18749818049e45
  }
  `;
      }
-@@ -636,7 +636,7 @@ JSBuiltinInternalFunctions::JSBuiltinInternalFunctions(JSC::VM& vm) : m_vm(vm)
+@@ -484,8 +484,12 @@ ${basename}BuiltinsWrapper::${basename}BuiltinsWrapper(JSC::VM& vm, RefPtr<JSC::
+   bundledCPP += `
+ static constexpr unsigned internalCombinedSourceStarts[] = { ${files.flatMap(({ functions }) => functions.map(fn => fn.sourceOffset)).join(", ")} };
+ 
++// JSC builtin IDs occupy the range below 0x10000; compiler functions start at 0x20000.
++static constexpr uint32_t firstBunBuiltinID = 0x10000;
++static_assert(std::size(internalCombinedSourceStarts) <= 0x10000);
++
+ RefPtr<JSC::SourceProvider> createBuiltinsSourceProvider() {
+-    return JSC::BuiltinsSourceProvider::create(StringImpl::createWithoutCopying(internalCombinedSource), internalCombinedSourceStarts);
++    return JSC::BuiltinsSourceProvider::create(StringImpl::createWithoutCopying(internalCombinedSource), internalCombinedSourceStarts, firstBunBuiltinID);
+ }
+ `;
+ 
+@@ -636,7 +640,7 @@ JSBuiltinInternalFunctions::JSBuiltinInternalFunctions(JSC::VM& vm) : m_vm(vm)
      }
      bundledHeader += `
      #define DECLARE_BUILTIN_GENERATOR(codeName, functionName, overriddenName, argumentCount) \\
