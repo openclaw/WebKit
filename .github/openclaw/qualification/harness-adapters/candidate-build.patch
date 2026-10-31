@@ -1,5 +1,18 @@
+diff --git a/src/codegen/bindgen-lib-internal.ts b/src/codegen/bindgen-lib-internal.ts
+index 655b6083a939a4991744b33c73db5981450baba5..06159dff52b4d8f40ac1dfb61b48c6e6de6142d5 100644
+--- a/src/codegen/bindgen-lib-internal.ts
++++ b/src/codegen/bindgen-lib-internal.ts
+@@ -118,7 +118,7 @@ export const kindTests: Record<
+   null: { ofValue: value => `${value}.isNull()` },
+   boolean: { ofValue: value => `${value}.isBoolean()` },
+   number: { ofValue: value => `${value}.isNumber()` },
+-  bigint: { ofValue: value => `${value}.isBigInt32()`, ofCell: "cell->isHeapBigInt()" },
++  bigint: { ofCell: "cell->isHeapBigInt()" },
+   string: { ofCell: "cell->isString()" },
+   stringObject: { ofCell: "cell->inherits<JSC::StringObject>()" },
+   array: { ofCell: "cell->inherits<JSC::JSArray>()" },
 diff --git a/src/codegen/bundle-functions.ts b/src/codegen/bundle-functions.ts
-index 9c991a68c0..7bf180f33a 100644
+index 9c991a68c09a9f9d36238805efc9d19ece9b70cd..7bf180f33af104fe3a18749818049e45ac813819 100644
 --- a/src/codegen/bundle-functions.ts
 +++ b/src/codegen/bundle-functions.ts
 @@ -453,11 +453,11 @@ export async function bundleBuiltinFunctions({ requireTransformer, typesDir }: B
@@ -25,8 +38,66 @@ index 9c991a68c0..7bf180f33a 100644
  
      WEBCORE_FOREACH_${basename.toUpperCase()}_BUILTIN_CODE(DECLARE_BUILTIN_GENERATOR)
      #undef DECLARE_BUILTIN_GENERATOR
+diff --git a/src/jsc/JSType.rs b/src/jsc/JSType.rs
+index 3c21ec7b288db26eafad93dd9077d42cc9bfec46..c8fae978d69b55f9c63a7bbb7ea23642ce6e05fc 100644
+--- a/src/jsc/JSType.rs
++++ b/src/jsc/JSType.rs
+@@ -36,7 +36,7 @@
+ //! • number → immediate double/int32 or HeapBigInt
+ //! • boolean → immediate true/false
+ //! • symbol → Symbol
+-//! • bigint → HeapBigInt or BigInt32 (immediate)
++//! • bigint → HeapBigInt
+ //! • null/undefined → immediate values
+ //!
+ //! JavaScript Objects → JSType:
+diff --git a/src/jsc/JSValue.rs b/src/jsc/JSValue.rs
+index 32d856923b3cd0778f006d4e99ccc5e7e7053f47..41955485d630a6daf561b877fa74658a1cfc44b7 100644
+--- a/src/jsc/JSValue.rs
++++ b/src/jsc/JSValue.rs
+@@ -289,18 +289,8 @@ impl JSValue {
+     pub fn is_big_int(self) -> bool {
+         JSC__JSValue__isBigInt(self)
+     }
+-    /// `JSValue.isBigInt32()` — true iff this value uses
+-    /// JSC's packed BigInt32 immediate representation (vs heap `JSBigInt`).
+-    #[inline]
+-    pub fn is_big_int32(self) -> bool {
+-        unsafe extern "C" {
+-            safe fn JSC__JSValue__isBigInt32(this: JSValue) -> bool;
+-        }
+-        JSC__JSValue__isBigInt32(self)
+-    }
+     /// `JSValue.isHeapBigInt()` — true iff this is a
+-    /// heap-allocated `JSBigInt` cell. Distinct from [`is_big_int`], which
+-    /// also returns `true` for the packed `BigInt32` immediate.
++    /// heap-allocated `JSBigInt` cell.
+     #[inline]
+     pub fn is_heap_big_int(self) -> bool {
+         unsafe extern "C" {
+diff --git a/src/jsc/bindings/BunProcess.cpp b/src/jsc/bindings/BunProcess.cpp
+index d6c91725f091986a343fe0c07d3eb9bb24e900dc..7be0bf3a4a2ed5b74322be06a55fa76f0aa93257 100644
+--- a/src/jsc/bindings/BunProcess.cpp
++++ b/src/jsc/bindings/BunProcess.cpp
+@@ -27,6 +27,7 @@
+ #include "JavaScriptCore/JSObjectInlines.h"
+ #include "JavaScriptCore/JSString.h"
+ #include "JavaScriptCore/JSType.h"
++#include "JavaScriptCore/Lookup.h"
+ #include "JavaScriptCore/MathCommon.h"
+ #include "JavaScriptCore/Protect.h"
+ #include "JavaScriptCore/PutPropertySlot.h"
+@@ -1860,7 +1861,7 @@ static JSValue constructLoadEnvFile(VM& vm, JSObject* processObject)
+ // Lazy PropertyCallback builders that enter JS. reifyAllStaticProperties wraps these in
+ // DeferTerminationForAWhile; a non-termination throw is cleared+reported so the worker's
+ // reifyAllStaticProperties (node:worker_threads preload) doesn't leave a pending exception.
+-static JSValue callLazyProcessBuilder(VM& vm, JSC::JSGlobalObject* globalObject, JSC::FunctionExecutable* (*generator)(VM&), const JSC::ArgList& args)
++static JSValue callLazyProcessBuilder(VM& vm, JSC::JSGlobalObject* globalObject, JSC::BuiltinGenerator generator, const JSC::ArgList& args)
+ {
+     auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
+     auto* function = JSC::JSFunction::create(vm, globalObject, generator(vm), globalObject);
 diff --git a/src/jsc/bindings/JSBuffer.cpp b/src/jsc/bindings/JSBuffer.cpp
-index 4078e20637..2d6485d17e 100644
+index 4078e20637104a1f416061071062b1b7c25bc80b..2d6485d17e75af2f544cc35848233bc935b3a946 100644
 --- a/src/jsc/bindings/JSBuffer.cpp
 +++ b/src/jsc/bindings/JSBuffer.cpp
 @@ -3080,7 +3080,7 @@ fastPath:
@@ -39,7 +110,7 @@ index 4078e20637..2d6485d17e 100644
          return JSValue::encode(jsNumber(std::bit_cast<T>(raw)));
  }
 diff --git a/src/jsc/bindings/JSCTestingHelpers.cpp b/src/jsc/bindings/JSCTestingHelpers.cpp
-index 1ec73a62de..ed62e231db 100644
+index 1ec73a62de1bbf9f0b9b8ec614541e0a7fbe1e06..ed62e231dbe67676a5a00ec977423dc9f945ada1 100644
 --- a/src/jsc/bindings/JSCTestingHelpers.cpp
 +++ b/src/jsc/bindings/JSCTestingHelpers.cpp
 @@ -65,7 +65,7 @@ JSC_DEFINE_HOST_FUNCTION(jsFunctionStartOfFixedExecutableMemoryPool,
@@ -60,8 +131,78 @@ index 1ec73a62de..ed62e231db 100644
  }
  
  JSC_DEFINE_HOST_FUNCTION(jsFunctionIsLiveCellAtRawAddress, (JSGlobalObject * globalObject, CallFrame* callframe))
+diff --git a/src/jsc/bindings/bindings.cpp b/src/jsc/bindings/bindings.cpp
+index 2e3ef553730ced0200b12c0f21ce9b59e97bd262..24cf9576ab95a18b29be8e0cfe425c032378f4b7 100644
+--- a/src/jsc/bindings/bindings.cpp
++++ b/src/jsc/bindings/bindings.cpp
+@@ -4173,10 +4173,6 @@ bool JSC__JSValue__isException(JSC::EncodedJSValue JSValue0, JSC::VM* arg1)
+ {
+     return JSC::JSValue::decode(JSValue0).isBigInt();
+ }
+-[[ZIG_EXPORT(nothrow)]] bool JSC__JSValue__isBigInt32(JSC::EncodedJSValue JSValue0)
+-{
+-    return JSC::JSValue::decode(JSValue0).isBigInt32();
+-}
+ 
+ [[ZIG_EXPORT(nothrow)]] bool JSC__JSValue__isLiveCell(JSC::EncodedJSValue JSValue0)
+ {
+@@ -4350,28 +4346,7 @@ uint8_t JSC__JSValue__asBigIntCompare(JSC::EncodedJSValue JSValue0, JSC::JSGloba
+ {
+     JSValue v1 = JSValue::decode(JSValue0);
+     JSValue v2 = JSValue::decode(JSValue1);
+-    ASSERT(v1.isHeapBigInt() || v1.isBigInt32());
+-
+-#if USE(BIGINT32)
+-    if (v1.isBigInt32()) {
+-        int32_t v1Int = v1.bigInt32AsInt32();
+-        if (v2.isHeapBigInt()) {
+-            return static_cast<uint8_t>(JSBigInt::compare(v1Int, v2.asHeapBigInt()));
+-        } else if (v2.isBigInt32()) {
+-            return static_cast<uint8_t>(JSBigInt::compare(v1Int, v2.bigInt32AsInt32()));
+-        }
+-
+-        double v2Double = v2.asNumber();
+-        if (v1Int == v2Double) {
+-            return static_cast<uint8_t>(JSBigInt::ComparisonResult::Equal);
+-        }
+-        if (v1Int < v2Double) {
+-            return static_cast<uint8_t>(JSBigInt::ComparisonResult::LessThan);
+-        }
+-
+-        return static_cast<uint8_t>(JSBigInt::ComparisonResult::GreaterThan);
+-    }
+-#endif
++    ASSERT(v1.isHeapBigInt());
+ 
+     if (v1.isHeapBigInt()) {
+         JSBigInt* v1BigInt = v1.asHeapBigInt();
+@@ -4379,12 +4354,6 @@ uint8_t JSC__JSValue__asBigIntCompare(JSC::EncodedJSValue JSValue0, JSC::JSGloba
+             return static_cast<uint8_t>(JSBigInt::compare(v1BigInt, v2.asHeapBigInt()));
+         }
+ 
+-#if USE(BIGINT32)
+-        if (v2.isBigInt32()) {
+-            return static_cast<uint8_t>(JSBigInt::compare(v1BigInt, v2.toInt32(globalObject)));
+-        }
+-#endif
+-
+         return static_cast<uint8_t>(JSBigInt::compareToDouble(v1BigInt, v2.asNumber()));
+     }
+ 
+diff --git a/src/jsc/bindings/headers.h b/src/jsc/bindings/headers.h
+index 94a58d21623db636d84098e7660e97271aca0372..98da6a18343dfcb27f9d29f699006c7cc073f44e 100644
+--- a/src/jsc/bindings/headers.h
++++ b/src/jsc/bindings/headers.h
+@@ -212,7 +212,6 @@ CPP_DECL bool JSC__JSValue__isAggregateError(JSC::EncodedJSValue JSValue0, JSC::
+ CPP_DECL bool JSC__JSValue__isAnyError(JSC::EncodedJSValue JSValue0);
+ CPP_DECL bool JSC__JSValue__isAnyInt(JSC::EncodedJSValue JSValue0);
+ CPP_DECL bool JSC__JSValue__isBigInt(JSC::EncodedJSValue JSValue0);
+-CPP_DECL bool JSC__JSValue__isBigInt32(JSC::EncodedJSValue JSValue0);
+ CPP_DECL bool JSC__JSValue__isCallable(JSC::EncodedJSValue JSValue0);
+ CPP_DECL bool JSC__JSValue__isClass(JSC::EncodedJSValue JSValue0, JSC::JSGlobalObject* arg1);
+ CPP_DECL bool JSC__JSValue__isConstructor(JSC::EncodedJSValue JSValue0);
 diff --git a/src/jsc/bindings/sqlite/NodeSqlite.cpp b/src/jsc/bindings/sqlite/NodeSqlite.cpp
-index a009685e94..dcd35d6c79 100644
+index a009685e942de61dca781d37c1e360ab2a4360ee..dcd35d6c798860ebf9e5ddf075c817bb8c8abc8a 100644
 --- a/src/jsc/bindings/sqlite/NodeSqlite.cpp
 +++ b/src/jsc/bindings/sqlite/NodeSqlite.cpp
 @@ -323,7 +323,7 @@ static inline JSValue sqliteToJS(JSGlobalObject* globalObject, Source source, bo
@@ -94,3 +235,145 @@ index a009685e94..dcd35d6c79 100644
          RETURN_IF_EXCEPTION(scope, {});
      } else {
          Bun::putDirectNamed(vm, result, "changes"_s, jsNumber(static_cast<double>(changes)));
+diff --git a/src/jsc/bindings/webcore/SerializedScriptValue.cpp b/src/jsc/bindings/webcore/SerializedScriptValue.cpp
+index a456daf857a5391d88cb3a854190d8502cc6c2ca..24db5ea935528ed0bae6c3bc66a2c11cbbeae22c 100644
+--- a/src/jsc/bindings/webcore/SerializedScriptValue.cpp
++++ b/src/jsc/bindings/webcore/SerializedScriptValue.cpp
+@@ -927,13 +927,6 @@ private:
+                 write(FalseTag);
+             return;
+         }
+-#if USE(BIGINT32)
+-        if (value.isBigInt32()) {
+-            write(BigIntTag);
+-            dumpBigIntData(value);
+-            return;
+-        }
+-#endif
+ 
+         // Make any new primitive extension safe by throwing an error.
+         code = SerializationReturnCode::DataCloneError;
+@@ -962,31 +955,9 @@ private:
+     void dumpBigIntData(JSValue value)
+     {
+         ASSERT(value.isBigInt());
+-#if USE(BIGINT32)
+-        if (value.isBigInt32()) {
+-            dumpBigInt32Data(value.bigInt32AsInt32());
+-            return;
+-        }
+-#endif
+         dumpHeapBigIntData(uncheckedDowncast<JSBigInt>(value));
+     }
+ 
+-#if USE(BIGINT32)
+-    void dumpBigInt32Data(int32_t integer)
+-    {
+-        write(static_cast<uint8_t>(integer < 0));
+-        if (!integer) {
+-            write(static_cast<uint32_t>(0)); // Length-in-uint64_t
+-            return;
+-        }
+-        write(static_cast<uint32_t>(1)); // Length-in-uint64_t
+-        int64_t value = static_cast<int64_t>(integer);
+-        if (value < 0)
+-            value = -value;
+-        write(static_cast<uint64_t>(value));
+-    }
+-#endif
+-
+     void dumpHeapBigIntData(JSBigInt* bigInt)
+     {
+         write(static_cast<uint8_t>(bigInt->sign()));
+@@ -3569,9 +3540,6 @@ private:
+             return JSValue();
+ 
+         if (!lengthInUint64) {
+-#if USE(BIGINT32)
+-            return jsBigInt32(0);
+-#else
+             JSBigInt* bigInt = JSBigInt::tryCreateZero(m_lexicalGlobalObject->vm());
+             if (!bigInt) [[unlikely]] {
+                 fail();
+@@ -3579,7 +3547,6 @@ private:
+             }
+             m_gcBuffer.appendWithCrashOnOverflow(bigInt);
+             return bigInt;
+-#endif
+         }
+ 
+         if (lengthInUint64 > static_cast<uint64_t>(m_end - m_ptr) / sizeof(uint64_t)) {
+@@ -3587,36 +3554,6 @@ private:
+             return JSValue();
+         }
+ 
+-#if USE(BIGINT32)
+-        static_assert(sizeof(JSBigInt::Digit) == sizeof(uint64_t));
+-        if (lengthInUint64 == 1) {
+-            uint64_t digit64 = 0;
+-            if (!read(digit64))
+-                return JSValue();
+-            if (sign) {
+-                if (digit64 <= static_cast<uint64_t>(-static_cast<int64_t>(INT32_MIN)))
+-                    return jsBigInt32(static_cast<int32_t>(-static_cast<int64_t>(digit64)));
+-            } else {
+-                if (digit64 <= INT32_MAX)
+-                    return jsBigInt32(static_cast<int32_t>(digit64));
+-            }
+-            ASSERT(digit64 != 0);
+-            JSBigInt* bigInt = JSBigInt::tryCreateWithLength(m_lexicalGlobalObject->vm(), 1);
+-            if (!bigInt) {
+-                fail();
+-                return JSValue();
+-            }
+-            bigInt->setDigit(0, digit64);
+-            bigInt->setSign(sign);
+-            bigInt = bigInt->tryRightTrim(m_lexicalGlobalObject->vm());
+-            if (!bigInt) {
+-                fail();
+-                return JSValue();
+-            }
+-            m_gcBuffer.appendWithCrashOnOverflow(bigInt);
+-            return tryConvertToBigInt32(bigInt);
+-        }
+-#endif
+         Vector<JSBigInt::Digit, 16> digits;
+         if constexpr (sizeof(JSBigInt::Digit) == sizeof(uint64_t)) {
+             digits.reserveInitialCapacity(lengthInUint64);
+@@ -3644,7 +3581,7 @@ private:
+             return JSValue();
+         }
+         m_gcBuffer.appendWithCrashOnOverflow(bigInt);
+-        return tryConvertToBigInt32(bigInt);
++        return bigInt;
+     }
+ 
+     JSValue readTerminal()
+diff --git a/src/runtime/test_runner/expect/toBeEven.rs b/src/runtime/test_runner/expect/toBeEven.rs
+index ec46a941b9f3672382118af3e1e0118805a3e385..1a876a1c97e4bdf213f691f61463b990fd689661 100644
+--- a/src/runtime/test_runner/expect/toBeEven.rs
++++ b/src/runtime/test_runner/expect/toBeEven.rs
+@@ -12,7 +12,7 @@ impl Expect {
+             if v.is_any_int() {
+                 let n = v.to_int64();
+                 n == 0 || n.rem_euclid(2) == 0
+-            } else if v.is_big_int() || v.is_big_int32() {
++            } else if v.is_big_int() {
+                 let n = v.to_int64();
+                 n == 0 || n & 1 == 0
+             } else if v.is_number() {
+diff --git a/src/runtime/test_runner/expect/toBeOdd.rs b/src/runtime/test_runner/expect/toBeOdd.rs
+index 9fd38a5d2be4570d105fb1612003537c2794c4dc..06be1374e4b23348297e6f3e74af844c220d10e9 100644
+--- a/src/runtime/test_runner/expect/toBeOdd.rs
++++ b/src/runtime/test_runner/expect/toBeOdd.rs
+@@ -9,9 +9,7 @@ impl Expect {
+         cx: &mut JsScope<'_>,
+     ) -> JsResult<JSValue> {
+         self.run_unary_predicate(cx.global(), this_value.to_js(), "toBeOdd", |v| {
+-            if v.is_big_int32() {
+-                v.to_int32() & 1 == 1
+-            } else if v.is_big_int() {
++            if v.is_big_int() {
+                 v.to_int64() & 1 == 1
+             } else if v.is_int32() {
+                 v.to_int32().rem_euclid(2) == 1

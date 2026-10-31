@@ -38,6 +38,13 @@ if test "$selection_exit" -ne 0; then exit "$selection_exit"; fi
 "$candidate" test test/bake/dev/production.test.ts \
   -t 'builds a framework without server components and keeps its client entry point' \
   > "$results/bake-builtin.log" 2>&1
+"$candidate" test test/js/bun/test/jest-extended.test.js -t 'toBeEven\(\)|toBeOdd\(\)' \
+  > "$results/bigint-matchers.log" 2>&1
+"$candidate" test test/js/node/process/process.test.js \
+  -t 'process\.allowedNodeEnvironmentFlags|process\.finalization\.register does not validate|process\.finalization exit listener' \
+  > "$results/lazy-process-builtins.log" 2>&1
+"$candidate" test test/js/web/workers/structured-clone.test.ts -t 'primitive BigInt|Array with primitives|Object with primitives' \
+  > "$results/bigint-serialization.log" 2>&1
 # The native runner uses agent.tmpdir(), which selects /tmp on this Linux lane.
 python3 "$inputs/compile_cache.py" /tmp "$junit_prefix" "$results/module-junit.xml"
 # Run these unchanged upstream tests explicitly as well, so skips cannot satisfy the gate.

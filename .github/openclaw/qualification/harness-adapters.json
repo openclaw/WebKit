@@ -55,19 +55,55 @@
       "build": {
         "kind": "source-compatibility",
         "patch": "harness-adapters/candidate-build.patch",
-        "sha256": "0eb3ee1af8cb194001349a8f70d4cc1f371d186a51553cd0d963a8d41e97351a",
+        "sha256": "8ca87d7efa71bb14335ef06dc941491910093c5f4cfed2f76ad6b8eb826e0f26",
         "compiled_inputs": [
+          "src/codegen/bindgen-lib-internal.ts",
           "src/codegen/bundle-functions.ts",
+          "src/jsc/JSType.rs",
+          "src/jsc/JSValue.rs",
+          "src/jsc/bindings/BunProcess.cpp",
           "src/jsc/bindings/JSBuffer.cpp",
           "src/jsc/bindings/JSCTestingHelpers.cpp",
-          "src/jsc/bindings/sqlite/NodeSqlite.cpp"
+          "src/jsc/bindings/bindings.cpp",
+          "src/jsc/bindings/sqlite/NodeSqlite.cpp",
+          "src/jsc/bindings/webcore/SerializedScriptValue.cpp",
+          "src/runtime/test_runner/expect/toBeEven.rs",
+          "src/runtime/test_runner/expect/toBeOdd.rs"
         ],
         "files": {
+          "src/codegen/bindgen-lib-internal.ts": {
+            "before": "141273133e8750c41149f0af1706c25239ecb28a0667ae35c8f601bfd1c4e8df",
+            "after": "7bef5387621aa5450c3b00e2872031f21ef0719ac52948774455bdeba82dec39",
+            "base_blob": "655b6083a939a4991744b33c73db5981450baba5",
+            "adapted_blob": "06159dff52b4d8f40ac1dfb61b48c6e6de6142d5",
+            "mode": "100644"
+          },
           "src/codegen/bundle-functions.ts": {
             "before": "e2764a60ce6a34b307dfa40c6dd108b718b99ae5ff89da71058a0b12c2289493",
             "after": "04cd03f5daac325912db4f4e285f1871e2c86984fb6022e8ebe95b70070a9c30",
             "base_blob": "9c991a68c09a9f9d36238805efc9d19ece9b70cd",
             "adapted_blob": "7bf180f33af104fe3a18749818049e45ac813819",
+            "mode": "100644"
+          },
+          "src/jsc/JSType.rs": {
+            "before": "03b74867c3243546a3acd61973f2134ff825e0157f3b5ce4de35b893e9afcccb",
+            "after": "3fedf23e63bbcc52553e787bae0d88a97c6d1fa52215191549df7970a76863a6",
+            "base_blob": "3c21ec7b288db26eafad93dd9077d42cc9bfec46",
+            "adapted_blob": "c8fae978d69b55f9c63a7bbb7ea23642ce6e05fc",
+            "mode": "100644"
+          },
+          "src/jsc/JSValue.rs": {
+            "before": "09cda8bb9bae139792aeb0f18da01ec1cd87fad08099face932aa1f443e8da4d",
+            "after": "6e34aa76583324080aab9a0f804f1f89db5edc9dce7e6ab54cc5547957a2b11c",
+            "base_blob": "32d856923b3cd0778f006d4e99ccc5e7e7053f47",
+            "adapted_blob": "41955485d630a6daf561b877fa74658a1cfc44b7",
+            "mode": "100644"
+          },
+          "src/jsc/bindings/BunProcess.cpp": {
+            "before": "6c864f2dccbac5a8ae4f74390b5594336a5a4b32d5e30549f09cce2b108da40f",
+            "after": "61a99ca5932ca5c1e8499dd0f4797fd404b30428ed744a3c50454353c8744713",
+            "base_blob": "d6c91725f091986a343fe0c07d3eb9bb24e900dc",
+            "adapted_blob": "7be0bf3a4a2ed5b74322be06a55fa76f0aa93257",
             "mode": "100644"
           },
           "src/jsc/bindings/JSBuffer.cpp": {
@@ -84,11 +120,46 @@
             "adapted_blob": "ed62e231dbe67676a5a00ec977423dc9f945ada1",
             "mode": "100644"
           },
+          "src/jsc/bindings/bindings.cpp": {
+            "before": "dbd09c9c614849925997140020afefd85489e57c03fb2a7bb9953bba07a3da6e",
+            "after": "81760bbb80dea0c60dd7284333496cd80cc96b493426fd6d3c776f1543a8499e",
+            "base_blob": "2e3ef553730ced0200b12c0f21ce9b59e97bd262",
+            "adapted_blob": "24cf9576ab95a18b29be8e0cfe425c032378f4b7",
+            "mode": "100644"
+          },
+          "src/jsc/bindings/headers.h": {
+            "before": "1f9b820e3c7746f637069ec89a87b9980ac2933846e878346e9085e7938e16ad",
+            "after": "e796c2ce432a1fa9746fe76856d30be20a05533d4b0ea4d26691a6b63bdd9e4d",
+            "base_blob": "94a58d21623db636d84098e7660e97271aca0372",
+            "adapted_blob": "98da6a18343dfcb27f9d29f699006c7cc073f44e",
+            "mode": "100644"
+          },
           "src/jsc/bindings/sqlite/NodeSqlite.cpp": {
             "before": "646b3e54dd66cc80adce94541ca57b55763b111badb50e7ad2413b42f6beaeb6",
             "after": "dc29542440db4113fa31970d666f76af3ada75f4ee91bc20c156684a16eea783",
             "base_blob": "a009685e942de61dca781d37c1e360ab2a4360ee",
             "adapted_blob": "dcd35d6c798860ebf9e5ddf075c817bb8c8abc8a",
+            "mode": "100644"
+          },
+          "src/jsc/bindings/webcore/SerializedScriptValue.cpp": {
+            "before": "2b94c6c10332ea1920ebbc9eaf8d9a621a16e6bcbd7e4a6360693b5a0c023e82",
+            "after": "1715e3d41c8a5ed976f9ed8f81deae549b43b7948e2d4252447209623300f727",
+            "base_blob": "a456daf857a5391d88cb3a854190d8502cc6c2ca",
+            "adapted_blob": "24db5ea935528ed0bae6c3bc66a2c11cbbeae22c",
+            "mode": "100644"
+          },
+          "src/runtime/test_runner/expect/toBeEven.rs": {
+            "before": "11285c104f679da00a95deb0e8c91f0653a7d2326bb10052bf1778b193a1c20e",
+            "after": "11646740db6bff0853fffcd8f22ccda5afb4618d5904dbf9cc700c0f7fc96a0a",
+            "base_blob": "ec46a941b9f3672382118af3e1e0118805a3e385",
+            "adapted_blob": "1a876a1c97e4bdf213f691f61463b990fd689661",
+            "mode": "100644"
+          },
+          "src/runtime/test_runner/expect/toBeOdd.rs": {
+            "before": "ad8cb5744f97543f9c3815b27222403bec492c9e55703dea79aaa237d4bfad99",
+            "after": "9d7f181a63d2a3ccdf014057a531fd11503fed3ccf7b0119799b2fc3ae1566a7",
+            "base_blob": "9fd38a5d2be4570d105fb1612003537c2794c4dc",
+            "adapted_blob": "06be1374e4b23348297e6f3e74af844c220d10e9",
             "mode": "100644"
           }
         }
