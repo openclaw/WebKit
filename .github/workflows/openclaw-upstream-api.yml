@@ -5,6 +5,7 @@ on:
     paths: [.github/workflows/openclaw-upstream-api.yml]
   workflow_dispatch:
 permissions:
+  actions: read
   contents: read
 concurrency:
   group: openclaw-upstream-api-${{ github.ref }}
@@ -44,12 +45,20 @@ jobs:
           echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends cmake ninja-build clang-23 lld-23 libicu-dev ruby ruby-highline libjson-pp-perl
-      - name: Prove the original link failure and exact upstream correction
+      - name: Fetch the frozen original link-failure evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/openclaw/WebKit/actions/runs/41209516678 --jq '.head_sha')" = 2eb40b2190e24f36b24c05d37fc4458aa9e6907b
+          test "$(gh api repos/openclaw/WebKit/actions/artifacts/13046099211 --jq '.workflow_run.id')" = 41209516678
+          gh api repos/openclaw/WebKit/actions/artifacts/13046099211/zip > "$RUNNER_TEMP/upstream-api-baseline.zip"
+      - name: Qualify the exact correction against the recorded link failure
         env:
           PIPELINE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           python3 - <<'PY'
-          import hashlib, json, os, re, signal, subprocess, time
+          import hashlib, json, os, re, signal, subprocess, time, zipfile
           from pathlib import Path
           from xml.etree import ElementTree
           source = Path('upstream').resolve()
@@ -103,23 +112,38 @@ jobs:
           record['configure'] = configure
           save()
           frozen(base)
-          checked('configure-base', ['cmake', '-S', str(source), '-B', str(build), *configure], 600)
+          baseline = Path(os.environ['RUNNER_TEMP']) / 'upstream-api-baseline.zip'
+          assert hashlib.sha256(baseline.read_bytes()).hexdigest() == '2c93622aed6ff91dd8a6038e260779d158c6d6404b94871e81507a996ff30847'
+          with zipfile.ZipFile(baseline) as archive:
+              assert set(archive.namelist()) == {'proof.json', 'configure-base.log', 'build-base.log'}
+              assert len(archive.infolist()) == 3 and sum(info.file_size for info in archive.infolist()) <= 32 * 1024**2
+              prior = json.loads(archive.read('proof.json'))
+              text = archive.read('build-base.log').decode()
+              assert prior['pipeline'] == '2eb40b2190e24f36b24c05d37fc4458aa9e6907b'
+              assert prior['base'] == base and prior['candidate'] == head and prior['configure'] == configure
+              assert prior['steps'] == {'configure-base': {'returncode': 0, 'timed_out': False},
+                                        'build-base': {'returncode': 1, 'timed_out': False}}
+              assert re.search(r'undefined (?:symbol|reference)', text), 'baseline failure must be linkage'
+              for symbol in ('Bun__removableFeatureState', 'Bun__throwForRemovedFeature',
+                             'Bun__abortForRemovedFeature', 'JSC::AOT::builtinTable'):
+                  assert symbol in text, ('missing original linkage failure', symbol)
+              for name in ('configure-base.log', 'build-base.log'):
+                  (out / ('prior-' + name)).write_bytes(archive.read(name))
+              (out / 'prior-proof.json').write_text(json.dumps(prior, indent=2) + '\n')
+          record['baseline'] = {'kind': 'prior-run-baseline', 'run': 41209516678,
+                                'artifact': 13046099211,
+                                'zip_sha256': hashlib.sha256(baseline.read_bytes()).hexdigest()}
+          save()
           api = build / 'bin/TestWebKitAPI/TestJavaScriptCore'
           assert not api.exists()
-          code = run('build-base', ['cmake', '--build', str(build), '--target', 'TestJavaScriptCore', '-j4'], 4500)
-          text = (out / 'build-base.log').read_text()
-          assert code > 0 and not api.exists(), 'base must fail before producing the API executable'
-          assert re.search(r'undefined (?:symbol|reference)', text), 'base failure must be linkage'
-          for symbol in ('Bun__removableFeatureState', 'Bun__throwForRemovedFeature', 'Bun__throwForRemovedFunction', 'JSC::AOT::builtinTable'):
-              assert symbol in text, ('missing original linkage failure', symbol)
           frozen(base)
           checked('fetch-candidate', ['git', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', 'fetch', '--no-tags', '--no-prune', '--no-auto-maintenance', 'origin', head])
           assert set(git('diff', '--name-only', base, head).splitlines()) == expected_paths
           checked('checkout-candidate', ['git', 'checkout', '--detach', head])
           frozen(head)
-          # The three changed CMake files reconfigure the same build; unchanged objects retain normal dependency tracking.
+          # No objects survived the prior run; build the exact candidate from a fresh tree.
           checked('configure-candidate', ['cmake', '-S', str(source), '-B', str(build), *configure], 600)
-          checked('build-candidate', ['cmake', '--build', str(build), '--target', 'TestJavaScriptCore', '-j4'], 900)
+          checked('build-candidate', ['cmake', '--build', str(build), '--target', 'TestJavaScriptCore', '-j4'], 4500)
           checked('api-smoke', [str(api), '--gtest_filter=JavaScriptCore_MarkedVector.Append_JSObjectPtr', '--gtest_output=xml:' + str(out / 'api-smoke.xml')])
           cases = ElementTree.parse(out / 'api-smoke.xml').getroot().findall('.//testcase')
           assert len(cases) == 1
