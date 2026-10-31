@@ -1,0 +1,49 @@
+{
+  "bun": "fd40ba44187c721ee023062fa153a6a27560e6b1",
+  "webkit": "5ec9ac8557722128588184ed9cf77347d9a30cf1",
+  "patch_sha256": "576826a5ff3488b621b775ddf4e37cfa3a869a65aaeb28dbe3af2d44043ecbfa",
+  "files": {
+    "scripts/build/aot.ts": {
+      "before": "a9d2051afc9204ca7625f853f97ffa2d3141e6e8f81cd1733d3657a0778699c9",
+      "after": "4264932add06b74a3c0206c7ca365661cadc12b173a864910752dd0bc3643e02",
+      "base_blob": "5ae4884d3402dd1627375d888b2c8eca98733229",
+      "adapted_blob": "16d3e7736a43c90fedb249c95cf8ead3fad09ae6",
+      "mode": "100644"
+    },
+    "scripts/build/deps/webkit.ts": {
+      "before": "12933600404cf33f4d23a59f6336dec2546ad95eecca6d036165b2a1b52b7c33",
+      "after": "a0a250069f71d4211bb05f56eb3bb896707739c67dce5bd0414a7acd248d8bd1",
+      "base_blob": "4fc1df1f0bf8bbb865505a995fcd7c32e8646223",
+      "adapted_blob": "ba13cc4677471e8f820535423ed759a7bbaa6255",
+      "mode": "100644"
+    },
+    "scripts/build/ninja.ts": {
+      "before": "3035405b5a273099242feb6a76798a3eff14fd6f992cda1211f7574fac81d266",
+      "after": "ea19b3bb1fd2ebce9ce6a32ef96fb8a7ea9f99ac3aaaa1b5bb192162f639efce",
+      "base_blob": "6d0eb950721760a5bbe426b94bab7d6413edb4cc",
+      "adapted_blob": "89f4ab89a2c47fbac710a8ab426401eb8a07d590",
+      "mode": "100644"
+    },
+    "scripts/build/rules.ts": {
+      "before": "ecf7810912d33bdc4106e3a137b0b800c811274b902f5e51f0146804ffbe01aa",
+      "after": "2f184f99a29560350d80c92929a5a745cddef80d7b1c18dc5c345cae647c7612",
+      "base_blob": "4f2b1ce576424e75d93d1d6ccf65a073805c57e9",
+      "adapted_blob": "1c2173c5647ac4acfe5e0dc947ccb2384ef56e20",
+      "mode": "100644"
+    },
+    "scripts/build/timings.ts": {
+      "before": "6fd843eb5ab1b232865c29145a2bfb58b829ad03f6a7c30d2a23460e42c6b578",
+      "after": "8a84d94e6e475628c8b288473743ff96606eae751383050502c87a4bf4f3b217",
+      "base_blob": "c017df06e1d7cc94bec31b03292fde4820b8dab6",
+      "adapted_blob": "952c8081f92e4f033ca592f8931b57b921865869",
+      "mode": "100644"
+    },
+    "test/internal/build-aot-codegen-declared-outputs.test.ts": {
+      "before": "9f6e8e2256481c73873de7e5341f383e12f3356f9967681ca4d6f22f9ec0d572",
+      "after": "d33a41f49be51f00253b52af498a45258c7cb1b1ed67259c0566d069a43f598b",
+      "base_blob": "b9b6a5353d4572e45a514d16b41ba84dc3a66f25",
+      "adapted_blob": "db4ea4bf79b52e27196a65582774eab455078ff6",
+      "mode": "100644"
+    }
+  }
+}
