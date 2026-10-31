@@ -1,8 +1,8 @@
 {
   "bun": "fd40ba44187c721ee023062fa153a6a27560e6b1",
   "webkit": "5ec9ac8557722128588184ed9cf77347d9a30cf1",
-  "prepare_only": true,
-  "patch_sha256": "1ed73ad9c42c7dc5289c880dc609ff581e266f76508438162b081881f2465126",
+  "prepare_only": false,
+  "patch_sha256": "4c461028bcf8376484b143c0757dcbe6e9c645968718e0e1d5779a0fd5674dfd",
   "files": {
     "CHANGELOG.md": {
       "before": "aa3d183726734a0c1dd7f255d783b7e7b1946e4ff88e9432623e31556c206308",
@@ -195,9 +195,9 @@
     },
     "src/aot/builtins/resolve/tests.rs": {
       "before": "2a4fe643597914d681cb43b3bed4ead6526f8911591ebbe217270acfc702ad4e",
-      "after": "dbe4013cdc5c0699fa39ac8b5892bfbfc1e503d5c915870f81ed1a64e6da1348",
+      "after": "e87f3fef3dd36ec5951a9157cc11b65ea1bbb8836eaf55f41dc9ce13c5c69913",
       "base_blob": "2b8f0dd6aa506bbc2e9d4367f10e162991e78965",
-      "adapted_blob": "50d01ec90497e373ca5263f3c2376bc7ae3e9ea2",
+      "adapted_blob": "52ffcec209a8c8fb7421b8703f6bc69fd603ffd0",
       "mode": "100644"
     },
     "src/aot/builtins/resolve/tests/imports.rs": {
@@ -216,23 +216,23 @@
     },
     "src/aot/builtins/runtime_uses.rs": {
       "before": "d9ce1845282ca0ebaafa17b0230693c8033217619733e57dbfd1035b2d0910c0",
-      "after": "06517219d722ca4122f5555f0633773a812972ab7890a715d38b818d9b89865c",
+      "after": "f19a3f22c05492063306c0828e76c8b8817c9aab7d70f0d96339faf1765401c9",
       "base_blob": "582a773834da9fa8d81098a2a597f3a8321cc32e",
-      "adapted_blob": "6ac810b37071444786d6fa79ce0783d094061884",
+      "adapted_blob": "5e91e2c2ebbf9af57b490ebddf8fac7881f33c37",
       "mode": "100644"
     },
     "src/aot/builtins/runtime_uses/tests.rs": {
       "before": "c253b8f301e3e4fa32482709212059e9e4704f3076ca1c232fb56acb883a6bae",
-      "after": "91e82f01f0c162dd2877c92fa3a7d1a2719416eeadeafc4f4892bf226f00d5f9",
+      "after": "e82b715e7158bc859762c87d79ed122992fa20ec243d6b21df8732b1ebf309a6",
       "base_blob": "5be60f6ada933b49bb1fb891bacae215b3d2de23",
-      "adapted_blob": "f11f6af297c1447e1845eb2c21d35ad001b56c0f",
+      "adapted_blob": "72821bd1146f5f3adf79fdc4c114cf36ec7b5b44",
       "mode": "100644"
     },
     "src/aot/builtins/table.rs": {
       "before": "81c87917dde378078721f9b2290f487777576c14f1dca3cf5947c412743fe6ce",
-      "after": "86adfbdc72445368fdbd828b64fdadfb0337dae7e0d78f21af93be80be7d4415",
+      "after": "6c3894d7172f477263dcf87a64e444498e43f8912358b3ea38e1e71db74590bd",
       "base_blob": "afeccb76582f506a698cf9ce421a5f28341832eb",
-      "adapted_blob": "bba3dd968f15b42491b99009bf5a445844b7f285",
+      "adapted_blob": "83dfe4283f16a12ccfc38914f1c6b0d1cc2c8753",
       "mode": "100644"
     },
     "src/aot/builtins/table/entries.rs": {
@@ -328,16 +328,16 @@
     },
     "src/aot/compile/runtime_reach.rs": {
       "before": "2c485e19dda9a9f634452c07736170e9f47acbd8aca510d616056eaf9438b36d",
-      "after": "6d933c6a72ee05243b9eed5281398cc537903b2044249f7a557d48a6a2aee8a5",
+      "after": "1cb8e47218eb43db06095b31adaa154e214658d8dc52a3ea25ede9118cc2996e",
       "base_blob": "6fc2a928dc2e7f547394612d11db9d9a88f0da62",
-      "adapted_blob": "b43b6890ab48d0618ccfb7af8036d8e3a61c7fef",
+      "adapted_blob": "42e236719ad5a01d15a4f13aa3bfb440976a061b",
       "mode": "100644"
     },
     "src/aot/compile/tests.rs": {
       "before": "40b3818083976602712d8d5d5c576783df8bafbce3173963b9fe30018affbd15",
-      "after": "7564a616773b4bb2f70370d6cbd1e7aa1197c73a6aa77834262d2a70ea8c4194",
+      "after": "a7f3599edb894d2bc316ac5bbbf8692ee8b2b2fc069d683b90a488301abea8f5",
       "base_blob": "65e9f4b505be0e4d7236270fc8a7e27c8b313a22",
-      "adapted_blob": "f1f2d4695f1ea46542b5a257d2c00e9867ffa04d",
+      "adapted_blob": "5a3770e9739acb6c541394413a1a92456fa052be",
       "mode": "100644"
     },
     "src/aot/diagnostic_codes.rs": {
