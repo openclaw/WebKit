@@ -265,9 +265,11 @@ void SavedFrameEmitter::generateNewHeapFrame(const ValueContext& value)
             cells.storeHeader(frame, loadImmutable64(AOT_INSTANCE_OFFSET(coroutines.savedFrameHeader)));
             m_out.storePtr(m_out.intPtrZero, frame.value(), m_heaps.JSNonArray_butterfly);
             // The number of words, no words skipped, version 0.
-            m_out.store64(m_out.constInt64(numberOfWords), word(SavedFrame::offsetOfNumberOfWords()));
+            LValue storedWordCount = m_out.constInt64(numberOfWords);
+            m_out.store64(storedWordCount, word(SavedFrame::offsetOfNumberOfWords()));
             static_assert(SavedFrame::offsetOfKind() == SavedFrame::offsetOfLiveSlotMapOffsetPlusOne() + 4 && SavedFrame::offsetOfFlags() == SavedFrame::offsetOfKind() + 3 && !static_cast<int32_t>(CoroutineKind::Generator) && !static_cast<int32_t>(SavedFrame::Continuation::None));
-            m_out.store64(m_out.constInt64(static_cast<int64_t>(static_cast<uint64_t>(SavedFrame::isHeapFrameFlag) << 56)), word(SavedFrame::offsetOfLiveSlotMapOffsetPlusOne()));
+            LValue storedFlags = m_out.constInt64(static_cast<int64_t>(static_cast<uint64_t>(SavedFrame::isHeapFrameFlag) << 56));
+            m_out.store64(storedFlags, word(SavedFrame::offsetOfLiveSlotMapOffsetPlusOne()));
             m_out.store64(resumeAddress.value(), word(SavedFrame::offsetOfResumeAddress()));
             m_out.store64(frame.value(), word(SavedFrame::offsetOfPromiseOrWaiter()));
             m_out.store64(m_out.int64Zero, word(SavedFrame::offsetOfPreservedRegister()));

@@ -252,8 +252,13 @@ void JSONParseEmitter::generateGetOrderWord(const ValueContext& value)
     Word32 orderWord = shapeTests.orderWordOf(object);
     // The word of an object with the layout's other shape, which tracks no order, says nothing about its keys.
     uint32_t shape = shapeWithKeyOrderOf(value->layout());
-    if (shape && m_placement.shapes().shapesOf(value->layout()).count > 1)
-        orderWord = select(equal(shapeTests.shapeWordOf(object), word32(static_cast<int32_t>(shapeWordOf(shape)))), orderWord, word32(static_cast<int32_t>(outOfLineOrderWord)));
+    if (shape && m_placement.shapes().shapesOf(value->layout()).count > 1) {
+        Word32 actualShape = shapeTests.shapeWordOf(object);
+        Word32 expectedShape = word32(static_cast<int32_t>(shapeWordOf(shape)));
+        Condition hasExpectedShape = equal(actualShape, expectedShape);
+        Word32 withoutOrder = word32(static_cast<int32_t>(outOfLineOrderWord));
+        orderWord = select(hasExpectedShape, orderWord, withoutOrder);
+    }
     define(value, zeroExtended(orderWord));
 }
 
@@ -298,9 +303,13 @@ void JSONParseEmitter::generateGetFieldInKeyOrder(const ValueContext& value)
     Join<Pointer> entries(m_out);
     Join<Word32> result(m_out);
 
-    Word32 hash = add(add(shapeWord, orderWord), shiftRightUnsigned(orderWord, keyOrderEntriesHashShift));
+    Word32 shapeAndOrder = add(shapeWord, orderWord);
+    Word32 shiftedOrder = shiftRightUnsigned(orderWord, keyOrderEntriesHashShift);
+    Word32 hash = add(shapeAndOrder, shiftedOrder);
     static_assert(indexOfKeyOrderEntries(3, (5u << orderWordCountShift) + 4) == 3 + 4 + (5 << 5));
-    LValue cached = offsetBy(loadImmutablePointer(AOT_INSTANCE_OFFSET(objects.keyOrderEntries)), zeroExtended(bitAnd(hash, numberOfCachedKeyOrderEntries - 1)), 4).value();
+    Pointer cachedEntries = loadImmutablePointer(AOT_INSTANCE_OFFSET(objects.keyOrderEntries));
+    Integer cacheIndex = zeroExtended(bitAnd(hash, numberOfCachedKeyOrderEntries - 1));
+    LValue cached = offsetBy(cachedEntries, cacheIndex, 4).value();
     branch(equal(Word32(m_out.load32(m_out.address(heap, cached, OBJECT_OFFSETOF(KeyOrderEntriesCacheEntry, shapeWord)))), shapeWord), { normalEdge(hasShape), rareEdge(isNotCached) });
 
     m_out.appendTo(hasShape);

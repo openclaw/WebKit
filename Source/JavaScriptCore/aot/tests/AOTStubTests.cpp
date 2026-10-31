@@ -258,6 +258,47 @@ static void testPackedWords()
     AOT_TEST_CHECK(ResumeClosureRequest::frameWordOf(resumeRequest) == 3);
 }
 
+static void testLargeFunctionWords()
+{
+    constexpr uint64_t offsetInCode = 64;
+    constexpr uint32_t firstShapeCollision = 0x3f0000;
+    for (uint32_t function : { (1u << 21) - 1, 1u << 21, (1u << 21) + 1, ClosureWord::firstReservedFunction - 1 }) {
+        AOT_TEST_CHECK(ClosureWord::canEncode({ offsetInCode, 0 }, function));
+        for (unsigned parameters : { 0u, 3u, ClosureWord::maxNumberOfParameters }) {
+            for (uint8_t borrowed = 0; borrowed < 4; ++borrowed) {
+                for (bool endsTailCalls : { false, true }) {
+                    for (bool takesNewTarget : { false, true }) {
+                        for (bool isNotCallable : { false, true }) {
+                            ClosureWord::Flags flags { isNotCallable, takesNewTarget, borrowed, endsTailCalls };
+                            uint64_t word = ClosureWord::encode({ offsetInCode, parameters }, function, flags);
+                            AOT_TEST_CHECK(ClosureWord::closureNumberOf(word) == function);
+                            AOT_TEST_CHECK(ClosureWord::addressOf(word, 4096) == 4096 + offsetInCode);
+                            AOT_TEST_CHECK(ClosureWord::numberOfParametersOf(word) == parameters);
+                            AOT_TEST_CHECK(ClosureWord::borrowedArgumentsOf(word) == borrowed);
+                            AOT_TEST_CHECK(ClosureWord::takesNewTarget(word) == takesNewTarget);
+                            AOT_TEST_CHECK(ClosureWord::isCallable(word) == !isNotCallable);
+                            if (isNotCallable)
+                                continue;
+                            uint32_t upperHalf = static_cast<uint32_t>(word >> 32);
+                            AOT_TEST_CHECK(mayBeUpperHalfOfSlimClosureWord(upperHalf));
+                            AOT_TEST_CHECK(!canPassShapeTest(upperHalf));
+                            AOT_TEST_CHECK(static_cast<uint16_t>(upperHalf >> 8) < blockTestHalfword(0));
+                            AOT_TEST_CHECK(static_cast<int64_t>(word) >= ClosureWord::minWordOfCalleeTaking(parameters));
+                        }
+                    }
+                }
+            }
+        }
+        uint64_t request = ClosureRequest::encode(function, 2, 9);
+        AOT_TEST_CHECK(ClosureRequest::closureNumberOf(request) == function && ClosureRequest::executableOf(request) == 2 && ClosureRequest::allocationOf(request) == 9);
+        uint64_t resume = ResumeClosureRequest::encode(function, 1, 9, 3);
+        AOT_TEST_CHECK(ClosureRequest::closureNumberOf(resume) == function && ResumeClosureRequest::executableOf(resume) == 1 && ResumeClosureRequest::frameWordOf(resume) == 3);
+    }
+    for (uint32_t function = ClosureWord::firstReservedFunction; function <= firstShapeCollision; ++function)
+        AOT_TEST_CHECK(!ClosureWord::canEncode({ offsetInCode, 0 }, function));
+    AOT_TEST_CHECK(canPassShapeTest(closureWordMarker | firstShapeCollision | 3u << (ClosureWord::borrowsArgumentShift - 32)));
+}
+
 template<typename Words>
 static const void* wordAt(const Words& words, ptrdiff_t offset)
 {
@@ -883,6 +924,7 @@ std::span<const NativeTest> stubTests()
         { "stubs/entries-of-a-body"_s, testBodyEntries },
         { "stubs/dumped-names-are-distinct"_s, testDumpedNames },
         { "stubs/packed-words"_s, testPackedWords },
+        { "stubs/large-function-words"_s, testLargeFunctionWords },
         { "stubs/stub-words"_s, testStubWords },
         { "stubs/adapter-frame"_s, testAdapterFrame },
         { "stubs/front-ends-and-preludes"_s, testFrontEndsAndPreludes },
