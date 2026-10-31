@@ -177,6 +177,8 @@ worker inspection and external-buffer cases alongside the fork selection.
 
 ## Unreleased
 
+- Resolve suspended async stack positions through one switch-relative target lookup shared by both stack capture paths; cover two distinct await locations.
+
 - Keep reference-only GC validation visitors concrete with Bun ArrayBuffer accounting enabled, without charging replayed references as additional memory.
 
 - Release class-field identifiers with their parser arena by allocating DefineFieldNode on the deletable arena path.
