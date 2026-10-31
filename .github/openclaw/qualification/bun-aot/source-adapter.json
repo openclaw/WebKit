@@ -2,13 +2,13 @@
   "bun": "fd40ba44187c721ee023062fa153a6a27560e6b1",
   "webkit": "5ec9ac8557722128588184ed9cf77347d9a30cf1",
   "prepare_only": false,
-  "patch_sha256": "ea80416c88d2c3958e4128394884c8f5a3b47fba5810ad74af7f02cd0761ac7a",
+  "patch_sha256": "35286f32f850bb0845d407604ee69d484c0252df738493a342b09dd62c73909f",
   "files": {
     "CHANGELOG.md": {
       "before": "aa3d183726734a0c1dd7f255d783b7e7b1946e4ff88e9432623e31556c206308",
-      "after": "3a8dee48ca90849efd154d48bde9de8ac4cc2de6eb485433d1dc76eec44d37ea",
+      "after": "0ccec7ae23479479b1bd114b7d4177828f31091f816db1acb33c6e38ec5726d6",
       "base_blob": "ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0",
-      "adapted_blob": "bff77b818d959f2ab0c8974ca98673a72b5eefe8",
+      "adapted_blob": "277de39f7dab51420caf7290599989aa9b91fa66",
       "mode": "100644"
     },
     "Cargo.lock": {
@@ -1192,6 +1192,13 @@
       "after": "a8c9980a8a16ef2d308db32c4b687296701196cfcb2514eb4fc67e0712623883",
       "base_blob": "eba66eba32f38f0aff67ca7d597c005b1c30bf9d",
       "adapted_blob": "33fb58ed3aad0de9d483ad6978ef8248c30b476b",
+      "mode": "100644"
+    },
+    "src/jsc/bindings/BunAOTCompile.cpp": {
+      "before": "bf059f23af2810297b8d9dba127102483d08b082551754c8202d9b8c3f758243",
+      "after": "4a6afa1dd4a455f02df4eef5e5b56bc3584f321855a9eff0a56b9da69c0ab979",
+      "base_blob": "1b0f9adefe7424fcc2e4e1a8436f986f01e3c87c",
+      "adapted_blob": "0c33145b5accc54b31883532861d823ca864531d",
       "mode": "100644"
     },
     "src/jsc/bindings/ZigGlobalObject.cpp": {

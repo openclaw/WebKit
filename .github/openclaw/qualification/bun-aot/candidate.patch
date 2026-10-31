@@ -1,11 +1,12 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0..bff77b818d959f2ab0c8974ca98673a72b5eefe8 100644
+index ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0..277de39f7dab51420caf7290599989aa9b91fa66 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,7 @@
+@@ -2,6 +2,8 @@
  
  ## Unreleased
  
++- Keep AOT flow-report text and result sections aligned with the JavaScriptCore compiler interface.
 +- Align AOT builtin, parser, module, and retention contracts with the synchronized JavaScriptCore engine.
  - Resolve literal embedded module paths against prepared AOT entry points, including TypeScript and custom output names.
  
@@ -11454,6 +11455,98 @@ index eba66eba32f38f0aff67ca7d597c005b1c30bf9d..33fb58ed3aad0de9d483ad6978ef8248
      ]),
    };
  }
+diff --git a/src/jsc/bindings/BunAOTCompile.cpp b/src/jsc/bindings/BunAOTCompile.cpp
+index 1b0f9adefe7424fcc2e4e1a8436f986f01e3c87c..0c33145b5accc54b31883532861d823ca864531d 100644
+--- a/src/jsc/bindings/BunAOTCompile.cpp
++++ b/src/jsc/bindings/BunAOTCompile.cpp
+@@ -52,6 +52,7 @@ struct BunAOTResult {
+     JSC::AOT::Vector<Wire::InternalErrorRecord> internalErrors;
+     JSC::AOT::Vector<Wire::FeatureUseRecord> featuresUsed;
+     JSC::AOT::Vector<Wire::LocaleUseRecord> localesUsed;
++    JSC::AOT::Vector<Wire::WorkerEntryRecord> workerEntries;
+     JSC::AOT::Vector<Wire::AllocationRemarkRecord> allocationRemarks;
+     JSC::AOT::Vector<Wire::ObfuscatedSiteRecord> obfuscatedSites;
+     JSC::AOT::Vector<Wire::FunctionReportRecord> functions;
+@@ -142,6 +143,12 @@ extern "C" BunAOTBytes Bun__AOT__resultSection(const BunAOTResult* result, Wire:
+         return bytesOf(result->featuresUsed);
+     case Wire::ResultSection::LocalesUsed:
+         return bytesOf(result->localesUsed);
++    case Wire::ResultSection::WorkerEntries:
++        return bytesOf(result->workerEntries);
++    case Wire::ResultSection::LibraryFunctionsLacked:
++        return output ? bytesOf(output->flowReport.libraryFunctionsLacked) : noBytes;
++    case Wire::ResultSection::OtherOrigins:
++        return output ? bytesOf(output->flowReport.otherOrigins) : noBytes;
+     case Wire::ResultSection::Accesses:
+         return output ? bytesOf(output->flowReport.accesses) : noBytes;
+     case Wire::ResultSection::AccessCounts:
+@@ -171,13 +178,11 @@ extern "C" BunAOTBytes Bun__AOT__resultSection(const BunAOTResult* result, Wire:
+     case Wire::ResultSection::ObfuscatedSites:
+         return bytesOf(result->obfuscatedSites);
+     case Wire::ResultSection::ArrivalSites:
+-        return output ? bytesOf(output->arrivalSites.sites) : noBytes;
+     case Wire::ResultSection::ArrivalSiteLayouts:
+-        return output ? bytesOf(output->arrivalSites.siteLayouts) : noBytes;
+     case Wire::ResultSection::ArrivalLayouts:
+-        return output ? bytesOf(output->arrivalSites.layouts) : noBytes;
+     case Wire::ResultSection::ArrivalLayoutFields:
+-        return output ? bytesOf(output->arrivalSites.layoutFields) : noBytes;
++        // The engine embeds arrival-site text in its symbols and code-size map.
++        return noBytes;
+     }
+     return noBytes;
+ }
+@@ -278,10 +283,11 @@ static void encodeFeatureUse(BunAOTResult& result)
+     std::ranges::stable_sort(result.featuresUsed, {}, &Wire::FeatureUseRecord::feature);
+ }
+ 
+-static void encodeLocaleUse(BunAOTResult& result)
++static void encodeFlowReportText(BunAOTResult& result)
+ {
+     Typed::FlowReport& report = result.output->flowReport;
+     result.localesUsed = rebaseTextRanges(result.text, report.localeTags.span(), WTF::move(report.localesUsed), &Wire::LocaleUseRecord::tag);
++    result.workerEntries = rebaseTextRanges(result.text, report.workerEntryPaths.span(), WTF::move(report.workerEntries), &Wire::WorkerEntryRecord::path);
+ }
+ 
+ static Typed::AllocationSiteReport findAllocationSite(const Typed::FlowReport& report, Typed::AllocationSiteID site)
+@@ -342,24 +348,6 @@ static void encodeFunctionReports(BunAOTResult& result, OperationNames& operatio
+     });
+ }
+ 
+-static void encodeArrivalSites(BunAOTResult& result)
+-{
+-    Typed::ArrivalSiteReport& report = result.output->arrivalSites;
+-    Wire::TextRange appended = appendText(result.text, report.text.span());
+-    bool didAppend = appended.length == report.text.size();
+-    auto rebase = [&](Wire::TextRange& range) {
+-        range = didAppend ? Wire::TextRange { appended.offset + range.offset, range.length } : Wire::TextRange { 0, 0 };
+-    };
+-    for (Wire::ArrivalSiteRecord& site : report.sites)
+-        rebase(site.operation);
+-    for (Wire::ArrivalLayoutRecord& layout : report.layouts) {
+-        rebase(layout.kind);
+-        rebase(layout.name);
+-    }
+-    for (Wire::ArrivalLayoutFieldRecord& field : report.layoutFields)
+-        rebase(field.name);
+-}
+-
+ static void encodePassTimes(BunAOTResult& result)
+ {
+     const JSC::AOT::Vector<JSC::AOT::Statistics::PassTime>& passTimes = result.output->statistics.passTimes();
+@@ -429,11 +417,10 @@ extern "C" BunAOTResult* Bun__AOT__compile(BunAOTBytes program, const JSC::AOT::
+     OperationNames operationNames(result->text);
+     encodeDiagnostics(*result);
+     encodeFeatureUse(*result);
+-    encodeLocaleUse(*result);
++    encodeFlowReportText(*result);
+     encodeAllocationRemarks(*result, operationNames);
+     encodeObfuscatedSites(*result);
+     encodeFunctionReports(*result, operationNames);
+-    encodeArrivalSites(*result);
+     encodePassTimes(*result);
+     result->statistics = result->output->statistics.values();
+     result->limitValues = result->output->limitValues;
 diff --git a/src/jsc/bindings/ZigGlobalObject.cpp b/src/jsc/bindings/ZigGlobalObject.cpp
 index f8b13cf1ac2723adb6908b5095eacfa462c3b863..b7fd10726d8879ca59c0cb2da4b669e75b18ff4f 100644
 --- a/src/jsc/bindings/ZigGlobalObject.cpp
