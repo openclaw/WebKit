@@ -302,6 +302,61 @@ identities = {name: sha(BUILD / name) for name in ['bun', 'jsc', 'testaot', 'cod
 smoke = "if(new Intl.DisplayNames(['fr'],{type:'region'}).of('DE')!=='Allemagne')throw Error('ICU compressed region data');(typeof print==='function'?print:console.log)('ICU79.1 French region data passed')"
 for name in ['bun', 'jsc']:
     assert run('icu-smoke-' + name, [str(BUILD / name), '-e', smoke], 60).strip() == 'ICU79.1 French region data passed'
+rust_env = dict(ENV, BUN_CODEGEN_DIR=str(BUILD / 'codegen'), TESTAOT=str(BUILD / 'testaot'),
+                CARGO_PROFILE_DEV_OPT_LEVEL='1', CARGO_BUILD_JOBS='2',
+                CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS='-Cforce-frame-pointers=yes')
+rust_cases = [
+    ('bun_sema_parser', 'analysis_fold', 'ordinary_run_await_branches_keep_test_effects'),
+    ('bun_sema_parser', 'analysis_fold', 'build_only_conditions_leave_ordinary_run_await_live'),
+    ('bun_aot', None, 'link::marks::tests::expected_result_keeps_its_layouts'),
+    ('bun_aot', None, 'emit::tests::engine_prints_same_text'),
+    ('bun_aot', None, 'modules::plan::tests::the_commonjs_files_of_a_graph_run_first'),
+    ('bun_aot', None, 'modules::imports::tests::strict_import_survives_a_soft_typescript_re_export_of_the_same_name'),
+    ('bun_aot', None, 'link::module_records::tests::missing_commonjs_re_export_preserves_alias_and_written_specifier'),
+    ('bun_aot', None, 'ir::tests::property_keys::created_symbols_differ_by_module_and_call_number'),
+    ('bun_aot', None, 'engine::used_features::tests::every_engine_cause_maps'),
+    ('bun_aot', None, 'report::causes::tests::only_property_accesses_have_property_causes'),
+    ('bun_aot', None, 'load::typed_packages::tests::one_rejected_file_is_compiled_from_the_installed_file'),
+    ('bun_trim', None, 'decide::tests::dynamic_import_keeps_what_is_used_and_what_loads_files_from_disk'),
+    ('bun_trim', None, 'decide::tests::dynamic_import_of_code_keeps_what_transpiles_and_interprets_a_file'),
+]
+
+
+def rust_result(text):
+    assert len(re.findall(r'^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured;', text, re.M)) == 1
+    assert not re.search(r'^(?:FAIL|PANIC|SKIP)(?:[: ]|$)', text, re.M), 'Rust/engine contract was skipped or failed'
+
+
+for index, (package, target, selector) in enumerate(rust_cases):
+    command = ['cargo', '+nightly-2026-09-15', 'test', '--locked', '-p', package]
+    command += ['--test', target] if target else ['--lib']
+    text = run('rust-contract-' + str(index), [*command, selector, '--', '--exact', '--nocapture'],
+               1800, env=rust_env)
+    rust_result(text)
+    source_state(True)
+ir_files = {}
+for index, selector in enumerate([
+    'lower/coroutines/',
+    'lower/functions/key-in-brackets-names-function.ts',
+    'lower/functions/symbol-key-names-function.js',
+    'lower/expected-results/',
+    'lower/installed-types/rows-of-a-query-repository-types/main.ts',
+    'lower/modules/required-names.ts',
+    'lower/modules/es-module-imports-names-of-commonjs.mjs',
+]):
+    # The Rust runner permits an empty post-filter selection. Admit actual files first.
+    files = sorted(str(path.relative_to(SOURCE)) for path in (SOURCE / 'test/aot/ir/lower').rglob('*')
+                   if path.is_file() and selector in str(path.relative_to(SOURCE))
+                   and not {'imports', 'node_modules'} & set(path.relative_to(SOURCE / 'test/aot/ir/lower').parts)
+                   and path.name.endswith(('.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'))
+                   and not path.name.endswith(('.d.ts', '.d.mts', '.d.cts')))
+    assert files, 'IR selector matched no test files: ' + selector
+    ir_files[selector] = files
+    text = run('ir-contract-' + str(index), ['cargo', '+nightly-2026-09-15', 'test', '--locked',
+               '-p', 'bun_aot', '--test', 'ir_tests', 'lower', '--', '--exact', '--nocapture'],
+               1800, env=dict(rust_env, AOT_IR_FILTER=selector, AOT_IR_JOBS='1'))
+    rust_result(text)
+    source_state(True)
 internal_cases = {}
 for name, file in [('build-contracts', 'build-aot-codegen-declared-outputs.test.ts'),
                    ('local-webkit-contracts', 'build-local-webkit.test.ts')]:
@@ -335,7 +390,15 @@ internal_cases['aot/builtins/realm-agreement.test.ts'] = realm_cases
 source_state(True)
 cases = []
 for part, name in [('calls-of-proxies', 'strict--empty--two'), ('calls-of-proxies', 'strict--trap--method'),
-                   ('builtin-modules', 'async-local-storage-get-store')]:
+                   ('builtin-modules', 'async-local-storage-get-store'),
+                   ('errors', 'names-in-frames-of-async-functions-that-never-reach-their-await'),
+                   ('async-and-generators', 'what-the-names-of-the-parameters-of-a-suspended-function-hold'),
+                   ('errors', 'functions-declared-under-a-constant-key-in-brackets-show-the-key-as-their-name'),
+                   ('parsed-records', 'nested-objects-and-arrays'),
+                   ('builtin-modules', 'sqlite-in-memory-with-no-optional-pass'),
+                   ('modules', 'names-known-at-link'),
+                   ('symbol-fields', 'two-symbols-with-one-description'),
+                   ('symbol-fields', 'one-place-in-the-text-makes-several-symbols')]:
     expected = part + '/' + name
     case_env = dict(ENV, TEST_PART='aot/' + part, AOT_PROGRAMS=expected, AOT_SHARE='all',
                     AOT_PROGRAMS_JOBS='1', AOT_BUILTIN_TABLE=str(table))
@@ -349,5 +412,6 @@ restore_source()
 assert identities == {name: sha(BUILD / name) for name in identities}
 result = json.loads((OUT / 'proof.json').read_text())
 result.update(passed=True, binary_sha256=identities, program_cases=cases, build_contract_cases=internal_cases,
+              rust_contract_cases=rust_cases, ir_contract_files=ir_files,
               patch_sha256=spec['patch_sha256'], source_tree=original_tree, icu=icu)
 (OUT / 'proof.json').write_text(json.dumps(result, indent=2) + '\n')

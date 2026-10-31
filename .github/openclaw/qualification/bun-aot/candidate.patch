@@ -1,3 +1,15 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index edaf84c7a78292be0e69884156a6c27f204d3c68..a18131a5aa6ede6ccfcbe06da5d0dabd843b8ad0 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -170,6 +170,7 @@ dependencies = [
+  "bun_collections",
+  "bun_core",
+  "bun_glob",
++ "bun_js_parser",
+  "bun_lint",
+  "bun_lint_react_compiler",
+  "bun_options_types",
 diff --git a/docs/bundler/aot-debugging.mdx b/docs/bundler/aot-debugging.mdx
 index 31e67ad82c588dc02b8fd0d942e0c8e69268ce41..600bad27769b43fcc75890d9e43114fad976bc89 100644
 --- a/docs/bundler/aot-debugging.mdx
@@ -1315,7 +1327,7 @@ index ce23d42585dd33dc81d2a0ec7dad909fdecee01c..9780607d5a80f0847fa9dab4f24fc92d
              spellings.intrinsic("$undefined", IntrinsicPosition::Value),
              Some(Intrinsic::Undefined)
 diff --git a/src/aot/builtins/resolve.rs b/src/aot/builtins/resolve.rs
-index 329dc2b39c07e6187ea6029fa8768e5f89388ea4..cc5e57ff9f8306f14f7c012e030f19d5affb723f 100644
+index 329dc2b39c07e6187ea6029fa8768e5f89388ea4..1a20b133d6765b2b596fc8948ddd2e3f6d2528c6 100644
 --- a/src/aot/builtins/resolve.rs
 +++ b/src/aot/builtins/resolve.rs
 @@ -20,9 +20,9 @@ use super::table::{
@@ -1338,7 +1350,7 @@ index 329dc2b39c07e6187ea6029fa8768e5f89388ea4..cc5e57ff9f8306f14f7c012e030f19d5
      symbols: Box<[(SymbolId, BuiltinPath)]>,
      commonjs: CommonJsBuiltins,
      evaluated_texts: Box<[EvaluatedText]>,
-@@ -228,6 +229,41 @@ impl ResolvedBuiltins {
+@@ -228,6 +229,47 @@ impl ResolvedBuiltins {
          }
      }
  
@@ -1361,14 +1373,20 @@ index 329dc2b39c07e6187ea6029fa8768e5f89388ea4..cc5e57ff9f8306f14f7c012e030f19d5
 +            };
 +            steps.push(path);
 +            match hir[current].kind {
-+                ExprKind::Dot { chain: Chain::No, .. }
-+                | ExprKind::Index { chain: Chain::No, .. } => match hir.member_key(current)? {
++                ExprKind::Dot {
++                    chain: Chain::No, ..
++                }
++                | ExprKind::Index {
++                    chain: Chain::No, ..
++                } => match hir.member_key(current)? {
 +                    (object, MemberKey::Name(_)) => current = hir.skip_type_assertions(object),
 +                    (_, MemberKey::PrivateName(_) | MemberKey::Computed(_)) => return None,
 +                },
 +                ExprKind::Ident(_) => {
 +                    let is_free_name = bound.is_evaluated_ident(current)
-+                        && bound.dynamic_lookup_scope(NodeData::Expr(current)).is_none()
++                        && bound
++                            .dynamic_lookup_scope(NodeData::Expr(current))
++                            .is_none()
 +                        && bound.binding(current) == Binding::Free;
 +                    return is_free_name.then_some(steps);
 +                }
@@ -1436,10 +1454,10 @@ index c9faca89b70c70c0360c3da22a41d39ef3c97782..b71a9675c5436a429013609fb1a2f0de
                  None => {
                      self.held.insert(symbol, Some(value));
 diff --git a/src/aot/builtins/resolve/paths.rs b/src/aot/builtins/resolve/paths.rs
-index 1d6d56c4d9c7db546b196f14beb417d54910fe63..d6ff9302397d5d7266e99db7a026e37e195110ab 100644
+index 1d6d56c4d9c7db546b196f14beb417d54910fe63..bb8b691ebcff94873c472f2f505a0fce2ce50994 100644
 --- a/src/aot/builtins/resolve/paths.rs
 +++ b/src/aot/builtins/resolve/paths.rs
-@@ -127,13 +127,13 @@ impl Resolver<'_, '_> {
+@@ -127,13 +127,19 @@ impl Resolver<'_, '_> {
          ExprState::of_path(self.find_global(name))
      }
  
@@ -1447,18 +1465,24 @@ index 1d6d56c4d9c7db546b196f14beb417d54910fe63..d6ff9302397d5d7266e99db7a026e37e
 +    fn find_key_name(&self, key: MemberKey) -> Option<(BuiltinName, Mutability, bool)> {
          match key {
 -            MemberKey::Name(name) => Some((self.input.names.get(name)?, Mutability::AlwaysLocked)),
-+            MemberKey::Name(name) => Some((self.input.names.get(name)?, Mutability::AlwaysLocked, false)),
++            MemberKey::Name(name) => {
++                Some((self.input.names.get(name)?, Mutability::AlwaysLocked, false))
++            }
              MemberKey::Computed(computed) => {
 -                let key = self.value_of(computed)?.path;
 -                let symbol = table::well_known_symbol(key.id)?;
 -                Some((table::name_of_symbol(symbol), key.mutability))
 +                let key = self.value_of(computed)?;
 +                let symbol = table::well_known_symbol(key.path.id)?;
-+                Some((table::name_of_symbol(symbol), key.path.mutability, key.has_side_effects))
++                Some((
++                    table::name_of_symbol(symbol),
++                    key.path.mutability,
++                    key.has_side_effects,
++                ))
              }
              MemberKey::PrivateName(_) => None,
          }
-@@ -160,8 +160,9 @@ impl Resolver<'_, '_> {
+@@ -160,8 +166,9 @@ impl Resolver<'_, '_> {
          }
          let module_object = find_module_object_in(holder);
          let is_held = held.is_some() || known.is_none() || module_object.is_some();
@@ -1469,7 +1493,7 @@ index 1d6d56c4d9c7db546b196f14beb417d54910fe63..d6ff9302397d5d7266e99db7a026e37e
              return ExprState::Unresolved;
          };
          let Some(path) = self.find_member(holder, name) else {
-@@ -171,6 +172,10 @@ impl Resolver<'_, '_> {
+@@ -171,6 +178,10 @@ impl Resolver<'_, '_> {
              id: path.id,
              mutability: weaker(path.mutability, key_mutability),
          });
@@ -1558,10 +1582,10 @@ index 5992063b2a05d41b22d65c2a8909fdd255cb7e3a..9b355d65b9e845f75925f4d398603099
              commonjs,
              evaluated_texts: output.evaluated_texts.into_boxed_slice(),
 diff --git a/src/aot/builtins/resolve/tests.rs b/src/aot/builtins/resolve/tests.rs
-index 2b8f0dd6aa506bbc2e9d4367f10e162991e78965..bccaa8e268c2d57ae7f07cb6c6d77f92f2e88a22 100644
+index 2b8f0dd6aa506bbc2e9d4367f10e162991e78965..8bcf0177af7852a477adfb7d3e17116ec1913671 100644
 --- a/src/aot/builtins/resolve/tests.rs
 +++ b/src/aot/builtins/resolve/tests.rs
-@@ -263,6 +263,15 @@ impl Case<'_, '_> {
+@@ -263,6 +263,16 @@ impl Case<'_, '_> {
          found.unwrap_or_else(|| panic!("no expression `{text}` in: {}", self.source))
      }
  
@@ -1570,7 +1594,8 @@ index 2b8f0dd6aa506bbc2e9d4367f10e162991e78965..bccaa8e268c2d57ae7f07cb6c6d77f92
 +    }
 +
 +    fn global_path(&self, text: &str) -> Option<Vec<BuiltinId>> {
-+        self.resolved.global_path(self.hir, self.bound, self.expr(text))
++        self.resolved
++            .global_path(self.hir, self.bound, self.expr(text))
 +            .map(|steps| steps.into_iter().map(|step| step.id).collect())
 +    }
 +
@@ -1715,22 +1740,28 @@ index 5be60f6ada933b49bb1fb891bacae215b3d2de23..cdfe53ce10e9c066eadb15b41200861b
          .copied();
      listed.filter(|&function| exists_on_linux(function))
 diff --git a/src/aot/builtins/table.rs b/src/aot/builtins/table.rs
-index afeccb76582f506a698cf9ce421a5f28341832eb..b47e38602266f5a8ff4714e7c2393b7b8a41e680 100644
+index afeccb76582f506a698cf9ce421a5f28341832eb..0b441851d54379b0df9a9f78d550e809ff8282a0 100644
 --- a/src/aot/builtins/table.rs
 +++ b/src/aot/builtins/table.rs
-@@ -18,9 +18,10 @@ pub use ids::{
+@@ -18,12 +18,12 @@ pub use ids::{
  };
  pub use lookup::{
      ACCESSOR_FUNCTIONS, ExportLookup, MODULE_LOADER_FUNCTIONS, MemberLookup, STARTUP_FUNCTIONS,
 -    STARTUP_LOADS, STARTUP_MODULES, canonical_id, class_data, contents_index, entry, exists_on,
-+    STARTUP_LOADS, STARTUP_MODULES, answers_query, canonical_id, class_data, contents_index, entry, exists_on,
-     find_export, find_name, find_symbol_name, global, host_reads, is_es_module,
+-    find_export, find_name, find_symbol_name, global, host_reads, is_es_module,
 -    is_legal_builtin_constant, is_locked, is_removable_call, is_symbol_name, member, members,
+-    module_by_specifier, module_data, name_of_symbol, namespace_of, object_replacing_namespace,
+-    own_member, removable_calls, root_of, runtime_function, runtime_functions, specifier_of,
+-    symbol_constant, text_of, text_of_name, well_known_symbol,
++    STARTUP_LOADS, STARTUP_MODULES, answers_query, canonical_id, class_data, contents_index, entry,
++    exists_on, find_export, find_name, find_symbol_name, global, host_reads, is_es_module,
 +    is_legal_builtin_constant, is_locked, is_parser, is_removable_call, is_symbol_name, member,
-+    members,
-     module_by_specifier, module_data, name_of_symbol, namespace_of, object_replacing_namespace,
-     own_member, removable_calls, root_of, runtime_function, runtime_functions, specifier_of,
-     symbol_constant, text_of, text_of_name, well_known_symbol,
++    members, module_by_specifier, module_data, name_of_symbol, namespace_of,
++    object_replacing_namespace, own_member, removable_calls, root_of, runtime_function,
++    runtime_functions, specifier_of, symbol_constant, text_of, text_of_name, well_known_symbol,
+ };
+ pub use syntax::{
+     Conversion, DirectiveKind, ErrorKind, Intrinsic, IntrinsicPosition, NativeCallKind,
 diff --git a/src/aot/builtins/table/entries.rs b/src/aot/builtins/table/entries.rs
 index a36627e8bca786cfa0afd5ae98a96834fe559d73..250025fa1de01d762ce48e74ed540a4b666a05e6 100644
 --- a/src/aot/builtins/table/entries.rs
@@ -1907,7 +1938,7 @@ index 2c99e605f4617d17935d3d612211fe8d8d02eaea..6cc0355813122b14f1ebc264fc70d439
  
      // `exports.a = exports.b = value` is a part like `var a = value`: it is there for whoever reads one of the names.
 diff --git a/src/aot/compile/removable.rs b/src/aot/compile/removable.rs
-index e6f8d999d88300e3fbcc26bf87647b993a971b96..ef5eea32a4deb1befffa2c2843b8da69bc722010 100644
+index e6f8d999d88300e3fbcc26bf87647b993a971b96..430269f11eaaeaee232829f4b335ab9719b91a10 100644
 --- a/src/aot/compile/removable.rs
 +++ b/src/aot/compile/removable.rs
 @@ -2,9 +2,14 @@
@@ -2001,19 +2032,20 @@ index e6f8d999d88300e3fbcc26bf87647b993a971b96..ef5eea32a4deb1befffa2c2843b8da69
      // An import, and an export from another module, answer for themselves alone: whether the other module is evaluated is the caller's question.
      pub(crate) fn statement(&self, statement: StmtId) -> bool {
          let hir = self.hir;
-@@ -183,9 +235,8 @@ impl<'a, 's> Removable<'a, 's> {
+@@ -183,9 +235,10 @@ impl<'a, 's> Removable<'a, 's> {
              | StmtKind::ExportAsNamespace(_)
              | StmtKind::Import(_)
              | StmtKind::ExportNamed(_) => true,
 -            StmtKind::Expr(expression) | StmtKind::ExportDefault(expression) => {
 -                self.expression(expression)
--            }
-+            StmtKind::Expr(expression) => self.with_value_taken(false, || self.expression(expression)),
++            StmtKind::Expr(expression) => {
++                self.with_value_taken(false, || self.expression(expression))
+             }
 +            StmtKind::ExportDefault(expression) => self.stored_value(expression),
              StmtKind::Var(declarations) => declarations
                  .iter()
                  .all(|declaration| self.declaration(declaration)),
-@@ -194,7 +245,9 @@ impl<'a, 's> Removable<'a, 's> {
+@@ -194,7 +247,9 @@ impl<'a, 's> Removable<'a, 's> {
              StmtKind::Module(namespace) => self.is_namespace_without_code(namespace),
              StmtKind::ImportEquals(alias) => self.import_equals(alias),
              StmtKind::If { test, yes, no } => {
@@ -2024,7 +2056,7 @@ index e6f8d999d88300e3fbcc26bf87647b993a971b96..ef5eea32a4deb1befffa2c2843b8da69
              }
              StmtKind::Try {
                  block, finalizer, ..
-@@ -218,7 +271,10 @@ impl<'a, 's> Removable<'a, 's> {
+@@ -218,7 +273,10 @@ impl<'a, 's> Removable<'a, 's> {
              }
              VarKind::AwaitUsing => false,
          };
@@ -2036,7 +2068,7 @@ index e6f8d999d88300e3fbcc26bf87647b993a971b96..ef5eea32a4deb1befffa2c2843b8da69
      }
  
      // A pattern reads properties of its value or runs its iterator. `value` is `NONE` where there is none.
-@@ -263,6 +319,10 @@ impl<'a, 's> Removable<'a, 's> {
+@@ -263,6 +321,10 @@ impl<'a, 's> Removable<'a, 's> {
      }
  
      pub(crate) fn class(&self, class: ClassId) -> bool {
@@ -2047,7 +2079,7 @@ index e6f8d999d88300e3fbcc26bf87647b993a971b96..ef5eea32a4deb1befffa2c2843b8da69
          let node = &self.hir[class];
          node.flags.contains(Flags::AMBIENT)
              || (!self.has_decorator(node.modifiers)
-@@ -282,7 +342,7 @@ impl<'a, 's> Removable<'a, 's> {
+@@ -282,7 +344,7 @@ impl<'a, 's> Removable<'a, 's> {
              Decision::GlobalPath(_) | Decision::DeferredData => return false,
              Decision::Unknown => {}
          }
@@ -2056,7 +2088,7 @@ index e6f8d999d88300e3fbcc26bf87647b993a971b96..ef5eea32a4deb1befffa2c2843b8da69
              return true;
          }
          if !self.stack.is_safe_to_recurse() {
-@@ -318,6 +378,7 @@ impl<'a, 's> Removable<'a, 's> {
+@@ -318,6 +380,7 @@ impl<'a, 's> Removable<'a, 's> {
                          || self.expression(branch)
                  };
                  self.expression(test)
@@ -2064,7 +2096,7 @@ index e6f8d999d88300e3fbcc26bf87647b993a971b96..ef5eea32a4deb1befffa2c2843b8da69
                      && is_removable(branches.yes, true)
                      && is_removable(branches.no, false)
              }
-@@ -444,7 +505,9 @@ impl<'a, 's> Removable<'a, 's> {
+@@ -444,7 +507,9 @@ impl<'a, 's> Removable<'a, 's> {
          hir[declaration].members.iter().all(|member| {
              let node = &hir[member];
              node.computed_name.is_none()
@@ -2075,12 +2107,13 @@ index e6f8d999d88300e3fbcc26bf87647b993a971b96..ef5eea32a4deb1befffa2c2843b8da69
          })
      }
  
-@@ -601,7 +664,15 @@ impl<'a, 's> Removable<'a, 's> {
+@@ -601,7 +666,16 @@ impl<'a, 's> Removable<'a, 's> {
          };
          let is_guarded = matches!(op, BinOp::Or | BinOp::And)
              && self.is_guarded_free_name(right, left, op == BinOp::And);
 -        converts_nothing && self.expression(left) && (is_guarded || self.expression(right))
-+        converts_nothing && self.expression(left)
++        converts_nothing
++            && self.expression(left)
 +            && !self.is_decided_by_member_read(left, &[right])
 +            && (is_guarded || self.expression(right))
 +    }
@@ -2092,7 +2125,7 @@ index e6f8d999d88300e3fbcc26bf87647b993a971b96..ef5eea32a4deb1befffa2c2843b8da69
      }
  
      fn identifier(&self, identifier: ExprId) -> bool {
-@@ -676,6 +747,9 @@ impl<'a, 's> Removable<'a, 's> {
+@@ -676,6 +750,9 @@ impl<'a, 's> Removable<'a, 's> {
          let is_export_of_namespace = match self.find_static_binding(object) {
              Some(Binding::Symbol(symbol)) => {
                  matches!(*self.bound.symbol(symbol).decls, [Decl::ImportNamespace(_)])
@@ -2102,7 +2135,7 @@ index e6f8d999d88300e3fbcc26bf87647b993a971b96..ef5eea32a4deb1befffa2c2843b8da69
              }
              Some(Binding::Arguments(_) | Binding::CommonJs(_) | Binding::Free) | None => false,
          };
-@@ -693,22 +767,19 @@ impl<'a, 's> Removable<'a, 's> {
+@@ -693,22 +770,19 @@ impl<'a, 's> Removable<'a, 's> {
              })
      }
  
@@ -2219,13 +2252,14 @@ index a37e0ea6dcda750a398dd3c65016f92b74de5ea0..eab9d6a170bcc29f32177a68f01812a3
          }
          if !self.stack.is_safe_to_recurse() {
 diff --git a/src/aot/compile/tests.rs b/src/aot/compile/tests.rs
-index 65e9f4b505be0e4d7236270fc8a7e27c8b313a22..073edfa93b3cd24cc90e22cf809ee8f542440fcf 100644
+index 65e9f4b505be0e4d7236270fc8a7e27c8b313a22..da1f6dfde12941dbb0e214bdd87fbc4c31d0354f 100644
 --- a/src/aot/compile/tests.rs
 +++ b/src/aot/compile/tests.rs
-@@ -1089,14 +1089,3 @@ fn build_that_compiles_refuses_the_whole_program() {
+@@ -1088,15 +1088,3 @@ fn build_that_compiles_refuses_the_whole_program() {
+     let (result, _) = link_project(&project, &WithoutServices);
      assert_eq!(expect_failure(result).refused_entry_points, None);
  }
- 
+-
 -#[test]
 -fn summary_says_whether_the_program_validates_by_type() {
 -    let validates = |text: &str| {
@@ -2238,7 +2272,7 @@ index 65e9f4b505be0e4d7236270fc8a7e27c8b313a22..073edfa93b3cd24cc90e22cf809ee8f5
 -    assert!(validates("console.log(JSON.parse<number>(\"1\"));"));
 -}
 diff --git a/src/aot/diagnostic_codes.rs b/src/aot/diagnostic_codes.rs
-index cd434ad7e276825584fc4e66ce11ac564112b5ea..870432bb72f5aa0b548e8613b1c8940554acb800 100644
+index cd434ad7e276825584fc4e66ce11ac564112b5ea..b4b499a298f6f58908e617a1285b5cba15714828 100644
 --- a/src/aot/diagnostic_codes.rs
 +++ b/src/aot/diagnostic_codes.rs
 @@ -35,9 +35,6 @@ diagnostic_codes! {
@@ -2269,11 +2303,13 @@ index cd434ad7e276825584fc4e66ce11ac564112b5ea..870432bb72f5aa0b548e8613b1c89405
          InvalidRegExpFlags = 100515, Error, "Invalid flags \"{0}\" in regular expression";
      }
      Builtins 100700..=100749 {}
-@@ -110,6 +98,7 @@ diagnostic_codes! {
+@@ -109,7 +97,8 @@ diagnostic_codes! {
+ 
  pub const RETIRED_NUMBERS: &[u32] = &[
      100013, 100015, 100017, 100033, 100034, 100059, 100063, 100109, 100120, 100300, 100303, 100304,
-     100500, 100502, 100513,
-+    100107, 100503, 100504, 100505, 100506, 100507, 100508, 100509, 100512, 100514,
+-    100500, 100502, 100513,
++    100500, 100502, 100513, 100107, 100503, 100504, 100505, 100506, 100507, 100508, 100509, 100512,
++    100514,
  ];
  
  pub const WITHOUT_PRINTED_NUMBER: &[Code] =
@@ -2293,27 +2329,28 @@ index 18973a2e52f0a77c6a165d24b83d4ef6a134dcc2..a0e59ad54690fa05c126c0ca056f98a8
              | ProgramList::StaticFields
              | ProgramList::ModuleRequests
 diff --git a/src/aot/emit/tests.rs b/src/aot/emit/tests.rs
-index 9c283e28ecbab439613be07d139410ff5cfbea72..7acc821cdb83e562c3970681ab6d8bb933586df9 100644
+index 9c283e28ecbab439613be07d139410ff5cfbea72..e1d270b31a643f25b6f2a655bb6ad64e66993e56 100644
 --- a/src/aot/emit/tests.rs
 +++ b/src/aot/emit/tests.rs
-@@ -10,12 +10,12 @@ use crate::builtins::{BuiltinId, RuntimeFunction};
+@@ -10,12 +10,11 @@ use crate::builtins::{BuiltinId, RuntimeFunction};
  use crate::compile::testing::TemporaryDirectory;
  use crate::ir::generated::String as StringRecord;
  use crate::ir::generated::{
 -    Data, DataMember, DataNode, Entry, EvalBinding, EvalScope, ExpectedResult, Field, Function,
-+    Data, DataMember, DataNode, Entry, EvalBinding, EvalScope, ExpectedResult, ExpectedResultFlags,
-+    Field, Function,
-     FunctionFlags, FunctionVisibility, Header, HostRead, ImportPhase, Layout, LayoutKind, LimitId,
-     MAGIC, Module, ModuleExport, ModuleFailure, ModuleRequest, ModuleRequestKind, ProgramList,
+-    FunctionFlags, FunctionVisibility, Header, HostRead, ImportPhase, Layout, LayoutKind, LimitId,
+-    MAGIC, Module, ModuleExport, ModuleFailure, ModuleRequest, ModuleRequestKind, ProgramList,
 -    RequiredName, RuntimeFunctionEntry, SCHEMA_HASH, StaticField, SyntheticExport, TemplatePart,
 -    TemplatePlaceholder, TypeSite, TypeSiteKind, UndeclaredMembers, ValidatedPrimitive,
 -    ValidationMember, ValidationNode, ValidationRule, ValidationShape, Variable, WebAssemblyModule,
-+    RequiredName, RuntimeFunctionEntry, SCHEMA_HASH, StaticField, SyntheticExport, TypeSite,
-+    TypeSiteKind, Variable, WebAssemblyModule,
++    Data, DataMember, DataNode, Entry, EvalBinding, EvalScope, ExpectedResult, ExpectedResultFlags,
++    Field, Function, FunctionFlags, FunctionVisibility, Header, HostRead, ImportPhase, Layout,
++    LayoutKind, LimitId, MAGIC, Module, ModuleExport, ModuleFailure, ModuleRequest,
++    ModuleRequestKind, ProgramList, RequiredName, RuntimeFunctionEntry, SCHEMA_HASH, StaticField,
++    SyntheticExport, TypeSite, TypeSiteKind, Variable, WebAssemblyModule,
  };
  use crate::ir::testing::{build_function, function_with_parameters};
  use crate::ir::{
-@@ -74,50 +74,10 @@ fn create_declared_type(names: &Names) -> DeclaredType {
+@@ -74,50 +73,10 @@ fn create_declared_type(names: &Names) -> DeclaredType {
  }
  
  fn create_expected_result(names: &Names) -> ExpectedResult {
@@ -2365,7 +2402,7 @@ index 9c283e28ecbab439613be07d139410ff5cfbea72..7acc821cdb83e562c3970681ab6d8bb9
      }
  }
  
-@@ -154,6 +114,7 @@ fn create_module(names: &Names) -> Module {
+@@ -154,6 +113,7 @@ fn create_module(names: &Names) -> Module {
              target: MODULE,
              phase: ImportPhase::Defer,
              is_dynamic_star_export: true,
@@ -2373,7 +2410,7 @@ index 9c283e28ecbab439613be07d139410ff5cfbea72..7acc821cdb83e562c3970681ab6d8bb9
              kind: ModuleRequestKind::Import,
              completes: true,
          }],
-@@ -171,6 +132,8 @@ fn create_module(names: &Names) -> Module {
+@@ -171,6 +131,8 @@ fn create_module(names: &Names) -> Module {
              module: MODULE,
              name: names.name,
              may_be_absent: false,
@@ -2382,7 +2419,7 @@ index 9c283e28ecbab439613be07d139410ff5cfbea72..7acc821cdb83e562c3970681ab6d8bb9
          }],
          positions: source_positions(source, vec![0, 2]),
          function_text: source.to_vec(),
-@@ -240,6 +203,7 @@ fn create_full_program() -> Program {
+@@ -240,6 +202,7 @@ fn create_full_program() -> Program {
          importer: MODULE,
          specifier: names.text,
          exporter: Some(MODULE),
@@ -2403,14 +2440,17 @@ index 13876f765c5c8772f64f026e97804268fa753c21..6d716f8ca6dc3324f7e902aa809a2ce2
              UnseenCodeCause::RunsUnseenCode
          }
 diff --git a/src/aot/engine/used_features/tests.rs b/src/aot/engine/used_features/tests.rs
-index 5bd6ed9159ad28acd5500636131d2701394fb290..432c394a5aa9ff5e939b54984f9b0b9d8d4a5141 100644
+index 5bd6ed9159ad28acd5500636131d2701394fb290..1648bae973a838351b9409650d62942ea652b5bd 100644
 --- a/src/aot/engine/used_features/tests.rs
 +++ b/src/aot/engine/used_features/tests.rs
-@@ -201,6 +201,7 @@ fn every_engine_cause_maps() {
+@@ -201,6 +201,10 @@ fn every_engine_cause_maps() {
              EngineCause::RunsMachineCode,
              UnseenCodeCause::RunsUnseenCode,
          ),
-+        (EngineCause::LoadsCodeByName, UnseenCodeCause::LoadsCodeByName),
++        (
++            EngineCause::LoadsCodeByName,
++            UnseenCodeCause::LoadsCodeByName,
++        ),
      ];
      assert_eq!(
          table.map(|(engine_cause, _)| engine_cause),
@@ -2427,10 +2467,10 @@ index 19c1a5bb3a13e850073b40fd0e07242cce961bb6..7a86fd887d0421bb6ea9d0a725168939
      pub modules: Option<ModuleList>,
  }
 diff --git a/src/aot/ir/finish/tests.rs b/src/aot/ir/finish/tests.rs
-index 6623766bbadb966f98405261c5861d2939332c13..552097867068c2fb3765bd1e82362909cac5a282 100644
+index 6623766bbadb966f98405261c5861d2939332c13..b3dbc0d5506cd08be5f52bb990d866ab735c8623 100644
 --- a/src/aot/ir/finish/tests.rs
 +++ b/src/aot/ir/finish/tests.rs
-@@ -95,11 +95,14 @@ fn call_round_trip() {
+@@ -95,11 +95,26 @@ fn call_round_trip() {
              Some(key),
              Some(name),
              Some(expected_result),
@@ -2442,11 +2482,23 @@ index 6623766bbadb966f98405261c5861d2939332c13..552097867068c2fb3765bd1e82362909
          );
          builder.set_position(None);
 -        builder.call(callee, None, &[], None, None, None, false, true);
-+        builder.call(callee, None, &[], None, None, None, None, None, false, true, false);
++        builder.call(
++            callee,
++            None,
++            &[],
++            None,
++            None,
++            None,
++            None,
++            None,
++            false,
++            true,
++            false,
++        );
          builder.return_value(None);
      });
      let values: Vec<ValueView<'_>> = entry_of(&body).values().collect();
-@@ -107,11 +110,12 @@ fn call_round_trip() {
+@@ -107,11 +122,14 @@ fn call_round_trip() {
          panic!("the entry block lists three values");
      };
      let reference = (4 + DROPPED_VALUE_COUNT) as u32;
@@ -2456,11 +2508,13 @@ index 6623766bbadb966f98405261c5861d2939332c13..552097867068c2fb3765bd1e82362909
      assert_eq!(
          with_this.fields,
 -        [1, 0, 1, 3, 2, 4, 3, reference, reference, reference]
-+        [1, 0, 1, 3, 2, 4, 3, reference, reference, reference, absent, absent]
++        [
++            1, 0, 1, 3, 2, 4, 3, reference, reference, reference, absent, absent
++        ]
      );
  
      assert_eq!(
-@@ -119,10 +123,9 @@ fn call_round_trip() {
+@@ -119,10 +137,9 @@ fn call_round_trip() {
          (value(6), Opcode::Call)
      );
      assert_eq!(without_this.position, None);
@@ -2584,10 +2638,10 @@ index 766c1366de7d3092ccded1d6c08d3ee2ea8843ed..bbed12b4e91be1a0109210a87d684712
          }
      }
 diff --git a/src/aot/ir/tests/body.rs b/src/aot/ir/tests/body.rs
-index 6187be0c91101dd406cf76ff6d7ba6eaf45ead2f..4a2533585b719197e2b8aa51aa4324f7535e4fcf 100644
+index 6187be0c91101dd406cf76ff6d7ba6eaf45ead2f..9994484b5a8a08b0f114d32b88e22798410565be 100644
 --- a/src/aot/ir/tests/body.rs
 +++ b/src/aot/ir/tests/body.rs
-@@ -274,20 +274,20 @@ fn build_body_with_references(offset: usize) -> Body {
+@@ -274,20 +274,32 @@ fn build_body_with_references(offset: usize) -> Body {
          );
          builder.new_closure(function_id(40), &[operand]);
          builder.call_direct(function_id(41), &[operand]);
@@ -2605,14 +2659,26 @@ index 6187be0c91101dd406cf76ff6d7ba6eaf45ead2f..4a2533585b719197e2b8aa51aa4324f7
          let expected_result = ExpectedResultId::new(84 + offset);
          let (name, expected_result) = (Some(string(21)), Some(expected_result));
 -        builder.call(operand, None, &[], None, name, expected_result, true, true);
-+        builder.call(operand, None, &[], None, name, expected_result, None, None, true, true, false);
++        builder.call(
++            operand,
++            None,
++            &[],
++            None,
++            name,
++            expected_result,
++            None,
++            None,
++            true,
++            true,
++            false,
++        );
          builder.new_template_object(&template_strings);
 -        builder.throw_module_failure(ModuleFailureId::new(81 + offset));
 +        builder.throw_module_failure(ModuleFailureId::new(81 + offset), false);
          let next = builder.create_block(None);
          builder.switch_string(operand, &[string(25)], &[Edge::to(next)], Edge::to(next));
          builder.seal(next);
-@@ -368,7 +368,7 @@ fn remap_changes_exactly_reference_words() {
+@@ -368,7 +380,7 @@ fn remap_changes_exactly_reference_words() {
  fn remap_of_body_without_references_changes_nothing() {
      let function = build_function(&[], |builder| {
          let left = builder.integer(REMAP_OFFSET as i64);
@@ -2622,24 +2688,37 @@ index 6187be0c91101dd406cf76ff6d7ba6eaf45ead2f..4a2533585b719197e2b8aa51aa4324f7
          builder.return_value(Some(sum));
      });
 diff --git a/src/aot/ir/tests/handlers.rs b/src/aot/ir/tests/handlers.rs
-index a188da3a54757714572344d8bcf65f4f741123c6..4323b378d84aa37ee52ba4b489294fe173a505d9 100644
+index a188da3a54757714572344d8bcf65f4f741123c6..a33dd64dcdace1013af34398301551dbeafb2eeb 100644
 --- a/src/aot/ir/tests/handlers.rs
 +++ b/src/aot/ir/tests/handlers.rs
-@@ -10,7 +10,7 @@ use crate::ir::testing::build_function;
+@@ -10,7 +10,19 @@ use crate::ir::testing::build_function;
  use crate::ir::types::TypeTable;
  
  pub(super) fn emit_call(builder: &mut FunctionBuilder, callee: ValueId) -> ValueId {
 -    builder.call(callee, None, &[], None, None, None, false, false)
-+    builder.call(callee, None, &[], None, None, None, None, None, false, false, false)
++    builder.call(
++        callee,
++        None,
++        &[],
++        None,
++        None,
++        None,
++        None,
++        None,
++        false,
++        false,
++        false,
++    )
  }
  
  pub(super) fn create_catch_handler(builder: &mut FunctionBuilder) -> Handler {
-@@ -522,16 +522,16 @@ function f0 module=m0 thisType={type=anything} parameters=[{type=anything}] resu
+@@ -522,16 +534,17 @@ function f0 module=m0 thisType={type=anything} parameters=[{type=anything}] resu
  fn roles_and_subject() {
      assert_graph(&[TypeTable::ANYTHING], ITERATION_CLEANUP, |builder| {
          let iterable = builder.parameter(0);
 -        let iterator = builder.iterator_open(iterable, IteratorKind::Sync, None, false, false);
-+        let iterator = builder.iterator_open(iterable, IteratorKind::Sync, None, false, false, false);
++        let iterator =
++            builder.iterator_open(iterable, IteratorKind::Sync, None, false, false, false);
          let cleanup = builder.create_handler(BlockRole::IterationCleanup, Some(iterator), None);
          enter_covered_block(builder, cleanup);
          let (kind, mode) = (IteratorKind::Sync, ResumeMode::Next);
@@ -2750,10 +2829,10 @@ index 845837d1c4d195883bac108416a497b72dda374d..3825a94437d89b19560f0993f7b6d0a5
 +    );
  }
 diff --git a/src/aot/link/marks/tests.rs b/src/aot/link/marks/tests.rs
-index 39791f2055d64202fc94b00a41f5e721c8fab0d6..bfb4e7bcb3e6f3a6f8b529d6eb625da136f67456 100644
+index 39791f2055d64202fc94b00a41f5e721c8fab0d6..cc65f0aea6813a8d70e6bf6f79bbf8ec85602682 100644
 --- a/src/aot/link/marks/tests.rs
 +++ b/src/aot/link/marks/tests.rs
-@@ -517,32 +517,29 @@ fn data_record_keeps_its_layout() {
+@@ -517,32 +517,53 @@ fn data_record_keeps_its_layout() {
  }
  
  #[test]
@@ -2782,16 +2861,40 @@ index 39791f2055d64202fc94b00a41f5e721c8fab0d6..bfb4e7bcb3e6f3a6f8b529d6eb625da1
          unit.define_body(|builder| {
              let callee = builder.undefined();
 -            builder.call(callee, None, &[], None, None, Some(retained), false, false);
-+            builder.call(callee, None, &[], None, None, Some(retained), None, None, false, false, false);
++            builder.call(
++                callee,
++                None,
++                &[],
++                None,
++                None,
++                Some(retained),
++                None,
++                None,
++                false,
++                false,
++                false,
++            );
          });
          unit.define_function(1, |builder| {
              let callee = builder.undefined();
 -            builder.call(callee, None, &[], None, None, Some(dropped), false, false);
-+            builder.call(callee, None, &[], None, None, Some(dropped), None, None, false, false, false);
++            builder.call(
++                callee,
++                None,
++                &[],
++                None,
++                None,
++                Some(dropped),
++                None,
++                None,
++                false,
++                false,
++                false,
++            );
          });
  
          let marked = mark_fragments(projects, [unit.finish()]);
-@@ -550,9 +547,6 @@ fn expected_result_keeps_its_layouts_and_site() {
+@@ -550,9 +571,6 @@ fn expected_result_keeps_its_layouts_and_site() {
          assert!(marked.errors.is_empty(), "{:?}", marked.errors);
          let marks = marked.unit_marks(main);
          assert_eq!(marks.expected_results, [true, false]);
@@ -2824,7 +2927,7 @@ index 56cb5278dd3bb66e65f8e3babdca2eb9e88a77e3..bc85e545be8b21be1b559bb2fd8d6020
          unit.define_body(|builder| {
              if throws_in_body {
 diff --git a/src/aot/link/module_records.rs b/src/aot/link/module_records.rs
-index 8b714cc6682d28b7fe91c75cc7ce8e8eda044013..bcee5bec0f47308944930797f7d90c9cf38e4c9f 100644
+index 8b714cc6682d28b7fe91c75cc7ce8e8eda044013..2f88efa537bbf286285ba646bafbfdb71f4bedc0 100644
 --- a/src/aot/link/module_records.rs
 +++ b/src/aot/link/module_records.rs
 @@ -373,6 +373,7 @@ impl RecordBuilder<'_, '_, '_> {
@@ -2844,7 +2947,7 @@ index 8b714cc6682d28b7fe91c75cc7ce8e8eda044013..bcee5bec0f47308944930797f7d90c9c
              })
              .collect();
      }
-@@ -507,10 +510,14 @@ impl RecordBuilder<'_, '_, '_> {
+@@ -507,10 +510,18 @@ impl RecordBuilder<'_, '_, '_> {
          failure: &modules::ModuleFailure,
      ) -> generated::ModuleFailure {
          // Where a module lacks a name, the name stands in the place of the specifier.
@@ -2853,14 +2956,18 @@ index 8b714cc6682d28b7fe91c75cc7ce8e8eda044013..bcee5bec0f47308944930797f7d90c9c
              ModuleFailureKind::Unresolved { specifier, .. }
              | ModuleFailureKind::UnresolvedAtLoad { specifier, .. } => (specifier, None),
 -            ModuleFailureKind::ExportMayBeAbsent { exporter, name } => (name, Some(exporter)),
-+            ModuleFailureKind::ExportMayBeAbsent { exporter, name, asked_by } => {
++            ModuleFailureKind::ExportMayBeAbsent {
++                exporter,
++                name,
++                asked_by,
++            } => {
 +                export_specifier = asked_by.map(|it| self.intern_atom(it.specifier));
 +                (asked_by.map_or(name, |it| it.export_name), Some(exporter))
-+            },
++            }
              ModuleFailureKind::ExportNotFound { .. }
              | ModuleFailureKind::ExportAmbiguous { .. } => {
                  unreachable!("a name that cannot be bound stops the build")
-@@ -520,6 +527,7 @@ impl RecordBuilder<'_, '_, '_> {
+@@ -520,6 +531,7 @@ impl RecordBuilder<'_, '_, '_> {
              importer: self.input.id_of(project, ModuleRef::File(failure.importer)),
              specifier: self.intern_atom(specifier),
              exporter: exporter.map(|exporter| self.input.id_of(project, exporter)),
@@ -2869,7 +2976,7 @@ index 8b714cc6682d28b7fe91c75cc7ce8e8eda044013..bcee5bec0f47308944930797f7d90c9c
      }
  }
 diff --git a/src/aot/link/module_records/tests.rs b/src/aot/link/module_records/tests.rs
-index 015542b027f97b29f88a6c3ce7bf8d4f4159b53b..e832615e98aea65cca82794489f2995f707f166e 100644
+index 015542b027f97b29f88a6c3ce7bf8d4f4159b53b..b9e52d7cd8c426b9b4216e6cd702b5f372085a38 100644
 --- a/src/aot/link/module_records/tests.rs
 +++ b/src/aot/link/module_records/tests.rs
 @@ -156,6 +156,7 @@ fn es_module_record_has_body_and_requests() {
@@ -2892,16 +2999,19 @@ index 015542b027f97b29f88a6c3ce7bf8d4f4159b53b..e832615e98aea65cca82794489f2995f
      assert_eq!(module, module_named(&program, "barrel.js"));
      assert_eq!(program.strings.get(name), b"x");
      let requests = &record_named(&program, "barrel.js").requests;
-@@ -767,6 +771,8 @@ fn only_name_re_exported_by_typescript_may_be_absent() {
+@@ -767,6 +771,11 @@ fn only_name_re_exported_by_typescript_may_be_absent() {
          assert_eq!(required.may_be_absent, expected, "{exporter}");
          assert_eq!(required.module, module_named(&program, "barrel.js"));
          assert_eq!(program.strings.get(required.name), b"x");
 +        assert_eq!(program.strings.get(required.export_name.unwrap()), b"x");
-+        assert_eq!(program.strings.get(required.specifier.unwrap()), b"./barrel.js");
++        assert_eq!(
++            program.strings.get(required.specifier.unwrap()),
++            b"./barrel.js"
++        );
      }
  }
  
-@@ -960,3 +966,25 @@ fn host_reads_no_export_of_bun_modules() {
+@@ -960,3 +969,29 @@ fn host_reads_no_export_of_bun_modules() {
          assert_eq!(host_reads_of(kind).count(), 0, "{kind:?}");
      }
  }
@@ -2913,33 +3023,51 @@ index 015542b027f97b29f88a6c3ce7bf8d4f4159b53b..e832615e98aea65cca82794489f2995f
 +        "import { nope } from './k.cjs'; export { nope as visible };",
 +        "import { nope } from './k.cjs'; console.log(nope); export { nope as visible } from './k.cjs';",
 +    ] {
-+        let program = link_program(&[
-+            ("main.mjs", source),
-+            ("k.cjs", "exports.present = 1;"),
-+        ]);
-+        let failures: Vec<_> = program.module_failures.iter()
++        let program = link_program(&[("main.mjs", source), ("k.cjs", "exports.present = 1;")]);
++        let failures: Vec<_> = program
++            .module_failures
++            .iter()
 +            .filter(|failure| failure.exporter == Some(module_named(&program, "k.cjs")))
 +            .collect();
 +        assert!(!failures.is_empty());
-+        let exported = failures.iter().find(|failure| failure.export_specifier.is_some())
++        let exported = failures
++            .iter()
++            .find(|failure| failure.export_specifier.is_some())
 +            .expect("the re-export failure keeps its written source");
 +        assert_eq!(program.strings.get(exported.specifier), b"visible");
-+        assert_eq!(program.strings.get(exported.export_specifier.unwrap()), b"./k.cjs");
++        assert_eq!(
++            program.strings.get(exported.export_specifier.unwrap()),
++            b"./k.cjs"
++        );
 +    }
 +}
 diff --git a/src/aot/link/numbering/tests.rs b/src/aot/link/numbering/tests.rs
-index bf056698ed19d16dc6494a2f12a79f576384ba04..effece9e7e63e43f6e7da2c48502eccc26cbd1fe 100644
+index bf056698ed19d16dc6494a2f12a79f576384ba04..9118d396a86ed521f4bc6650de9e00551fe6cf18 100644
 --- a/src/aot/link/numbering/tests.rs
 +++ b/src/aot/link/numbering/tests.rs
-@@ -143,7 +143,7 @@ fn emit_references(builder: &mut FunctionBuilder, names: &[Reference]) {
+@@ -142,9 +142,19 @@ fn emit_references(builder: &mut FunctionBuilder, names: &[Reference]) {
+             Reference::Type(id) => builder.type_test(value, id),
              Reference::TypeSite(id) => builder.check(value, TypeTable::NUMBER, Some(id)),
              Reference::EvalScope(id) => builder.direct_eval(id, value, value, None, &[]),
-             Reference::ExpectedResult(id) => {
+-            Reference::ExpectedResult(id) => {
 -                builder.call(value, None, &[], None, None, Some(id), false, false)
-+                builder.call(value, None, &[], None, None, Some(id), None, None, false, false, false)
-             }
+-            }
++            Reference::ExpectedResult(id) => builder.call(
++                value,
++                None,
++                &[],
++                None,
++                None,
++                Some(id),
++                None,
++                None,
++                false,
++                false,
++                false,
++            ),
              Reference::Data(id) => builder.data(id),
              Reference::Module(id, ModuleReferenceKind::Target) => {
+                 builder.module_namespace(id, ImportPhase::Evaluation)
 diff --git a/src/aot/link/property_keys.rs b/src/aot/link/property_keys.rs
 index e4b70407da4a98501c9610ed0998d1e91030ef6a..e0d41462e4b9f9f64b57eb15dac667af5c1297d4 100644
 --- a/src/aot/link/property_keys.rs
@@ -3016,15 +3144,27 @@ index 992841f77b38c188e27dec57b9da3083e5e6b2b5..69abb1d59d8d206c331172d84597158f
  "#,
      ),
 diff --git a/src/aot/link/unit/tests.rs b/src/aot/link/unit/tests.rs
-index acddb976e18c73aa41142be5a3de39934b7420e3..44ff5e7361ea7aa4006a29efd4e8bf436479213b 100644
+index acddb976e18c73aa41142be5a3de39934b7420e3..eb9e2832f2d73f10986d8f6a9fca6578c3630b02 100644
 --- a/src/aot/link/unit/tests.rs
 +++ b/src/aot/link/unit/tests.rs
-@@ -184,10 +184,10 @@ fn records_are_listed_by_kind() {
+@@ -184,10 +184,22 @@ fn records_are_listed_by_kind() {
          builder.new_object(LayoutId::new(3), &[], None, &[]);
          builder.check(value, TypeTable::NUMBER, Some(TypeSiteId::new(1)));
          builder.direct_eval(EvalScopeId::new(2), value, value, None, &[]);
 -        builder.call(value, None, &[], None, None, expected, false, false);
-+        builder.call(value, None, &[], None, None, expected, None, None, false, false, false);
++        builder.call(
++            value,
++            None,
++            &[],
++            None,
++            None,
++            expected,
++            None,
++            None,
++            false,
++            false,
++            false,
++        );
          builder.data(DataId::new(6));
          builder.prop_get(value, PropertyKeyId::new(7), false, false);
 -        builder.throw_module_failure(WireModuleFailureId::new(8));
@@ -3032,7 +3172,7 @@ index acddb976e18c73aa41142be5a3de39934b7420e3..44ff5e7361ea7aa4006a29efd4e8bf43
          builder.return_value(None);
      });
      let references = list_references(&[function]);
-@@ -210,7 +210,7 @@ fn records_are_listed_by_kind() {
+@@ -210,7 +222,7 @@ fn records_are_listed_by_kind() {
  fn target_and_referrer_are_separate_lists() {
      let [owner, target, referrer, resolved] = [0, 1, 2, 3].map(ModuleId::new);
      let function = build_function(&[], |builder| {
@@ -3041,7 +3181,7 @@ index acddb976e18c73aa41142be5a3de39934b7420e3..44ff5e7361ea7aa4006a29efd4e8bf43
          builder.resolve_module(resolved, referrer, StringId::new(0), false);
          builder.module_namespace(referrer, ImportPhase::Evaluation);
          builder.return_value(None);
-@@ -228,7 +228,7 @@ fn builtin_references_are_dropped() {
+@@ -228,7 +240,7 @@ fn builtin_references_are_dropped() {
  
      let functions = [
          build_function(&[], |builder| {
@@ -3050,7 +3190,7 @@ index acddb976e18c73aa41142be5a3de39934b7420e3..44ff5e7361ea7aa4006a29efd4e8bf43
              builder.return_value(None);
          }),
          build_function(&[], |builder| builder.return_value(None)),
-@@ -246,11 +246,11 @@ fn builtin_references_are_dropped() {
+@@ -246,11 +258,11 @@ fn builtin_references_are_dropped() {
  #[test]
  fn definitions_that_share_a_record_share_their_lists() {
      let own = Arc::new(build_function(&[], |builder| {
@@ -3152,20 +3292,22 @@ index 11589de96c8505c4e6442c567c9857c42650238c..f36ea33b4c8078988863a7d82816565e
  
      fn add_evaluated_functions(
 diff --git a/src/aot/load/typed_packages/tests.rs b/src/aot/load/typed_packages/tests.rs
-index 81d8db52a5db9181ee70f0cc27b46c667c8b6111..80d7aea58d171af7075e896674d526420935e081 100644
+index 81d8db52a5db9181ee70f0cc27b46c667c8b6111..f3900e7391515596221af7a7eeab898ccbf1f155 100644
 --- a/src/aot/load/typed_packages/tests.rs
 +++ b/src/aot/load/typed_packages/tests.rs
-@@ -4,7 +4,8 @@ use crate::compile::{Build, LoadedBuild};
+@@ -2,9 +2,10 @@ use super::*;
+ use crate::compile::testing::{TemporaryDirectory, describe_messages, set_up_output};
+ use crate::compile::{Build, LoadedBuild};
  use crate::engine::ExecutableIdentity;
++use crate::load::project::ProjectId;
  use crate::load::source_provider::WithoutServices;
  use crate::options::{LoadOptions, Options, PathOptions, RemovableOptions};
 -use crate::statistics::{LimitValues, StatisticId, Statistics};
 +use crate::statistics::{LimitValues, Statistics};
-+use crate::load::project::ProjectId;
  use bun_ast::Log;
  use bun_options_types::aot_options::AotOptions;
  use bun_sema::resolve::{CodeOptions, Options as CheckerOptions, Resolver};
-@@ -433,8 +434,23 @@ fn one_rejected_file_is_compiled_from_the_installed_file() {
+@@ -433,8 +434,41 @@ fn one_rejected_file_is_compiled_from_the_installed_file() {
                  export const sum = x + y;\n";
      project.write("app.ts", main);
  
@@ -3176,19 +3318,37 @@ index 81d8db52a5db9181ee70f0cc27b46c667c8b6111..80d7aea58d171af7075e896674d52642
 +    let loaded = load_project(&project, "app.ts", |loaded| {
 +        let files = loaded.project(ProjectId::Application).loaded.files();
 +        let expected = [
-+            ("node_modules/p/x.js", Some(".sound/p/lay/x.js"), false, "export const x: number = 1;\n"),
++            (
++                "node_modules/p/x.js",
++                Some(".sound/p/lay/x.js"),
++                false,
++                "export const x: number = 1;\n",
++            ),
 +            ("node_modules/p/y.js", None, true, "export const y = 2;\n"),
 +        ];
 +        for (installed_path, typed_path, rejected, text) in expected {
 +            let path = project.path(installed_path);
-+            let file = *files.compiled_files().iter()
++            let file = *files
++                .compiled_files()
++                .iter()
 +                .find(|&&file| files.module(file).file_name() == path.as_slice())
 +                .expect("the imported package file is compiled");
 +            let compiled = files.compiled(file).expect("a compiled module");
-+            assert_eq!(compiled.typed_source_path.map(<[u8]>::to_vec),
-+                typed_path.map(|relative| project.path(relative)), "{installed_path}");
-+            assert_eq!(compiled.rejected_typed_version.is_some(), rejected, "{installed_path}");
-+            assert_eq!(&files.hir(file).text[..], text.as_bytes(), "{installed_path}");
++            assert_eq!(
++                compiled.typed_source_path.map(<[u8]>::to_vec),
++                typed_path.map(|relative| project.path(relative)),
++                "{installed_path}"
++            );
++            assert_eq!(
++                compiled.rejected_typed_version.is_some(),
++                rejected,
++                "{installed_path}"
++            );
++            assert_eq!(
++                &files.hir(file).text[..],
++                text.as_bytes(),
++                "{installed_path}"
++            );
 +        }
 +    });
 +    let ((), _) = loaded.unwrap_or_else(|(_, failure)| panic!("{failure}"));
@@ -3214,7 +3374,7 @@ index 3f9029d21a8e6c10be7e62918381f6931dd84dc9..29698fb0f023982f477f5527b2d904b3
 +    lowering.builder.await_value(value, &held, false)
  }
 diff --git a/src/aot/lower/call.rs b/src/aot/lower/call.rs
-index 03fe1d7c328d2e764e30090c558cee9c74566caa..4adc72e85b51cfba0f2156cdc203e0cb96b07562 100644
+index 03fe1d7c328d2e764e30090c558cee9c74566caa..7d01dcc575820c35f3e753172104306c69500628 100644
 --- a/src/aot/lower/call.rs
 +++ b/src/aot/lower/call.rs
 @@ -17,7 +17,7 @@ use super::expression::{
@@ -3251,24 +3411,30 @@ index 03fe1d7c328d2e764e30090c558cee9c74566caa..4adc72e85b51cfba0f2156cdc203e0cb
      let arguments = Arguments::Values(SmallVec::from_slice(arguments));
      emit_call(lowering, callee, None, arguments, CallSite::default())
  }
-@@ -133,6 +135,8 @@ pub(in crate::lower) fn lower_call(
+@@ -133,6 +135,11 @@ pub(in crate::lower) fn lower_call(
          lowering.file.builtins,
      );
      let site = call_site(lowering.file, call);
 +    // Optimized calls may replace the callee with a synthetic helper, but its source read still shows in key order.
-+    super::expression::lower_read_of_locked_path(lowering, skip_type_syntax(lowering.file, site.callee));
++    super::expression::lower_read_of_locked_path(
++        lowering,
++        skip_type_syntax(lowering.file, site.callee),
++    );
      let exit = evaluation.chain_exit;
      let inner = skip_type_syntax(lowering.file, site.callee);
      if bound.eval_scope(call).is_some() {
-@@ -187,6 +191,7 @@ pub(in crate::lower) fn lower_new(
+@@ -187,6 +194,10 @@ pub(in crate::lower) fn lower_new(
          return evaluated_text::lower_evaluated_text_call(lowering, expression, text, None);
      }
      let site = call_site(lowering.file, expression);
-+    super::expression::lower_read_of_locked_path(lowering, skip_type_syntax(lowering.file, site.callee));
++    super::expression::lower_read_of_locked_path(
++        lowering,
++        skip_type_syntax(lowering.file, site.callee),
++    );
      if let Some(value) = written_operands::try_lower_new(lowering, expression, site) {
          return value;
      }
-@@ -288,8 +293,11 @@ pub(in crate::lower) fn emit_call_at(
+@@ -288,8 +299,11 @@ pub(in crate::lower) fn emit_call_at(
              callee.key,
              callee.name,
              options.expected_result,
@@ -3280,14 +3446,11 @@ index 03fe1d7c328d2e764e30090c558cee9c74566caa..4adc72e85b51cfba0f2156cdc203e0cb
          ),
          Arguments::List(list) => lowering.builder.call_list(
              callee.function,
-@@ -315,6 +323,18 @@ pub(in crate::lower) fn emit_call_at(
+@@ -315,6 +329,15 @@ pub(in crate::lower) fn emit_call_at(
      }
  }
  
-+fn find_number_of_symbol_call(
-+    file: &FileLowering<'_, '_, '_, '_>,
-+    call: ExprId,
-+) -> Option<u32> {
++fn find_number_of_symbol_call(file: &FileLowering<'_, '_, '_, '_>, call: ExprId) -> Option<u32> {
 +    let ExprKind::Call(number) = file.hir[call].kind else {
 +        return None;
 +    };
@@ -3299,7 +3462,7 @@ index 03fe1d7c328d2e764e30090c558cee9c74566caa..4adc72e85b51cfba0f2156cdc203e0cb
  pub(in crate::lower) fn emit_call_expression(
      lowering: &mut FunctionLowering<'_, '_, '_, '_, '_>,
      call: ExprId,
-@@ -327,7 +347,8 @@ pub(in crate::lower) fn emit_call_expression(
+@@ -327,7 +350,8 @@ pub(in crate::lower) fn emit_call_expression(
      convert_argument_values(lowering, call, &mut arguments);
      let options = CallOptions {
          tail: Tail::No,
@@ -3367,21 +3530,22 @@ index 54caf68a17627207dc4754676981fb23faba9122..40a20ac20694394e3500a22c200b0133
      let matches = lowering.create_block();
      let differs = lowering.create_block();
 diff --git a/src/aot/lower/call/intrinsic.rs b/src/aot/lower/call/intrinsic.rs
-index 3e72f30cd6fa368339d93c1a541f6804abb235d7..52319aaadf52968edffcf85d8f0d5a4599c3423f 100644
+index 3e72f30cd6fa368339d93c1a541f6804abb235d7..f361afb2c35ca2f0d55cca7754fd2f2a7c3aec5b 100644
 --- a/src/aot/lower/call/intrinsic.rs
 +++ b/src/aot/lower/call/intrinsic.rs
-@@ -8,8 +8,8 @@ use smallvec::{SmallVec, smallvec};
+@@ -8,8 +8,9 @@ use smallvec::{SmallVec, smallvec};
  use super::intrinsic_call::{
      create_anonymous_callee, find_linked_function, lower_builtin_function_call,
      lower_call_with_rest, lower_conversion, lower_function_apply, lower_function_call,
 -    lower_if_abrupt_close_iterator, lower_linked_function_call, lower_prepended_argument_call,
 -    lower_promise_status_test, lower_throw,
 +    lower_if_abrupt_close_iterator, lower_iterator_generic_close, lower_iterator_generic_next,
-+    lower_linked_function_call, lower_prepended_argument_call, lower_promise_status_test, lower_throw,
++    lower_linked_function_call, lower_prepended_argument_call, lower_promise_status_test,
++    lower_throw,
  };
  use super::intrinsic_operation::{KeySpelling, claim_operand_kind, lower_operation};
  use super::{Arguments, CallOptions, CallSite, Callee, emit_construct};
-@@ -20,7 +20,7 @@ use crate::diagnostic_codes::Code;
+@@ -20,7 +21,7 @@ use crate::diagnostic_codes::Code;
  use crate::ir::generated::{FunctionFlags, OperandKind};
  use crate::ir::{BlockId, Opcode, PropertyKey, PropertyKeyId, TypeId, TypeTable, ValueId};
  use crate::lower::expression::{
@@ -3390,7 +3554,7 @@ index 3e72f30cd6fa368339d93c1a541f6804abb235d7..52319aaadf52968edffcf85d8f0d5a45
      skip_type_syntax,
  };
  use crate::lower::member::{self, PropertyName};
-@@ -91,6 +91,7 @@ pub(super) fn lower_intrinsic_call(
+@@ -91,6 +92,7 @@ pub(super) fn lower_intrinsic_call(
          options: CallOptions {
              tail: evaluation.tail,
              expected_result: None,
@@ -3398,7 +3562,7 @@ index 3e72f30cd6fa368339d93c1a541f6804abb235d7..52319aaadf52968edffcf85d8f0d5a45
              is_never_inlined: false,
          },
      };
-@@ -157,7 +158,7 @@ pub(super) fn emit_private_global_get(
+@@ -157,7 +159,7 @@ pub(super) fn emit_private_global_get(
      name: BuiltinName,
  ) -> ValueId {
      let key = engine_private_key(lowering.file, table::text_of_name(name));
@@ -3407,7 +3571,7 @@ index 3e72f30cd6fa368339d93c1a541f6804abb235d7..52319aaadf52968edffcf85d8f0d5a45
      lowering.builder.prop_get(global, key, true, false)
  }
  
-@@ -168,7 +169,7 @@ fn try_lower_intrinsic_value(
+@@ -168,7 +170,7 @@ fn try_lower_intrinsic_value(
      exit: Option<BlockId>,
  ) -> Lowered<ValueId> {
      match intrinsic {
@@ -3416,7 +3580,7 @@ index 3e72f30cd6fa368339d93c1a541f6804abb235d7..52319aaadf52968edffcf85d8f0d5a45
          Intrinsic::LinkTimeConstant(constant) => Ok(lowering.builder.link_time_constant(constant)),
          Intrinsic::NativeBinding(id) => Ok(lowering.builder.native_binding(id)),
          Intrinsic::Undefined | Intrinsic::Directive(_) | Intrinsic::Erased => {
-@@ -180,7 +181,7 @@ fn try_lower_intrinsic_value(
+@@ -180,7 +182,7 @@ fn try_lower_intrinsic_value(
          Intrinsic::PrivateGlobal | Intrinsic::ReplaceablePrivateGlobal => {
              lower_private_global(lowering, expression)
          }
@@ -3425,7 +3589,7 @@ index 3e72f30cd6fa368339d93c1a541f6804abb235d7..52319aaadf52968edffcf85d8f0d5a45
              Ok(lower_private_member(lowering, expression, exit)?.function)
          }
          Intrinsic::LinkedFunction(linked) => {
-@@ -269,7 +270,7 @@ fn try_lower_intrinsic_call(
+@@ -269,7 +271,7 @@ fn try_lower_intrinsic_call(
          }
          Intrinsic::ArgumentCount => lower_argument_count(lowering, site),
          Intrinsic::Argument => lower_argument_read(lowering, site),
@@ -3434,7 +3598,7 @@ index 3e72f30cd6fa368339d93c1a541f6804abb235d7..52319aaadf52968edffcf85d8f0d5a45
              let callee = lower_private_member(lowering, site.callee, site.exit)?;
              Ok(lower_call_with_rest(lowering, site, callee, site.arguments))
          }
-@@ -281,6 +282,8 @@ fn try_lower_intrinsic_call(
+@@ -281,6 +283,8 @@ fn try_lower_intrinsic_call(
          Intrinsic::Conversion(conversion) => lower_conversion(lowering, site, conversion),
          Intrinsic::Throw(kind) => lower_throw(lowering, site, kind),
          Intrinsic::IfAbruptCloseIterator => lower_if_abrupt_close_iterator(lowering, site),
@@ -3443,7 +3607,7 @@ index 3e72f30cd6fa368339d93c1a541f6804abb235d7..52319aaadf52968edffcf85d8f0d5a45
          Intrinsic::Erased => Ok(lowering.builder.undefined()),
          Intrinsic::Directive(_) | Intrinsic::NativeCall(_) => Err((site.call, Misuse::Position)),
          Intrinsic::BundleError => Err((site.call, Misuse::BundleError)),
-@@ -298,7 +301,7 @@ fn lower_builtin_construct(
+@@ -298,7 +302,7 @@ fn lower_builtin_construct(
      builtin: BuiltinId,
  ) -> Lowered<ValueId> {
      let [argument] = lower_named_arguments(lowering, site)?;
@@ -3453,7 +3617,7 @@ index 3e72f30cd6fa368339d93c1a541f6804abb235d7..52319aaadf52968edffcf85d8f0d5a45
      let call_site = CallSite::default();
      Ok(emit_construct(lowering, callee, None, arguments, call_site))
 diff --git a/src/aot/lower/call/intrinsic_call.rs b/src/aot/lower/call/intrinsic_call.rs
-index 675c3089a882f2529fdb6a0b5a2121f19f739caa..b35a505bc70f78ada3d07721d1140cec35dbac76 100644
+index 675c3089a882f2529fdb6a0b5a2121f19f739caa..9b9a7ff1982c92dd703405c21000db60c9919859 100644
 --- a/src/aot/lower/call/intrinsic_call.rs
 +++ b/src/aot/lower/call/intrinsic_call.rs
 @@ -16,7 +16,7 @@ use crate::ir::generated::{self, BlockRole, RuntimeErrorKind};
@@ -3504,7 +3668,7 @@ index 675c3089a882f2529fdb6a0b5a2121f19f739caa..b35a505bc70f78ada3d07721d1140cec
              let arguments = Arguments::Values(smallvec![message]);
              let call_site = CallSite::default();
              let error = emit_construct(lowering, constructor, None, arguments, call_site);
-@@ -279,6 +279,27 @@ pub(super) fn lower_if_abrupt_close_iterator(
+@@ -279,6 +279,33 @@ pub(super) fn lower_if_abrupt_close_iterator(
      Ok(lowering.builder.undefined())
  }
  
@@ -3524,7 +3688,13 @@ index 675c3089a882f2529fdb6a0b5a2121f19f739caa..b35a505bc70f78ada3d07721d1140cec
 +) -> Lowered<ValueId> {
 +    let [next_method, iterator] = lower_named_arguments(lowering, site)?;
 +    let arguments = Arguments::Values(SmallVec::new());
-+    let result = emit_call(lowering, next_method, Some(iterator), arguments, CallSite::default());
++    let result = emit_call(
++        lowering,
++        next_method,
++        Some(iterator),
++        arguments,
++        CallSite::default(),
++    );
 +    let error = RuntimeErrorKind::IteratorResultNotObject;
 +    Ok(lowering.builder.require_object(result, error))
 +}
@@ -3546,7 +3716,7 @@ index 74d683c44214a59206eb4f4b7bfb4bf393e16943..b0a47f04eafaf022cc5617a44bf65149
      let answer = emit_call(lowering, function, None, arguments, CallSite::default());
      convert::claim_call_result(lowering, call, answer)
 diff --git a/src/aot/lower/call/written_operands.rs b/src/aot/lower/call/written_operands.rs
-index 15f839d93fde600b7388cdeb8c7844b94f41d892..59edfdcb362b472f7573123420b9a42d7628f3cf 100644
+index 15f839d93fde600b7388cdeb8c7844b94f41d892..8fe2dd03cb21261fa3a8607e59fccc346fcc3dd8 100644
 --- a/src/aot/lower/call/written_operands.rs
 +++ b/src/aot/lower/call/written_operands.rs
 @@ -23,7 +23,7 @@ pub(super) fn find_locked_builtin(
@@ -3558,18 +3728,22 @@ index 15f839d93fde600b7388cdeb8c7844b94f41d892..59edfdcb362b472f7573123420b9a42d
      {
          Some(Resolved::Builtin(path)) => path.locked_builtin().map(table::canonical_id),
          Some(Resolved::DynamicGlobal(_) | Resolved::Intrinsic(_)) | None => None,
-@@ -155,7 +155,9 @@ fn lower_object_from_entries(
+@@ -155,7 +155,13 @@ fn lower_object_from_entries(
          object::begin_dictionary(lowering)
      };
      for entry in entries {
 -        object::add_property(lowering, &mut made, entry.key, entry.value);
 +        object::add_property_inside(
-+            lowering, &mut made, entry.key, entry.value, BuiltinId::ObjectFromEntries,
++            lowering,
++            &mut made,
++            entry.key,
++            entry.value,
++            BuiltinId::ObjectFromEntries,
 +        );
      }
      let made = object::finish_object(lowering, made);
      Some(convert::claim_call_result(lowering, call, made))
-@@ -194,7 +196,7 @@ fn lower_definition_by_descriptors(
+@@ -194,7 +200,7 @@ fn lower_definition_by_descriptors(
          description.callee,
      ));
      let describe =
@@ -3578,7 +3752,7 @@ index 15f839d93fde600b7388cdeb8c7844b94f41d892..59edfdcb362b472f7573123420b9a42d
      let arguments = Arguments::Values(SmallVec::from_slice(&[source]));
      let described = emit_call(lowering, describe, None, arguments, CallSite::default());
  
-@@ -260,7 +262,7 @@ fn emit_insertion(
+@@ -260,7 +266,7 @@ fn emit_insertion(
      collection: ValueId,
      operands: &[ValueId],
  ) {
@@ -3588,10 +3762,10 @@ index 15f839d93fde600b7388cdeb8c7844b94f41d892..59edfdcb362b472f7573123420b9a42d
      emit_call(
          lowering,
 diff --git a/src/aot/lower/class/constructor.rs b/src/aot/lower/class/constructor.rs
-index 95b4b43c94b337fae6445daeaec31f5d41f50916..7046098a2d0ad59f15d1a4393d5f39af481ab08e 100644
+index 95b4b43c94b337fae6445daeaec31f5d41f50916..d76ed5cd264eed28eccfcd314e672a4f148986a3 100644
 --- a/src/aot/lower/class/constructor.rs
 +++ b/src/aot/lower/class/constructor.rs
-@@ -55,15 +55,28 @@ pub(super) fn declare_constructor(
+@@ -55,15 +55,30 @@ pub(super) fn declare_constructor(
      class: ClassId,
      plan: &ClassPlan,
      name: Option<StringId>,
@@ -3604,10 +3778,12 @@ index 95b4b43c94b337fae6445daeaec31f5d41f50916..7046098a2d0ad59f15d1a4393d5f39af
 +    };
      match plan.constructor {
 -        Some(function) => function::declare_source_function(file, function, name),
-+        Some(function) => function::declare_source_function_with(file, function, &mut |_, header| {
-+            header.name = header.name.or(name);
-+            header.flags |= name_flag;
-+        }),
++        Some(function) => {
++            function::declare_source_function_with(file, function, &mut |_, header| {
++                header.name = header.name.or(name);
++                header.flags |= name_flag;
++            })
++        }
          None => {
              let key = FunctionKey::ImplicitConstructor(ClassRef {
                  file: file.file,
@@ -3623,7 +3799,7 @@ index 95b4b43c94b337fae6445daeaec31f5d41f50916..7046098a2d0ad59f15d1a4393d5f39af
      }
  }
 diff --git a/src/aot/lower/class/definition.rs b/src/aot/lower/class/definition.rs
-index 2c72231b3ababa119c4fd0f5ffd806024e59deae..567420864654139786420fcd6b15c030f5c797af 100644
+index 2c72231b3ababa119c4fd0f5ffd806024e59deae..3215ab059a1d0602cf9e7038312f3880ec4f1635 100644
 --- a/src/aot/lower/class/definition.rs
 +++ b/src/aot/lower/class/definition.rs
 @@ -12,7 +12,7 @@ use crate::ir::generated::MethodKind;
@@ -3662,16 +3838,18 @@ index 2c72231b3ababa119c4fd0f5ffd806024e59deae..567420864654139786420fcd6b15c030
      outer: Option<(Binding, Atom)>,
  ) -> ValueId {
      let (hir, bound) = (lowering.file.hir, lowering.file.bound);
-@@ -89,7 +89,7 @@ fn evaluate_class(
+@@ -89,7 +89,9 @@ fn evaluate_class(
      let binding = layouts::class_binding(lowering.file, class);
      let own_key =
          has_own_name.then(|| member::function_name_key(lowering.file, binding, node.name));
 -    let name = own_key.map(PropertyName::Constant).or(name);
-+    let name = own_key.map(|key| PropertyName::Constant(key).into()).or(name);
++    let name = own_key
++        .map(|key| PropertyName::Constant(key).into())
++        .or(name);
      let head = emit_class_head(lowering, class, &plan, name, heritage);
      let values = members::define_members(lowering, head, &plan);
      lowering.set_position(node.start);
-@@ -156,17 +156,17 @@ fn emit_class_head(
+@@ -156,17 +158,23 @@ fn emit_class_head(
      lowering: &mut FunctionLowering<'_, '_, '_, '_, '_>,
      class: ClassId,
      plan: &ClassPlan,
@@ -3681,7 +3859,13 @@ index 2c72231b3ababa119c4fd0f5ffd806024e59deae..567420864654139786420fcd6b15c030
  ) -> ClassHead {
      let static_name = find_static_name(lowering.file, name);
 -    let constructor = constructor::declare_constructor(lowering.file, class, plan, static_name);
-+    let constructor = constructor::declare_constructor(lowering.file, class, plan, static_name, name.is_some_and(|given| given.is_under_computed_key));
++    let constructor = constructor::declare_constructor(
++        lowering.file,
++        class,
++        plan,
++        static_name,
++        name.is_some_and(|given| given.is_under_computed_key),
++    );
      let layout = layouts::define_class_layout(lowering.file, class, constructor);
  
      lowering.set_position(lowering.file.hir[class].start);
@@ -3692,7 +3876,7 @@ index 2c72231b3ababa119c4fd0f5ffd806024e59deae..567420864654139786420fcd6b15c030
          lowering
              .builder
              .set_function_name(closure, key, MethodKind::Method);
-@@ -218,9 +218,9 @@ fn emit_class_result(
+@@ -218,9 +226,9 @@ fn emit_class_result(
  
  fn find_static_name(
      file: &FileLowering<'_, '_, '_, '_>,
@@ -4081,7 +4265,7 @@ index 0000000000000000000000000000000000000000..8b54cca9a6568f65899439586103fe3c
 +    }
 +}
 diff --git a/src/aot/lower/expression.rs b/src/aot/lower/expression.rs
-index 89972f0978aa88b1ded14e3cf04c28af77be61a6..0e6c7a52a4833b799e8a5714d8a7aac6f82e0ca6 100644
+index 89972f0978aa88b1ded14e3cf04c28af77be61a6..90564ddffcb4c6e761005856299242cfe8d3727e 100644
 --- a/src/aot/lower/expression.rs
 +++ b/src/aot/lower/expression.rs
 @@ -11,7 +11,7 @@ use bun_sema::fold::{Constant, Decision, FoldedValue};
@@ -4093,11 +4277,9 @@ index 89972f0978aa88b1ded14e3cf04c28af77be61a6..0e6c7a52a4833b799e8a5714d8a7aac6
  use super::{
      FileLowering, FunctionLowering, async_function, call, class, commonjs, control, convert, data,
      function, generator, jsx, module, object, operator, scope, template,
-@@ -21,8 +21,11 @@ use crate::ir::generated::MAX_TRACKED_INTEGER;
- use crate::ir::{BlockId, DeclaredType, ValueId};
+@@ -22,13 +22,16 @@ use crate::ir::{BlockId, DeclaredType, ValueId};
  
  pub(in crate::lower) use self::array::lower_argument_list;
-+pub(in crate::lower) use self::unused::lower_read_of_locked_path;
  pub(in crate::lower) use self::assignment::{AssignmentTarget, classify_assignment_target};
 -pub(in crate::lower) use self::builtin_path::{emit_locked_builtin, expect_resolved_path};
 +pub(in crate::lower) use self::builtin_path::{
@@ -4106,6 +4288,13 @@ index 89972f0978aa88b1ded14e3cf04c28af77be61a6..0e6c7a52a4833b799e8a5714d8a7aac6
  pub(in crate::lower) use self::chain::{
      ShortCircuit, is_chain_root, lower_chain_base, lower_in_chain,
  };
+ pub(in crate::lower) use self::global_path::{
+     emit_free_name_delete, emit_free_name_get, emit_free_name_set, lower_global_path_holder,
+ };
++pub(in crate::lower) use self::unused::lower_read_of_locked_path;
+ 
+ #[derive(Copy, Clone)]
+ pub(in crate::lower) struct TailCast<'t> {
 @@ -46,7 +49,7 @@ pub(in crate::lower) enum Tail<'t> {
  pub(in crate::lower) struct Evaluation<'t> {
      pub(in crate::lower) tail: Tail<'t>,
@@ -4189,7 +4378,7 @@ index 89972f0978aa88b1ded14e3cf04c28af77be61a6..0e6c7a52a4833b799e8a5714d8a7aac6
          Some(Resolved::Builtin(path)) if path.locked_builtin().is_some() => {
              emit_locked_builtin(lowering, path.id)
          }
-@@ -466,10 +489,20 @@ fn lower_unless_constant(
+@@ -466,10 +489,25 @@ fn lower_unless_constant(
      expression: ExprId,
      lower: fn(&mut FunctionLowering<'_, '_, '_, '_, '_>, ExprId) -> ValueId,
  ) -> ValueId {
@@ -4200,8 +4389,13 @@ index 89972f0978aa88b1ded14e3cf04c28af77be61a6..0e6c7a52a4833b799e8a5714d8a7aac6
 +    let constant = match lowering.file.decisions().constant(lowering.file.hir, inner) {
 +        FoldedValue::Constant(constant) => constant,
 +        FoldedValue::ConstantOutsideDeadZone(constant)
-+            if lowering.file.decisions().reads_member(inner) => constant,
-+        FoldedValue::ConstantOutsideDeadZone(_) | FoldedValue::Unknown => return lower(lowering, expression),
++            if lowering.file.decisions().reads_member(inner) =>
++        {
++            constant
++        }
++        FoldedValue::ConstantOutsideDeadZone(_) | FoldedValue::Unknown => {
++            return lower(lowering, expression);
++        }
 +    };
 +    if !passes_every_assertion(lowering.file, expression, constant) {
 +        return lower(lowering, expression);
@@ -4213,7 +4407,7 @@ index 89972f0978aa88b1ded14e3cf04c28af77be61a6..0e6c7a52a4833b799e8a5714d8a7aac6
  }
  
  fn lower_access(
-@@ -573,6 +606,7 @@ fn lower_assertion(
+@@ -573,6 +611,7 @@ fn lower_assertion(
  fn lower_for_effect_by_kind(
      lowering: &mut FunctionLowering<'_, '_, '_, '_, '_>,
      expression: ExprId,
@@ -4221,7 +4415,7 @@ index 89972f0978aa88b1ded14e3cf04c28af77be61a6..0e6c7a52a4833b799e8a5714d8a7aac6
  ) {
      if lowering.file.is_simplified(expression) {
          return unused::lower_simplified_expression(lowering, expression);
-@@ -600,7 +634,11 @@ fn lower_for_effect_by_kind(
+@@ -600,7 +639,11 @@ fn lower_for_effect_by_kind(
              UnOp::PreInc | UnOp::PreDec | UnOp::PostInc | UnOp::PostDec => {
                  assignment::lower_update(lowering, expression, ResultUsage::Effect);
              }
@@ -4234,7 +4428,7 @@ index 89972f0978aa88b1ded14e3cf04c28af77be61a6..0e6c7a52a4833b799e8a5714d8a7aac6
              UnOp::Plus | UnOp::Minus | UnOp::BitNot | UnOp::Typeof | UnOp::Delete => {
                  lower_by_decision(lowering, expression, Evaluation::PLAIN);
              }
-@@ -609,7 +647,7 @@ fn lower_for_effect_by_kind(
+@@ -609,7 +652,7 @@ fn lower_for_effect_by_kind(
          | ExprKind::AsConst(operand)
          | ExprKind::NonNull(operand)
          | ExprKind::Instantiation { expr: operand, .. } => {
@@ -4323,7 +4517,7 @@ index 619989f991d1aa283306f6c53b4488d1b7a42330..4e35eb2a522ea4811e9881ac9fa077ef
              break;
          }
 diff --git a/src/aot/lower/expression/unused.rs b/src/aot/lower/expression/unused.rs
-index 39a0816e61eb52e11c888ae195f498ddf0c1a914..b2d537ac7aad16657fa328be97b994ce5754fc64 100644
+index 39a0816e61eb52e11c888ae195f498ddf0c1a914..d89e8fb4601286232bf1c1c5d6639992d35a94c5 100644
 --- a/src/aot/lower/expression/unused.rs
 +++ b/src/aot/lower/expression/unused.rs
 @@ -1,8 +1,10 @@
@@ -4339,13 +4533,14 @@ index 39a0816e61eb52e11c888ae195f498ddf0c1a914..b2d537ac7aad16657fa328be97b994ce
  
  fn lower_properties_for_effect(
      lowering: &mut FunctionLowering<'_, '_, '_, '_, '_>,
-@@ -48,3 +50,97 @@ pub(super) fn lower_simplified_expression(
+@@ -48,3 +50,98 @@ pub(super) fn lower_simplified_expression(
          lower_expression_for_effect(lowering, part);
      }
  }
 +
 +pub(super) fn is_read_left_out(file: &FileLowering<'_, '_, '_, '_>, expression: ExprId) -> bool {
-+    file.builtins.global_path(file.hir, file.bound, expression)
++    file.builtins
++        .global_path(file.hir, file.bound, expression)
 +        .is_some_and(|steps| is_read_left_out_by_bun_run(steps[0].id))
 +}
 +
@@ -4532,10 +4727,10 @@ index 47c2241bb20f20fc28b7255b6d9c331d199b9ec4..6b724c074f2d5f0d7e6f2e2d69ed74b4
      match kind {
          FnKind::Getter => MethodKind::Getter,
 diff --git a/src/aot/lower/function/header.rs b/src/aot/lower/function/header.rs
-index 8a14872bf0677085bf68842dcc3dc425505878c8..7d0e9783eccf4c24ba551ea2d441936f3e7c63c0 100644
+index 8a14872bf0677085bf68842dcc3dc425505878c8..55c644967e1fd13c976a78738e1b790ce3a7732c 100644
 --- a/src/aot/lower/function/header.rs
 +++ b/src/aot/lower/function/header.rs
-@@ -1,10 +1,11 @@
+@@ -1,10 +1,13 @@
  use bun_sema::atom::known;
  use bun_sema::bind::{Binding, CodeUnit, Decl, FnOwner};
  use bun_sema::check::aot::FunctionRef;
@@ -4544,25 +4739,31 @@ index 8a14872bf0677085bf68842dcc3dc425505878c8..7d0e9783eccf4c24ba551ea2d441936f
  
  use crate::builtins::id::BuiltinClass;
 -use crate::ir::generated::{Function, FunctionFlags, FunctionKind, LimitId, SourceRange};
-+use crate::ir::generated::{Function, FunctionFlags, FunctionKind, FunctionSyntax, LimitId, SourceRange};
++use crate::ir::generated::{
++    Function, FunctionFlags, FunctionKind, FunctionSyntax, LimitId, SourceRange,
++};
  use crate::ir::{
      Body, DeclaredType, FunctionId, FunctionKey, Mapped, PositionFlags, Primitives, StringId, Type,
      TypeTable,
-@@ -54,6 +55,13 @@ pub(crate) fn create_header(
+@@ -54,6 +57,17 @@ pub(crate) fn create_header(
          role: file.source.function_role(),
          flags,
          length: 0,
 +        syntax: match key {
 +            FunctionKey::Source(source)
-+                if file.inputs.sources.kind(file.file) == crate::load::SourceKind::EvaluatedText
++                if file.inputs.sources.kind(file.file)
++                    == crate::load::SourceKind::EvaluatedText
 +                    && file.hir[source.function].name.is_none()
-+                    && find_enclosing_key(file, key).is_none() => FunctionSyntax::IS_EVALUATED_SCRIPT,
++                    && find_enclosing_key(file, key).is_none() =>
++            {
++                FunctionSyntax::IS_EVALUATED_SCRIPT
++            }
 +            _ => FunctionSyntax::default(),
 +        },
          enclosing_runtime_function,
          captures: captures::capture_positions(file, key),
          this_type: DeclaredType::untyped(),
-@@ -142,6 +150,12 @@ fn create_source_header(
+@@ -142,6 +156,12 @@ fn create_source_header(
          None if func.flags.contains(Flags::DEFAULT) => Some(file.intern_atom(known::default)),
          None => None,
      };
@@ -4576,19 +4777,21 @@ index 8a14872bf0677085bf68842dcc3dc425505878c8..7d0e9783eccf4c24ba551ea2d441936f
      header.length = compute_length(hir, function);
      let has_strict_this = header.flags.contains(FunctionFlags::HAS_THIS)
 diff --git a/src/aot/lower/function_types.rs b/src/aot/lower/function_types.rs
-index a16e810cbe5eca411bc700bf5c4e24070cdd3476..f0a1d8ace0a10519d485371a7943a570d2a755f2 100644
+index a16e810cbe5eca411bc700bf5c4e24070cdd3476..316791fd99193297bd9d0562ecca2e7095707ed4 100644
 --- a/src/aot/lower/function_types.rs
 +++ b/src/aot/lower/function_types.rs
-@@ -5,7 +5,7 @@ use rustc_hash::FxHashMap;
+@@ -5,7 +5,9 @@ use rustc_hash::FxHashMap;
  use std::sync::Arc;
  
  use super::{FileLowering, class};
 -use crate::ir::generated::{Function, FunctionFlags, FunctionKind, FunctionRole, SourceRange};
-+use crate::ir::generated::{Function, FunctionFlags, FunctionKind, FunctionRole, FunctionSyntax, SourceRange};
++use crate::ir::generated::{
++    Function, FunctionFlags, FunctionKind, FunctionRole, FunctionSyntax, SourceRange,
++};
  use crate::ir::{Body, DeclaredType, FunctionId, FunctionKey};
  
  #[derive(Default)]
-@@ -99,6 +99,7 @@ pub(in crate::lower) fn define_signatures(file: &mut FileLowering<'_, '_, '_, '_
+@@ -99,6 +101,7 @@ pub(in crate::lower) fn define_signatures(file: &mut FileLowering<'_, '_, '_, '_
          role: FunctionRole::Signature,
          flags: FunctionFlags::default(),
          length: 0,
@@ -4641,7 +4844,7 @@ index 70c23029e55a7853d05e32d3edb217165e7e102f..85f98b300feadf5bf256c7e900cf7c79
          sent: builder.result_at(results, YieldResult::Sent.to_wire()),
          mode: builder.result_at(results, YieldResult::Mode.to_wire()),
 diff --git a/src/aot/lower/iteration.rs b/src/aot/lower/iteration.rs
-index 06bd16d4b57d3284e960abfdb49ccee71c0fb30a..4a67453625f9ed6e80aa28251cd60770a2d1e086 100644
+index 06bd16d4b57d3284e960abfdb49ccee71c0fb30a..c4c254d8d0e8c5545776fef5923ab20972db15b2 100644
 --- a/src/aot/lower/iteration.rs
 +++ b/src/aot/lower/iteration.rs
 @@ -4,6 +4,8 @@ mod loop_head;
@@ -4653,47 +4856,69 @@ index 06bd16d4b57d3284e960abfdb49ccee71c0fb30a..4a67453625f9ed6e80aa28251cd60770
  use super::FunctionLowering;
  use crate::ir::ValueId;
  use crate::ir::generated::{IteratorCompletion, IteratorKind, IteratorResumeResult, ResumeMode};
-@@ -30,7 +32,7 @@ pub(crate) fn emit_iterator_open(
+@@ -28,9 +30,14 @@ pub(crate) fn emit_iterator_open(
+ ) -> ValueId {
+     let element_count = pattern.map(|shape| shape.element_count);
      let has_rest = pattern.is_some_and(|shape| shape.has_rest);
-     lowering
-         .builder
+-    lowering
+-        .builder
 -        .iterator_open(iterable, kind, element_count, pattern.is_some(), has_rest)
-+        .iterator_open(iterable, kind, element_count, pattern.is_some(), has_rest, false)
++    lowering.builder.iterator_open(
++        iterable,
++        kind,
++        element_count,
++        pattern.is_some(),
++        has_rest,
++        false,
++    )
  }
  
  pub(crate) fn emit_iterator_step(
-@@ -39,10 +41,11 @@ pub(crate) fn emit_iterator_step(
+@@ -39,10 +46,16 @@ pub(crate) fn emit_iterator_step(
      kind: IteratorKind,
      step_index: Option<u32>,
  ) -> IteratorStep {
-+    let held = get_values_held_by_step(lowering, kind);
-     let results =
-         lowering
-             .builder
+-    let results =
+-        lowering
+-            .builder
 -            .iterator_resume(iterator, None, kind, ResumeMode::Next, step_index, false);
-+            .iterator_resume(iterator, None, kind, ResumeMode::Next, step_index, &held, false);
++    let held = get_values_held_by_step(lowering, kind);
++    let results = lowering.builder.iterator_resume(
++        iterator,
++        None,
++        kind,
++        ResumeMode::Next,
++        step_index,
++        &held,
++        false,
++    );
      read_step_results(lowering, results)
  }
  
-@@ -53,9 +56,10 @@ pub(in crate::lower) fn emit_iterator_resume(
+@@ -53,9 +66,11 @@ pub(in crate::lower) fn emit_iterator_resume(
      mode: ResumeMode,
      sent: ValueId,
  ) -> IteratorStep {
-+    let held = get_values_held_by_step(lowering, kind);
-     let results = lowering
-         .builder
+-    let results = lowering
+-        .builder
 -        .iterator_resume(iterator, Some(sent), kind, mode, None, true);
-+        .iterator_resume(iterator, Some(sent), kind, mode, None, &held, true);
++    let held = get_values_held_by_step(lowering, kind);
++    let results =
++        lowering
++            .builder
++            .iterator_resume(iterator, Some(sent), kind, mode, None, &held, true);
      read_step_results(lowering, results)
  }
  
-@@ -65,7 +69,19 @@ pub(crate) fn emit_iterator_close(
+@@ -65,7 +80,21 @@ pub(crate) fn emit_iterator_close(
      kind: IteratorKind,
      completion: IteratorCompletion,
  ) {
 -    lowering.builder.iterator_close(iterator, kind, completion);
 +    let held = get_values_held_by_step(lowering, kind);
-+    lowering.builder.iterator_close(iterator, kind, completion, &held);
++    lowering
++        .builder
++        .iterator_close(iterator, kind, completion, &held);
 +}
 +
 +// Only an async iterator step or close can suspend the function.
@@ -4744,19 +4969,21 @@ index cac7a5f1d5fb828ed9b786facb126c2573922769..ab3a776236af5b94ddbb39a80fc13ae2
          .builder
          .try_define_live_binding(target, module, source_key, target_key, getter);
 diff --git a/src/aot/lower/layouts/object_types.rs b/src/aot/lower/layouts/object_types.rs
-index 12024eb504d6c44c841a573906a2a5e701022ae5..f7eb4071c53e6aa70162d603256505f7ac4486a1 100644
+index 12024eb504d6c44c841a573906a2a5e701022ae5..cb51848cd648fc7c7ae5c68d6876ca15e6ce2024 100644
 --- a/src/aot/lower/layouts/object_types.rs
 +++ b/src/aot/lower/layouts/object_types.rs
-@@ -894,7 +894,7 @@ fn describe_key(file: &FileLowering<'_, '_, '_, '_>, key: PropertyKeyId) -> Opti
+@@ -894,7 +894,9 @@ fn describe_key(file: &FileLowering<'_, '_, '_, '_>, key: PropertyKeyId) -> Opti
      let mut description = KeyDescription::new();
      description.push(key.kind.to_wire() as u8);
      match key.kind {
 -        PropertyKeyKind::Text | PropertyKeyKind::EnginePrivateName => {
-+        PropertyKeyKind::Text | PropertyKeyKind::EnginePrivateName | PropertyKeyKind::ModulePrivateName => {
++        PropertyKeyKind::Text
++        | PropertyKeyKind::EnginePrivateName
++        | PropertyKeyKind::ModulePrivateName => {
              description.extend_from_slice(file.fragment.strings.get(key.text?));
          }
          PropertyKeyKind::WellKnownSymbol => description.push(key.symbol?.to_wire() as u8),
-@@ -903,7 +903,7 @@ fn describe_key(file: &FileLowering<'_, '_, '_, '_>, key: PropertyKeyId) -> Opti
+@@ -903,7 +905,7 @@ fn describe_key(file: &FileLowering<'_, '_, '_, '_>, key: PropertyKeyId) -> Opti
                  return None;
              };
              description.extend_from_slice(&home.0.to_be_bytes());
@@ -4766,15 +4993,17 @@ index 12024eb504d6c44c841a573906a2a5e701022ae5..f7eb4071c53e6aa70162d603256505f7
          PropertyKeyKind::PrivateName => return None,
      }
 diff --git a/src/aot/lower/member.rs b/src/aot/lower/member.rs
-index 4cb9f6272d18e4ea4ec17f2278697882e48cada1..8b78e789023d085ca4a5d576ab1d0258649c38e5 100644
+index 4cb9f6272d18e4ea4ec17f2278697882e48cada1..db52b8142c1d4a83cc7a1759187a5773d9b4892d 100644
 --- a/src/aot/lower/member.rs
 +++ b/src/aot/lower/member.rs
-@@ -4,13 +4,14 @@ mod reference;
+@@ -4,13 +4,16 @@ mod reference;
  use bun_sema::atom::known;
  use bun_sema::check::aot::ShapeKind;
  use bun_sema::fold::Constant;
 -use bun_sema::hir::{Chain, ExprId, ExprKind, MemberKey, NodeData};
-+use bun_sema::hir::{Chain, ExprId, ExprKind, Flags, Member, MemberKey, NameKind, NodeData, Prop, PropKey};
++use bun_sema::hir::{
++    Chain, ExprId, ExprKind, Flags, Member, MemberKey, NameKind, NodeData, Prop, PropKey,
++};
  use bun_sema::types::EnumValue;
  
  use super::{
@@ -4785,7 +5014,7 @@ index 4cb9f6272d18e4ea4ec17f2278697882e48cada1..8b78e789023d085ca4a5d576ab1d0258
  use crate::diagnostic_codes::Code;
  use crate::ir::{BlockId, PropertyKeyId, ValueId};
  
-@@ -38,6 +39,43 @@ impl PropertyName {
+@@ -38,6 +41,43 @@ impl PropertyName {
      }
  }
  
@@ -4829,7 +5058,7 @@ index 4cb9f6272d18e4ea4ec17f2278697882e48cada1..8b78e789023d085ca4a5d576ab1d0258
  #[derive(Copy, Clone)]
  enum Access {
      Property(PropertyKeyId),
-@@ -89,13 +127,24 @@ pub(crate) fn emit_define(
+@@ -89,13 +129,28 @@ pub(crate) fn emit_define(
      object: ValueId,
      name: PropertyName,
      value: ValueId,
@@ -4851,23 +5080,29 @@ index 4cb9f6272d18e4ea4ec17f2278697882e48cada1..8b78e789023d085ca4a5d576ab1d0258
              lowering.builder.prop_define(object, key, value)
          }
 -        Access::Element(property) => lowering.builder.elem_define(object, property, value),
-+        Access::Element(property) => lowering.builder.elem_define(object, property, value, called_builtin),
++        Access::Element(property) => {
++            lowering
++                .builder
++                .elem_define(object, property, value, called_builtin)
++        }
      };
  }
  
 diff --git a/src/aot/lower/member/key.rs b/src/aot/lower/member/key.rs
-index 500d7ac6ea6766858e32133b19dc12ad2c55afc0..58861489b07669d1a846c1475bb311810ff417e0 100644
+index 500d7ac6ea6766858e32133b19dc12ad2c55afc0..317412ea41610f51b03f7d31f5740454ba4d5132 100644
 --- a/src/aot/lower/member/key.rs
 +++ b/src/aot/lower/member/key.rs
-@@ -6,7 +6,7 @@ use bun_sema::hir::{ExprId, MemberKey, PropKey};
+@@ -6,8 +6,8 @@ use bun_sema::hir::{ExprId, MemberKey, PropKey};
  use super::PropertyName;
  use crate::builtins::table;
  use crate::builtins::{
 -    BuiltinName, BuiltinNames, Intrinsic, IntrinsicPosition, Mutability, Resolved, SourceDialect,
-+    Intrinsic, IntrinsicPosition, Mutability, Resolved, SourceDialect,
-     find_intrinsic, find_symbol_key,
+-    find_intrinsic, find_symbol_key,
++    Intrinsic, IntrinsicPosition, Mutability, Resolved, SourceDialect, find_intrinsic,
++    find_symbol_key,
  };
  use crate::ir::generated::NameClass;
+ use crate::ir::{PropertyKey, PropertyKeyId, PropertyKeyKind, StringId, ValueId};
 @@ -44,7 +44,7 @@ pub(in crate::lower) fn created_symbol_key(
      }
      let module = file.fragment.declare_module(ModuleRef::File(creation.file));
@@ -4930,7 +5165,7 @@ index 15f1f3b40421f5649235ea08702a52e2308f1a13..9eed6d2415a2fc80d830e48b03711f9c
  
  use bun_sema::check::Checker;
 diff --git a/src/aot/lower/module.rs b/src/aot/lower/module.rs
-index d15c1dcf15af52545c455d31b6dac4d2178930cf..7f191fe2041cb650fd675fe45a3a3e334324dd49 100644
+index d15c1dcf15af52545c455d31b6dac4d2178930cf..b5fda4ec7aba26a04bf624a75dfab8dc4971bc82 100644
 --- a/src/aot/lower/module.rs
 +++ b/src/aot/lower/module.rs
 @@ -17,7 +17,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
@@ -4941,16 +5176,18 @@ index d15c1dcf15af52545c455d31b6dac4d2178930cf..7f191fe2041cb650fd675fe45a3a3e33
  use super::{FileLowering, FunctionLowering};
  use crate::builtins::ResolvedBuiltins;
  use crate::builtins::id::{BuiltinId, RuntimeFunction};
-@@ -27,7 +26,7 @@ use crate::modules::ImportBinding;
+@@ -27,7 +26,9 @@ use crate::modules::ImportBinding;
  
  pub(crate) use self::body::{finish_module, lower_export_default, lower_module_body};
  pub(crate) use self::faces::{lower_check_body, lower_face_body};
 -pub(crate) use self::imports::{get_import, lower_namespace_member, lower_namespace_receiver};
-+pub(crate) use self::imports::{get_import, lower_import, lower_namespace_member, lower_namespace_receiver};
++pub(crate) use self::imports::{
++    get_import, lower_import, lower_namespace_member, lower_namespace_receiver,
++};
  pub(crate) use self::loads::{
      lower_import_call, lower_import_equals_require, try_lower_module_call,
  };
-@@ -37,7 +36,6 @@ pub(in crate::lower) use library::LibraryFunctionForm;
+@@ -37,7 +38,6 @@ pub(in crate::lower) use library::LibraryFunctionForm;
  #[derive(Default)]
  pub(crate) struct ModuleState {
      pub(in crate::lower) data: DataState,
@@ -4959,19 +5196,20 @@ index d15c1dcf15af52545c455d31b6dac4d2178930cf..7f191fe2041cb650fd675fe45a3a3e33
  }
  
 diff --git a/src/aot/lower/module/body.rs b/src/aot/lower/module/body.rs
-index dfa1e856eff7c2a23404dc37c04b29e608e9adfb..392b19b999f3dcbfef9104bbb7cb33ad169917cc 100644
+index dfa1e856eff7c2a23404dc37c04b29e608e9adfb..4dac836c074d0aafceef59ce7ea6ba4d52b0ecc6 100644
 --- a/src/aot/lower/module/body.rs
 +++ b/src/aot/lower/module/body.rs
-@@ -11,7 +11,7 @@ use crate::lower::fragment::ModuleFragment;
+@@ -10,8 +10,7 @@ use crate::ir::{FunctionId, FunctionKey, VariableKey};
+ use crate::lower::fragment::ModuleFragment;
  use crate::lower::member::PropertyName;
  use crate::lower::{
-     FileLowering, FunctionLowering, commonjs, control, data, expression, function, scope,
+-    FileLowering, FunctionLowering, commonjs, control, data, expression, function, scope,
 -    statement, validate,
-+    statement,
++    FileLowering, FunctionLowering, commonjs, control, data, expression, function, scope, statement,
  };
  use crate::modules::{ExportBinding, ModuleKind};
  
-@@ -79,7 +79,6 @@ fn ensure_exported_variables(file: &mut FileLowering<'_, '_, '_, '_>) {
+@@ -79,7 +78,6 @@ fn ensure_exported_variables(file: &mut FileLowering<'_, '_, '_, '_>) {
  }
  
  pub(crate) fn lower_module_body(file: &mut FileLowering<'_, '_, '_, '_>, function: FunctionId) {
@@ -4979,7 +5217,7 @@ index dfa1e856eff7c2a23404dc37c04b29e608e9adfb..392b19b999f3dcbfef9104bbb7cb33ad
      match file.inputs.modules.kind(file.file) {
          ModuleKind::SourceText | ModuleKind::Data => lower_es_module_body(file, function),
          ModuleKind::CommonJs => commonjs::lower_commonjs_body(file, function),
-@@ -96,7 +95,7 @@ fn lower_es_module_body(file: &mut FileLowering<'_, '_, '_, '_>, function: Funct
+@@ -96,7 +94,7 @@ fn lower_es_module_body(file: &mut FileLowering<'_, '_, '_, '_>, function: Funct
      let mut lowering = FunctionLowering::begin(file, function);
      scope::enter_scope(&mut lowering, scope);
      if let Some(failure) = load_failure {
@@ -5019,7 +5257,7 @@ index 50d17e27d615ed9f093cf8e11683b6e1753866d8..2af2bea305e678597e2bdefca27fecbb
          lowering.builder.switch_to(split.not_taken);
      }
 diff --git a/src/aot/lower/module/imports.rs b/src/aot/lower/module/imports.rs
-index d66fedf72455173d18daf2ee5bcc4e55289afc2d..ecdcec936f667c9275286f67fb63227f67b981cb 100644
+index d66fedf72455173d18daf2ee5bcc4e55289afc2d..9d1f5995732c379c1237967635294bb6334e6291 100644
 --- a/src/aot/lower/module/imports.rs
 +++ b/src/aot/lower/module/imports.rs
 @@ -1,6 +1,6 @@
@@ -5031,7 +5269,7 @@ index d66fedf72455173d18daf2ee5bcc4e55289afc2d..ecdcec936f667c9275286f67fb63227f
  
  use crate::builtins::id::{BuiltinId, BuiltinName};
  use crate::builtins::{BuiltinPath, Mutability, Resolved, table};
-@@ -22,6 +22,36 @@ pub(crate) fn get_import(
+@@ -22,6 +22,44 @@ pub(crate) fn get_import(
      emit_import_binding(lowering, binding, name, path)
  }
  
@@ -5041,7 +5279,9 @@ index d66fedf72455173d18daf2ee5bcc4e55289afc2d..ecdcec936f667c9275286f67fb63227f
 +    if hir.is_type_only_import(import) {
 +        return;
 +    }
-+    let named = hir[import].named.iter()
++    let named = hir[import]
++        .named
++        .iter()
 +        .filter(|&spec| !hir[spec].type_only)
 +        .map(Decl::ImportSpec);
 +    let whole = [Decl::ImportNamespace(import), Decl::ImportDefault(import)];
@@ -5050,11 +5290,17 @@ index d66fedf72455173d18daf2ee5bcc4e55289afc2d..ecdcec936f667c9275286f67fb63227f
 +        if symbol.is_none() {
 +            continue;
 +        }
-+        match lowering.file.inputs.modules.import_binding(lowering.file.file, symbol) {
++        match lowering
++            .file
++            .inputs
++            .modules
++            .import_binding(lowering.file.file, symbol)
++        {
 +            ImportBinding::CapturedBuiltin { member, export }
 +                if table::entry(member).is_added_at_first_read =>
 +            {
-+                let variable = scope::ensure_variable(lowering.file, VariableKey::SyntheticExport(export));
++                let variable =
++                    scope::ensure_variable(lowering.file, VariableKey::SyntheticExport(export));
 +                lowering.builder.get_module_variable(variable);
 +            }
 +            ImportBinding::Builtin(member) if table::entry(member).is_added_at_first_read => {
@@ -5068,7 +5314,7 @@ index d66fedf72455173d18daf2ee5bcc4e55289afc2d..ecdcec936f667c9275286f67fb63227f
  pub(super) fn emit_import_binding(
      lowering: &mut FunctionLowering<'_, '_, '_, '_, '_>,
      binding: ImportBinding,
-@@ -50,7 +80,7 @@ pub(super) fn emit_import_binding(
+@@ -50,7 +88,7 @@ pub(super) fn emit_import_binding(
              holder,
              name: member_name,
          } => {
@@ -5077,7 +5323,7 @@ index d66fedf72455173d18daf2ee5bcc4e55289afc2d..ecdcec936f667c9275286f67fb63227f
              emit_named_read(lowering, object, member_name)
          }
          ImportBinding::NamespaceRead {
-@@ -135,7 +165,7 @@ pub(super) fn emit_builtin_import(
+@@ -135,7 +173,7 @@ pub(super) fn emit_builtin_import(
          Some(BuiltinPath {
              id: locked,
              mutability: Mutability::AlwaysLocked,
@@ -5086,7 +5332,7 @@ index d66fedf72455173d18daf2ee5bcc4e55289afc2d..ecdcec936f667c9275286f67fb63227f
          // A locked property that holds a function of the host, which has no entry of its own: `import { wrap } from "node:module"`.
          Some(BuiltinPath {
              mutability: Mutability::AlwaysLocked,
-@@ -160,11 +190,11 @@ fn emit_export_read(lowering: &mut FunctionLowering<'_, '_, '_, '_, '_>, id: Bui
+@@ -160,11 +198,11 @@ fn emit_export_read(lowering: &mut FunctionLowering<'_, '_, '_, '_, '_>, id: Bui
      let entry = table::entry(id);
      match (entry.module, entry.holder) {
          (None, Some(holder)) => {
@@ -5101,7 +5347,7 @@ index d66fedf72455173d18daf2ee5bcc4e55289afc2d..ecdcec936f667c9275286f67fb63227f
  }
  
 diff --git a/src/aot/lower/module/loads.rs b/src/aot/lower/module/loads.rs
-index 65f8d32781f0d4d7d223b7439f4021a80c97488d..000a69eb25a4621d52da32ae10fa29dfc75332bf 100644
+index 65f8d32781f0d4d7d223b7439f4021a80c97488d..20e181e77c70d1a97811dc5a5eaadb65332e3a1b 100644
 --- a/src/aot/lower/module/loads.rs
 +++ b/src/aot/lower/module/loads.rs
 @@ -124,26 +124,29 @@ pub(crate) fn lower_import_call(
@@ -5186,16 +5432,18 @@ index 65f8d32781f0d4d7d223b7439f4021a80c97488d..000a69eb25a4621d52da32ae10fa29df
      let arguments = Arguments::Values(smallvec![directory]);
      let is_below = call::emit_call(
          lowering,
-@@ -990,7 +997,7 @@ fn emit_path_from_own_directory(
+@@ -990,7 +997,9 @@ fn emit_path_from_own_directory(
      lowering.continue_in(below);
      let length = PropertyName::Constant(lowering.file.atom_key(known::length));
      let length = member::emit_get(lowering, directory, length);
 -    let slice = lowering.builder.builtin(BuiltinId::StringPrototypeSlice);
-+    let slice = lowering.builder.builtin(BuiltinId::StringPrototypeSlice, true);
++    let slice = lowering
++        .builder
++        .builtin(BuiltinId::StringPrototypeSlice, true);
      let arguments = Arguments::Values(smallvec![length]);
      let mut rest = call::emit_call(lowering, slice, Some(text), arguments, CallSite::default());
      // `path.join` answers `B:\~BUN\root\plugins\a.js` there.
-@@ -998,7 +1005,7 @@ fn emit_path_from_own_directory(
+@@ -998,7 +1007,7 @@ fn emit_path_from_own_directory(
      if platform.contains(Platforms::WINDOWS) {
          let replace_all = lowering
              .builder
@@ -5204,7 +5452,7 @@ index 65f8d32781f0d4d7d223b7439f4021a80c97488d..000a69eb25a4621d52da32ae10fa29df
          let separators = [&b"\\"[..], b"/"].map(|separator| {
              let separator = lowering.file.intern_bytes(separator);
              lowering.builder.string(separator)
-@@ -1059,7 +1066,7 @@ fn branch_on_path_made_by_call(
+@@ -1059,7 +1068,7 @@ fn branch_on_path_made_by_call(
          let separator = lowering.builder.string(separator);
          let last_index_of = lowering
              .builder
@@ -5213,16 +5461,18 @@ index 65f8d32781f0d4d7d223b7439f4021a80c97488d..000a69eb25a4621d52da32ae10fa29df
          let arguments = Arguments::Values(smallvec![separator]);
          let end = call::emit_call(
              lowering,
-@@ -1069,7 +1076,7 @@ fn branch_on_path_made_by_call(
+@@ -1069,7 +1078,9 @@ fn branch_on_path_made_by_call(
              CallSite::default(),
          );
          let start = lowering.builder.integer(0);
 -        let slice = lowering.builder.builtin(BuiltinId::StringPrototypeSlice);
-+        let slice = lowering.builder.builtin(BuiltinId::StringPrototypeSlice, true);
++        let slice = lowering
++            .builder
++            .builtin(BuiltinId::StringPrototypeSlice, true);
          let arguments = Arguments::Values(smallvec![start, end]);
          directory = call::emit_call(
              lowering,
-@@ -1110,7 +1117,7 @@ fn emit_refusal_of_other_path(
+@@ -1110,7 +1121,7 @@ fn emit_refusal_of_other_path(
      );
      let parts = [head, written, tail].map(|part| lowering.builder.string(part));
      let message = lowering.builder.strcat(&parts);
@@ -5231,7 +5481,7 @@ index 65f8d32781f0d4d7d223b7439f4021a80c97488d..000a69eb25a4621d52da32ae10fa29df
      let arguments = Arguments::Values(smallvec![message]);
      let error = call::emit_construct(lowering, constructor, None, arguments, CallSite::default());
      let name = lowering.file.intern_bytes(b"code");
-@@ -1168,7 +1175,7 @@ fn emit_computed_load(
+@@ -1168,7 +1179,7 @@ fn emit_computed_load(
                  let module = modules.face(spelled.module).unwrap_or(spelled.module);
                  let module = lowering.file.fragment.declare_module(module);
                  let referrer = lowering.file.module_id();
@@ -5240,7 +5490,7 @@ index 65f8d32781f0d4d7d223b7439f4021a80c97488d..000a69eb25a4621d52da32ae10fa29df
              }
          };
          lowering.builder.write_variable(result, loaded);
-@@ -1272,15 +1279,16 @@ fn emit_require_failure(
+@@ -1272,15 +1283,18 @@ fn emit_require_failure(
          }
          ImportSpecifier::Pattern { .. } | ImportSpecifier::Unknown => {}
      }
@@ -5255,11 +5505,13 @@ index 65f8d32781f0d4d7d223b7439f4021a80c97488d..000a69eb25a4621d52da32ae10fa29df
  ) -> ValueId {
      let failure = lowering.file.fragment.declare_module_failure(failure);
 -    lowering.builder.throw_module_failure(failure);
-+    lowering.builder.throw_module_failure(failure, is_for_require);
++    lowering
++        .builder
++        .throw_module_failure(failure, is_for_require);
      lowering.builder.unreachable();
      lowering.begin_unreachable_block();
      lowering.builder.undefined()
-@@ -1314,8 +1322,8 @@ fn emit_resolved_import(
+@@ -1314,8 +1328,8 @@ fn emit_resolved_import(
      object: BuiltinId,
  ) -> ValueId {
      let value = imports::emit_builtin_import(lowering, object, None);
@@ -5270,7 +5522,7 @@ index 65f8d32781f0d4d7d223b7439f4021a80c97488d..000a69eb25a4621d52da32ae10fa29df
      let arguments = Arguments::Values(smallvec![value]);
      call::emit_call(
          lowering,
-@@ -1332,15 +1340,15 @@ fn emit_rejected_import(
+@@ -1332,15 +1346,15 @@ fn emit_rejected_import(
  ) -> ValueId {
      let failure = lowering.file.fragment.declare_module_failure(failure);
      let handler = control::begin_handler(lowering, BlockRole::CatchHandler, None);
@@ -5390,7 +5642,7 @@ index 1f0c1cde38509f0acd86a388e25e16218a5da54f..876a735330492e55cc4b6ac19ae5c74c
  pub(in crate::lower) fn literal_argument_position(hir: &hir::File<'_>, call: &Call) -> Option<u32> {
      let mut arguments = hir.ids(call.args);
 diff --git a/src/aot/lower/parameters/binding.rs b/src/aot/lower/parameters/binding.rs
-index fff1784f453e45270d3de8afe5a7c1a5aa624d01..431b6c69c7d6a9b0572d8bf95119dee86bcf3238 100644
+index fff1784f453e45270d3de8afe5a7c1a5aa624d01..cf3ce60168e0b915b53e57a93175dcec600feea7 100644
 --- a/src/aot/lower/parameters/binding.rs
 +++ b/src/aot/lower/parameters/binding.rs
 @@ -1,11 +1,12 @@
@@ -5401,25 +5653,22 @@ index fff1784f453e45270d3de8afe5a7c1a5aa624d01..431b6c69c7d6a9b0572d8bf95119dee8
  use smallvec::SmallVec;
  
  use super::arguments;
- use crate::ir::{DeclaredType, ValueId};
 +use crate::ir::generated::FunctionFlags;
+ use crate::ir::{DeclaredType, ValueId};
  use crate::lower::member::PropertyName;
 -use crate::lower::scope::{BindingForm, BindingRef, ScopeSlot};
 +use crate::lower::scope::{BindingForm, BindingRef, ScopeSlot, Storage};
  use crate::lower::{
      FunctionLowering, condition, convert, expression, member, pattern, positions, scope,
  };
-@@ -41,6 +42,75 @@ pub(crate) fn lower_parameters(lowering: &mut FunctionLowering<'_, '_, '_, '_, '
+@@ -41,6 +42,72 @@ pub(crate) fn lower_parameters(lowering: &mut FunctionLowering<'_, '_, '_, '_, '
      }
      emit_parameter_var_copies(lowering, source);
      scope::instantiate_functions(lowering, top);
 +    list_held_bindings(lowering, source);
 +}
 +
-+fn list_held_bindings(
-+    lowering: &mut FunctionLowering<'_, '_, '_, '_, '_>,
-+    source: FnId,
-+) {
++fn list_held_bindings(lowering: &mut FunctionLowering<'_, '_, '_, '_, '_>, source: FnId) {
 +    let flags = lowering.builder.function().flags;
 +    if !flags.intersects(FunctionFlags::IS_ASYNC | FunctionFlags::IS_GENERATOR) {
 +        return;
@@ -5512,10 +5761,10 @@ index 836987baf2b81b6af5c905ba70af74dfd1951748..0a4d3cef7f33bc36b65ab6c08dada0fc
  
      let direct = lowering.create_block();
 diff --git a/src/aot/lower/scope/walk/functions.rs b/src/aot/lower/scope/walk/functions.rs
-index 5dc9f015489f6339698c3ab1a73cfdf112f48a27..de760d0b7bcbe5dc9de412d20646a31cb867140c 100644
+index 5dc9f015489f6339698c3ab1a73cfdf112f48a27..be06f5bfa2b17b8dc8625d0d5ff4b1d33fe43c87 100644
 --- a/src/aot/lower/scope/walk/functions.rs
 +++ b/src/aot/lower/scope/walk/functions.rs
-@@ -1,10 +1,11 @@
+@@ -1,9 +1,10 @@
  use bun_sema::bind::{CodeUnit, Decl, EvalScope, FnOwner, ScopeId, ScopeKind};
  use bun_sema::check::aot::FunctionRef;
 -use bun_sema::hir::{ClassId, FnBody, FnId, FnKind, StmtId};
@@ -5523,11 +5772,10 @@ index 5dc9f015489f6339698c3ab1a73cfdf112f48a27..de760d0b7bcbe5dc9de412d20646a31c
  
  use super::{Context, EvalUse, Initialization, PatternRole, Task, WalkedFunctionId, Walker};
  use crate::ir::{ClassSlot, FunctionKey};
- use crate::lower::scope::{BindingRef, ScopeSlot};
 +use crate::lower::parameters::parameter_symbols;
+ use crate::lower::scope::{BindingRef, ScopeSlot};
  use crate::lower::{class, commonjs};
  
- fn find_scope_class(kind: ScopeKind) -> Option<ClassId> {
 @@ -54,6 +55,17 @@ impl Walker<'_, '_> {
          let hir = self.hir;
          let context = self.create_function_context(function, id);
@@ -5547,16 +5795,18 @@ index 5dc9f015489f6339698c3ab1a73cfdf112f48a27..de760d0b7bcbe5dc9de412d20646a31c
              self.push_expressions([hir[parameter].default], context);
              self.visit_pattern(hir[parameter].pat, PatternRole::Parameter, context);
 diff --git a/src/aot/lower/statement.rs b/src/aot/lower/statement.rs
-index f73a7b08a3d8d11a466e88a8ab016efc333962f1..95ff2153b816d69f9a0c7bf8fcfc99c3c0b832f4 100644
+index f73a7b08a3d8d11a466e88a8ab016efc333962f1..f9c6f9ec45f20d21a823b6ee384a93c33fd8d3f0 100644
 --- a/src/aot/lower/statement.rs
 +++ b/src/aot/lower/statement.rs
-@@ -65,6 +65,13 @@ fn lower_statement_in_place(
+@@ -65,6 +65,15 @@ fn lower_statement_in_place(
          return;
      }
      if commonjs::is_erased(lowering.file, statement) {
 +        let hir = lowering.file.hir;
 +        if let StmtKind::Expr(value) = hir[statement].kind
-+            && let ExprKind::Call(site) = hir[expression::skip_type_syntax(lowering.file, value)].kind {
++            && let ExprKind::Call(site) =
++                hir[expression::skip_type_syntax(lowering.file, value)].kind
++        {
 +            lowering.set_position(hir[statement].start);
 +            let callee = expression::skip_type_syntax(lowering.file, hir[site].callee);
 +            expression::lower_read_of_locked_path(lowering, callee);
@@ -5564,7 +5814,7 @@ index f73a7b08a3d8d11a466e88a8ab016efc333962f1..95ff2153b816d69f9a0c7bf8fcfc99c3
          return;
      }
      let stmt = lowering.file.hir[statement];
-@@ -78,10 +85,10 @@ fn lower_statement_in_place(
+@@ -78,10 +87,10 @@ fn lower_statement_in_place(
          | StmtKind::Directive { .. }
          | StmtKind::Interface(_)
          | StmtKind::TypeAlias(_)
@@ -5576,7 +5826,7 @@ index f73a7b08a3d8d11a466e88a8ab016efc333962f1..95ff2153b816d69f9a0c7bf8fcfc99c3
          StmtKind::Expr(expression) => {
              if !commonjs::try_lower_exports_statement(lowering, expression) {
                  expression::lower_expression_for_effect(lowering, expression);
-@@ -154,6 +161,7 @@ fn lower_return(lowering: &mut FunctionLowering<'_, '_, '_, '_, '_>, expression:
+@@ -154,6 +163,7 @@ fn lower_return(lowering: &mut FunctionLowering<'_, '_, '_, '_, '_>, expression:
      }
      let value = expression::lower_tail_expression(lowering, expression);
      let value = generator::prepare_return_value(lowering, value);
@@ -5584,7 +5834,7 @@ index f73a7b08a3d8d11a466e88a8ab016efc333962f1..95ff2153b816d69f9a0c7bf8fcfc99c3
      control::emit_return(lowering, value, Some(expression));
  }
  
-@@ -166,14 +174,14 @@ fn lower_if(
+@@ -166,14 +176,14 @@ fn lower_if(
      let decisions = lowering.file.decisions();
      let has_live_else = no.is_some() && !decisions.is_dead_stmt(no);
      if decisions.is_dead_stmt(yes) {
@@ -7867,7 +8117,7 @@ index b13e2990dc5ac8fda1441657b4b3f7eb94365a64..2dbac12fda1e3973993390d3d7af6ea7
          resume_next: create_value_block(lowering),
          resume_throw: create_value_block(lowering),
 diff --git a/src/aot/modules/bindings.rs b/src/aot/modules/bindings.rs
-index fe92272ad4d139ac3c12851088c251c151a4ab7d..89baaa9c993fe5c7c0f774985bfef7055ffbe309 100644
+index fe92272ad4d139ac3c12851088c251c151a4ab7d..df405217d689f82b81853eddc7bc670833650e6d 100644
 --- a/src/aot/modules/bindings.rs
 +++ b/src/aot/modules/bindings.rs
 @@ -105,11 +105,18 @@ pub struct SyntheticExport {
@@ -7905,7 +8155,7 @@ index fe92272ad4d139ac3c12851088c251c151a4ab7d..89baaa9c993fe5c7c0f774985bfef705
      pub kind: ModuleRequestKind,
      /// Behind the request, or behind any site of it, the target has run to its end or lies on a cycle with the module that asks.
      pub completes: bool,
-@@ -138,11 +147,16 @@ impl ModuleRequest {
+@@ -138,11 +147,19 @@ impl ModuleRequest {
              target,
              phase: ImportPhase::Evaluation,
              is_dynamic_star_export: false,
@@ -7916,26 +8166,33 @@ index fe92272ad4d139ac3c12851088c251c151a4ab7d..89baaa9c993fe5c7c0f774985bfef705
      }
  
 +    pub fn hoisted_import(target: ModuleRef) -> ModuleRequest {
-+        ModuleRequest { is_hoisted: true, ..ModuleRequest::import(target) }
++        ModuleRequest {
++            is_hoisted: true,
++            ..ModuleRequest::import(target)
++        }
 +    }
 +
      pub fn require(target: ModuleRef, completes: bool) -> ModuleRequest {
          ModuleRequest {
              kind: ModuleRequestKind::Require,
 diff --git a/src/aot/modules/exports.rs b/src/aot/modules/exports.rs
-index fab413b131635e92731e620c63ee633b4aa36d53..6250f78f61b9db0233655b1918a9de3024d96e02 100644
+index fab413b131635e92731e620c63ee633b4aa36d53..be35468697f08b689b84244fbbe5bccb918297db 100644
 --- a/src/aot/modules/exports.rs
 +++ b/src/aot/modules/exports.rs
-@@ -612,7 +612,7 @@ fn find_absent_name(
+@@ -612,7 +612,11 @@ fn find_absent_name(
      may_be_absent.then_some(PendingFailure {
          order: written.order,
          failure: ModuleFailure {
 -            kind: ModuleFailureKind::ExportMayBeAbsent { exporter, name },
-+            kind: ModuleFailureKind::ExportMayBeAbsent { exporter, name, asked_by: written.asked_by },
++            kind: ModuleFailureKind::ExportMayBeAbsent {
++                exporter,
++                name,
++                asked_by: written.asked_by,
++            },
              importer,
              site: written.site_kind,
              start: written.start,
-@@ -660,21 +660,26 @@ pub(super) fn resolve_exports(
+@@ -660,21 +664,28 @@ pub(super) fn resolve_exports(
          nodes.tables[table].follows_every_star = true;
      }
      let mut failures = Vec::new();
@@ -7943,7 +8200,9 @@ index fab413b131635e92731e620c63ee633b4aa36d53..6250f78f61b9db0233655b1918a9de30
      for (table, module) in nodes.tables.iter().zip(entries) {
          let own_results = &results[table.nodes.start as usize..];
 -        for (&(_, entry), &(_, resolved)) in module.own.iter().zip(own_results) {
-+        for ((&(_, entry), &(_, resolved)), node) in module.own.iter().zip(own_results).zip(table.nodes.start..) {
++        for ((&(_, entry), &(_, resolved)), node) in
++            module.own.iter().zip(own_results).zip(table.nodes.start..)
++        {
              failures.extend(find_link_failure(
                  scans,
                  module.file,
@@ -7963,12 +8222,15 @@ index fab413b131635e92731e620c63ee633b4aa36d53..6250f78f61b9db0233655b1918a9de30
          index: nodes.index,
          failures,
          commonjs: CommonJsNames::default(),
-@@ -699,14 +704,14 @@ pub(super) fn resolve_exports(
+@@ -699,14 +710,20 @@ pub(super) fn resolve_exports(
      for written in &commonjs_imports {
          if let Some(pending) = find_absent_name(&tables, modules, written) {
              tables.failures.push(pending);
 -            absent_names.push((written.imported, written.order));
-+            absent_names.push((written.imported, (written.asked_by.is_none(), written.order)));
++            absent_names.push((
++                written.imported,
++                (written.asked_by.is_none(), written.order),
++            ));
          }
      }
      tables
@@ -7976,11 +8238,14 @@ index fab413b131635e92731e620c63ee633b4aa36d53..6250f78f61b9db0233655b1918a9de30
          .shared_sort_by_key(|pending| (pending.failure.importer, pending.order));
      absent_names.shared_sort_by_key(|&(imported, order)| (imported.importer, order));
 -    tables.absent_commonjs_names = absent_names;
-+    tables.absent_commonjs_names = absent_names.into_iter().map(|(imported, (_, order))| (imported, order)).collect();
++    tables.absent_commonjs_names = absent_names
++        .into_iter()
++        .map(|(imported, (_, order))| (imported, order))
++        .collect();
      tables.commonjs_imports = commonjs_imports
          .iter()
          .map(|written| written.imported)
-@@ -721,6 +726,7 @@ pub(super) struct ExportTables {
+@@ -721,6 +738,7 @@ pub(super) struct ExportTables {
      files: Vec<FileId>,
      tables: Vec<FileTable>,
      results: Vec<(Atom, ResolvedName)>,
@@ -7988,7 +8253,7 @@ index fab413b131635e92731e620c63ee633b4aa36d53..6250f78f61b9db0233655b1918a9de30
      index: FxHashMap<NodeKey, u32>,
      failures: Vec<PendingFailure>,
      commonjs: CommonJsNames,
-@@ -816,6 +822,15 @@ impl ExportTables {
+@@ -816,6 +834,15 @@ impl ExportTables {
          &self.names(module)[..own_count as usize]
      }
  
@@ -8005,7 +8270,7 @@ index fab413b131635e92731e620c63ee633b4aa36d53..6250f78f61b9db0233655b1918a9de30
          let Some(table) = find_table(&self.files, module) else {
              return true;
 diff --git a/src/aot/modules/exports/entries.rs b/src/aot/modules/exports/entries.rs
-index 3d5c0c3c86955353c0e39382aaf941653ac19fe2..0db5fc3c20b02811bcfe39356273f3d7aff5d2e8 100644
+index 3d5c0c3c86955353c0e39382aaf941653ac19fe2..7fb3fb739fc06dbc124f53957f4dc1c6714be73b 100644
 --- a/src/aot/modules/exports/entries.rs
 +++ b/src/aot/modules/exports/entries.rs
 @@ -5,12 +5,12 @@ use crate::modules::imports::{find_imported_value_site, may_name_value};
@@ -8039,7 +8304,7 @@ index 3d5c0c3c86955353c0e39382aaf941653ac19fe2..0db5fc3c20b02811bcfe39356273f3d7
                      order: FailureOrder {
                          site: site as u32,
                          part: SitePart::Name(position),
-@@ -238,15 +240,28 @@ impl EntryCollector<'_, '_> {
+@@ -238,15 +240,33 @@ impl EntryCollector<'_, '_> {
          for index in 0..self.hir.imports.len() as u32 {
              self.add_names_of_import(ImportId(index), &mut imports);
          }
@@ -8055,12 +8320,17 @@ index 3d5c0c3c86955353c0e39382aaf941653ac19fe2..0db5fc3c20b02811bcfe39356273f3d7
                  continue;
              };
 +            let asked_by = match self.analysis.import_sites[site as usize].specifier {
-+                ImportSpecifier::Constant(specifier) => Some(ExportStatement { export_name, specifier }),
++                ImportSpecifier::Constant(specifier) => Some(ExportStatement {
++                    export_name,
++                    specifier,
++                }),
 +                _ => None,
 +            };
 +            let Some(written) = written else {
 +                let import = imports.iter_mut().find(|import| {
-+                    import.order.site == site && import.imported.name == name && import.asked_by.is_none()
++                    import.order.site == site
++                        && import.imported.name == name
++                        && import.asked_by.is_none()
 +                });
 +                if let Some(import) = import {
 +                    import.asked_by = asked_by;
@@ -8070,7 +8340,7 @@ index 3d5c0c3c86955353c0e39382aaf941653ac19fe2..0db5fc3c20b02811bcfe39356273f3d7
              let exporter = self.commonjs_file_at(site as usize);
              imports.extend(exporter.map(|exporter| WrittenImport {
                  imported: CommonJsImport {
-@@ -255,6 +270,7 @@ impl EntryCollector<'_, '_> {
+@@ -255,6 +275,7 @@ impl EntryCollector<'_, '_> {
                      name,
                  },
                  must_be_there: !self.hir.has_typescript_semantics(),
@@ -8079,21 +8349,24 @@ index 3d5c0c3c86955353c0e39382aaf941653ac19fe2..0db5fc3c20b02811bcfe39356273f3d7
                      site,
                      part: written.part,
 diff --git a/src/aot/modules/exports/tests.rs b/src/aot/modules/exports/tests.rs
-index c2b15f46052c9de972f4fadabad917031ce9d2d6..968e291a73dbdb60b972fcfa0354a3790253fa00 100644
+index c2b15f46052c9de972f4fadabad917031ce9d2d6..04e14fdda5aebf6e26407b6017082702da190c6c 100644
 --- a/src/aot/modules/exports/tests.rs
 +++ b/src/aot/modules/exports/tests.rs
-@@ -435,7 +435,13 @@ fn named_re_export_of_uncompiled_code_is_indirect() {
+@@ -435,7 +435,16 @@ fn named_re_export_of_uncompiled_code_is_indirect() {
              is_read_from_object: true,
          };
          assert_eq!(graph.exports(barrel), [expected]);
 -        assert_eq!(graph.required_names(barrel), [RequiredName::new(module, x)]);
-+        assert_eq!(graph.required_names(barrel), [RequiredName {
-+            asked_by: Some(crate::modules::ExportStatement {
-+                export_name: y,
-+                specifier: input.files.atoms.intern(UNCOMPILED_MODULE.as_bytes()),
-+            }),
-+            ..RequiredName::new(module, x)
-+        }]);
++        assert_eq!(
++            graph.required_names(barrel),
++            [RequiredName {
++                asked_by: Some(crate::modules::ExportStatement {
++                    export_name: y,
++                    specifier: input.files.atoms.intern(UNCOMPILED_MODULE.as_bytes()),
++                }),
++                ..RequiredName::new(module, x)
++            }]
++        );
          assert!(!graph.has_dynamic_names(barrel));
          assert!(graph.synthetic_exports().is_empty());
          assert!(graph.errors().is_empty());
@@ -8119,7 +8392,7 @@ index 991c5b8dcdbfe52e641ccb138c7b92fad36f0974..27c21484a7d1c05c1e8f5eee31203e63
  }
  
 diff --git a/src/aot/modules/imports.rs b/src/aot/modules/imports.rs
-index 465320d17fbef756fefd802fe5ed559889fb264d..b24eeb1f3ef60f8423a93fea49bfa4ce3a705b75 100644
+index 465320d17fbef756fefd802fe5ed559889fb264d..bbed474e755319980eb1bd0f71d5eaadfc2a8a2e 100644
 --- a/src/aot/modules/imports.rs
 +++ b/src/aot/modules/imports.rs
 @@ -1,7 +1,7 @@
@@ -8127,7 +8400,7 @@ index 465320d17fbef756fefd802fe5ed559889fb264d..b24eeb1f3ef60f8423a93fea49bfa4ce
  mod tests;
  
 -use super::bindings::{AccessedModule, Holder, ImportBinding, RequiredName};
-+use super::bindings::{AccessedModule, Holder, ImportBinding, ExportStatement, RequiredName};
++use super::bindings::{AccessedModule, ExportStatement, Holder, ImportBinding, RequiredName};
  use super::exports::{ExportTables, Resolution};
  use super::failures::{FailureOrder, ModuleFailure, ModuleFailureKind, PendingFailure, SitePart};
  use super::interop::{ImportPhase, ModuleKind, SyntheticExportRule};
@@ -8163,16 +8436,20 @@ index 465320d17fbef756fefd802fe5ed559889fb264d..b24eeb1f3ef60f8423a93fea49bfa4ce
          let bindings = &mut self.imports.bindings;
          bindings.shared_sort_by_key(|&(symbol, _)| symbol);
          bindings.dedup_by_key(|&mut (symbol, _)| symbol);
-@@ -463,7 +463,7 @@ impl<'a, 's> FileBinder<'a, 's> {
+@@ -463,7 +463,11 @@ impl<'a, 's> FileBinder<'a, 's> {
      }
  
      fn add_required_name(&mut self, required_name: RequiredName) {
 -        if self.required_name_set.insert(required_name) {
-+        if self.required_name_set.insert((required_name.module, required_name.name, required_name.may_be_absent)) {
++        if self.required_name_set.insert((
++            required_name.module,
++            required_name.name,
++            required_name.may_be_absent,
++        )) {
              self.imports.required_names.push(required_name);
          }
      }
-@@ -502,21 +502,44 @@ impl<'a, 's> FileBinder<'a, 's> {
+@@ -502,21 +506,51 @@ impl<'a, 's> FileBinder<'a, 's> {
          }
      }
  
@@ -8202,7 +8479,9 @@ index 465320d17fbef756fefd802fe5ed559889fb264d..b24eeb1f3ef60f8423a93fea49bfa4ce
          // A name that a TypeScript module re-exports may be a type, which no module has at run time.
          let may_be_absent = self.hir.has_typescript_semantics();
 -        for &(_, resolved) in self.context.tables.own_names(self.file) {
-+        for (position, &(export_name, resolved)) in self.context.tables.own_names(self.file).iter().enumerate() {
++        for (position, &(export_name, resolved)) in
++            self.context.tables.own_names(self.file).iter().enumerate()
++        {
              if let Some(required_name) = resolved.required_name {
                  self.add_required_name(RequiredName {
                      may_be_absent,
@@ -8213,18 +8492,23 @@ index 465320d17fbef756fefd802fe5ed559889fb264d..b24eeb1f3ef60f8423a93fea49bfa4ce
          }
          // The export table names the variable.
 -        for &(_, resolved) in self.context.tables.names(self.file) {
-+        for (position, &(export_name, resolved)) in self.context.tables.names(self.file).iter().enumerate() {
++        for (position, &(export_name, resolved)) in
++            self.context.tables.names(self.file).iter().enumerate()
++        {
              if let Some(deferred) = self.find_deferred_export(resolved.resolution) {
 -                self.add_required_name(deferred);
-+                self.add_required_name(RequiredName { asked_by: self.find_export_statement(position, export_name), ..deferred });
++                self.add_required_name(RequiredName {
++                    asked_by: self.find_export_statement(position, export_name),
++                    ..deferred
++                });
              }
          }
      }
 diff --git a/src/aot/modules/imports/tests.rs b/src/aot/modules/imports/tests.rs
-index 5e2fa3d93657d2ea65008e7b310a4f4a0f356b20..cc36d22b9e77932c4d919a901fc0a5b4b804968e 100644
+index 5e2fa3d93657d2ea65008e7b310a4f4a0f356b20..85a77ac6833f5776405ca84adb8a5ba198f59407 100644
 --- a/src/aot/modules/imports/tests.rs
 +++ b/src/aot/modules/imports/tests.rs
-@@ -603,11 +603,13 @@ fn name_of_two_commonjs_stars_is_required_once() {
+@@ -603,11 +603,22 @@ fn name_of_two_commonjs_stars_is_required_once() {
          let read = ImportBinding::NamespaceRead { module, name };
          assert_eq!(program.binding("main.js", "x"), read);
          assert_eq!(program.binding("main.js", "again"), read);
@@ -8234,52 +8518,73 @@ index 5e2fa3d93657d2ea65008e7b310a4f4a0f356b20..cc36d22b9e77932c4d919a901fc0a5b4
 -            assert_eq!(required_names, expected, "{importer}");
 -        }
 +        let plain = RequiredName::new(module, name);
-+        assert_eq!(program.graph.required_names(program.file("main.js")), [plain]);
++        assert_eq!(
++            program.graph.required_names(program.file("main.js")),
++            [plain]
++        );
 +        let exported = RequiredName {
-+            asked_by: Some(ExportStatement { export_name: program.atom("y"), specifier: program.atom("./barrel.js") }),
++            asked_by: Some(ExportStatement {
++                export_name: program.atom("y"),
++                specifier: program.atom("./barrel.js"),
++            }),
 +            ..plain
 +        };
-+        assert_eq!(program.graph.required_names(program.file("indirect.js")), [exported]);
++        assert_eq!(
++            program.graph.required_names(program.file("indirect.js")),
++            [exported]
++        );
      });
  }
  
-@@ -645,7 +647,10 @@ fn name_of_static_and_commonjs_stars_is_required() {
+@@ -645,7 +656,16 @@ fn name_of_static_and_commonjs_stars_is_required() {
                  "main.js",
                  vec![required_in("barrel.js"), required_in("outer.js")],
              ),
 -            ("indirect.js", vec![required_in("barrel.js")]),
-+            ("indirect.js", vec![RequiredName {
-+                asked_by: Some(ExportStatement { export_name: program.atom("y"), specifier: program.atom("./barrel.js") }),
-+                ..required_in("barrel.js")
-+            }]),
++            (
++                "indirect.js",
++                vec![RequiredName {
++                    asked_by: Some(ExportStatement {
++                        export_name: program.atom("y"),
++                        specifier: program.atom("./barrel.js"),
++                    }),
++                    ..required_in("barrel.js")
++                }],
++            ),
          ];
          for (importer, expected) in expected_names {
              let required_names = program.graph.required_names(program.file(importer));
-@@ -681,7 +686,10 @@ fn name_re_exported_by_typescript_may_be_absent() {
+@@ -681,7 +701,13 @@ fn name_re_exported_by_typescript_may_be_absent() {
          ("two.cjs", "exports.y = 2;"),
      ];
      with_program(&files, |program| {
 -        let required = RequiredName::new(program.module("barrel.js"), program.atom("x"));
 +        let required = RequiredName {
-+            asked_by: Some(ExportStatement { export_name: program.atom("x"), specifier: program.atom("./barrel.js") }),
++            asked_by: Some(ExportStatement {
++                export_name: program.atom("x"),
++                specifier: program.atom("./barrel.js"),
++            }),
 +            ..RequiredName::new(program.module("barrel.js"), program.atom("x"))
 +        };
          assert_eq!(
              program.graph.required_names(program.file("untyped.js")),
              [required]
-@@ -775,7 +783,10 @@ fn name_of_one_external_module_in_two_files_is_required() {
+@@ -775,7 +801,13 @@ fn name_of_one_external_module_in_two_files_is_required() {
          );
          assert_eq!(
              program.graph.required_names(program.file("a.js")),
 -            [existing_name]
 +            [RequiredName {
-+                asked_by: Some(ExportStatement { export_name: name, specifier: program.atom(UNCOMPILED_MODULE) }),
++                asked_by: Some(ExportStatement {
++                    export_name: name,
++                    specifier: program.atom(UNCOMPILED_MODULE)
++                }),
 +                ..existing_name
 +            }]
          );
          assert_eq!(program.find_export("index.js", "z"), ExportLookup::Unknown);
          let own_entry = ExportLookup::Found(ExportBinding::Indirect { module, name });
-@@ -903,3 +914,22 @@ fn jsx_import_failure_is_an_import_failure() {
+@@ -903,3 +935,34 @@ fn jsx_import_failure_is_an_import_failure() {
          assert!(program.graph.failures().is_empty());
      });
  }
@@ -8287,8 +8592,14 @@ index 5e2fa3d93657d2ea65008e7b310a4f4a0f356b20..cc36d22b9e77932c4d919a901fc0a5b4
 +#[test]
 +fn strict_import_survives_a_soft_typescript_re_export_of_the_same_name() {
 +    let files = [
-+        ("main.ts", "import { x } from './barrel.js'; export { x as y } from './barrel.js'; console.log(x);"),
-+        ("barrel.js", "export * from './one.cjs'; export * from './two.cjs';"),
++        (
++            "main.ts",
++            "import { x } from './barrel.js'; export { x as y } from './barrel.js'; console.log(x);",
++        ),
++        (
++            "barrel.js",
++            "export * from './one.cjs'; export * from './two.cjs';",
++        ),
 +        ("one.cjs", "exports.x = 1;"),
 +        ("two.cjs", "exports.z = 2;"),
 +    ];
@@ -8296,25 +8607,35 @@ index 5e2fa3d93657d2ea65008e7b310a4f4a0f356b20..cc36d22b9e77932c4d919a901fc0a5b4
 +        let strict = RequiredName::new(program.module("barrel.js"), program.atom("x"));
 +        let soft = RequiredName {
 +            may_be_absent: true,
-+            asked_by: Some(ExportStatement { export_name: program.atom("y"), specifier: program.atom("./barrel.js") }),
++            asked_by: Some(ExportStatement {
++                export_name: program.atom("y"),
++                specifier: program.atom("./barrel.js"),
++            }),
 +            ..strict
 +        };
-+        assert_eq!(program.graph.required_names(program.file("main.ts")), [soft, strict]);
++        assert_eq!(
++            program.graph.required_names(program.file("main.ts")),
++            [soft, strict]
++        );
 +    });
 +}
 diff --git a/src/aot/modules/mod.rs b/src/aot/modules/mod.rs
-index b0277eb4caf2f3656a5e9ba4cbcfe2204191b79c..12c8fc005db8c4da5c86d29bd6a090946476695b 100644
+index b0277eb4caf2f3656a5e9ba4cbcfe2204191b79c..83c36326bee6da9ed7f8446ae44a55c4415a456e 100644
 --- a/src/aot/modules/mod.rs
 +++ b/src/aot/modules/mod.rs
-@@ -26,7 +26,7 @@ mod unread_exports;
+@@ -26,9 +26,9 @@ mod unread_exports;
  mod wrapped;
  
  pub use bindings::{
 -    AccessedModule, Candidates, ExportBinding, ExportLookup, ExportUse, Holder, ImportBinding,
-+    AccessedModule, Candidates, ExportBinding, ExportLookup, ExportStatement, ExportUse, Holder, ImportBinding,
-     ModuleExport, ModuleRequest, RequiredName, SiteAnswer, SpelledModule, SyntheticExport,
-     SyntheticExportId,
+-    ModuleExport, ModuleRequest, RequiredName, SiteAnswer, SpelledModule, SyntheticExport,
+-    SyntheticExportId,
++    AccessedModule, Candidates, ExportBinding, ExportLookup, ExportStatement, ExportUse, Holder,
++    ImportBinding, ModuleExport, ModuleRequest, RequiredName, SiteAnswer, SpelledModule,
++    SyntheticExport, SyntheticExportId,
  };
+ pub use code_unit_order::compare_code_units;
+ pub use commonjs_exports::CommonJsExports;
 diff --git a/src/aot/modules/plan.rs b/src/aot/modules/plan.rs
 index afa3e2d0c492a26b178950a08910ab2f858f0870..702491d7dd5416b6b1c1c1be6590dbaf67877ee3 100644
 --- a/src/aot/modules/plan.rs
@@ -8356,10 +8677,10 @@ index afa3e2d0c492a26b178950a08910ab2f858f0870..702491d7dd5416b6b1c1c1be6590dbaf
              ranges.insert(module, start as u32..requests.len() as u32);
          }
 diff --git a/src/aot/modules/plan/tests.rs b/src/aot/modules/plan/tests.rs
-index 76e99bf94e542160131c01b579961bb63eb34bb3..e8edd53eeafa60b7ad5cfc053a766946120b0d4c 100644
+index 76e99bf94e542160131c01b579961bb63eb34bb3..78c1878964ad94f18be8fc98dd358bd2fc0e83b5 100644
 --- a/src/aot/modules/plan/tests.rs
 +++ b/src/aot/modules/plan/tests.rs
-@@ -472,8 +472,13 @@ fn the_commonjs_files_of_a_graph_run_first() {
+@@ -472,8 +472,16 @@ fn the_commonjs_files_of_a_graph_run_first() {
              "request k2.cjs",
              "request k1.cjs",
              "request a.mjs",
@@ -8367,7 +8688,10 @@ index 76e99bf94e542160131c01b579961bb63eb34bb3..e8edd53eeafa60b7ad5cfc053a766946
          ];
          assert_eq!(plan.requests("main.mjs"), expected);
 +        let final_requests = plan.graph.requests_of(plan.module("main.mjs"));
-+        let hoisted: Vec<bool> = final_requests.iter().map(|request| request.is_hoisted).collect();
++        let hoisted: Vec<bool> = final_requests
++            .iter()
++            .map(|request| request.is_hoisted)
++            .collect();
 +        assert_eq!(hoisted, [true, true, true, false, false]);
 +        assert_eq!(final_requests[2].target, final_requests[4].target);
          assert_eq!(plan.requests("a.mjs"), ["request b.mjs", "request k2.cjs"]);
@@ -9384,28 +9708,41 @@ index 506eca67445a5f6c99df133368ec597669b911cf..00000000000000000000000000000000
 -  return { ...value };
 -}
 diff --git a/src/aot/report/causes.rs b/src/aot/report/causes.rs
-index 1fddbb69c9a2b946b4497548b820d536bfd1b183..6439868d2b72195a93ab55196b8f0f108078838f 100644
+index 1fddbb69c9a2b946b4497548b820d536bfd1b183..5def2fc76d37f23deca7c71d9f2d89d3b6ed90ad 100644
 --- a/src/aot/report/causes.rs
 +++ b/src/aot/report/causes.rs
-@@ -59,7 +59,12 @@ impl Cause {
+@@ -59,7 +59,25 @@ impl Cause {
  }
  
  pub(super) fn is_property_access(kind: AccessKind) -> bool {
 -    !matches!(kind, AccessKind::Call | AccessKind::Construct)
 +    match kind {
-+        AccessKind::Read | AccessKind::Store | AccessKind::Define | AccessKind::Has | AccessKind::Delete => true,
-+        AccessKind::Unknown | AccessKind::Call | AccessKind::Construct | AccessKind::Truthiness
-+        | AccessKind::Equality | AccessKind::Arithmetic | AccessKind::Comparison | AccessKind::Conversion
-+        | AccessKind::TypeOf | AccessKind::InstanceOf | AccessKind::Iteration | AccessKind::Spread => false,
++        AccessKind::Read
++        | AccessKind::Store
++        | AccessKind::Define
++        | AccessKind::Has
++        | AccessKind::Delete => true,
++        AccessKind::Unknown
++        | AccessKind::Call
++        | AccessKind::Construct
++        | AccessKind::Truthiness
++        | AccessKind::Equality
++        | AccessKind::Arithmetic
++        | AccessKind::Comparison
++        | AccessKind::Conversion
++        | AccessKind::TypeOf
++        | AccessKind::InstanceOf
++        | AccessKind::Iteration
++        | AccessKind::Spread => false,
 +    }
  }
  
  fn is_untyped_access(record: &AccessRecord) -> bool {
 diff --git a/src/aot/report/causes/tests.rs b/src/aot/report/causes/tests.rs
-index 2ab0a1fb1e98e56d00860083322ab76c8efc7a21..f7d1524450c79d6e589a1a29f2c3768015aa9e4f 100644
+index 2ab0a1fb1e98e56d00860083322ab76c8efc7a21..2800eb694e514fdb48cb3e3ae7689f76490373b6 100644
 --- a/src/aot/report/causes/tests.rs
 +++ b/src/aot/report/causes/tests.rs
-@@ -355,15 +355,15 @@ fn free_access_has_no_cause() {
+@@ -355,15 +355,26 @@ fn free_access_has_no_cause() {
  }
  
  #[test]
@@ -9413,7 +9750,14 @@ index 2ab0a1fb1e98e56d00860083322ab76c8efc7a21..f7d1524450c79d6e589a1a29f2c37680
 +fn only_property_accesses_have_property_causes() {
      for kind in AccessKind::ALL {
 -        let is_call = matches!(kind, AccessKind::Call | AccessKind::Construct);
-+        let is_property = [AccessKind::Read, AccessKind::Store, AccessKind::Define, AccessKind::Has, AccessKind::Delete].contains(&kind);
++        let is_property = [
++            AccessKind::Read,
++            AccessKind::Store,
++            AccessKind::Define,
++            AccessKind::Has,
++            AccessKind::Delete,
++        ]
++        .contains(&kind);
          let record = AccessRecord {
              kind,
              ..unknown_object(PROGRAM, 0, 100)
@@ -9421,7 +9765,11 @@ index 2ab0a1fb1e98e56d00860083322ab76c8efc7a21..f7d1524450c79d6e589a1a29f2c37680
 -        assert_eq!(is_property_access(kind), !is_call, "{kind:?}");
 -        assert_eq!(collect(&[record]).is_empty(), is_call, "{kind:?}");
 +        assert_eq!(is_property_access(kind), is_property, "{kind:?}");
-+        assert_eq!(collect(&[record]).len(), usize::from(is_property), "{kind:?}");
++        assert_eq!(
++            collect(&[record]).len(),
++            usize::from(is_property),
++            "{kind:?}"
++        );
      }
  }
  
@@ -9505,7 +9853,7 @@ index d19b39d25dbfb4b6a3efcecebee6a0bc032952b9..81b81bf32c1e49ede6787587f14c483f
  }
  
 diff --git a/src/aot/report/wording.rs b/src/aot/report/wording.rs
-index eece435c825a0c410a7ac1b9579a6c4f05d5c0f6..90670588ab94b278dbe1c79647ab7fa9743e8289 100644
+index eece435c825a0c410a7ac1b9579a6c4f05d5c0f6..720df2bb3ef60a1c72b59a8da46f001eeaaf12f9 100644
 --- a/src/aot/report/wording.rs
 +++ b/src/aot/report/wording.rs
 @@ -73,7 +73,7 @@ pub(super) fn cause_wording(cause: UnprovenCause) -> CauseWording {
@@ -9579,23 +9927,24 @@ index eece435c825a0c410a7ac1b9579a6c4f05d5c0f6..90670588ab94b278dbe1c79647ab7fa9
          }
      }
  }
-@@ -608,14 +605,9 @@ pub(super) fn heap_cause_sentence(cause: AllocationHeapCause) -> Option<&'static
+@@ -608,15 +605,8 @@ pub(super) fn heap_cause_sentence(cause: AllocationHeapCause) -> Option<&'static
  pub(super) fn interpreted_cause_sentence(reason: u32) -> Option<&'static str> {
      match InterpretedCause::from_wire(reason)? {
          InterpretedCause::None => None,
 -        InterpretedCause::TooManyNodes => Some("the type has more parts than the limit allows"),
          InterpretedCause::RepeatedRecursion => Some("two members of a union are both recursive"),
 -        InterpretedCause::MemberKeyIsNotText => Some("the key of a member is a symbol"),
-         InterpretedCause::LayoutIsNotModeled => {
+-        InterpretedCause::LayoutIsNotModeled => {
 -            Some("no call in the program parses or validates this type")
 -        }
 -        InterpretedCause::MemberIsNotNamedField => {
 -            Some("a member is not a named field of the object")
-+            Some("no call in the program parses this type")
-         }
+-        }
++        InterpretedCause::LayoutIsNotModeled => Some("no call in the program parses this type"),
          InterpretedCause::FieldTypeIsNotTestable => {
              Some("a field's proven type can't be checked at run time")
-@@ -633,7 +625,7 @@ pub(super) fn unseen_code_sentence(cause: UnseenCodeCause) -> &'static str {
+         }
+@@ -633,7 +623,7 @@ pub(super) fn unseen_code_sentence(cause: UnseenCodeCause) -> &'static str {
          UnseenCodeCause::ImportsUncompiledCode => {
              "the program imports a module that isn't in the executable"
          }
@@ -9604,7 +9953,7 @@ index eece435c825a0c410a7ac1b9579a6c4f05d5c0f6..90670588ab94b278dbe1c79647ab7fa9
              "the program calls import() or require() with a dynamic path"
          }
          UnseenCodeCause::RunsUnseenCode => "the program can run code that isn't in the executable",
-@@ -743,8 +735,7 @@ pub(super) fn missed_optimization_code(kind: DeclineKind) -> &'static str {
+@@ -743,8 +733,7 @@ pub(super) fn missed_optimization_code(kind: DeclineKind) -> &'static str {
          DeclineKind::LoopNotVersioned => "loop-guards-not-hoisted",
          DeclineKind::LoopBoundNotClamped => "bounds-checks-not-hoisted",
          DeclineKind::StretchNotGuarded => "no-fast-path",
@@ -9614,7 +9963,7 @@ index eece435c825a0c410a7ac1b9579a6c4f05d5c0f6..90670588ab94b278dbe1c79647ab7fa9
      }
  }
  
-@@ -756,7 +747,7 @@ pub(super) fn trim_blocker_code(cause: UnseenCodeCause) -> &'static str {
+@@ -756,7 +745,7 @@ pub(super) fn trim_blocker_code(cause: UnseenCodeCause) -> &'static str {
          UnseenCodeCause::FlowGaveUp => "limit-reached",
          UnseenCodeCause::EvaluatesText => "eval",
          UnseenCodeCause::ImportsUncompiledCode => "external-import",
@@ -10488,10 +10837,10 @@ index 13077b695a3a013e1174659f2883dcfbbef42f3d..63ea7096cc10dccd11e5597412d694ed
  
  use crate::atom::Interner;
 diff --git a/src/sema/file_analysis/source_tests/fold.rs b/src/sema/file_analysis/source_tests/fold.rs
-index ad77980983d3dc48c45923876de862890a5cfd41..4769fb68cf4a702606dfdeb7e9800166ffae87cf 100644
+index ad77980983d3dc48c45923876de862890a5cfd41..e3fa7238d77f523a4c8e79b1e8f04d24c34b7755 100644
 --- a/src/sema/file_analysis/source_tests/fold.rs
 +++ b/src/sema/file_analysis/source_tests/fold.rs
-@@ -1448,6 +1448,46 @@ fn dead_code() {
+@@ -1448,6 +1448,65 @@ fn dead_code() {
      }
  }
  
@@ -10507,7 +10856,10 @@ index ad77980983d3dc48c45923876de862890a5cfd41..4769fb68cf4a702606dfdeb7e9800166
 +        let text = format!("async function f() {{ {body} }}");
 +        analyzed("a.mjs", &text, |s| {
 +            let decisions = s.analysis.decisions.as_folded_by_bun_run();
-+            assert!(!bun_sema::file_analysis::has_live_await(&s.hir, &decisions, s.function("f")), "{body}");
++            assert!(
++                !bun_sema::file_analysis::has_live_await(&s.hir, &decisions, s.function("f")),
++                "{body}"
++            );
 +            let effects = find_exprs(&s.hir, |kind| matches!(kind, ExprKind::Call(_)));
 +            let effect = effects.into_iter().find(|&e| {
 +                let ExprKind::Call(call) = s.hir[e].kind else { unreachable!() };
@@ -10522,15 +10874,31 @@ index ad77980983d3dc48c45923876de862890a5cfd41..4769fb68cf4a702606dfdeb7e9800166
 +fn build_only_conditions_leave_ordinary_run_await_live() {
 +    for (text, options) in [
 +        ("async function f() { if (FLAG) await work(); }", FLAG),
-+        ("async function f() { if ((FLAG || true) === true) {} else await work(); }", FLAG),
++        (
++            "async function f() { if ((FLAG || true) === true) {} else await work(); }",
++            FLAG,
++        ),
 +        ("async function f() { console.log(await work()); }", DROPS),
-+        ("async function f() { (FLAG && false) ?? await work(); }", FLAG),
++        (
++            "async function f() { (FLAG && false) ?? await work(); }",
++            FLAG,
++        ),
 +    ] {
 +        folded("a.mjs", text, options, |s| {
 +            let function = s.function("f");
 +            let decisions = &s.analysis.decisions;
-+            assert!(!bun_sema::file_analysis::has_live_await(&s.hir, decisions, function), "{text}");
-+            assert!(bun_sema::file_analysis::has_live_await(&s.hir, &decisions.as_folded_by_bun_run(), function), "{text}");
++            assert!(
++                !bun_sema::file_analysis::has_live_await(&s.hir, decisions, function),
++                "{text}"
++            );
++            assert!(
++                bun_sema::file_analysis::has_live_await(
++                    &s.hir,
++                    &decisions.as_folded_by_bun_run(),
++                    function
++                ),
++                "{text}"
++            );
 +        });
 +    }
 +}
@@ -10538,12 +10906,15 @@ index ad77980983d3dc48c45923876de862890a5cfd41..4769fb68cf4a702606dfdeb7e9800166
  #[test]
  fn everything_below_is_marked() {
      let text = "if (false) { function g() { h(); } class K { m() { i(); } } var v; } v;";
-@@ -1524,11 +1564,19 @@ fn tests_of_runtime_values() {
+@@ -1524,11 +1583,22 @@ fn tests_of_runtime_values() {
          |s| {
              let type_test = last_expr(s, |kind| matches!(kind, ExprKind::Unary { .. }));
              let function = Constant::String(s.workspace.atom("function"));
 -            assert_eq!(constant(s, type_test), FoldedValue::Constant(function));
-+            assert_eq!(constant(s, type_test), FoldedValue::ConstantOutsideDeadZone(function));
++            assert_eq!(
++                constant(s, type_test),
++                FoldedValue::ConstantOutsideDeadZone(function)
++            );
 +            assert!(s.analysis.decisions.reads_member(type_test));
              assert_eq!(decision(s, last_member(s)), Decision::Unknown);
              assert_eq!(constant(s, last_member(s)), FoldedValue::Unknown);
@@ -10702,10 +11073,10 @@ index 3d0c8cb9a089344063b88aaccd7c732ce4bc4d76..2f3f0ea84ab02fe573eee36c547ed700
      }
  }
 diff --git a/src/sema/fold/dead_code.rs b/src/sema/fold/dead_code.rs
-index f31b95745fb1a0ba6e266fab8a3361ea5d6e2e5a..b91e2e6fb08da4fc0d8266b8e3be5c204bcd6a05 100644
+index f31b95745fb1a0ba6e266fab8a3361ea5d6e2e5a..dec876d32f32bb44a046c394d9df1eb8127fefbb 100644
 --- a/src/sema/fold/dead_code.rs
 +++ b/src/sema/fold/dead_code.rs
-@@ -5,33 +5,56 @@ use crate::bind::Parent;
+@@ -5,33 +5,58 @@ use crate::bind::Parent;
  use crate::hir::{BinOp, CaseId, ExprId, File, FnBody, IdList, Span, StmtId, StmtKind};
  use crate::util::PositionSet;
  
@@ -10745,7 +11116,9 @@ index f31b95745fb1a0ba6e266fab8a3361ea5d6e2e5a..b91e2e6fb08da4fc0d8266b8e3be5c20
 +                    Some(false) => yes.some(),
 +                    None => None,
 +                };
-+                roots.in_bun_run.extend(excluded_in_bun_run.map(TreeNode::Stmt));
++                roots
++                    .in_bun_run
++                    .extend(excluded_in_bun_run.map(TreeNode::Stmt));
 +            } else {
 +                self.push_excluded_parts(stmt, &mut roots.all);
 +            }
@@ -10797,16 +11170,20 @@ index 81804f69da6a77c267fc7206052b489ed09696e5..2f62f043a8369d13a541b5059ed65144
  
  #[derive(Copy, Clone)]
 diff --git a/src/sema/fold/folder.rs b/src/sema/fold/folder.rs
-index 10197935111cb78be77eae26156b0047d2a46064..8b30c58a4e861e1d12ec960b7443616fcfdec503 100644
+index 10197935111cb78be77eae26156b0047d2a46064..c30ffbee6faaaf149529b339391d8055308bf743 100644
 --- a/src/sema/fold/folder.rs
 +++ b/src/sema/fold/folder.rs
-@@ -1,4 +1,5 @@
+@@ -1,8 +1,9 @@
 -use super::dead_code::mark_dead_code;
 +use super::dead_code::{DeadRoots, mark_dead_code};
-+use super::known_to_bun_run::ExcludedOperand;
  use super::evaluate::{Evaluator, Value};
  use super::feature_flags::find_feature_import;
  use super::folder_commonjs::LoaderNames;
+ use super::inputs::{FoldInputs, PathState};
++use super::known_to_bun_run::ExcludedOperand;
+ use super::{
+     Constant, Decision, Decisions, FoldError, FoldResult, FoldedConstant, FoldedValue, NodeBits,
+     literal_constant, slice_in,
 @@ -21,6 +22,7 @@ use std::cell::{Cell, OnceCell};
  pub(super) enum Effects {
      Unknown,
@@ -10982,7 +11359,7 @@ index 74f69aa0e2d550d3ac3498d2ca7602c0e39be164..ce466b5cc6f28a23bc35dbda35611e61
      }
  }
 diff --git a/src/sema/fold/folder_names.rs b/src/sema/fold/folder_names.rs
-index 68abf323eb93e932e3c1a8367bb63c9d3337785f..95d0bbfb4ddc3c971ae65dcf5933af5d92283eec 100644
+index 68abf323eb93e932e3c1a8367bb63c9d3337785f..96197678eb7bdbe43217b88b29ddd64f2d9f4418 100644
 --- a/src/sema/fold/folder_names.rs
 +++ b/src/sema/fold/folder_names.rs
 @@ -52,6 +52,7 @@ impl<'s> Folder<'_, 's> {
@@ -11001,21 +11378,20 @@ index 68abf323eb93e932e3c1a8367bb63c9d3337785f..95d0bbfb4ddc3c971ae65dcf5933af5d
          let undefined = Value::from(Constant::Undefined);
          Some(Folded::new(undefined, object_value.effects))
      }
-@@ -110,6 +112,13 @@ impl<'s> Folder<'_, 's> {
+@@ -110,6 +112,12 @@ impl<'s> Folder<'_, 's> {
          let Some(init) = self.find_const_initializer(ident) else {
              return Folded::UNKNOWN;
          };
 +        let is_primitive = matches!(self.folded(init).value, Value::Known(_));
-+        let is_inlined_by_bun_run = is_primitive
-+            && self.is_folded_by_bun_run(init)
-+            && self.is_in_constant_prefix(init);
++        let is_inlined_by_bun_run =
++            is_primitive && self.is_folded_by_bun_run(init) && self.is_in_constant_prefix(init);
 +        if !is_inlined_by_bun_run {
 +            self.mark_folded_by_build_alone(ident);
 +        }
          match self.folded_value(init) {
              FoldedValue::Constant(constant) if self.is_library_binding(symbol) => {
                  self.decide(ident, Decision::Constant(constant))
-@@ -135,12 +144,21 @@ impl<'s> Folder<'_, 's> {
+@@ -135,12 +143,21 @@ impl<'s> Folder<'_, 's> {
          if !is_renamed_identifier && self.is_assignment_target(e) {
              return None;
          }
@@ -11109,10 +11485,10 @@ index d1777422b699d1c6a740f21ee72bcf54a2008453..a8ca44c1a4392d44976b7ac380ef489c
          Folded::new(selected.value, test.effects.min(selected.effects))
 diff --git a/src/sema/fold/known_to_bun_run.rs b/src/sema/fold/known_to_bun_run.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..030db6eb41f43539416092b2e66037c94bb31f47
+index 0000000000000000000000000000000000000000..f425c1f10ff9380ad14240fd07e49ecf151fb2c2
 --- /dev/null
 +++ b/src/sema/fold/known_to_bun_run.rs
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,225 @@
 +use super::evaluate::Value;
 +use super::folder::Folder;
 +use crate::bind::CommonJsVariable;
@@ -11193,7 +11569,9 @@ index 0000000000000000000000000000000000000000..030db6eb41f43539416092b2e66037c9
 +    }
 +
 +    pub(super) fn is_truthy_in_bun_run(&self, e: ExprId) -> Option<bool> {
-+        self.conditions_in_bun_run.get(&e).copied()
++        self.conditions_in_bun_run
++            .get(&e)
++            .copied()
 +            .or_else(|| self.condition_in_bun_run(e))
 +    }
 +
@@ -11203,19 +11581,36 @@ index 0000000000000000000000000000000000000000..030db6eb41f43539416092b2e66037c9
 +        let truthy = |operand| self.is_truthy_in_bun_run(operand);
 +        match self.hir[e].kind {
 +            ExprKind::Unary { op: UnOp::Void, .. } => Some(false),
-+            ExprKind::Unary { op: UnOp::Typeof, .. } => Some(true),
-+            ExprKind::Unary { op: UnOp::Not, operand } => truthy(operand).map(|it| !it),
-+            ExprKind::Binary { op: BinOp::And, left, right } => match truthy(left) {
++            ExprKind::Unary {
++                op: UnOp::Typeof, ..
++            } => Some(true),
++            ExprKind::Unary {
++                op: UnOp::Not,
++                operand,
++            } => truthy(operand).map(|it| !it),
++            ExprKind::Binary {
++                op: BinOp::And,
++                left,
++                right,
++            } => match truthy(left) {
 +                Some(false) => Some(false),
 +                Some(true) => truthy(right),
 +                None => truthy(right).filter(|&it| !it),
 +            },
-+            ExprKind::Binary { op: BinOp::Or, left, right } => match truthy(left) {
++            ExprKind::Binary {
++                op: BinOp::Or,
++                left,
++                right,
++            } => match truthy(left) {
 +                Some(true) => Some(true),
 +                Some(false) => truthy(right),
 +                None => truthy(right).filter(|&it| it),
 +            },
-+            ExprKind::Binary { op: BinOp::Comma, right, .. } => truthy(right),
++            ExprKind::Binary {
++                op: BinOp::Comma,
++                right,
++                ..
++            } => truthy(right),
 +            ExprKind::As { expr, .. }
 +            | ExprKind::Satisfies { expr, .. }
 +            | ExprKind::AsConst(expr)
@@ -11225,7 +11620,12 @@ index 0000000000000000000000000000000000000000..030db6eb41f43539416092b2e66037c9
 +        }
 +    }
 +
-+    pub(super) fn exclude_operand(&mut self, operand: ExprId, decided_by: ExprId, is_truthiness_test: bool) {
++    pub(super) fn exclude_operand(
++        &mut self,
++        operand: ExprId,
++        decided_by: ExprId,
++        is_truthiness_test: bool,
++    ) {
 +        self.excluded_operands.push(ExcludedOperand {
 +            operand,
 +            is_excluded_by_bun_run: self.is_folded_by_bun_run(decided_by)
@@ -11720,18 +12120,20 @@ index 30472f1f0d3f987525cce5384e3c3c1e54667a71..761a8644f4a435823afc23db3d1dc0a9
          UnseenCodeCause::OptionAdmitsCode,
      ];
 diff --git a/src/trim/tests/trimming_invariants.rs b/src/trim/tests/trimming_invariants.rs
-index c90d21266cbe516c789661e9c69e918619572fca..b7000992946f6fe64ff0fafd2c72060154c4d4b2 100644
+index c90d21266cbe516c789661e9c69e918619572fca..c9e04ad869e3ba96d115eee916de8d2d80f957d1 100644
 --- a/src/trim/tests/trimming_invariants.rs
 +++ b/src/trim/tests/trimming_invariants.rs
-@@ -587,6 +587,14 @@ fn features_opened_by(cause: UnseenCodeCause) -> FeatureSet {
+@@ -587,6 +587,16 @@ fn features_opened_by(cause: UnseenCodeCause) -> FeatureSet {
      let only_when_named = bun_trim::features_kept_only_when_named();
      match cause {
          LoadsModuleByName => FeatureSet::from_features(&[Feature::DataFileLoaders]),
 +        UnseenCodeCause::LoadsCodeByName => {
 +            let mut features = features_opened_by(EvaluatesText);
 +            features.union_with(&FeatureSet::from_features(&[
-+                Feature::DataFileLoaders, Feature::RuntimeTranspiler,
-+                Feature::Interpreter, Feature::BuiltinSourceText,
++                Feature::DataFileLoaders,
++                Feature::RuntimeTranspiler,
++                Feature::Interpreter,
++                Feature::BuiltinSourceText,
 +            ]));
 +            features
 +        }

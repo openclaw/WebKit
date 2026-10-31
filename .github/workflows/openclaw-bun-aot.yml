@@ -102,7 +102,7 @@ jobs:
           out = Path('aot-proof')
           out.mkdir(exist_ok=True)
           files = sorted(out.iterdir()) + sorted(Path('controls/.github/openclaw/qualification/bun-aot').iterdir())
-          assert 0 < len(files) <= 33 and all(stat.S_ISREG(p.lstat().st_mode) for p in files)
+          assert 0 < len(files) <= 96 and all(stat.S_ISREG(p.lstat().st_mode) for p in files)
           assert sum(p.stat().st_size for p in files) <= 128 * 1024**2
           def sha(path):
               with path.open('rb') as stream: return hashlib.file_digest(stream, 'sha256').hexdigest()
