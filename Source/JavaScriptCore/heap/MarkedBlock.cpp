@@ -199,7 +199,9 @@ void MarkedBlock::Handle::lastChanceToFinalize()
     blockHeader().m_markingVersion = heap()->objectSpace().markingVersion();
     m_weakSet.lastChanceToFinalize();
     blockHeader().m_newlyAllocated.clearAll();
-    blockHeader().m_newlyAllocatedVersion = heap()->objectSpace().newlyAllocatedVersion();
+    // Both liveness maps are empty: use the existing all-dead sweep specialization.
+    blockHeader().m_newlyAllocatedVersion = MarkedSpace::nullVersion;
+    blockHeader().m_markingVersion = MarkedSpace::nullVersion;
     m_directory->setIsInUse(this, true);
     sweep(nullptr);
 }

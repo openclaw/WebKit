@@ -170,6 +170,8 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+- Use the all-dead sweep specialization during VM destruction while preserving weak finalization and every cell destructor.
+
 ## Stack retention and Linux suspension (2026-10-09)
 
 - Initialize new VM entry scratch buffers and alignment padding before entering JavaScript or native callees, preventing stale stack values from retaining otherwise unreachable objects during collection.

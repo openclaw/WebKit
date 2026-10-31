@@ -219,6 +219,7 @@ if (ENABLE_JAVASCRIPTCORE)
         Runner/TestsController.cpp
 
         Tests/JavaScriptCore/DisallowVMEntry.cpp
+        Tests/JavaScriptCore/HeapTeardown.cpp
         Tests/JavaScriptCore/InspectorConsoleMessage.cpp
         Tests/JavaScriptCore/MarkedVector.cpp
         Tests/JavaScriptCore/PropertySlot.cpp
