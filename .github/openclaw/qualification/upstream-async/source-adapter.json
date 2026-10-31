@@ -1,6 +1,6 @@
 {
   "base": "e66916298091dd12469076fd854e135b03fb16ff",
-  "head": "6ce74d41a71cc74ace7fba1c947865a26959e7f4",
+  "head": "ba2bec62afeae614a801a2a2af501687b845b0b6",
   "build_adapter": "31b03fa17b3a9133d5240d593fa464b5825a2e33",
   "build_patch_sha256": "133ca9e02fb4a4468b2b67e5b394de10189b2f9e80373f94c4be800e9d0127e9",
   "files": {
@@ -39,8 +39,8 @@
     }
   },
   "fixture": {
-    "sha256": "dc1af1a3e1066a0bc796553e836d120494037df5646ecf89591688056960ad6d",
-    "blob": "4738c068df7f333939e2fac6436c8d3969b5c305"
+    "sha256": "fdd809f40f171b69a6db64c4486feedb06834ee7f17145d68031d9579d93fe33",
+    "blob": "40343fdd9de395f88ea8fc6e129da84d115fa5bf"
   },
   "registration": {
     "before": {
@@ -71,7 +71,7 @@
     "-DCMAKE_C_COMPILER=clang-23",
     "-DCMAKE_CXX_COMPILER=clang++-23"
   ],
-  "expected_failure_line": 119,
+  "expected_failure_line": 120,
   "static_registration": "    if (ENABLE_STATIC_JSC)\n        list(APPEND TestJavaScriptCore_SOURCES Tests/JavaScriptCore/AsyncStackTrace.cpp)\n    endif ()\n\n",
   "production": {
     "path": "Source/JavaScriptCore/interpreter/Interpreter.cpp",
