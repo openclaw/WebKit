@@ -305,8 +305,11 @@ private:
                 Word32 quotient(m_out.m_block->appendNew<B3::Value>(m_proc, B3::UDiv, m_out.origin(), dividend.value(), divisor.value()));
                 return sub(dividend, mul(quotient, divisor));
             } else {
-                if (isDividendUint32 && *constantDivisor <= std::numeric_limits<int32_t>::max())
-                    return zeroExtended(remainderOfNonNegative(low32(dividend), word32(static_cast<int32_t>(*constantDivisor))));
+                if (isDividendUint32 && *constantDivisor <= std::numeric_limits<int32_t>::max()) {
+                    Word32 narrowDividend = low32(dividend);
+                    Word32 narrowDivisor = word32(static_cast<int32_t>(*constantDivisor));
+                    return zeroExtended(remainderOfNonNegative(narrowDividend, narrowDivisor));
+                }
                 return remainderByConstant(dividend, *constantDivisor, DividendSign::NonNegative);
             }
         }

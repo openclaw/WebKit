@@ -556,6 +556,11 @@ static void testProgramThatWasNotAnalyzedIsOpen()
     AOT_TEST_CHECK(flagsOf(printsSum, { "disable=flow-results"_s }) == (runsOnlyCodeOfImage ? open : open | Flags { ImageFlag::LoadsCodeOutsideImage }));
 }
 
+static void testProgramThatWasNotAnalyzedStillExcludesDiskCodeWhenRequested()
+{
+    AOT_TEST_CHECK(flagsOf(printsSum, { "disable=flow-results"_s, "exclude=CodeOutsideImage"_s }) == open);
+}
+
 static void testObfuscationIsAnotherFlag()
 {
     AOT_TEST_CHECK(flagsOf(printsSum, { "obfuscate"_s }) == Flags { ImageFlag::IsObfuscated });
@@ -673,6 +678,7 @@ std::span<const NativeTest> closedWorldTests()
         { "closed-world/flags/excluded-text-leaves-the-program-closed"_s, testExcludedTextLeavesTheProgramClosed },
         { "closed-world/flags/losses-of-the-analysis-admit-nothing"_s, testLossesOfTheAnalysisAdmitNothing },
         { "closed-world/flags/program-that-was-not-analyzed-is-open"_s, testProgramThatWasNotAnalyzedIsOpen },
+        { "closed-world/flags/program-that-was-not-analyzed-still-excludes-disk-code-when-requested"_s, testProgramThatWasNotAnalyzedStillExcludesDiskCodeWhenRequested },
         { "closed-world/flags/obfuscation-is-another-flag"_s, testObfuscationIsAnotherFlag },
         { "closed-world/evaluation/closed-program-refuses-every-evaluator"_s, testClosedProgramRefusesEveryEvaluator },
         { "closed-world/evaluation/program-that-evaluates-text-keeps-every-evaluator"_s, testProgramThatEvaluatesTextKeepsEveryEvaluator },

@@ -51,10 +51,15 @@ void ArrayBuiltinEmitter::copyElements(const ArrayStorageForm& form, const Array
     if (formOfTarget.kind == ArrayStorage::Double && form.kind != formOfTarget.kind) {
         RELEASE_ASSERT(form.kind == ArrayStorage::Int32);
         Number number = toNumber(unboxInt32Element(rawElement.as<Boxed>()));
-        rawElement = select(elements().isHole(form, rawElement), elements().rawHole(formOfTarget).as<Number>(), number);
+        Condition isHole = elements().isHole(form, rawElement);
+        Number hole = elements().rawHole(formOfTarget).as<Number>();
+        rawElement = select(isHole, hole, number);
     } else if (form.kind == ArrayStorage::Double && form.kind != formOfTarget.kind) {
         RELEASE_ASSERT(formOfTarget.kind == ArrayStorage::Contiguous);
-        rawElement = select(elements().isHole(form, rawElement), elements().rawHole(formOfTarget).as<Boxed>(), elements().boxRawElement(form, rawElement));
+        Condition isHole = elements().isHole(form, rawElement);
+        Boxed hole = elements().rawHole(formOfTarget).as<Boxed>();
+        Boxed boxed = elements().boxRawElement(form, rawElement);
+        rawElement = select(isHole, hole, boxed);
     } else
         RELEASE_ASSERT(form.kind == formOfTarget.kind || (form.kind == ArrayStorage::Int32 && formOfTarget.kind == ArrayStorage::Contiguous));
     elements().storeRawElement(formOfTarget, target.elements, add(target.first, reverses ? sub(sub(count, integer(1)), index) : index), rawElement);
@@ -231,7 +236,10 @@ void ArrayBuiltinEmitter::copyIntoNewArray(const InlineCall& call, const LengthO
 Integer ArrayBuiltinEmitter::clampToLength(Integer relative, Integer length)
 {
     Integer fromEnd = add(relative, length);
-    return select(lessThan(relative, 0), select(lessThan(fromEnd, 0), 0, fromEnd), select(lessThan(relative, length), relative, length));
+    Condition isNegative = lessThan(relative, 0);
+    Integer negativeBound = select(lessThan(fromEnd, 0), 0, fromEnd);
+    Integer positiveBound = select(lessThan(relative, length), relative, length);
+    return select(isNegative, negativeBound, positiveBound);
 }
 
 void ArrayBuiltinEmitter::storeItem(const InlineCall& call, const ArrayStorageForm& form, ArrayElements target, Integer position, ValueID item)
@@ -254,11 +262,14 @@ void ArrayBuiltinEmitter::generateArrayWith(const InlineCall& call)
     Integer position;
     copyIntoNewArray(call, [&](Integer lengthOfReceiver) {
         length = lengthOfReceiver;
-        position = select(lessThan(relative, 0), add(relative, length), relative);
+        Condition isNegative = lessThan(relative, 0);
+        Integer fromEnd = add(relative, length);
+        position = select(isNegative, fromEnd, relative);
         missUnless(call, below(position, length));
         return length;
     }, [&](const ArrayStorageForm& form, const ArrayStorageForm& made, ArrayElements source, ArrayElements target) {
-        copyElements(form, made, { source, integer(0) }, { target, integer(0) }, length, CopyDirection::Forward, miss);
+        Integer start = integer(0);
+        copyElements(form, made, { source, start }, { target, start }, length, CopyDirection::Forward, miss);
         storeItem(call, made, target, position, call.argument(1));
     });
 }
@@ -271,7 +282,9 @@ void ArrayBuiltinEmitter::generateArrayToReversed(const InlineCall& call)
     copyIntoNewArray(call, [&](Integer lengthOfReceiver) {
         return length = lengthOfReceiver;
     }, [&](const ArrayStorageForm& form, const ArrayStorageForm& made, ArrayElements source, ArrayElements target) {
-        copyElements(form, made, { source, integer(0) }, { target, integer(0) }, length, CopyDirection::Forward, missBlockOf(call), true);
+        Integer start = integer(0);
+        LBasicBlock miss = missBlockOf(call);
+        copyElements(form, made, { source, start }, { target, start }, length, CopyDirection::Forward, miss, true);
     });
 }
 
@@ -293,12 +306,23 @@ void ArrayBuiltinEmitter::generateArrayToSpliced(const InlineCall& call)
     copyIntoNewArray(call, [&](Integer length) {
         from = clampToLength(start, length);
         Integer left = sub(length, from);
-        Integer skipped = !numberOfRangeArguments ? integer(0) : !skipCount ? left : select(lessThan(skipCount, 0), 0, select(lessThan(skipCount, left), skipCount, left));
+        Integer skipped;
+        if (!numberOfRangeArguments)
+            skipped = integer(0);
+        else if (!skipCount)
+            skipped = left;
+        else {
+            Condition isNegative = lessThan(skipCount, 0);
+            Integer capped = select(lessThan(skipCount, left), skipCount, left);
+            skipped = select(isNegative, 0, capped);
+        }
         behind = add(from, skipped);
         tail = sub(length, behind);
-        return add(add(from, tail), integer(static_cast<int64_t>(items.size())));
+        Integer copiedLength = add(from, tail);
+        return add(copiedLength, integer(static_cast<int64_t>(items.size())));
     }, [&](const ArrayStorageForm& form, const ArrayStorageForm& made, ArrayElements source, ArrayElements target) {
-        copyElements(form, made, { source, integer(0) }, { target, integer(0) }, from, CopyDirection::Forward, miss);
+        Integer start = integer(0);
+        copyElements(form, made, { source, start }, { target, start }, from, CopyDirection::Forward, miss);
         Integer position = from;
         for (ValueID item : items) {
             storeItem(call, made, target, position, item);
