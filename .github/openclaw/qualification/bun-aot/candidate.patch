@@ -2435,7 +2435,7 @@ index 2c99e605f4617d17935d3d612211fe8d8d02eaea..6cc0355813122b14f1ebc264fc70d439
  
      // `exports.a = exports.b = value` is a part like `var a = value`: it is there for whoever reads one of the names.
 diff --git a/src/aot/compile/removable.rs b/src/aot/compile/removable.rs
-index e6f8d999d88300e3fbcc26bf87647b993a971b96..430269f11eaaeaee232829f4b335ab9719b91a10 100644
+index e6f8d999d88300e3fbcc26bf87647b993a971b96..acdfc24f0508abc3361759bd73a49707ea26d811 100644
 --- a/src/aot/compile/removable.rs
 +++ b/src/aot/compile/removable.rs
 @@ -2,9 +2,14 @@
@@ -2454,6 +2454,15 @@ index e6f8d999d88300e3fbcc26bf87647b993a971b96..430269f11eaaeaee232829f4b335ab97
  use bun_sema::atom::{Atom, Interner, known};
  use bun_sema::bind::{
      Binding, BindingStability, Bound, CodeUnit, CommonJsVariable, Decl, ModuleInstanceState,
+@@ -22,7 +27,7 @@ use bun_sema::program::{FileId, Files};
+ use rustc_hash::FxHashMap;
+ 
+ use crate::builtins::table::{self, BuiltinFlags};
+-use crate::builtins::{BuiltinId, BuiltinKind, Resolved, ResolvedBuiltins};
++use crate::builtins::{BuiltinId, BuiltinKind, ResolvedBuiltins};
+ use crate::load::sources::parsed_source;
+ use crate::modules::{Member, ModuleGraph};
+ use crate::options::RemovableOptions;
 @@ -79,6 +84,38 @@ fn is_read_without_code(builtin: BuiltinId, is_global: bool) -> bool {
      }
  }

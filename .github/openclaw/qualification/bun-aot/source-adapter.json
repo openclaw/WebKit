@@ -2,7 +2,7 @@
   "bun": "fd40ba44187c721ee023062fa153a6a27560e6b1",
   "webkit": "5ec9ac8557722128588184ed9cf77347d9a30cf1",
   "prepare_only": false,
-  "patch_sha256": "4c461028bcf8376484b143c0757dcbe6e9c645968718e0e1d5779a0fd5674dfd",
+  "patch_sha256": "ea80416c88d2c3958e4128394884c8f5a3b47fba5810ad74af7f02cd0761ac7a",
   "files": {
     "CHANGELOG.md": {
       "before": "aa3d183726734a0c1dd7f255d783b7e7b1946e4ff88e9432623e31556c206308",
@@ -300,9 +300,9 @@
     },
     "src/aot/compile/removable.rs": {
       "before": "b68f6450a91715ba9118d05bbf93de94da259956a2ec515b5e40ecd6a38d0a0f",
-      "after": "a6045b15267207a94a951d7bb1f66ec36b4c00b610348a7ec8d862da0fb543a9",
+      "after": "3ae1e4e453d5841d7bac6fa48a3efac7f4d1462673d63fb7762a69d0c7ab77ed",
       "base_blob": "e6f8d999d88300e3fbcc26bf87647b993a971b96",
-      "adapted_blob": "430269f11eaaeaee232829f4b335ab9719b91a10",
+      "adapted_blob": "acdfc24f0508abc3361759bd73a49707ea26d811",
       "mode": "100644"
     },
     "src/aot/compile/removable/rows.tsv": {
