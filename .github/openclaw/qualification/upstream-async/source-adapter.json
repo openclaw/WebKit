@@ -1,6 +1,6 @@
 {
   "base": "e66916298091dd12469076fd854e135b03fb16ff",
-  "head": "ba2bec62afeae614a801a2a2af501687b845b0b6",
+  "head": "540ee746090a24a8d9df95cba19fd489307fb06b",
   "build_adapter": "31b03fa17b3a9133d5240d593fa464b5825a2e33",
   "build_patch_sha256": "133ca9e02fb4a4468b2b67e5b394de10189b2f9e80373f94c4be800e9d0127e9",
   "files": {
@@ -83,5 +83,10 @@
       "sha256": "8a31a54e6bf6d543d002a6c6688381783f502f559343125481b2568a10b4c55b",
       "blob": "b71ffd70b8420c2593bc0c1f8ff63892327cbd29"
     }
+  },
+  "stress_fixture": {
+    "path": "JSTests/stress/error-stack-async-relative-resume-target.js",
+    "sha256": "014ebbeecbd94287c126a356c18ded2a44b667c338a452927d78b3e658dd9235",
+    "blob": "18f52dd37073b9fd9facd9ab86145126efb35120"
   }
 }

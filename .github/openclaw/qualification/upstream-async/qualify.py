@@ -17,7 +17,7 @@ OUT = Path(os.environ['RUNNER_TEMP']) / 'upstream-async-proof'
 OUT.mkdir(exist_ok=True)
 SPEC = json.loads((INPUTS / 'source-adapter.json').read_text())
 BASE = 'e66916298091dd12469076fd854e135b03fb16ff'
-HEAD = 'ba2bec62afeae614a801a2a2af501687b845b0b6'
+HEAD = '540ee746090a24a8d9df95cba19fd489307fb06b'
 ADAPTER = '31b03fa17b3a9133d5240d593fa464b5825a2e33'
 FIXTURE = 'Tools/TestWebKitAPI/Tests/JavaScriptCore/AsyncStackTrace.cpp'
 REGISTRATION = 'Tools/TestWebKitAPI/CMakeLists.txt'
@@ -82,6 +82,10 @@ def state(pin, adapted):
     identity(SOURCE / SPEC['production']['path'], SPEC['production']['before' if pin == BASE else 'after'])
     assert set(git('ls-files', '--others', '--exclude-standard').splitlines()) == ({FIXTURE} if pin == BASE and adapted else set())
     identity(SOURCE / REGISTRATION, SPEC['registration']['after' if pin == HEAD or adapted else 'before'])
+    if pin == HEAD:
+        identity(SOURCE / SPEC['stress_fixture']['path'], SPEC['stress_fixture'])
+    else:
+        assert not (SOURCE / SPEC['stress_fixture']['path']).exists()
     if pin == HEAD or adapted:
         identity(SOURCE / FIXTURE, SPEC['fixture'])
     else:
@@ -109,6 +113,51 @@ def admit(path, red):
     assert switch > 0 and relative > 0 and actual == relative and expected == switch + relative
     text = message + '\n' + ''.join(failure.itertext())
     assert re.search(r'AsyncStackTrace\.cpp:' + str(SPEC['expected_failure_line']) + r'\b', text), text
+
+
+def stress(binary):
+    fixture = SPEC['stress_fixture']
+    identity(SOURCE / fixture['path'], fixture)
+    before = sha(binary)
+    results = Path(os.environ['RUNNER_TEMP']) / 'upstream-async-stress-results'
+    prefix = 'stress/error-stack-async-relative-resume-target.js.'
+    try:
+        run('head-jsc-stress', ['Tools/Scripts/run-jsc-stress-tests', 'JSTests/stress',
+            '--jsc', str(binary), '--filter', '^' + re.escape(prefix),
+            '--report-execution-time', '--no-retry', '--child-processes', '1',
+            '--output-dir', str(results)], seconds=600)
+    finally:
+        saved = {}
+        for name in ['results', 'passed', 'failed', 'noresult', 'flaky']:
+            path = results / name
+            assert not path.is_symlink()
+            if path.exists():
+                assert path.is_file() and path.stat().st_size <= 1024**2
+                saved[name] = path.read_text(encoding='ascii').splitlines()
+            else:
+                saved[name] = None
+        (OUT / 'stress-results.json').write_text(json.dumps(saved, indent=2) + '\n')
+    rows = saved['results']
+    assert rows and saved['passed']
+    names = []
+    for row in rows:
+        match = re.fullmatch(r'(.+): PASS', row)
+        assert match and match[1].startswith(prefix), row
+        names.append(match[1])
+    assert len(names) == len(set(names)) and len(saved['passed']) == len(set(saved['passed']))
+    assert set(saved['passed']) == set(names)
+    assert all(not saved[name] for name in ['failed', 'noresult', 'flaky'])
+    log = (OUT / 'head-jsc-stress.log').read_text()
+    timings = re.findall(r'^PASS: ([^\r\n]+) ([0-9]+)ms$', log, re.MULTILINE)
+    assert len(timings) == len(names) and len({name for name, _ in timings}) == len(names)
+    assert {name for name, _ in timings} == set(names)
+    assert all(0 <= int(ms) < 200 for _, ms in timings), timings
+    assert sha(binary) == before
+    identity(SOURCE / fixture['path'], fixture)
+    RECORD['stress'] = {'source': HEAD, 'fixture_sha256': fixture['sha256'],
+                        'binary_sha256': before,
+                        'cases': [{'name': name, 'milliseconds': int(ms)} for name, ms in timings]}
+    save()
 
 
 assert (SPEC['base'], SPEC['head'], SPEC['build_adapter']) == (BASE, HEAD, ADAPTER)
@@ -153,6 +202,10 @@ for arm, pin in [('base', BASE), ('head', HEAD)]:
     admit(xml, red=arm == 'base')
     assert sha(binary) == before
     state(pin, True)
+    if arm == 'head':
+        run('head-build-jsc', ['cmake', '--build', str(BUILD), '--target', 'jsc', '-j4'], 1200)
+        stress(BUILD / 'bin/jsc')
+        state(pin, True)
     RECORD['arms'][arm] = {'source': pin, 'binary_sha256': before, 'case': CASE,
                            'cmake_cache_sha256': sha(BUILD / 'CMakeCache.txt'), 'adapted_inputs': adapted_inputs}
     run(arm + '-restore', ['git', 'restore', '--source=' + pin, '--worktree', '--', *SPEC['files'], REGISTRATION])
