@@ -1,0 +1,147 @@
+name: OpenClaw upstream API linkage proof
+on:
+  pull_request:
+    branches: [claude/sync-webkit-upstream-20261014]
+    paths: [.github/workflows/openclaw-upstream-api.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: openclaw-upstream-api-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native-api-linkage:
+    if: >-
+      github.repository == 'openclaw/WebKit' &&
+      (github.event.pull_request.head.ref || github.ref_name) == 'claude/upstream-api-link-proof-20261031' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: openclaw/WebKit
+          ref: e66916298091dd12469076fd854e135b03fb16ff
+          path: upstream
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/LayoutTests/
+            !/JSTests/*
+            !/PerformanceTests/
+            !/Websites/
+            !/ManualTests/
+            !/WebDriverTests/
+            /JSTests/stress/
+            /JSTests/modules/
+            /JSTests/*.yaml
+            /JSTests/BUN-TEST-DIFFERENCES.md
+      - name: Install the existing native ARM64 toolchain
+        run: |
+          test "$(uname -m)" = aarch64
+          curl -fsSL --retry 5 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake ninja-build clang-23 lld-23 libicu-dev ruby ruby-highline libjson-pp-perl
+      - name: Prove the original link failure and exact upstream correction
+        env:
+          PIPELINE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, re, signal, subprocess, time
+          from pathlib import Path
+          from xml.etree import ElementTree
+          source = Path('upstream').resolve()
+          build = Path(os.environ['RUNNER_TEMP']) / 'upstream-api-build'
+          out = Path(os.environ['RUNNER_TEMP']) / 'upstream-api-proof'
+          out.mkdir()
+          base = 'e66916298091dd12469076fd854e135b03fb16ff'
+          head = '31b03fa17b3a9133d5240d593fa464b5825a2e33'
+          expected_paths = {
+              'Source/JavaScriptCore/CMakeLists.txt',
+              'Source/JavaScriptCore/shell/CMakeLists.txt',
+              'Tools/TestWebKitAPI/PlatformJSCOnly.cmake',
+          }
+          record = {'pipeline': os.environ['PIPELINE_SHA'], 'base': base, 'candidate': head, 'steps': {}}
+          deadline = time.monotonic() + 6000
+          def save():
+              (out / 'proof.json').write_text(json.dumps(record, indent=2) + '\n')
+          def run(name, argv, budget):
+              with (out / (name + '.log')).open('x') as log:
+                  process = subprocess.Popen(argv, cwd=source, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                  timed_out = False
+                  try:
+                      process.wait(timeout=min(budget, max(0, deadline - time.monotonic())))
+                  except subprocess.TimeoutExpired:
+                      timed_out = True
+                      raise
+                  finally:
+                      try:
+                          os.killpg(process.pid, signal.SIGKILL)
+                      except ProcessLookupError:
+                          pass
+                      process.wait()
+                      record['steps'][name] = {'returncode': process.returncode, 'timed_out': timed_out}
+                      save()
+              return process.returncode
+          def checked(name, argv, budget=120):
+              assert run(name, argv, budget) == 0, name
+          def git(*args):
+              return subprocess.check_output(['git', *args], cwd=source, timeout=120).decode().strip()
+          def frozen(expected):
+              assert git('rev-parse', 'HEAD') == expected
+              assert not git('status', '--porcelain', '--untracked-files=no'), 'tracked source drift'
+          configure = [
+              '-G', 'Ninja', '-DPORT=JSCOnly', '-DCMAKE_BUILD_TYPE=Release', '-DDEVELOPER_MODE=ON',
+              '-DCMAKE_COMPILE_WARNING_AS_ERROR=OFF', '-DENABLE_STATIC_JSC=ON',
+              '-DUSE_BUN_JSC_ADDITIONS=ON', '-DUSE_BUN_EVENT_LOOP=ON',
+              '-DUSE_MIMALLOC=ON', '-DUSE_EXTERNAL_MIMALLOC=OFF', '-DENABLE_FTL_JIT=ON',
+              '-DENABLE_BUN_SKIP_FAILING_ASSERTIONS=ON', '-DALLOW_LINE_AND_COLUMN_NUMBER_IN_BUILTINS=ON',
+              '-DENABLE_REMOTE_INSPECTOR=ON', '-DCMAKE_C_COMPILER=clang-23', '-DCMAKE_CXX_COMPILER=clang++-23',
+          ]
+          record['configure'] = configure
+          save()
+          frozen(base)
+          checked('configure-base', ['cmake', '-S', str(source), '-B', str(build), *configure], 600)
+          api = build / 'bin/TestWebKitAPI/TestJavaScriptCore'
+          assert not api.exists()
+          code = run('build-base', ['cmake', '--build', str(build), '--target', 'TestJavaScriptCore', '-j4'], 4500)
+          text = (out / 'build-base.log').read_text()
+          assert code > 0 and not api.exists(), 'base must fail before producing the API executable'
+          assert re.search(r'undefined (?:symbol|reference)', text), 'base failure must be linkage'
+          for symbol in ('Bun__removableFeatureState', 'Bun__throwForRemovedFeature', 'Bun__throwForRemovedFunction', 'JSC::AOT::builtinTable'):
+              assert symbol in text, ('missing original linkage failure', symbol)
+          frozen(base)
+          checked('fetch-candidate', ['git', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', 'fetch', '--no-tags', '--no-prune', '--no-auto-maintenance', 'origin', head])
+          assert set(git('diff', '--name-only', base, head).splitlines()) == expected_paths
+          checked('checkout-candidate', ['git', 'checkout', '--detach', head])
+          frozen(head)
+          # The three changed CMake files reconfigure the same build; unchanged objects retain normal dependency tracking.
+          checked('configure-candidate', ['cmake', '-S', str(source), '-B', str(build), *configure], 600)
+          checked('build-candidate', ['cmake', '--build', str(build), '--target', 'TestJavaScriptCore', '-j4'], 900)
+          checked('api-smoke', [str(api), '--gtest_filter=JavaScriptCore_MarkedVector.Append_JSObjectPtr', '--gtest_output=xml:' + str(out / 'api-smoke.xml')])
+          cases = ElementTree.parse(out / 'api-smoke.xml').getroot().findall('.//testcase')
+          assert len(cases) == 1
+          case = cases[0]
+          assert (case.get('classname'), case.get('name')) == ('JavaScriptCore_MarkedVector', 'Append_JSObjectPtr')
+          assert case.get('status') == 'run' and case.get('result') == 'completed'
+          assert not any(case.find(tag) is not None for tag in ('failure', 'error', 'skipped'))
+          shell_off = Path(os.environ['RUNNER_TEMP']) / 'upstream-api-shell-off'
+          checked('configure-shell-off', ['cmake', '-S', str(source), '-B', str(shell_off), *configure, '-DENABLE_JAVASCRIPT_SHELL=OFF'], 600)
+          checked('query-shell-off', ['ninja', '-C', str(shell_off), '-t', 'query', 'bin/TestWebKitAPI/TestJavaScriptCore'])
+          graph = (out / 'query-shell-off.log').read_text()
+          assert 'aot-builtin-table-obj' in graph and 'AOTNoFeatureRemoved.cpp.o' in graph
+          frozen(head)
+          with api.open('rb') as stream:
+              record['api_sha256'] = hashlib.file_digest(stream, 'sha256').hexdigest()
+          record.update(passed=True, api_cases=1, shell_off='configured target graph only')
+          save()
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: upstream-api-link-proof
+          path: ${{ runner.temp }}/upstream-api-proof/
+          if-no-files-found: warn
+          retention-days: 7
