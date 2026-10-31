@@ -21,6 +21,7 @@ BUILD = SOURCE / 'build/aot-linux-arm64'
 LIMIT = 128 * 1024**2
 STEPS = []
 START = time.monotonic()
+DEADLINE = START + 270 * 60
 ENV = {k: v for k, v in os.environ.items() if not any(t in k.upper() for t in ('TOKEN', 'PASSWORD', 'SECRET'))}
 ENV.update(CI='true', BUN_WEBKIT_PATH=str(ENGINE))
 
@@ -52,7 +53,7 @@ def run(name, command, seconds, env=None, expected=0):
                                 stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             while proc.poll() is None:
-                if time.monotonic() - started >= seconds:
+                if time.monotonic() >= min(started + seconds, DEADLINE):
                     record['timedOut'] = True
                     raise TimeoutError(name)
                 if sum(p.stat().st_size for p in OUT.iterdir() if p.is_file()) > LIMIT:
@@ -102,7 +103,7 @@ OUT.mkdir(exist_ok=True)
 assert git(Path('/work/pipeline'), 'rev-parse', 'HEAD') == PIPELINE
 spec = json.loads((INPUTS / 'source-adapter.json').read_text())
 assert spec['bun'] == BUN and spec['webkit'] == WEBKIT
-assert len(spec['files']) == 6
+assert len(spec['files']) == 8
 assert sha(INPUTS / 'candidate.patch') == spec['patch_sha256']
 original_tree = git(SOURCE, 'rev-parse', 'HEAD^{tree}')
 source_state(False)
@@ -119,20 +120,26 @@ source_state(False)
 run('apply-adapter', ['git', 'apply', '--check', str(INPUTS / 'candidate.patch')], 120)
 run('apply-adapter-write', ['git', 'apply', str(INPUTS / 'candidate.patch')], 120)
 source_state(True)
-run('build', ['bun', 'scripts/build.ts', '--profile=release-local', '--webkit=local',
-              '--webkit-version=' + WEBKIT, '--aot=on', '--ci=on', '--buildkite=off',
-              '--os=linux', '--arch=aarch64', '--abi=gnu', '--build-dir=build/aot-linux-arm64', '-j2'], 14400)
+build_command = ['bun', 'scripts/build.ts', '--profile=release-local', '--webkit=local',
+                 '--webkit-version=' + WEBKIT, '--aot=on', '--ci=on', '--buildkite=off',
+                 '--os=linux', '--arch=aarch64', '--abi=gnu', '--build-dir=build/aot-linux-arm64', '-j2']
+run('configure', [*build_command, '--configure-only'], 600)
+source_state(True)
+run('build', build_command, 14400)
 source_state(True)
 binary = BUILD / 'bun'
 table = BUILD / 'codegen/aot_builtin_table.json'
 assert all(p.is_file() and os.access(p, os.X_OK) for p in (binary, BUILD / 'jsc', BUILD / 'testaot'))
 assert table.stat().st_size > 0
 identities = {name: sha(BUILD / name) for name in ['bun', 'jsc', 'testaot', 'codegen/aot_builtin_table.json', 'build.ninja']}
-internal_xml = OUT / 'build-contracts.xml'
-run('build-contracts', [str(binary), 'test', 'test/internal/build-aot-codegen-declared-outputs.test.ts',
-                       '--reporter=junit', '--reporter-outfile=' + str(internal_xml)], 600)
-internal_cases = junit(internal_xml)
-assert len(internal_cases) >= 10
+internal_cases = {}
+for name, file in [('build-contracts', 'build-aot-codegen-declared-outputs.test.ts'),
+                   ('local-webkit-contracts', 'build-local-webkit.test.ts')]:
+    xml = OUT / (name + '.xml')
+    run(name, [str(binary), 'test', 'test/internal/' + file,
+               '--reporter=junit', '--reporter-outfile=' + str(xml)], 600)
+    internal_cases[file] = junit(xml)
+    assert len(internal_cases[file]) >= 10
 source_state(True)
 run('restore-source', ['git', 'restore', '--source=' + BUN, '--worktree', '--', *spec['files']], 120)
 source_state(False)

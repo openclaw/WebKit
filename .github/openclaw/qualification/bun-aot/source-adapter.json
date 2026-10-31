@@ -1,8 +1,15 @@
 {
   "bun": "fd40ba44187c721ee023062fa153a6a27560e6b1",
   "webkit": "5ec9ac8557722128588184ed9cf77347d9a30cf1",
-  "patch_sha256": "576826a5ff3488b621b775ddf4e37cfa3a869a65aaeb28dbe3af2d44043ecbfa",
+  "patch_sha256": "0c0587414742ab4bd9787cb3110f061456d5ca78351f738c95bb1f0aa291641d",
   "files": {
+    "scripts/build/aot-source-lists.ts": {
+      "before": "881654b517a593c56bf65ca3f84a238a8825b43c9ad92b1bd3587cb78a579ffa",
+      "after": "7bcd40648bf2798aab69a6bdf1201e44863b2e98cd63ddd1337b2eb550295395",
+      "base_blob": "3a340c0ec58bf172926ab963c38364363e23c9ea",
+      "adapted_blob": "2eea08b824cc83e18b086845efa9a616ddbd9c54",
+      "mode": "100644"
+    },
     "scripts/build/aot.ts": {
       "before": "a9d2051afc9204ca7625f853f97ffa2d3141e6e8f81cd1733d3657a0778699c9",
       "after": "4264932add06b74a3c0206c7ca365661cadc12b173a864910752dd0bc3643e02",
@@ -12,9 +19,9 @@
     },
     "scripts/build/deps/webkit.ts": {
       "before": "12933600404cf33f4d23a59f6336dec2546ad95eecca6d036165b2a1b52b7c33",
-      "after": "a0a250069f71d4211bb05f56eb3bb896707739c67dce5bd0414a7acd248d8bd1",
+      "after": "851e23605aceb4595eee24c99c776510d141adf3bc5cf507ce5d376f5c90b415",
       "base_blob": "4fc1df1f0bf8bbb865505a995fcd7c32e8646223",
-      "adapted_blob": "ba13cc4677471e8f820535423ed759a7bbaa6255",
+      "adapted_blob": "8b196120beecd8724adc10f63a15e1cdaf7e5375",
       "mode": "100644"
     },
     "scripts/build/ninja.ts": {
@@ -43,6 +50,13 @@
       "after": "d33a41f49be51f00253b52af498a45258c7cb1b1ed67259c0566d069a43f598b",
       "base_blob": "b9b6a5353d4572e45a514d16b41ba84dc3a66f25",
       "adapted_blob": "db4ea4bf79b52e27196a65582774eab455078ff6",
+      "mode": "100644"
+    },
+    "test/internal/build-local-webkit.test.ts": {
+      "before": "9d64ec86d587d9bb46229ba44ee500c4a5a1ce08c37c2dfad2afdcab3016c7ff",
+      "after": "c9225b71e8d12e8b116600fff79d8bbdb9eb8d7862027a038f8a6a0e81fa38b4",
+      "base_blob": "813be511cb68422034d0567ce65f59733b257fb4",
+      "adapted_blob": "56bee5f41c7552a173ca0d929fd861be7243fb65",
       "mode": "100644"
     }
   }

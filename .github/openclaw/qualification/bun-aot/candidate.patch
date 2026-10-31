@@ -1,3 +1,124 @@
+diff --git a/scripts/build/aot-source-lists.ts b/scripts/build/aot-source-lists.ts
+index 3a340c0ec58bf172926ab963c38364363e23c9ea..2eea08b824cc83e18b086845efa9a616ddbd9c54 100644
+--- a/scripts/build/aot-source-lists.ts
++++ b/scripts/build/aot-source-lists.ts
+@@ -6,7 +6,7 @@ import { writeIfChanged } from "./fs.ts";
+ 
+ /** Paths are relative to JavaScriptCore, with `/`, in ascending order by code unit. */
+ export interface AotSourceLists {
+-  /** Without those that are compiled for size: people keep that list. */
++  /** Without those that are compiled for size: people keep those lists. */
+   librarySources: string[];
+   testSources: string[];
+   includeDirectories: string[];
+@@ -16,7 +16,8 @@ export interface AotSourceLists {
+ }
+ 
+ export interface DeclaredAotLists {
+-  sourcesCompiledForSize: string[];
++  /** One list for each file of them. */
++  sourcesCompiledForSize: string[][];
+   generatedSources: string[];
+   generatedHeaders: string[];
+   programSources: string[];
+@@ -29,7 +30,7 @@ export interface DeclaredAotLists {
+ export interface WrittenAotLists extends AotSourceLists, DeclaredAotLists {}
+ 
+ const sourcesTxt = "aot/Sources.txt";
+-const sourcesCompiledForSizeTxt = "aot/SourcesCompiledForSize.txt";
++const sourcesCompiledForSizeTxts = ["aot/SourcesCompiledForSize.txt", "aot/SourcesCompiledForMinimumSize.txt"];
+ const aotCMake = "aot/AOT.cmake";
+ const headerExtensions = [".h", ".def", ".inc"];
+ const includedAotHeader = /#\s*include\s+["<](?:JavaScriptCore\/)?(AOT[\w+]*\.(?:h|def|inc))[">]/g;
+@@ -65,13 +66,7 @@ function filesUnder(root: string, directory: string, isWanted: (name: string) =>
+ 
+ const isHeader = (name: string): boolean =>
+   name.startsWith("AOT") && headerExtensions.some(extension => name.endsWith(extension));
+-/** There for tests alone, and not named or placed so: what reads IR text, what runs one pass, the dumps that only test commands print. */
+-const testSourcesOutsideTests =
+-  /^aot\/(?:ir\/AOT(?:IRLexer|IRParser\w*|WireProgramBuilder)|pipeline\/AOTPipelineTesting|place\/AOTPlacementDump|valueflow\/AOTFlowResultsDump)\.cpp$/;
+-const isTestSource = (path: string): boolean =>
+-  path.startsWith("aot/tests/") ||
+-  /^AOT\w*TestCommands\.cpp$/.test(basename(path)) ||
+-  testSourcesOutsideTests.test(path);
++const isTestSource = (path: string): boolean => path.startsWith("aot/tests/");
+ 
+ function includedAotHeadersOf(text: string): string[] {
+   return [...text.matchAll(includedAotHeader)].map(match => match[1]!);
+@@ -91,7 +86,7 @@ export function readWrittenAotLists(javaScriptCore: string): WrittenAotLists {
+       .filter(line => line !== "");
+   return {
+     librarySources: linesOf(sourcesTxt),
+-    sourcesCompiledForSize: linesOf(sourcesCompiledForSizeTxt),
++    sourcesCompiledForSize: sourcesCompiledForSizeTxts.map(linesOf),
+     testSources: evaluated.list("JavaScriptCore_AOT_TEST_SOURCES"),
+     includeDirectories: evaluated
+       .list("JavaScriptCore_PRIVATE_INCLUDE_DIRECTORIES")
+@@ -108,13 +103,15 @@ export function readWrittenAotLists(javaScriptCore: string): WrittenAotLists {
+     generatedHeaders: [
+       ...evaluated.list("JavaScriptCore_AOT_SCHEMA_GENERATED_HEADERS"),
+       ...evaluated.list("JavaScriptCore_AOT_BUILTIN_TABLE_GENERATED_HEADERS"),
++      ...evaluated.list("JavaScriptCore_AOT_VECTOR_GENERATED_HEADERS"),
+     ],
+     programSources: evaluated.list("JavaScriptCore_AOT_PROGRAM_SOURCES"),
+     shellSources: evaluated.list("JavaScriptCore_AOT_SHELL_SOURCES"),
+     tableExportedHeaders: evaluated.list("JavaScriptCore_AOT_BUILTIN_TABLE_EXPORTED_HEADERS"),
+-    tableExportedGeneratedHeaders: evaluated
+-      .list("JavaScriptCore_AOT_BUILTIN_TABLE_EXPORTED_GENERATED_HEADERS")
+-      .map(path => basename(path)),
++    tableExportedGeneratedHeaders: [
++      ...evaluated.list("JavaScriptCore_AOT_BUILTIN_TABLE_EXPORTED_GENERATED_HEADERS"),
++      ...evaluated.list("JavaScriptCore_AOT_VECTOR_GENERATED_HEADERS"),
++    ].map(path => basename(path)),
+   };
+ }
+ 
+@@ -192,7 +189,7 @@ export function computeAotSourceLists(
+     ...declared.generatedSources,
+     ...declared.programSources,
+     ...declared.shellSources,
+-    ...declared.sourcesCompiledForSize,
++    ...declared.sourcesCompiledForSize.flat(),
+   ]);
+   const sources = filesUnder(javaScriptCore, "aot", name => name.endsWith(".cpp")).filter(
+     path => !listedElsewhere.has(path),
+@@ -224,7 +221,7 @@ export function findAotSourceListProblems(javaScriptCore: string): string[] {
+     ...written.generatedSources,
+     ...written.programSources,
+     ...written.shellSources,
+-    ...written.sourcesCompiledForSize,
++    ...written.sourcesCompiledForSize.flat(),
+   ]);
+   const present = filesUnder(javaScriptCore, "aot", name => name.endsWith(".cpp"));
+   const sources = present.filter(path => !listedElsewhere.has(path));
+@@ -247,15 +244,20 @@ export function findAotSourceListProblems(javaScriptCore: string): string[] {
+       written.includeDirectories,
+       headerDirectories(javaScriptCore, written.generatedHeaders),
+     ),
+-    ...[...written.programSources, ...written.shellSources, ...written.sourcesCompiledForSize]
++    ...[...written.programSources, ...written.shellSources, ...written.sourcesCompiledForSize.flat()]
+       .filter(path => !present.includes(path))
+       .map(path => `${path}: listed, and there is no such file`),
+-    ...written.sourcesCompiledForSize
+-      .filter(isTestSource)
+-      .map(path => `${path}: in ${sourcesCompiledForSizeTxt}, and is a source of testaot`),
+-    ...(written.sourcesCompiledForSize.every((path, index, all) => index === 0 || all[index - 1]! < path)
+-      ? []
+-      : [`${sourcesCompiledForSizeTxt}: not in ascending order`]),
++    ...written.sourcesCompiledForSize.flatMap((sources, list) => [
++      ...sources
++        .filter(isTestSource)
++        .map(path => `${path}: in ${sourcesCompiledForSizeTxts[list]}, and is a source of testaot`),
++      ...(sources.every((path, index, all) => index === 0 || all[index - 1]! < path)
++        ? []
++        : [`${sourcesCompiledForSizeTxts[list]}: not in ascending order`]),
++    ]),
++    ...written.sourcesCompiledForSize[0]!.filter(path => written.sourcesCompiledForSize[1]!.includes(path)).map(
++      path => `${path}: in ${sourcesCompiledForSizeTxts.join(" and in ")}`,
++    ),
+   ];
+   const librarySources = sources.filter(path => !isTestSource(path));
+   if (
 diff --git a/scripts/build/aot.ts b/scripts/build/aot.ts
 index 5ae4884d3402dd1627375d888b2c8eca98733229..16d3e7736a43c90fedb249c95cf8ead3fad09ae6 100644
 --- a/scripts/build/aot.ts
@@ -115,7 +236,7 @@ index 5ae4884d3402dd1627375d888b2c8eca98733229..16d3e7736a43c90fedb249c95cf8ead3
    emitBuiltinSources(ctx);
  }
 diff --git a/scripts/build/deps/webkit.ts b/scripts/build/deps/webkit.ts
-index 4fc1df1f0bf8bbb865505a995fcd7c32e8646223..ba13cc4677471e8f820535423ed759a7bbaa6255 100644
+index 4fc1df1f0bf8bbb865505a995fcd7c32e8646223..8b196120beecd8724adc10f63a15e1cdaf7e5375 100644
 --- a/scripts/build/deps/webkit.ts
 +++ b/scripts/build/deps/webkit.ts
 @@ -192,7 +192,6 @@ export function webkitEngineSources(cfg: Config): EngineSources {
@@ -134,6 +255,129 @@ index 4fc1df1f0bf8bbb865505a995fcd7c32e8646223..ba13cc4677471e8f820535423ed759a7
      builtinTableInputs: [
        ...lists.paths("JavaScriptCore_AOT_BUILTIN_TABLE_DECLARATIONS"),
        ...lists.paths("JavaScriptCore_AOT_BUILTIN_TABLE_HANDWRITTEN_FUNCTIONS"),
+@@ -776,6 +774,7 @@ function webkitBuildSpec(cfg: Config): DirectBuild {
+   // Written in this graph: the first by a step of this spec, the others by the steps of ../aot.ts.
+   const aotGenerated = [
+     ...aotRuntimeFactsStep(wk, lists.jsc),
++    ...aotVectorStep(wk, lists.jsc),
+     ...aotGeneratedFiles(lists.jsc, "SCHEMA"),
+     ...aotGeneratedFiles(lists.jsc, "BUILTIN_TABLE"),
+   ];
+@@ -1470,6 +1469,19 @@ function aotRuntimeFactsStep(wk: WebKitBuild, lists: LibraryLists): string[] {
+   return outputs;
+ }
+ 
++/** AOT_GENERATE_VECTOR of aot/AOT.cmake. */
++function aotVectorStep(wk: WebKitBuild, lists: LibraryLists): string[] {
++  const script = join(wk.JSC, "aot", "support", "generator", "vector.ts");
++  const outputs = lists.paths("JavaScriptCore_AOT_VECTOR_GENERATED_HEADERS");
++  gen(wk, {
++    outputs,
++    cmd: [wk.cfg.bun, script, "--wtf", wk.WTF, "--out", aotGeneratedDirectory(wk)],
++    inputs: [script, join(wk.WTF, "wtf", "Vector.h")],
++    desc: "AOTVector.h",
++  });
++  return outputs;
++}
++
+ /** AOT_CHECK_SOURCE_LISTS and AOT_CHECK_EXPORTED_HEADERS of aot/AOT.cmake. */
+ function checkAotSourceLists(wk: WebKitBuild): void {
+   wk.listedDirs.push(...aotDirectories(wk.JSC));
+@@ -1708,10 +1720,16 @@ function unifiedSources(wk: WebKitBuild, listFiles: string[], options: string[])
+  */
+ const aotBundleSize = 8;
+ 
++/** The lists of aot/ that are compiled for size, and the attribute that every function of their bundles takes. */
++const aotListsCompiledForSize = [
++  { framework: "JavaScriptCoreAOTCompiledForSize", attribute: "optsize" },
++  { framework: "JavaScriptCoreAOTCompiledForMinimumSize", attribute: "minsize" },
++] as const;
++
+ interface JSCSources {
+   sources: string[];
+-  /** Those of `sources` that are compiled for size. */
+-  compiledForSize: string[];
++  /** Those of `sources` that are compiled for size, each with the attribute that its functions take. */
++  compiledForSize: Map<string, string>;
+   /** A bundle of aot/ and the sources that it includes. */
+   bundledAotSources: Map<string, string[]>;
+   listFiles: string[];
+@@ -1719,19 +1737,28 @@ interface JSCSources {
+ 
+ /**
+  * JSC's translation units: the bundles of the Sources.txt lists, plus
+- * JavaScriptCore_SOURCES. aot/ has two lists of its own (AOT_COMPUTE_SOURCES in
++ * JavaScriptCore_SOURCES. aot/ has three lists of its own (AOT_COMPUTE_SOURCES in
+  * aot/AOT.cmake), because a bundle is compiled with one set of flags.
+  * `--unified-sources=off` compiles each source of aot/ by itself.
++ * `--aot=off` compiles of the three lists only what aot/AOT.cmake names for a build without AoT.
+  */
+ function jscSourceList(wk: WebKitBuild, lists: LibraryLists): JSCSources {
+   const listsOf = (framework: string): string[] => lists.paths(`${framework}_UNIFIED_SOURCE_LIST_FILES`);
+   const aotOptions = wk.cfg.unifiedSources ? ["--max-bundle-size", `${aotBundleSize}`] : ["--print-all-sources"];
+-  const aot = unifiedSources(wk, listsOf("JavaScriptCoreAOT"), aotOptions);
+-  const aotCompiledForSize = unifiedSources(wk, listsOf("JavaScriptCoreAOTCompiledForSize"), [
+-    ...aotOptions,
+-    "--bundle-filename-prefix",
+-    ...lists.values("JavaScriptCoreAOTCompiledForSize_UNIFIED_SOURCE_BUNDLE_PREFIX"),
+-  ]);
++  const aot = wk.cfg.aot
++    ? unifiedSources(wk, listsOf("JavaScriptCoreAOT"), aotOptions)
++    : lists.paths("JavaScriptCore_AOT_SOURCES_WITHOUT_AOT");
++  const compiledForSize = new Map<string, string>();
++  for (const { framework, attribute } of wk.cfg.aot ? aotListsCompiledForSize : []) {
++    const options = ["--bundle-filename-prefix", ...lists.values(`${framework}_UNIFIED_SOURCE_BUNDLE_PREFIX`)];
++    for (const path of unifiedSources(wk, listsOf(framework), [...aotOptions, ...options])) {
++      compiledForSize.set(path, attribute);
++    }
++  }
++  const aotCompiledForSize = [...compiledForSize.keys()];
++  for (const path of lists.paths("JavaScriptCore_AOT_GENERATED_SOURCES_COMPILED_FOR_SIZE")) {
++    compiledForSize.set(path, "optsize");
++  }
+   const bundles = join(wk.DS, "unified-sources") + sep;
+   return {
+     sources: [
+@@ -1740,7 +1767,7 @@ function jscSourceList(wk: WebKitBuild, lists: LibraryLists): JSCSources {
+       ...aotCompiledForSize,
+       ...lists.paths("JavaScriptCore_SOURCES"),
+     ],
+-    compiledForSize: [...aotCompiledForSize, ...lists.paths("JavaScriptCore_AOT_GENERATED_SOURCES_COMPILED_FOR_SIZE")],
++    compiledForSize,
+     bundledAotSources: new Map(
+       [...aot, ...aotCompiledForSize]
+         .filter(path => path.startsWith(bundles))
+@@ -1752,7 +1779,7 @@ function jscSourceList(wk: WebKitBuild, lists: LibraryLists): JSCSources {
+     listFiles: [
+       ...listsOf("JavaScriptCore"),
+       ...listsOf("JavaScriptCoreAOT"),
+-      ...listsOf("JavaScriptCoreAOTCompiledForSize"),
++      ...aotListsCompiledForSize.flatMap(({ framework }) => listsOf(framework)),
+       unifiedSourceBundler(wk),
+     ],
+   };
+@@ -1794,7 +1821,7 @@ function jscGroup(
+   llintAssembly: string,
+ ): SourceGroup {
+   const { cfg, JSC } = wk;
+-  const forSize = new Set(cfg.release && cfg.unix ? compiledForSize : []);
++  const forSize = cfg.release && cfg.unix ? compiledForSize : new Map<string, string>();
+   const generated = aotGeneratedDirectory(wk) + sep;
+   // A bundle takes the header of its first source: whatever the others need beyond it they include themselves.
+   const aotPrefixOf = (source: string): AotPrefix | undefined => {
+@@ -1821,7 +1848,11 @@ function jscGroup(
+     sources: [
+       // Last, so that a function several sources instantiate is linked from one that is compiled for speed.
+       ...[...sources.filter(path => !forSize.has(path)), ...sources.filter(path => forSize.has(path))].map(path => {
+-        const extra = [...noUnwindTables(path), ...(forSize.has(path) ? ["-mllvm=-force-attribute=optsize"] : [])];
++        const attribute = forSize.get(path);
++        const extra = [
++          ...noUnwindTables(path),
++          ...(attribute !== undefined ? [`-mllvm=-force-attribute=${attribute}`] : []),
++        ];
+         const prefix = aotPrefixOf(path);
+         const bundled = bundledAotSources.get(path);
+         if (prefix !== undefined) {
 diff --git a/scripts/build/ninja.ts b/scripts/build/ninja.ts
 index 6d0eb950721760a5bbe426b94bab7d6413edb4cc..89f4ab89a2c47fbac710a8ab426401eb8a07d590 100644
 --- a/scripts/build/ninja.ts
@@ -302,3 +546,83 @@ index b9b6a5353d4572e45a514d16b41ba84dc3a66f25..db4ea4bf79b52e27196a65582774eab4
      ["emitBuiltinsTable", emitBuiltinsTable],
      ["emitBuiltinSources", emitBuiltinSources],
    ] as const)("%s throws without an engine", (name, emit) => {
+diff --git a/test/internal/build-local-webkit.test.ts b/test/internal/build-local-webkit.test.ts
+index 813be511cb68422034d0567ce65f59733b257fb4..56bee5f41c7552a173ca0d929fd861be7243fb65 100644
+--- a/test/internal/build-local-webkit.test.ts
++++ b/test/internal/build-local-webkit.test.ts
+@@ -295,6 +295,8 @@ const checkout = {
+     set(JavaScriptCoreAOT_UNIFIED_SOURCE_LIST_FILES "aot/Sources.txt")
+     set(JavaScriptCoreAOTCompiledForSize_UNIFIED_SOURCE_LIST_FILES "aot/SourcesCompiledForSize.txt")
+     set(JavaScriptCoreAOTCompiledForSize_UNIFIED_SOURCE_BUNDLE_PREFIX "CompiledForSize")
++    set(JavaScriptCoreAOTCompiledForMinimumSize_UNIFIED_SOURCE_LIST_FILES "aot/SourcesCompiledForMinimumSize.txt")
++    set(JavaScriptCoreAOTCompiledForMinimumSize_UNIFIED_SOURCE_BUNDLE_PREFIX "CompiledForMinimumSize")
+     set(JavaScriptCore_AOT_GENERATED_SOURCES_COMPILED_FOR_SIZE "\${JavaScriptCore_AOT_GENERATED_DIR}/AOTSchemaEnumNames.cpp")
+     list(APPEND JavaScriptCore_SOURCES \${JavaScriptCore_AOT_SCHEMA_GENERATED_SOURCES} \${JavaScriptCore_AOT_BUILTIN_TABLE_GENERATED_SOURCES})
+     list(APPEND JavaScriptCore_PRIVATE_INCLUDE_DIRECTORIES "\${JavaScriptCore_AOT_GENERATED_DIR}")
+@@ -312,6 +314,8 @@ const checkout = {
+     AOT_CHECK_SOURCE_LISTS()`,
+   "Source/JavaScriptCore/aot/Sources.txt": `aot/ir/AOTValue.cpp\n`,
+   "Source/JavaScriptCore/aot/SourcesCompiledForSize.txt": `aot/ir/AOTVerifier.cpp\n`,
++  "Source/JavaScriptCore/aot/SourcesCompiledForMinimumSize.txt": `aot/ir/AOTDump.cpp\n`,
++  "Source/JavaScriptCore/aot/ir/AOTDump.cpp": "",
+   "Source/JavaScriptCore/aot/ir/AOTVerifier.cpp": "",
+   "Source/JavaScriptCore/aot/ir/AOTSchema.def": "",
+   "Source/JavaScriptCore/aot/ir/generator/index.ts": "",
+@@ -419,6 +423,7 @@ describe.skipIf(Bun.which(python) === null)("the graph of a checkout", () => {
+       "B/JavaScriptCore/DerivedSources/Generated.cpp",
+       "B/JavaScriptCore/DerivedSources/unified-sources/UnifiedSource-of-8-1.cpp",
+       "B/JavaScriptCore/DerivedSources/unified-sources/CompiledForSizeUnifiedSource-of-8-1.cpp",
++      "B/JavaScriptCore/DerivedSources/unified-sources/CompiledForMinimumSizeUnifiedSource-of-8-1.cpp",
+       "B/JavaScriptCore/DerivedSources/JSCBuiltins.cpp",
+       "JSC/inspector/remote/socket/posix/RemoteInspectorSocketPOSIX.cpp",
+       // What the generators of aot/ write.
+@@ -449,9 +454,37 @@ describe.skipIf(Bun.which(python) === null)("the graph of a checkout", () => {
+         "B/JavaScriptCore/DerivedSources/unified-sources/CompiledForSizeUnifiedSource-of-8-1.cpp",
+         "JSC/aot/ir/AOTVerifier.cpp",
+       ],
++      [
++        "B/JavaScriptCore/DerivedSources/unified-sources/CompiledForMinimumSizeUnifiedSource-of-8-1.cpp",
++        "JSC/aot/ir/AOTDump.cpp",
++      ],
+     ]);
+   });
+ 
++  test("a release build gives the functions of a bundle compiled for size the attribute of its list", () => {
++    const attributesIn = (buildType: "Debug" | "Release") => {
++      const { spec, short } = describeBuild({ asan: false, buildType });
++      const sources = spec.groups!.find(g => g.name === "JavaScriptCore")!.sources;
++      return sources.flatMap(s =>
++        typeof s === "string"
++          ? []
++          : (s.cflags ?? []).filter(f => f.includes("force-attribute")).map(f => [short(s.path), f]),
++      );
++    };
++    expect(attributesIn("Release")).toEqual([
++      [
++        "B/JavaScriptCore/DerivedSources/unified-sources/CompiledForSizeUnifiedSource-of-8-1.cpp",
++        "-mllvm=-force-attribute=optsize",
++      ],
++      [
++        "B/JavaScriptCore/DerivedSources/unified-sources/CompiledForMinimumSizeUnifiedSource-of-8-1.cpp",
++        "-mllvm=-force-attribute=minsize",
++      ],
++      ["B/JavaScriptCore/DerivedSources/aot/AOTSchemaEnumNames.cpp", "-mllvm=-force-attribute=optsize"],
++    ]);
++    expect(attributesIn("Debug")).toEqual([]);
++  });
++
+   test("--unified-sources=off compiles each source of aot/ by itself", () => {
+     const { sources } = describeBuild({ asan: false, unifiedSources: false }).group("JavaScriptCore");
+     expect(sources).toContain("JSC/aot/ir/AOTValue.cpp");
+@@ -627,6 +660,11 @@ describe.skipIf(Bun.which(python) === null)("the graph of a checkout", () => {
+         },
+         "aot/SourcesCompiledForSize.txt: not in ascending order",
+       ],
++      [
++        "a source in both lists of those compiled for size",
++        { "aot/SourcesCompiledForMinimumSize.txt": "aot/ir/AOTDump.cpp\naot/ir/AOTVerifier.cpp\n" },
++        "aot/ir/AOTVerifier.cpp: in aot/SourcesCompiledForSize.txt and in aot/SourcesCompiledForMinimumSize.txt",
++      ],
+       [
+         "a folder of headers that is no include directory",
+         { "aot/flow/AOTFlowGraph.h": "" },
