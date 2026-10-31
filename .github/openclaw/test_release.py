@@ -1,5 +1,7 @@
+import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -9,6 +11,8 @@ from unittest.mock import patch
 
 spec=importlib.util.spec_from_file_location('release',Path(__file__).with_name('release.py'))
 release=importlib.util.module_from_spec(spec);spec.loader.exec_module(release)
+spec=importlib.util.spec_from_file_location('artifacts',Path(__file__).with_name('artifacts.py'))
+artifacts=importlib.util.module_from_spec(spec);spec.loader.exec_module(artifacts)
 SOURCE='a'*40
 
 class ReleaseIntegrity(unittest.TestCase):
@@ -99,5 +103,51 @@ class ReleaseIntegrity(unittest.TestCase):
         with patch.object(release,'api',side_effect=[{'enabled':True},run]),patch.object(release,'execute') as execute:
             with self.assertRaisesRegex(ValueError,'reviewed source'):release.authorize(SOURCE,42)
             execute.assert_not_called()
+
+class ArtifactRecipe(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name)
+        self.addCleanup(os.chdir,Path.cwd());os.chdir(self.root)
+        self.git('init','-q')
+        self.git('config','user.name','Recipe fixture');self.git('config','user.email','fixture@example.invalid')
+        self.git('config','commit.gpgsign','false')
+        for name in artifacts.RECIPE:
+            p=self.root/name
+            if name in ('icu','macos-cross'):p=p/'input.txt'
+            p.parent.mkdir(parents=True,exist_ok=True);p.write_text('reviewed input\n')
+        (self.root/'Dockerfile').write_text('ARG NODE_VERSION=24.16.0\n')
+        (self.root/'source.txt').write_text('engine source\n')
+        self.commit('upstream base');self.base=self.git('rev-parse','HEAD')
+        (self.root/'Dockerfile').write_text('ARG NODE_VERSION=24.22.1\n')
+        self.commit('reviewed Node security update')
+        recipe=subprocess.check_output(['git','ls-tree','--full-tree','-z','HEAD','--',*artifacts.RECIPE])
+        revision={'reviewed_source':self.git('rev-parse','HEAD'),'tree_sha256':hashlib.sha256(recipe).hexdigest()}
+        for name,value in [('BASE',self.base),('RECIPE_REVISION',revision)]:
+            p=patch.object(artifacts,name,value,create=True);p.start();self.addCleanup(p.stop)
+    def git(self,*args):
+        return subprocess.check_output(['git',*args],text=True).strip()
+    def commit(self,message):
+        self.git('add','.');self.git('commit','-qm',message)
+    def test_reviewed_recipe_survives_squash_and_later_engine_commits(self):
+        self.git('reset','--hard',self.base)
+        (self.root/'Dockerfile').write_text('ARG NODE_VERSION=24.22.1\n')
+        self.commit('squashed reviewed update')
+        self.assertEqual(artifacts.source(),self.git('rev-parse','HEAD'))
+        (self.root/'source.txt').write_text('security-patched engine source\n')
+        self.commit('engine change after reviewed recipe')
+        self.assertEqual(artifacts.source(),self.git('rev-parse','HEAD'))
+    def test_unreviewed_recipe_and_dirty_source_are_rejected(self):
+        (self.root/'source.txt').write_text('uncommitted engine change\n')
+        with self.assertRaises(subprocess.CalledProcessError):artifacts.source()
+        self.git('checkout','--','source.txt')
+        for name,mode in [('Dockerfile',False),('icu/input.txt',False),('Dockerfile',True)]:
+            with self.subTest(path=name,mode=mode):
+                p=self.root/name
+                if mode:p.chmod(0o755)
+                else:p.write_text('unreviewed recipe input\n')
+                self.commit('unreviewed recipe change')
+                with self.assertRaisesRegex(ValueError,'recipe differs'):artifacts.source()
+                self.git('reset','--hard','HEAD^')
 
 if __name__=='__main__':unittest.main()

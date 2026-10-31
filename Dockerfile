@@ -63,7 +63,7 @@ RUN curl -fsSL "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSI
     && zstd --version
 
 # Install Node (for icu/compress-data.ts; needs >=23.6 for default type stripping)
-ARG NODE_VERSION=24.16.0
+ARG NODE_VERSION=24.22.1
 RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/').tar.xz" \
     | tar -xJ -C /usr/local --strip-components=1 \
     && node --version

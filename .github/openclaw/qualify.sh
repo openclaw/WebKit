@@ -20,6 +20,9 @@ git apply "$inputs/patches/000-checksums.patch"
 # Apply openclaw/bun#151 equally to both frozen-source arms.
 git apply "$inputs/patches/012-vm-finalization-fixture.patch"
 sha256sum "$inputs/patches/012-vm-finalization-fixture.patch" > "$QUALIFICATION_DIR/vm-finalization-fixture.sha256"
+# Match the qualified host Node and preserve its authenticated session identity in both arms.
+git apply "$inputs/patches/013-node-reference-fixtures.patch"
+sha256sum "$inputs/patches/013-node-reference-fixtures.patch" > "$QUALIFICATION_DIR/node-reference-fixtures.sha256"
 bootstrap=$(command -v bun)
 "$bootstrap" install --frozen-lockfile
 (cd test && "$bootstrap" install --frozen-lockfile)
@@ -58,9 +61,14 @@ for arm in baseline candidate; do
   cp "$inputs/selected.json" build/openclaw-ci/selected.json
   cp "$inputs/selected.json" "$results/selected.json"
   rm -f build/openclaw-ci/results.json
-  env -u BUN_WEBKIT_ARTIFACT_MANIFEST -u BUN_BUILD_CACHE_DIR -u BUN_BUILD_PREFETCH_DIR \
+  # Retain both arms when a reference fails; the strict all-pass gate below still rejects failures.
+  if env -u BUN_WEBKIT_ARTIFACT_MANIFEST -u BUN_BUILD_CACHE_DIR -u BUN_BUILD_PREFETCH_DIR \
     HOME="$results/home" TMPDIR="$results/tmp" PATH="$results/bin:$PATH" OPENCLAW_CI_PLATFORM=linux \
-    "$candidate" scripts/openclaw-ci/tests.ts test > "$results/tests.log" 2>&1
+    "$candidate" scripts/openclaw-ci/tests.ts test > "$results/tests.log" 2>&1; then
+    printf '0\n' > "$results/exit-code.log"
+  else
+    printf '%s\n' "$?" > "$results/exit-code.log"
+  fi
   cp build/openclaw-ci/results.json "$results/results.json"
 done
 python3 "$inputs/compare-fork-ci.py" "$QUALIFICATION_DIR/baseline" "$QUALIFICATION_DIR/candidate" --output "$QUALIFICATION_DIR/faithfulness.json"
@@ -96,6 +104,7 @@ from pathlib import Path
 root=Path(sys.argv[1])
 faith=json.loads((root/'faithfulness.json').read_text())
 assert faith['identical_file_outcomes'] and faith['all_passed']
+assert all((root/arm/'exit-code.log').read_text().strip() == '0' for arm in ['baseline','candidate']), 'fork test runner failed'
 assert faith['selected_files']==44 and faith['result_files']==46
 for name in ['als-plugin','als-native']:
  rows=json.loads((root/(name+'.json')).read_text())['results']
