@@ -4341,22 +4341,22 @@ void Context::initCaps()
     {
         INFO() << "Limiting compressed format support.\n";
 
-        mSupportedExtensions.compressedETC1RGB8SubTextureEXT                 = false;
-        mSupportedExtensions.compressedETC1RGB8TextureOES                    = false;
-        mSupportedExtensions.compressedTextureEtcANGLE                       = false;
-        mSupportedExtensions.textureCompressionPvrtcIMG                      = false;
-        mSupportedExtensions.pvrtcSRGBEXT                                    = false;
-        mSupportedExtensions.copyCompressedTextureCHROMIUM                   = false;
-        mSupportedExtensions.textureCompressionAstcHdrKHR                    = false;
-        mSupportedExtensions.textureCompressionAstcLdrKHR                    = false;
-        mSupportedExtensions.textureCompressionAstcOES                       = false;
-        mSupportedExtensions.textureCompressionBptcEXT                       = false;
-        mSupportedExtensions.textureCompressionDxt1EXT                       = false;
-        mSupportedExtensions.textureCompressionDxt3ANGLE                     = false;
-        mSupportedExtensions.textureCompressionDxt5ANGLE                     = false;
-        mSupportedExtensions.textureCompressionRgtcEXT                       = false;
-        mSupportedExtensions.textureCompressionS3tcSrgbEXT                   = false;
-        mSupportedExtensions.textureCompressionAstcSliced3dKHR               = false;
+        mSupportedExtensions.compressedETC1RGB8SubTextureEXT   = false;
+        mSupportedExtensions.compressedETC1RGB8TextureOES      = false;
+        mSupportedExtensions.compressedTextureEtcANGLE         = false;
+        mSupportedExtensions.textureCompressionPvrtcIMG        = false;
+        mSupportedExtensions.pvrtcSRGBEXT                      = false;
+        mSupportedExtensions.copyCompressedTextureCHROMIUM     = false;
+        mSupportedExtensions.textureCompressionAstcHdrKHR      = false;
+        mSupportedExtensions.textureCompressionAstcLdrKHR      = false;
+        mSupportedExtensions.textureCompressionAstcOES         = false;
+        mSupportedExtensions.textureCompressionBptcEXT         = false;
+        mSupportedExtensions.textureCompressionDxt1EXT         = false;
+        mSupportedExtensions.textureCompressionDxt3ANGLE       = false;
+        mSupportedExtensions.textureCompressionDxt5ANGLE       = false;
+        mSupportedExtensions.textureCompressionRgtcEXT         = false;
+        mSupportedExtensions.textureCompressionS3tcSrgbEXT     = false;
+        mSupportedExtensions.textureCompressionAstcSliced3dKHR = false;
 
         caps->compressedTextureFormats.clear();
     }
@@ -9071,6 +9071,11 @@ void Context::semaphoreParameterui64v(SemaphoreID semaphore, GLenum pname, const
 void Context::getSemaphoreParameterui64v(SemaphoreID semaphore, GLenum pname, GLuint64 *params)
 {
     UNIMPLEMENTED();
+}
+
+void Context::trimMemory(MemoryTrimLevel trimLevel)
+{
+    mImplementation->trimMemory(this, trimLevel);
 }
 
 void Context::acquireTextures(GLuint numTextures,

@@ -227,6 +227,245 @@ void testCSELoopHeaderLoadFromBackEdgeStore(unsigned count)
     CHECK_EQ(storage, expected);
 }
 
+static void checkFixSSAResult(Procedure& proc, unsigned expectedPhis)
+{
+    validate(proc);
+    CHECK(proc.variables().isEmpty());
+    unsigned phis = 0;
+    for (Value* value : proc.values()) {
+        CHECK(value->opcode() != B3::Get);
+        CHECK(value->opcode() != B3::Set);
+        CHECK(value->opcode() != Identity);
+        if (value->opcode() == Phi)
+            ++phis;
+    }
+    CHECK_EQ(phis, expectedPhis);
+}
+
+void testFixSSALocalOnly()
+{
+    // x = a; r = x; x = r + 1; return x + r
+    Procedure proc;
+    BasicBlock* root = proc.addBlock();
+    Variable* x = proc.addVariable(Int64);
+
+    Value* a = root->appendNew<ArgumentRegValue>(proc, Origin(), GPRInfo::argumentGPR0);
+    root->appendNew<VariableValue>(proc, B3::Set, Origin(), x, a);
+    Value* r = root->appendNew<VariableValue>(proc, B3::Get, Origin(), x);
+    root->appendNew<VariableValue>(proc, B3::Set, Origin(), x,
+        root->appendNew<Value>(proc, Add, Origin(), r, root->appendIntConstant(proc, Origin(), Int64, 1)));
+    root->appendNew<Value>(proc, Return, Origin(),
+        root->appendNew<Value>(proc, Add, Origin(), root->appendNew<VariableValue>(proc, B3::Get, Origin(), x), r));
+
+    proc.resetReachability();
+    fixSSA(proc);
+    checkFixSSAResult(proc, 0);
+
+    auto code = compileProc(proc);
+    CHECK_EQ(invoke<int64_t>(*code, 20), 41);
+}
+
+void testFixSSADiamondSetInOneArm(bool flag)
+{
+    // x = a
+    // if (c) { x = 42; goto thenTail; thenTail: return x }
+    // else return x
+    Procedure proc;
+    BasicBlock* root = proc.addBlock();
+    BasicBlock* thenCase = proc.addBlock();
+    BasicBlock* thenTail = proc.addBlock();
+    BasicBlock* elseCase = proc.addBlock();
+    Variable* x = proc.addVariable(Int64);
+
+    Value* a = root->appendNew<ArgumentRegValue>(proc, Origin(), GPRInfo::argumentGPR0);
+    Value* c = root->appendNew<ArgumentRegValue>(proc, Origin(), GPRInfo::argumentGPR1);
+    root->appendNew<VariableValue>(proc, B3::Set, Origin(), x, a);
+    root->setSuccessors(FrequentedBlock(thenCase), FrequentedBlock(elseCase));
+    root->appendNew<Value>(proc, Branch, Origin(), c);
+
+    thenCase->appendNew<VariableValue>(proc, B3::Set, Origin(), x, thenCase->appendIntConstant(proc, Origin(), Int64, 42));
+    thenCase->setSuccessors(FrequentedBlock(thenTail));
+    thenCase->appendNew<Value>(proc, Jump, Origin());
+
+    thenTail->appendNew<Value>(proc, Return, Origin(), thenTail->appendNew<VariableValue>(proc, B3::Get, Origin(), x));
+
+    elseCase->appendNew<Value>(proc, Return, Origin(), elseCase->appendNew<VariableValue>(proc, B3::Get, Origin(), x));
+
+    proc.resetReachability();
+    fixSSA(proc);
+    checkFixSSAResult(proc, 0);
+
+    auto code = compileProc(proc);
+    CHECK_EQ(invoke<int64_t>(*code, 7, flag ? 1 : 0), flag ? 42 : 7);
+}
+
+void testFixSSADiamondJoinPhi(bool flag)
+{
+    // x = a
+    // if (c) x = 42
+    // return x
+    Procedure proc;
+    BasicBlock* root = proc.addBlock();
+    BasicBlock* thenCase = proc.addBlock();
+    BasicBlock* elseCase = proc.addBlock();
+    BasicBlock* join = proc.addBlock();
+    Variable* x = proc.addVariable(Int64);
+
+    Value* a = root->appendNew<ArgumentRegValue>(proc, Origin(), GPRInfo::argumentGPR0);
+    Value* c = root->appendNew<ArgumentRegValue>(proc, Origin(), GPRInfo::argumentGPR1);
+    root->appendNew<VariableValue>(proc, B3::Set, Origin(), x, a);
+    root->setSuccessors(FrequentedBlock(thenCase), FrequentedBlock(elseCase));
+    root->appendNew<Value>(proc, Branch, Origin(), c);
+
+    thenCase->appendNew<VariableValue>(proc, B3::Set, Origin(), x, thenCase->appendIntConstant(proc, Origin(), Int64, 42));
+    thenCase->setSuccessors(FrequentedBlock(join));
+    thenCase->appendNew<Value>(proc, Jump, Origin());
+
+    elseCase->setSuccessors(FrequentedBlock(join));
+    elseCase->appendNew<Value>(proc, Jump, Origin());
+
+    join->appendNew<Value>(proc, Return, Origin(), join->appendNew<VariableValue>(proc, B3::Get, Origin(), x));
+
+    proc.resetReachability();
+    fixSSA(proc);
+    checkFixSSAResult(proc, 1);
+
+    auto code = compileProc(proc);
+    CHECK_EQ(invoke<int64_t>(*code, 7, flag ? 1 : 0), flag ? 42 : 7);
+}
+
+void testFixSSADominatorChain(bool flag)
+{
+    // root:   x = a
+    // middle: y = x + 1; if (c) goto inner else goto side
+    // inner:  x = y * 2; goto bottom
+    // bottom: return x + y
+    // side:   return x
+    Procedure proc;
+    BasicBlock* root = proc.addBlock();
+    BasicBlock* middle = proc.addBlock();
+    BasicBlock* inner = proc.addBlock();
+    BasicBlock* bottom = proc.addBlock();
+    BasicBlock* side = proc.addBlock();
+    Variable* x = proc.addVariable(Int64);
+    Variable* y = proc.addVariable(Int64);
+
+    Value* a = root->appendNew<ArgumentRegValue>(proc, Origin(), GPRInfo::argumentGPR0);
+    Value* c = root->appendNew<ArgumentRegValue>(proc, Origin(), GPRInfo::argumentGPR1);
+    root->appendNew<VariableValue>(proc, B3::Set, Origin(), x, a);
+    root->setSuccessors(FrequentedBlock(middle));
+    root->appendNew<Value>(proc, Jump, Origin());
+
+    middle->appendNew<VariableValue>(proc, B3::Set, Origin(), y,
+        middle->appendNew<Value>(proc, Add, Origin(),
+            middle->appendNew<VariableValue>(proc, B3::Get, Origin(), x),
+            middle->appendIntConstant(proc, Origin(), Int64, 1)));
+    middle->setSuccessors(FrequentedBlock(inner), FrequentedBlock(side));
+    middle->appendNew<Value>(proc, Branch, Origin(), c);
+
+    inner->appendNew<VariableValue>(proc, B3::Set, Origin(), x,
+        inner->appendNew<Value>(proc, Mul, Origin(),
+            inner->appendNew<VariableValue>(proc, B3::Get, Origin(), y),
+            inner->appendIntConstant(proc, Origin(), Int64, 2)));
+    inner->setSuccessors(FrequentedBlock(bottom));
+    inner->appendNew<Value>(proc, Jump, Origin());
+
+    bottom->appendNew<Value>(proc, Return, Origin(),
+        bottom->appendNew<Value>(proc, Add, Origin(),
+            bottom->appendNew<VariableValue>(proc, B3::Get, Origin(), x),
+            bottom->appendNew<VariableValue>(proc, B3::Get, Origin(), y)));
+
+    side->appendNew<Value>(proc, Return, Origin(), side->appendNew<VariableValue>(proc, B3::Get, Origin(), x));
+
+    proc.resetReachability();
+    fixSSA(proc);
+    checkFixSSAResult(proc, 0);
+
+    auto code = compileProc(proc);
+    CHECK_EQ(invoke<int64_t>(*code, 7, flag ? 1 : 0), flag ? 24 : 7);
+}
+
+void testFixSSAGetBeforeSet(bool flag)
+{
+    // Both arms read x before anything assigns it, so each needs its own Bottom: one created in
+    // thenCase does not dominate elseCase.
+    //
+    // if (c) { y = x; x = 42 } else y = x + 7
+    // return x + y
+    Procedure proc;
+    BasicBlock* root = proc.addBlock();
+    BasicBlock* thenCase = proc.addBlock();
+    BasicBlock* elseCase = proc.addBlock();
+    BasicBlock* join = proc.addBlock();
+    Variable* x = proc.addVariable(Int64);
+    Variable* y = proc.addVariable(Int64);
+
+    Value* c = root->appendNew<ArgumentRegValue>(proc, Origin(), GPRInfo::argumentGPR0);
+    root->setSuccessors(FrequentedBlock(thenCase), FrequentedBlock(elseCase));
+    root->appendNew<Value>(proc, Branch, Origin(), c);
+
+    thenCase->appendNew<VariableValue>(proc, B3::Set, Origin(), y, thenCase->appendNew<VariableValue>(proc, B3::Get, Origin(), x));
+    thenCase->appendNew<VariableValue>(proc, B3::Set, Origin(), x, thenCase->appendIntConstant(proc, Origin(), Int64, 42));
+    thenCase->setSuccessors(FrequentedBlock(join));
+    thenCase->appendNew<Value>(proc, Jump, Origin());
+
+    elseCase->appendNew<VariableValue>(proc, B3::Set, Origin(), y,
+        elseCase->appendNew<Value>(proc, Add, Origin(),
+            elseCase->appendNew<VariableValue>(proc, B3::Get, Origin(), x),
+            elseCase->appendIntConstant(proc, Origin(), Int64, 7)));
+    elseCase->setSuccessors(FrequentedBlock(join));
+    elseCase->appendNew<Value>(proc, Jump, Origin());
+
+    join->appendNew<Value>(proc, Return, Origin(),
+        join->appendNew<Value>(proc, Add, Origin(),
+            join->appendNew<VariableValue>(proc, B3::Get, Origin(), x),
+            join->appendNew<VariableValue>(proc, B3::Get, Origin(), y)));
+
+    proc.resetReachability();
+    fixSSA(proc);
+    checkFixSSAResult(proc, 2);
+
+    auto code = compileProc(proc);
+    CHECK_EQ(invoke<int64_t>(*code, flag ? 1 : 0), flag ? 42 : 7);
+}
+
+void testFixSSASetFromGetInSameBlock(bool flag)
+{
+    // x = a + 1; y = x
+    // if (c) x = 3
+    // return x + y
+    Procedure proc;
+    BasicBlock* root = proc.addBlock();
+    BasicBlock* thenCase = proc.addBlock();
+    BasicBlock* join = proc.addBlock();
+    Variable* x = proc.addVariable(Int64);
+    Variable* y = proc.addVariable(Int64);
+
+    Value* a = root->appendNew<ArgumentRegValue>(proc, Origin(), GPRInfo::argumentGPR0);
+    Value* c = root->appendNew<ArgumentRegValue>(proc, Origin(), GPRInfo::argumentGPR1);
+    root->appendNew<VariableValue>(proc, B3::Set, Origin(), x,
+        root->appendNew<Value>(proc, Add, Origin(), a, root->appendIntConstant(proc, Origin(), Int64, 1)));
+    root->appendNew<VariableValue>(proc, B3::Set, Origin(), y, root->appendNew<VariableValue>(proc, B3::Get, Origin(), x));
+    root->setSuccessors(FrequentedBlock(thenCase), FrequentedBlock(join));
+    root->appendNew<Value>(proc, Branch, Origin(), c);
+
+    thenCase->appendNew<VariableValue>(proc, B3::Set, Origin(), x, thenCase->appendIntConstant(proc, Origin(), Int64, 3));
+    thenCase->setSuccessors(FrequentedBlock(join));
+    thenCase->appendNew<Value>(proc, Jump, Origin());
+
+    join->appendNew<Value>(proc, Return, Origin(),
+        join->appendNew<Value>(proc, Add, Origin(),
+            join->appendNew<VariableValue>(proc, B3::Get, Origin(), x),
+            join->appendNew<VariableValue>(proc, B3::Get, Origin(), y)));
+
+    proc.resetReachability();
+    fixSSA(proc);
+    checkFixSSAResult(proc, 1);
+
+    auto code = compileProc(proc);
+    CHECK_EQ(invoke<int64_t>(*code, 7, flag ? 1 : 0), flag ? 11 : 16);
+}
+
 void testLoadPreIndex32()
 {
     if (Options::defaultB3OptLevel() < 2)
@@ -1019,7 +1258,7 @@ void testBitOrImmBitOrArgImm32(int32_t a, int32_t b, int32_t c)
     CHECK_EQ(compileAndRun<int>(proc, b), (a | (b | c)));
 }
 
-double NODELETE bitOrDouble(double a, double b)
+double LEGACY_NODELETE bitOrDouble(double a, double b)
 {
     return std::bit_cast<double>(std::bit_cast<uint64_t>(a) | std::bit_cast<uint64_t>(b));
 }
@@ -1078,7 +1317,7 @@ void testBitOrImmsDouble(double a, double b)
     CHECK(isIdentical(compileAndRun<double>(proc), bitOrDouble(a, b)));
 }
 
-float NODELETE bitOrFloat(float a, float b)
+float LEGACY_NODELETE bitOrFloat(float a, float b)
 {
     return std::bit_cast<float>(std::bit_cast<uint32_t>(a) | std::bit_cast<uint32_t>(b));
 }
@@ -1945,7 +2184,7 @@ static void testZShrArgImm32(uint32_t a, uint32_t b)
 }
 
 template<typename IntegerType>
-static unsigned NODELETE countLeadingZero(IntegerType value)
+static unsigned LEGACY_NODELETE countLeadingZero(IntegerType value)
 {
     unsigned bitCount = sizeof(IntegerType) * 8;
     if (!value)
@@ -1982,6 +2221,50 @@ void testClzMem64(int64_t a)
     root->clearSuccessors();
     root->appendNew<Value>(proc, Return, Origin(), clzValue);
     CHECK_EQ(compileAndRun<unsigned>(proc, &a), countLeadingZero(a));
+}
+
+void testPopCountArg64(int64_t a)
+{
+    Procedure proc;
+    BasicBlock* root = proc.addBlock();
+    auto arguments = cCallArgumentValues<int64_t>(proc, root);
+    Value* count = root->appendNew<Value>(proc, PopCount, Origin(), arguments[0]);
+    root->clearSuccessors();
+    root->appendNew<Value>(proc, Return, Origin(), count);
+    CHECK_EQ(compileAndRun<uint64_t>(proc, a), static_cast<uint64_t>(std::popcount(static_cast<uint64_t>(a))));
+}
+
+void testPopCountMem64(int64_t a)
+{
+    Procedure proc;
+    BasicBlock* root = proc.addBlock();
+    auto arguments = cCallArgumentValues<int64_t*>(proc, root);
+    MemoryValue* value = root->appendNew<MemoryValue>(proc, Load, Int64, Origin(), arguments[0]);
+    Value* count = root->appendNew<Value>(proc, PopCount, Origin(), value);
+    root->clearSuccessors();
+    root->appendNew<Value>(proc, Return, Origin(), count);
+    CHECK_EQ(compileAndRun<uint64_t>(proc, &a), static_cast<uint64_t>(std::popcount(static_cast<uint64_t>(a))));
+}
+
+void testPopCountArg32(int32_t a)
+{
+    Procedure proc;
+    BasicBlock* root = proc.addBlock();
+    auto arguments = cCallArgumentValues<int32_t>(proc, root);
+    Value* count = root->appendNew<Value>(proc, PopCount, Origin(), arguments[0]);
+    root->clearSuccessors();
+    root->appendNew<Value>(proc, Return, Origin(), count);
+    CHECK_EQ(compileAndRun<uint32_t>(proc, a), static_cast<uint32_t>(std::popcount(static_cast<uint32_t>(a))));
+}
+
+void testPopCountConstant64(int64_t a)
+{
+    Procedure proc;
+    BasicBlock* root = proc.addBlock();
+    Value* count = root->appendNew<Value>(proc, PopCount, Origin(), root->appendNew<Const64Value>(proc, Origin(), a));
+    root->clearSuccessors();
+    root->appendNew<Value>(proc, Return, Origin(), count);
+    CHECK_EQ(compileAndRun<uint64_t>(proc), static_cast<uint64_t>(std::popcount(static_cast<uint64_t>(a))));
 }
 
 void testClzArg32(int32_t a)
@@ -4479,12 +4762,12 @@ void testMulNegArgArgDoubleAcrossBlocks(bool takeMultiply)
 }
 
 // Make sure the compiler does not try to optimize anything out.
-static NEVER_INLINE double NODELETE zero()
+static NEVER_INLINE double LEGACY_NODELETE zero()
 {
     return 0.;
 }
 
-static double NODELETE negativeZero()
+static double LEGACY_NODELETE negativeZero()
 {
     return -zero();
 }
@@ -4900,6 +5183,18 @@ void addShrTests(const TestConfig* config, Deque<RefPtr<SharedTask<void()>>>& ta
     RUN(testCSELoopHeaderLoadFromBackEdgeStore(0));
     RUN(testCSELoopHeaderLoadFromBackEdgeStore(1));
     RUN(testCSELoopHeaderLoadFromBackEdgeStore(5));
+
+    RUN(testFixSSALocalOnly());
+    RUN(testFixSSADiamondSetInOneArm(true));
+    RUN(testFixSSADiamondSetInOneArm(false));
+    RUN(testFixSSADiamondJoinPhi(true));
+    RUN(testFixSSADiamondJoinPhi(false));
+    RUN(testFixSSADominatorChain(true));
+    RUN(testFixSSADominatorChain(false));
+    RUN(testFixSSAGetBeforeSet(true));
+    RUN(testFixSSAGetBeforeSet(false));
+    RUN(testFixSSASetFromGetInSameBlock(true));
+    RUN(testFixSSASetFromGetInSameBlock(false));
 
     RUN(testLoadPreIndex32());
     RUN(testLoadPreIndex64());

@@ -133,6 +133,7 @@
 #endif
 
 #if ENABLE(2022_GLIB_API)
+#include "WebKitApplicationManifestPrivate.h"
 #include "WebKitImagePrivate.h"
 #include "WebKitNetworkSessionPrivate.h"
 #else
@@ -246,6 +247,7 @@ enum {
     PROP_MAGNIFICATION,
     PROP_IS_LOADING,
     PROP_IS_PLAYING_AUDIO,
+    PROP_HAS_PROTECTED_MEDIA,
 #if !ENABLE(2022_GLIB_API)
     PROP_IS_EPHEMERAL,
 #endif
@@ -530,6 +532,11 @@ void PageLoadStateObserver::didChangeActiveURL()
 void webkitWebViewIsPlayingAudioChanged(WebKitWebView* webView)
 {
     g_object_notify_by_pspec(G_OBJECT(webView), sObjProperties[PROP_IS_PLAYING_AUDIO]);
+}
+
+void webkitWebViewHasProtectedMediaChanged(WebKitWebView* webView)
+{
+    g_object_notify_by_pspec(G_OBJECT(webView), sObjProperties[PROP_HAS_PROTECTED_MEDIA]);
 }
 
 void webkitWebViewMediaCaptureStateDidChange(WebKitWebView* webView, WebCore::MediaProducer::MediaStateFlags mediaStateFlags)
@@ -963,7 +970,9 @@ static void webkitWebViewCreatePage(WebKitWebView* webView, Ref<API::PageConfigu
 #endif
 #endif
 #if USE(LIBWPE)
+    ALLOW_DEPRECATED_DECLARATIONS_BEGIN
     webView->priv->view = WKWPE::ViewLegacy::create(webkit_web_view_backend_get_wpe_backend(webView->priv->backend.get()), configuration.get());
+    ALLOW_DEPRECATED_DECLARATIONS_END
 #endif
 #endif
 }
@@ -1266,6 +1275,9 @@ static void webkitWebViewGetProperty(GObject* object, guint propId, GValue* valu
     case PROP_IS_PLAYING_AUDIO:
         g_value_set_boolean(value, webkit_web_view_is_playing_audio(webView));
         break;
+    case PROP_HAS_PROTECTED_MEDIA:
+        g_value_set_boolean(value, webkit_web_view_has_protected_media(webView));
+        break;
 #if !ENABLE(2022_GLIB_API)
     case PROP_IS_EPHEMERAL:
         g_value_set_boolean(value, webkit_web_view_is_ephemeral(webView));
@@ -1398,19 +1410,23 @@ static void webkit_web_view_class_init(WebKitWebViewClass* webViewClass)
 
 #if PLATFORM(WPE)
 #if USE(LIBWPE)
+    ALLOW_DEPRECATED_DECLARATIONS_BEGIN
     /**
      * WebKitWebView:backend:
      *
      * The #WebKitWebViewBackend of the view.
      *
      * Since: 2.20
+     *
+     * Deprecated: 2.56: Use WPE Platform API instead.
      */
     sObjProperties[PROP_BACKEND] =
         g_param_spec_boxed(
             "backend",
             nullptr, nullptr,
             WEBKIT_TYPE_WEB_VIEW_BACKEND,
-            static_cast<GParamFlags>(WEBKIT_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY));
+            static_cast<GParamFlags>(WEBKIT_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY | G_PARAM_DEPRECATED));
+    ALLOW_DEPRECATED_DECLARATIONS_END
 #endif
 #if ENABLE(WPE_PLATFORM)
     /**
@@ -1637,6 +1653,25 @@ static void webkit_web_view_class_init(WebKitWebViewClass* webViewClass)
     sObjProperties[PROP_IS_PLAYING_AUDIO] =
         g_param_spec_boolean(
             "is-playing-audio",
+            nullptr, nullptr,
+            FALSE,
+            WEBKIT_PARAM_READABLE);
+
+    /**
+     * WebKitWebView:has-protected-media:
+     *
+     * Whether a page in the #WebKitWebView has a media element with
+     * Encrypted Media Extensions (EME) MediaKeys attached, i.e. it may be
+     * presenting DRM-protected content. This property becomes %TRUE as soon
+     * as MediaKeys are attached to a media element, independently of whether
+     * playback is running, and is set back to %FALSE once no media element
+     * has MediaKeys attached anymore.
+     *
+     * Since: 2.56
+     */
+    sObjProperties[PROP_HAS_PROTECTED_MEDIA] =
+        g_param_spec_boolean(
+            "has-protected-media",
             nullptr, nullptr,
             FALSE,
             WEBKIT_PARAM_READABLE);
@@ -3404,6 +3439,8 @@ RendererBufferDescription webkitWebViewGetRendererBufferDescription(WebKitWebVie
  * Returns: (transfer none): the #WebKitWebViewBackend of @web_view
  *
  * Since: 2.20
+ *
+ * Deprecated: 2.56: Use WPE Platform API instead.
  */
 WebKitWebViewBackend* webkit_web_view_get_backend(WebKitWebView* webView)
 {
@@ -3865,6 +3902,29 @@ gboolean webkit_web_view_is_playing_audio(WebKitWebView* webView)
     g_return_val_if_fail(WEBKIT_IS_WEB_VIEW(webView), FALSE);
 
     return getPage(webView).isPlayingAudio();
+}
+
+/**
+ * webkit_web_view_has_protected_media:
+ * @web_view: a #WebKitWebView
+ *
+ * Gets the value of the #WebKitWebView:has-protected-media property.
+ *
+ * You can monitor when a page in a #WebKitWebView may be presenting
+ * DRM-protected media by connecting to the notify::has-protected-media
+ * signal of @web_view. This is useful when the application needs to keep
+ * protected content out of screenshots or recordings.
+ *
+ * Returns: %TRUE if a page in @web_view has a media element with MediaKeys
+ *    attached or %FALSE otherwise.
+ *
+ * Since: 2.56
+ */
+gboolean webkit_web_view_has_protected_media(WebKitWebView* webView)
+{
+    g_return_val_if_fail(WEBKIT_IS_WEB_VIEW(webView), FALSE);
+
+    return getPage(webView).hasProtectedMedia();
 }
 
 /**
@@ -6180,6 +6240,68 @@ WebKitImageList* webkit_web_view_get_page_icons(WebKitWebView* webView)
 {
     g_return_val_if_fail(WEBKIT_IS_WEB_VIEW(webView), nullptr);
     return webView->priv->pageIcons.get();
+}
+
+/**
+ * webkit_web_view_get_application_manifest:
+ * @web_view: a #WebKitWebView
+ * @cancellable: (nullable): a #GCancellable or %NULL to ignore
+ * @callback: (scope async): a #GAsyncReadyCallback to call when the request is satisfied
+ * @user_data: the data to pass to callback function
+ *
+ * Asynchronously get the application manifest of the currently loaded page.
+ *
+ * The manifest is loaded from the `<link rel="manifest">` element of the main
+ * frame document, so this should be called once the page has finished loading,
+ * for example on [signal@WebView::load-changed] with %WEBKIT_LOAD_FINISHED.
+ *
+ * When the operation is finished, @callback will be called. You can then call
+ * webkit_web_view_get_application_manifest_finish() to get the result of the operation.
+ *
+ * Since: 2.56
+ */
+void webkit_web_view_get_application_manifest(WebKitWebView* webView, GCancellable* cancellable, GAsyncReadyCallback callback, gpointer userData)
+{
+    g_return_if_fail(WEBKIT_IS_WEB_VIEW(webView));
+
+    GRefPtr<GTask> task = adoptGRef(g_task_new(webView, cancellable, callback, userData));
+#if ENABLE(APPLICATION_MANIFEST)
+    getPage(webView).getApplicationManifest([task = WTF::move(task)](const std::optional<WebCore::ApplicationManifest>& coreManifest) {
+        if (g_task_return_error_if_cancelled(task.get()))
+            return;
+
+        if (!coreManifest) {
+            g_task_return_pointer(task.get(), nullptr, nullptr);
+            return;
+        }
+
+        auto* webView = WEBKIT_WEB_VIEW(g_task_get_source_object(task.get()));
+        g_task_return_pointer(task.get(), webkitApplicationManifestCreate(webView, *coreManifest), g_object_unref);
+    });
+#else
+    g_task_return_pointer(task.get(), nullptr, nullptr);
+#endif
+}
+
+/**
+ * webkit_web_view_get_application_manifest_finish:
+ * @web_view: a #WebKitWebView
+ * @result: a #GAsyncResult
+ * @error: return location for error or %NULL to ignore
+ *
+ * Finish an asynchronous operation started with webkit_web_view_get_application_manifest().
+ *
+ * Returns: (transfer full) (nullable): the page [class@ApplicationManifest], or %NULL
+ *    if the page does not have a valid manifest or in case of error.
+ *
+ * Since: 2.56
+ */
+WebKitApplicationManifest* webkit_web_view_get_application_manifest_finish(WebKitWebView* webView, GAsyncResult* result, GError** error)
+{
+    g_return_val_if_fail(WEBKIT_IS_WEB_VIEW(webView), nullptr);
+    g_return_val_if_fail(g_task_is_valid(result, webView), nullptr);
+
+    return static_cast<WebKitApplicationManifest*>(g_task_propagate_pointer(G_TASK(result), error));
 }
 #endif
 

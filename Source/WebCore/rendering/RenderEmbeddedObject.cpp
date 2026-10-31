@@ -45,6 +45,7 @@
 #include "LocalFrameView.h"
 #include "LocalizedStrings.h"
 #include "MouseEvent.h"
+#include "NaturalDimensions.h"
 #include "Page.h"
 #include "PaintInfo.h"
 #include "Path.h"
@@ -96,7 +97,7 @@ RenderEmbeddedObject::~RenderEmbeddedObject() = default;
 
 void RenderEmbeddedObject::willBeDestroyed()
 {
-    protect(view())->frameView().removeEmbeddedObjectToUpdate(*this);
+    protect(view().frameView())->removeEmbeddedObjectToUpdate(*this);
     RenderWidget::willBeDestroyed();
 }
 
@@ -113,38 +114,24 @@ bool RenderEmbeddedObject::requiresAcceleratedCompositing() const
 
 static RefPtr<SVGSVGElement> embeddedSVGElement(const RenderWidget& renderer)
 {
-    RefPtr frameView = dynamicDowncast<LocalFrameView>(renderer.widget());
+    auto* frameView = dynamicDowncast<LocalFrameView>(renderer.widget());
     if (!frameView)
         return nullptr;
-    CheckedPtr svgRoot = frameView->embeddedSVGRoot();
+    auto* svgRoot = frameView->embeddedSVGRoot();
     if (!svgRoot)
         return nullptr;
-    if (CheckedPtr modernRoot = dynamicDowncast<RenderSVGRoot>(svgRoot.get()))
+    if (auto* modernRoot = dynamicDowncast<RenderSVGRoot>(svgRoot))
         return &modernRoot->svgSVGElement();
-    if (CheckedPtr legacyRoot = dynamicDowncast<LegacyRenderSVGRoot>(svgRoot.get()))
+    if (auto* legacyRoot = dynamicDowncast<LegacyRenderSVGRoot>(svgRoot))
         return &legacyRoot->svgSVGElement();
     return nullptr;
 }
 
-bool RenderEmbeddedObject::shouldRespectZeroIntrinsicWidth() const
+NaturalDimensions RenderEmbeddedObject::zoomedNaturalDimensions() const
 {
-    if (RefPtr svgElement = embeddedSVGElement(*this))
-        return svgElement->hasIntrinsicWidth();
-    return false;
-}
-
-bool RenderEmbeddedObject::shouldRespectZeroIntrinsicHeight() const
-{
-    RefPtr svgElement = embeddedSVGElement(*this);
-    if (!svgElement || !svgElement->hasIntrinsicHeight())
-        return false;
-    // A natural height of 0 is respected unless a natural width together with an
-    // aspect ratio can derive a non-zero height, in which case the derived height
-    // wins. The ratio may come from the SVG's viewBox or the CSS aspect-ratio
-    // property; see https://github.com/w3c/csswg-drafts/issues/11236#issuecomment-2718502765.
-    if (!svgElement->hasIntrinsicWidth())
-        return true;
-    return svgElement->currentViewBoxRect().isEmpty() && !style().aspectRatio().hasRatio();
+    if (RefPtr element = embeddedSVGElement(*this))
+        return element->naturalDimensions().zoomed(style().usedZoom());
+    return RenderWidget::zoomedNaturalDimensions();
 }
 
 ScrollableArea* RenderEmbeddedObject::scrollableArea() const
@@ -360,10 +347,12 @@ void RenderEmbeddedObject::getReplacementTextGeometry(const LayoutPoint& accumul
     fontDescription.setOneFamily(SystemFontDatabase::singleton().systemFontShorthandFamily(SystemFontDatabase::FontShorthand::WebkitSmallControl));
     fontDescription.setWeight(boldWeightValue());
     fontDescription.setUsedSize(12);
-    font = FontCascade(WTF::move(fontDescription));
+    FontCascade newFont(WTF::move(fontDescription));
+    font = WTF::move(newFont);
     font.update(nullptr);
 
-    run = TextRun(m_unavailablePluginReplacementText);
+    TextRun newRun(m_unavailablePluginReplacementText);
+    run = WTF::move(newRun);
     textWidth = font.width(run);
 
     replacementTextRect.setSize(FloatSize(textWidth + replacementTextRoundedRectLeftTextMargin + (includesArrow ? replacementTextRoundedRectRightTextMarginWithArrow : replacementTextRoundedRectRightTextMargin), replacementTextRoundedRectHeight));
@@ -397,7 +386,7 @@ void RenderEmbeddedObject::layout()
     updateLayerTransform();
 
     if (!widget())
-        protect(view())->frameView().addEmbeddedObjectToUpdate(*this);
+        protect(view().frameView())->addEmbeddedObjectToUpdate(*this);
 
     clearNeedsLayout();
 
@@ -468,7 +457,7 @@ void RenderEmbeddedObject::handleUnavailablePluginIndicatorEvent(Event* event)
     if (mouseEvent->type() == eventNames().mousedownEvent && mouseEvent->button() == MouseButton::Left) {
         m_mouseDownWasInUnavailablePluginIndicator = isInUnavailablePluginIndicator(*mouseEvent);
         if (m_mouseDownWasInUnavailablePluginIndicator) {
-            frame().eventHandler().setCapturingMouseEventsElement(element.copyRef());
+            protect(frame().eventHandler())->setCapturingMouseEventsElement(element.copyRef());
             element->setIsCapturingMouseEvents(true);
             setUnavailablePluginIndicatorIsPressed(true);
         }
@@ -476,7 +465,7 @@ void RenderEmbeddedObject::handleUnavailablePluginIndicatorEvent(Event* event)
     }
     if (mouseEvent->type() == eventNames().mouseupEvent && mouseEvent->button() == MouseButton::Left) {
         if (m_unavailablePluginIndicatorIsPressed) {
-            frame().eventHandler().setCapturingMouseEventsElement(nullptr);
+            protect(frame().eventHandler())->setCapturingMouseEventsElement(nullptr);
             element->setIsCapturingMouseEvents(false);
             setUnavailablePluginIndicatorIsPressed(false);
         }

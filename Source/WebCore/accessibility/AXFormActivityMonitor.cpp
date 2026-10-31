@@ -35,8 +35,10 @@
 #include "Color.h"
 #include "ColorSerialization.h"
 #include "ComposedTreeIterator.h"
+#include "ContainerNodeInlines.h"
 #include "ElementAncestorIteratorInlines.h"
 #include "ElementInlines.h"
+#include "FrameDestructionObserverInlines.h"
 #include "HTMLBodyElement.h"
 #include "HTMLFormControlElement.h"
 #include "HTMLInputElement.h"
@@ -44,6 +46,7 @@
 #include "HTMLNames.h"
 #include "HTMLSelectElement.h"
 #include "Logging.h"
+#include "RenderElementInlines.h"
 #include "RenderText.h"
 #include "TypedElementDescendantIteratorInlines.h"
 #include "ValidatedFormListedElement.h"
@@ -102,7 +105,7 @@ static constexpr unsigned maximumErrorMessageDepth = 4;
 
 // Roles that structure a document. An error message is never one of these, and a container that holds
 // one is an aggregate rather than a message.
-static bool isStructural(AXCoreObject& object)
+static bool LEGACY_NODELETE isStructural(AXCoreObject& object)
 {
     switch (object.role()) {
     case AccessibilityRole::Heading:
@@ -242,7 +245,7 @@ static bool isEmptyOrInvalid(AccessibilityObject& field)
 // Close enough under a field to be about it, rather than about the part of the page around it.
 static constexpr int maximumUncoloredMessageGap = 40;
 
-static bool isDirectlyBelow(const IntRect& messageRect, const IntRect& fieldRect)
+static bool LEGACY_NODELETE isDirectlyBelow(const IntRect& messageRect, const IntRect& fieldRect)
 {
     // A message counts as below the field once it starts past the field's middle, not only past its bottom edge.
     // |fieldRect| and |messageRect| have been rounded upstream, and on a zoomed-out page, this rounding can actually
@@ -279,7 +282,7 @@ static IntRect boundsForMessage(Element& element)
 // at all. Horizontal overlap is required, so a message in one column of a two-column form cannot pair with
 // the field beside it. Sitting above the field, or outside the form, both count against a message without
 // ruling it out, as plenty of sites put the message above, and plenty put it after the </form>.
-static std::optional<int> messageFieldAffinity(const IntRect& messageRect, const IntRect& fieldRect, bool messageIsInsideForm)
+static std::optional<int> LEGACY_NODELETE messageFieldAffinity(const IntRect& messageRect, const IntRect& fieldRect, bool messageIsInsideForm)
 {
     if (messageRect.isEmpty() || fieldRect.isEmpty())
         return std::nullopt;
@@ -456,7 +459,7 @@ static std::optional<Color> renderedTextColor(Element& message)
             continue;
 
         CheckedPtr renderer = text->renderer();
-        if (!renderer || isVisibilityHidden(renderer->style()))
+        if (!renderer || isVisibilityHidden(*renderer))
             continue;
 
         auto color = protect(renderer->style())->visitedDependentColor();
@@ -471,6 +474,10 @@ static std::optional<Color> renderedTextColor(Element& message)
 static bool couldHoldMessage(Element& element)
 {
     if (is<HTMLFormControlElement>(element) || element.isLink())
+        return false;
+
+    // A field's own text, and text in an editor the page built, is not a message.
+    if (element.isInUserAgentShadowTree() || element.hasEditableStyle())
         return false;
 
     // Text inside a label names a control, not an error message.

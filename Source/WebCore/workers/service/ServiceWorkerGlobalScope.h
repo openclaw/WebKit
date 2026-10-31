@@ -89,7 +89,7 @@ public:
 
     FetchOptions::Destination destination() const final { return FetchOptions::Destination::Serviceworker; }
 
-    WEBCORE_EXPORT Page* serviceWorkerPage();
+    WEBCORE_EXPORT Page* LEGACY_NODELETE serviceWorkerPage();
 
     void dispatchPushEvent(PushEvent&);
     PushEvent* pushEvent() { return m_pushEvent.get(); }
@@ -118,8 +118,8 @@ public:
     using FetchKey = std::pair<SWServerConnectionIdentifier, FetchIdentifier>;
     void addFetchTask(FetchKey, Ref<ServiceWorkerFetch::Client>&&);
     void addFetchEvent(FetchKey, FetchEvent&);
-    RefPtr<ServiceWorkerFetch::Client> NODELETE fetchTask(FetchKey);
-    bool NODELETE hasFetchTask() const;
+    RefPtr<ServiceWorkerFetch::Client> LEGACY_NODELETE fetchTask(FetchKey);
+    bool LEGACY_NODELETE hasFetchTask() const;
     void removeFetchTask(FetchKey);
     RefPtr<ServiceWorkerFetch::Client> takeFetchTask(FetchKey);
     void navigationPreloadFailed(FetchKey, ResourceError&&);

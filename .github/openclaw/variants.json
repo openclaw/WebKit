@@ -1,6 +1,6 @@
 {
   "bun_repository": "openclaw/bun",
-  "base": "3d3257150c40a1aabdc5f8b48d5b33d0413674cb",
+  "base": "e66916298091dd12469076fd854e135b03fb16ff",
   "lanes": [
     {
       "label": "bun-webkit-linux-amd64",

@@ -37,8 +37,6 @@
 #import <wtf/text/StringHash.h>
 #import <wtf/text/WTFString.h>
 
-struct WGPUShaderModuleImpl {
-};
 
 namespace WGSL {
 namespace AST {
@@ -53,7 +51,7 @@ class Device;
 class PipelineLayout;
 
 // https://gpuweb.github.io/gpuweb/#gpushadermodule
-class ShaderModule final : public WebGPU::ShaderModule, public WGPUShaderModuleImpl {
+class ShaderModule final : public WebGPU::ShaderModule {
     WTF_MAKE_TZONE_ALLOCATED(ShaderModule);
 
     using CheckResult = Variant<WGSL::SuccessfulCheck, WGSL::FailedCheck, std::monostate>;
@@ -69,7 +67,7 @@ public:
 
     ~ShaderModule();
 
-    void getCompilationInfo(CompletionHandler<void(WGPUCompilationInfoRequestStatus, const WGPUCompilationInfo&)>&& callback);
+    void compilationInfo(CompletionHandler<void(WebGPU::CompilationInfo&&)>&&) final;
     void setLabel(String&&) final;
 
     bool isValid() const final { return std::holds_alternative<WGSL::SuccessfulCheck>(m_checkResult); }
@@ -86,11 +84,11 @@ public:
     id<MTLLibrary> library() const { return m_library; }
 
     Device& device() const { return m_device; }
-    const String& NODELETE defaultVertexEntryPoint() const;
-    const String& NODELETE defaultFragmentEntryPoint() const;
-    const String& NODELETE defaultComputeEntryPoint() const;
+    const String& LEGACY_NODELETE defaultVertexEntryPoint() const;
+    const String& LEGACY_NODELETE defaultFragmentEntryPoint() const;
+    const String& LEGACY_NODELETE defaultComputeEntryPoint() const;
 
-    using VertexStageIn = HashMap<uint32_t, WGPUVertexFormat, DefaultHash<uint32_t>, WTF::UnsignedWithZeroKeyHashTraits<uint32_t>>;
+    using VertexStageIn = HashMap<uint32_t, WebGPU::VertexFormat, DefaultHash<uint32_t>, WTF::UnsignedWithZeroKeyHashTraits<uint32_t>>;
     using FragmentOutputs = HashMap<uint32_t, MTLDataType, DefaultHash<uint32_t>, WTF::UnsignedWithZeroKeyHashTraits<uint32_t>>;
     struct VertexOutputFragmentInput {
         MTLDataType dataType { MTLDataTypeNone };

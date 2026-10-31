@@ -114,7 +114,7 @@ private:
 };
 
 using KeyStoreIDType = unsigned;
-KeyStoreIDType NODELETE keyStoreBaseNextID();
+KeyStoreIDType LEGACY_NODELETE keyStoreBaseNextID();
 
 template<typename T>
 class KeyStoreBase {
@@ -249,7 +249,7 @@ public:
 
     void updateKeyStore(const KeyStore&);
     void unrefAllKeysFrom(const KeyStore&);
-    void setInstance(CDMInstanceProxy*);
+    void LEGACY_NODELETE setInstance(CDMInstanceProxy*);
     void abortWaitingForKey() const;
 
 protected:
@@ -261,7 +261,7 @@ protected:
     std::optional<KeyHandleValueVariant> getOrWaitForKeyValue(const KeyIDType&, WeakPtr<CDMProxyDecryptionClient>&&) const;
     void startedWaitingForKey() const;
     void stoppedWaitingForKey() const;
-    const CDMInstanceProxy* instance() const;
+    const CDMInstanceProxy* LEGACY_NODELETE instance() const;
 
 private:
     mutable Lock m_instanceLock;

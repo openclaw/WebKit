@@ -495,7 +495,7 @@ void WebFrameLoaderClient::willCacheResponse(WebCore::DocumentLoader* loader, We
 #endif
     if (implementations->willCacheResponseFunc) {
         if (id resource = [webView.get() _objectForIdentifier:identifier])
-            return completionHandler(protect(CallResourceLoadDelegate(implementations->willCacheResponseFunc, webView.get(), @selector(webView:resource:willCacheResponse:fromDataSource:), resource, response, protect(dataSource(loader)))));
+            return completionHandler(dynamic_objc_cast<NSCachedURLResponse>(protect(CallResourceLoadDelegate(implementations->willCacheResponseFunc, webView.get(), @selector(webView:resource:willCacheResponse:fromDataSource:), resource, response, protect(dataSource(loader))))));
     }
 
     completionHandler(response);
@@ -1143,6 +1143,11 @@ void WebFrameLoaderClient::dispatchEnqueueHistoryTraversalDelta(int)
 {
 }
 
+void WebFrameLoaderClient::dispatchEnqueueHistoryTraversalToItem(WebCore::BackForwardFrameItemIdentifier, CompletionHandler<void(bool)>&& completionHandler)
+{
+    completionHandler(false);
+}
+
 bool WebFrameLoaderClient::shouldFallBack(const WebCore::ResourceError& error) const
 {
     // FIXME: Needs to check domain.
@@ -1535,7 +1540,7 @@ NSDictionary *WebFrameLoaderClient::actionDictionary(const WebCore::NavigationAc
 
     if (auto mouseEventData = action.mouseEventData()) {
         constexpr OptionSet<HitTestRequest::Type> hitType { HitTestRequest::Type::ReadOnly, HitTestRequest::Type::Active, HitTestRequest::Type::DisallowUserAgentShadowContent, HitTestRequest::Type::AllowChildFrameContent };
-        auto element = adoptNS([[WebElementDictionary alloc] initWithHitTestResult:core(m_webFrame.get())->eventHandler().hitTestResultAtPoint(mouseEventData->absoluteLocation, hitType)]);
+        RetainPtr element = adoptNS([[WebElementDictionary alloc] initWithHitTestResult:protect(core(m_webFrame.get())->eventHandler())->hitTestResultAtPoint(mouseEventData->absoluteLocation, hitType)]);
         [result setObject:element.get() forKey:WebActionElementKey];
 
         auto button = std::to_underlying(mouseEventData->isTrusted ? mouseEventData->button : MouseButton::None);
@@ -1648,7 +1653,7 @@ WebCore::ObjectContentType WebFrameLoaderClient::objectContentType(const URL& ur
     return WebCore::ObjectContentType::None;
 }
 
-static AtomString NODELETE parameterValue(const Vector<AtomString>& paramNames, const Vector<AtomString>& paramValues, ASCIILiteral name)
+static AtomString LEGACY_NODELETE parameterValue(const Vector<AtomString>& paramNames, const Vector<AtomString>& paramValues, ASCIILiteral name)
 {
     size_t size = paramNames.size();
     ASSERT(size == paramValues.size());
@@ -1751,7 +1756,7 @@ RefPtr<WebCore::Widget> WebFrameLoaderClient::createPlugin(WebCore::HTMLPlugInEl
             pluginURL.get(), WebPlugInBaseURLKey, // pluginURL might be nil, so add it last
             nil]);
 
-        RetainPtr view = CallUIDelegate(webView.get(), selector, arguments.get());
+        RetainPtr view = dynamic_objc_cast<NSView>(CallUIDelegate(webView.get(), selector, arguments.get()));
 
         if (view)
             return adoptRef(*new PluginWidget(view.get()));
@@ -1759,7 +1764,7 @@ RefPtr<WebCore::Widget> WebFrameLoaderClient::createPlugin(WebCore::HTMLPlugInEl
 #endif
 
     RetainPtr<NSString> MIMEType;
-    WebBasePluginPackage *pluginPackage;
+    RetainPtr<WebBasePluginPackage> pluginPackage;
     if (mimeType.isEmpty())
         pluginPackage = nil;
     else {
@@ -1973,7 +1978,7 @@ RefPtr<WebCore::LegacyPreviewLoaderClient> WebFrameLoaderClient::createPreviewLo
 #if ENABLE(CONTENT_FILTERING)
 void WebFrameLoaderClient::contentFilterDidBlockLoad(WebCore::ContentFilterUnblockHandler&& unblockHandler)
 {
-    core(m_webFrame.get())->loader().policyChecker().setContentFilterUnblockHandler(WTF::move(unblockHandler));
+    protect(core(m_webFrame.get())->loader().policyChecker())->setContentFilterUnblockHandler(WTF::move(unblockHandler));
 }
 #endif
 
@@ -2031,26 +2036,6 @@ void WebFrameLoaderClient::getLoadDecisionForIcons(const Vector<std::pair<WebCor
 #endif
 }
 
-#if !PLATFORM(IOS_FAMILY)
-static NSImage *webGetNSImage(WebCore::Image* image, NSSize size)
-{
-    ASSERT(size.width);
-    ASSERT(size.height);
-
-    // FIXME: We're doing the resize here for now because WebCore::Image doesn't yet support resizing/multiple representations
-    // This makes it so there's effectively only one size of a particular icon in the system at a time. We should move this
-    // to WebCore::Image at some point.
-    if (!image)
-        return nil;
-    RetainPtr nsImage = image->adapter().nsImage();
-    if (!nsImage)
-        return nil;
-    if (!NSEqualSizes([nsImage.get() size], size))
-        [nsImage.get() setSize:size];
-    return nsImage.autorelease();
-}
-#endif // !PLATFORM(IOS_FAMILY)
-
 void WebFrameLoaderClient::finishedLoadingIcon(WebCore::FragmentedSharedBuffer* iconData)
 {
 #if !PLATFORM(IOS_FAMILY)
@@ -2061,13 +2046,18 @@ void WebFrameLoaderClient::finishedLoadingIcon(WebCore::FragmentedSharedBuffer* 
     if (!webView)
         return;
 
-    auto image = WebCore::BitmapImage::create();
+    Ref image = WebCore::BitmapImage::create();
     if (image->setData(iconData, true) < WebCore::EncodedDataStatus::SizeAvailable)
         return;
 
-    RetainPtr icon = webGetNSImage(image.ptr(), NSMakeSize(16, 16));
-    if (icon)
-        [webView.get() _setMainFrameIcon:icon.get()];
+    WebCore::FloatSize size { 16, 16 };
+    RetainPtr icon = image->adapter().nsImage(WebCore::ConcreteObjectSize::fixed(size));
+    if (!icon)
+        return;
+    if (!NSEqualSizes([icon size], size))
+        [icon setSize:size];
+
+    [webView.get() _setMainFrameIcon:icon.get()];
 #else
     UNUSED_PARAM(iconData);
 #endif

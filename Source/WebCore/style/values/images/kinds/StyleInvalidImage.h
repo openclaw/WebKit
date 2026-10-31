@@ -36,7 +36,7 @@ namespace Style {
 
 class InvalidImage final : public GeneratedImage {
 public:
-    static Ref<InvalidImage> create();
+    static Ref<InvalidImage> LEGACY_NODELETE create();
 
     virtual ~InvalidImage();
 
@@ -44,13 +44,9 @@ public:
     bool equals(const InvalidImage&) const { return false; }
     bool canRender(const RenderElement*) const final { return false; }
 
-    static constexpr bool isFixedSize = true;
-
 protected:
     void didAddClient(RenderElement&) final { }
     void didRemoveClient(RenderElement&) final { }
-
-    FloatSize fixedSize(const RenderElement&) const final { return { }; }
 
 private:
     InvalidImage();
@@ -59,12 +55,13 @@ private:
     void load(CachedResourceLoader&, const ResourceLoaderOptions&) final;
     bool knownToBeOpaque(const RenderElement&) const { return false; }
     bool canDraw(const RenderElement&) const final { return false; }
+    bool containsCurrentColor() const final { return false; }
     bool canDrawAtSize(const RenderElement&, const FloatSize&) const final { return false; }
 
-    ImageDrawResult draw(GraphicsContext&, const RenderElement&, ConcreteObjectSize, const FloatRect& destination, const FloatRect& source, ImagePaintingOptions, bool isForFirstLine) const final;
-    ImageDrawResult drawAsPattern(GraphicsContext&, const RenderElement&, ConcreteObjectSize, const FloatRect& destination, const FloatRect& tile, const AffineTransform&, const FloatPoint& phase, const FloatSize& spacing, ImagePaintingOptions, bool isForFirstLine) const final;
-    ImageDrawResult drawTiled(GraphicsContext&, const RenderElement&, ConcreteObjectSize, const FloatRect& destination, const FloatPoint& phase, const FloatSize& tileSize, const FloatSize& spacing, ImagePaintingOptions, bool isForFirstLine) const final;
-    ImageDrawResult drawNinePiece(GraphicsContext&, const RenderElement&, ConcreteObjectSize, const NinePieceGeometry&, ImagePaintingOptions) const final;
+    ImageDrawResult draw(GraphicsContext&, const RenderElement&, ConcreteObjectSize, const FloatRect& destination, const FloatRect& source, ImageDrawingOptions, bool isForFirstLine) const final;
+    ImageDrawResult drawAsPattern(GraphicsContext&, const RenderElement&, ConcreteObjectSize, const FloatRect& destination, const FloatRect& tile, const AffineTransform&, const FloatPoint& phase, const FloatSize& spacing, ImageDrawingOptions, bool isForFirstLine) const final;
+    ImageDrawResult drawTiled(GraphicsContext&, const RenderElement&, ConcreteObjectSize, const FloatRect& destination, const FloatPoint& phase, const FloatSize& tileSize, const FloatSize& spacing, ImageDrawingOptions, bool isForFirstLine) const final;
+    ImageDrawResult drawNinePiece(GraphicsContext&, const RenderElement&, ConcreteObjectSize, const NinePieceGeometry&, ImageDrawingOptions) const final;
     Ref<CSSValue> computedStyleValue(const Style::ComputedStyle&) const;
     Ref<DeprecatedCSSOMValue> computedStyleDeprecatedCSSOMValue(CSSValuePool&, const Style::ComputedStyle&, CSSStyleDeclaration&) const final;
 };

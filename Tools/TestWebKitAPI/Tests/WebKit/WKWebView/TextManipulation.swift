@@ -86,11 +86,125 @@ extension _WKTextManipulationToken {
     }
 }
 
+// Each `#expect` or `#require` is a round trip to the Swift Testing macro plugin, followed by type-checking the code it
+// expands to. An inline `#expect(a == b)` is the worst case, taking roughly 20ms in this module because the expanded
+// comparison is solved against every `==` overload visible here. With hundreds of checks, that made this file by far
+// the slowest to compile in TestWebKitAPI. Routing them through these helpers expands each macro once, leaving
+// ordinary function calls at the call sites.
+//
+// The helpers take the caller's location as `#fileID`, `#filePath`, `#line`, and `#column` rather than as
+// `SourceLocation = #_sourceLocation`, because `#_sourceLocation` is a plugin macro too, and as a default argument it
+// would still be expanded at every call site.
+
+private func expectEqual<T: Equatable>(
+    _ actual: T,
+    _ expected: T,
+    fileID: String = #fileID,
+    filePath: String = #filePath,
+    line: Int = #line,
+    column: Int = #column
+) {
+    let sourceLocation = SourceLocation(fileID: fileID, filePath: filePath, line: line, column: column)
+    #expect(actual == expected, sourceLocation: sourceLocation)
+}
+
+private func requireEqual<T: Equatable>(
+    _ actual: T,
+    _ expected: T,
+    fileID: String = #fileID,
+    filePath: String = #filePath,
+    line: Int = #line,
+    column: Int = #column
+) throws {
+    let sourceLocation = SourceLocation(fileID: fileID, filePath: filePath, line: line, column: column)
+    try #require(actual == expected, sourceLocation: sourceLocation)
+}
+
+private func expectNil<T>(
+    _ value: T?,
+    fileID: String = #fileID,
+    filePath: String = #filePath,
+    line: Int = #line,
+    column: Int = #column
+) {
+    let sourceLocation = SourceLocation(fileID: fileID, filePath: filePath, line: line, column: column)
+    #expect(value == nil, sourceLocation: sourceLocation)
+}
+
+private func requireNonNil<T>(
+    _ value: T?,
+    fileID: String = #fileID,
+    filePath: String = #filePath,
+    line: Int = #line,
+    column: Int = #column
+) throws -> T {
+    let sourceLocation = SourceLocation(fileID: fileID, filePath: filePath, line: line, column: column)
+    return try #require(value, sourceLocation: sourceLocation)
+}
+
+private func expectTrue(
+    _ condition: Bool,
+    fileID: String = #fileID,
+    filePath: String = #filePath,
+    line: Int = #line,
+    column: Int = #column
+) {
+    let sourceLocation = SourceLocation(fileID: fileID, filePath: filePath, line: line, column: column)
+    #expect(condition, sourceLocation: sourceLocation)
+}
+
+private func expectFalse(
+    _ condition: Bool,
+    fileID: String = #fileID,
+    filePath: String = #filePath,
+    line: Int = #line,
+    column: Int = #column
+) {
+    let sourceLocation = SourceLocation(fileID: fileID, filePath: filePath, line: line, column: column)
+    #expect(!condition, sourceLocation: sourceLocation)
+}
+
+private func expectIdentical(
+    _ actual: AnyObject?,
+    _ expected: AnyObject?,
+    fileID: String = #fileID,
+    filePath: String = #filePath,
+    line: Int = #line,
+    column: Int = #column
+) {
+    let sourceLocation = SourceLocation(fileID: fileID, filePath: filePath, line: line, column: column)
+    #expect(actual === expected, sourceLocation: sourceLocation)
+}
+
+private func item(containing text: String, in items: [_WKTextManipulationItem]) -> _WKTextManipulationItem? {
+    items.first { $0.tokens.contains { $0.content?.contains(text) == true } }
+}
+
 private func proximity(
     forItemContaining text: String,
     in items: [_WKTextManipulationItem]
 ) -> _WKTextManipulationViewportProximityInfo? {
-    items.first { $0.tokens.contains { $0.content?.contains(text) == true } }?.viewportProximityInfo
+    item(containing: text, in: items)?.viewportProximityInfo
+}
+
+@MainActor
+private func scrollMainFrame(of webView: WKWebView, to y: CGFloat) async throws {
+    try await webView.callJavaScript { "scrollTo(0, \(y))" }
+    await webView.nextPresentationUpdate()
+}
+
+private func expectRect(
+    _ rect: CGRect,
+    isOffsetFrom referenceRect: CGRect,
+    dy: CGFloat,
+    fileID: String = #fileID,
+    filePath: String = #filePath,
+    line: Int = #line,
+    column: Int = #column
+) {
+    expectFalse(rect.isNull, fileID: fileID, filePath: filePath, line: line, column: column)
+    expectFalse(referenceRect.isNull, fileID: fileID, filePath: filePath, line: line, column: column)
+    expectEqual(rect, referenceRect.offsetBy(dx: 0, dy: dy), fileID: fileID, filePath: filePath, line: line, column: column)
 }
 
 private let subscrollerHTML = """
@@ -103,6 +217,18 @@ private let subscrollerHTML = """
     </div>\
     <div style='height: 2000px'></div>\
     <div>Offscreen text</div>\
+    </body>
+    """
+
+private let boundingRectHTML = """
+    <!DOCTYPE html>\
+    <meta name='viewport' content='width=800, initial-scale=1'>\
+    <body style='margin: 0'>\
+    <div style='height: 100px'></div>\
+    <p style='margin: 0 0 0 50px'>First text</p>\
+    <div style='height: 1100px'></div>\
+    <p style='margin: 0 0 0 50px'>Second text</p>\
+    <div style='height: 3000px'></div>\
     </body>
     """
 
@@ -152,7 +278,7 @@ struct TextManipulationTests {
 
         await webView._startTextManipulations(with: nil)
 
-        #expect(delegate.items.isEmpty)
+        expectTrue(delegate.items.isEmpty)
     }
 
     @Test
@@ -162,15 +288,15 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 3)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello")
+        try requireEqual(items.count, 3)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello")
 
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "world")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "world")
 
-        try #require(items[2].tokens.count == 1)
-        #expect(items[2].tokens[0].content == "WebKit")
+        try requireEqual(items[2].tokens.count, 1)
+        expectEqual(items[2].tokens[0].content, "WebKit")
     }
 
     @Test
@@ -180,13 +306,13 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 5)
-        #expect(items[0].tokens[0].content == "hello")
-        #expect(items[0].tokens[1].content == "\n")
-        #expect(items[0].tokens[2].content == "world")
-        #expect(items[0].tokens[3].content == "\n")
-        #expect(items[0].tokens[4].content == "WebKit")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 5)
+        expectEqual(items[0].tokens[0].content, "hello")
+        expectEqual(items[0].tokens[1].content, "\n")
+        expectEqual(items[0].tokens[2].content, "world")
+        expectEqual(items[0].tokens[3].content, "\n")
+        expectEqual(items[0].tokens[4].content, "WebKit")
     }
 
     @Test
@@ -198,14 +324,14 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 2)
-        #expect(items[0].tokens[0].content == "hello, ")
-        #expect(items[0].tokens[1].content == "world")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 2)
+        expectEqual(items[0].tokens[0].content, "hello, ")
+        expectEqual(items[0].tokens[1].content, "world")
 
-        try #require(items[1].tokens.count == 2)
-        #expect(items[1].tokens[0].content == "Web")
-        #expect(items[1].tokens[1].content == "Kit")
+        try requireEqual(items[1].tokens.count, 2)
+        expectEqual(items[1].tokens[0].content, "Web")
+        expectEqual(items[1].tokens[1].content, "Kit")
     }
 
     @Test
@@ -220,22 +346,22 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 4)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hey")
-        #expect(!items[0].tokens[0].isExcluded)
+        try requireEqual(items.count, 4)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hey")
+        expectFalse(items[0].tokens[0].isExcluded)
 
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "this is greet")
-        #expect(!items[1].tokens[0].isExcluded)
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "this is greet")
+        expectFalse(items[1].tokens[0].isExcluded)
 
-        try #require(items[2].tokens.count == 1)
-        #expect(items[2].tokens[0].content == "fruit")
-        #expect(!items[2].tokens[0].isExcluded)
+        try requireEqual(items[2].tokens.count, 1)
+        expectEqual(items[2].tokens[0].content, "fruit")
+        expectFalse(items[2].tokens[0].isExcluded)
 
-        try #require(items[3].tokens.count == 1)
-        #expect(items[3].tokens[0].content == "hello")
-        #expect(!items[3].tokens[0].isExcluded)
+        try requireEqual(items[3].tokens.count, 1)
+        expectEqual(items[3].tokens[0].content, "hello")
+        expectFalse(items[3].tokens[0].isExcluded)
     }
 
     @Test
@@ -248,12 +374,12 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 2)
-        #expect(items[0].tokens[0].content == "hello, ")
-        #expect(items[0].tokens[1].content == "world")
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "WebKit")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 2)
+        expectEqual(items[0].tokens[0].content, "hello, ")
+        expectEqual(items[0].tokens[1].content, "world")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "WebKit")
     }
 
     @Test
@@ -263,21 +389,21 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         var items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello")
 
         try await webView.callJavaScript {
             "document.body.appendChild(document.createElement('div')).innerHTML = 'world<br><b>Web</b>Kit';"
         }
         items = await delegate.waitForItems(count: 3)
 
-        try #require(items.count == 3)
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "world")
-        try #require(items[2].tokens.count == 2)
-        #expect(items[2].tokens[0].content == "Web")
-        #expect(items[2].tokens[1].content == "Kit")
+        try requireEqual(items.count, 3)
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "world")
+        try requireEqual(items[2].tokens.count, 2)
+        expectEqual(items[2].tokens[0].content, "Web")
+        expectEqual(items[2].tokens[1].content, "Kit")
     }
 
     @Test
@@ -300,19 +426,19 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         var items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello")
 
         try await webView.callJavaScript {
             "document.querySelectorAll('span.hidden').forEach((span) => span.classList.remove('hidden'));"
         }
         items = await delegate.waitForItems(count: 2)
 
-        try #require(items.count == 2)
-        try #require(items[1].tokens.count == 2)
-        #expect(items[1].tokens[0].content == "Web")
-        #expect(items[1].tokens[1].content == "Kit")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[1].tokens.count, 2)
+        expectEqual(items[1].tokens[0].content, "Web")
+        expectEqual(items[1].tokens[1].content, "Kit")
 
         // These need to happen separately in order to have a deterministic ordering.
         try await webView.callJavaScript {
@@ -320,16 +446,16 @@ struct TextManipulationTests {
         }
         items = await delegate.waitForItems(count: 3)
 
-        try #require(items.count == 3)
-        try #require(items[2].tokens.count == 1)
-        #expect(items[2].tokens[0].content == "hey")
+        try requireEqual(items.count, 3)
+        try requireEqual(items[2].tokens.count, 1)
+        expectEqual(items[2].tokens[0].content, "hey")
 
         try await webView.callJavaScript { "document.getElementById('section').removeAttribute('hidden');" }
         items = await delegate.waitForItems(count: 4)
 
-        try #require(items.count == 4)
-        try #require(items[3].tokens.count == 1)
-        #expect(items[3].tokens[0].content == "there")
+        try requireEqual(items.count, 4)
+        try requireEqual(items[3].tokens.count, 1)
+        expectEqual(items[3].tokens[0].content, "there")
     }
 
     @Test
@@ -339,9 +465,9 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         var items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello")
 
         try await webView.callJavaScript {
             """
@@ -353,9 +479,9 @@ struct TextManipulationTests {
 
         items = await delegate.waitForItems(count: 2)
 
-        try #require(items.count == 2)
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == " world")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, " world")
     }
 
     @Test
@@ -372,19 +498,19 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 5)
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 5)
         let tokens = items[0].tokens
-        #expect(tokens[0].content == "Here's some code:")
-        #expect(!tokens[0].isExcluded)
-        #expect(tokens[1].content == "function ")
-        #expect(tokens[1].isExcluded)
-        #expect(tokens[2].content == "F")
-        #expect(tokens[2].isExcluded)
-        #expect(tokens[3].content == "() { }")
-        #expect(tokens[3].isExcluded)
-        #expect(tokens[4].content == ".")
-        #expect(!tokens[4].isExcluded)
+        expectEqual(tokens[0].content, "Here's some code:")
+        expectFalse(tokens[0].isExcluded)
+        expectEqual(tokens[1].content, "function ")
+        expectTrue(tokens[1].isExcluded)
+        expectEqual(tokens[2].content, "F")
+        expectTrue(tokens[2].isExcluded)
+        expectEqual(tokens[3].content, "() { }")
+        expectTrue(tokens[3].isExcluded)
+        expectEqual(tokens[4].content, ".")
+        expectFalse(tokens[4].isExcluded)
     }
 
     @Test
@@ -402,10 +528,10 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "world")
-        #expect(!items[0].tokens[0].isExcluded)
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "world")
+        expectFalse(items[0].tokens[0].isExcluded)
     }
 
     @Test
@@ -423,10 +549,10 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "Message: ")
-        #expect(!items[0].tokens[0].isExcluded)
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "Message: ")
+        expectFalse(items[0].tokens[0].isExcluded)
     }
 
     @Test
@@ -448,10 +574,10 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello, ")
-        #expect(!items[0].tokens[0].isExcluded)
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello, ")
+        expectFalse(items[0].tokens[0].isExcluded)
     }
 
     @Test
@@ -481,31 +607,31 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 7)
+        try requireEqual(items.count, 7)
 
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "One")
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "One")
 
-        try #require(items[1].tokens.count == 2)
-        #expect(items[1].tokens[0].content == "Two")
-        #expect(items[1].tokens[1].content == "-three")
+        try requireEqual(items[1].tokens.count, 2)
+        expectEqual(items[1].tokens[0].content, "Two")
+        expectEqual(items[1].tokens[1].content, "-three")
 
-        try #require(items[2].tokens.count == 1)
-        #expect(items[2].tokens[0].content == "Four")
+        try requireEqual(items[2].tokens.count, 1)
+        expectEqual(items[2].tokens[0].content, "Four")
 
-        try #require(items[3].tokens.count == 2)
-        #expect(items[3].tokens[0].content == "Five")
-        #expect(items[3].tokens[1].content == "-six")
+        try requireEqual(items[3].tokens.count, 2)
+        expectEqual(items[3].tokens[0].content, "Five")
+        expectEqual(items[3].tokens[1].content, "-six")
 
-        try #require(items[4].tokens.count == 2)
-        #expect(items[4].tokens[0].content == "Seven")
-        #expect(items[4].tokens[1].content == "Eight")
+        try requireEqual(items[4].tokens.count, 2)
+        expectEqual(items[4].tokens[0].content, "Seven")
+        expectEqual(items[4].tokens[1].content, "Eight")
 
-        try #require(items[5].tokens.count == 1)
-        #expect(items[5].tokens[0].content == "Nine")
+        try requireEqual(items[5].tokens.count, 1)
+        expectEqual(items[5].tokens[0].content, "Nine")
 
-        try #require(items[6].tokens.count == 1)
-        #expect(items[6].tokens[0].content == "Ten")
+        try requireEqual(items[6].tokens.count, 1)
+        expectEqual(items[6].tokens[0].content, "Ten")
     }
 
     @Test
@@ -537,16 +663,16 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 3)
+        try requireEqual(items.count, 3)
 
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello")
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello")
 
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "world")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "world")
 
-        try #require(items[2].tokens.count == 1)
-        #expect(items[2].tokens[0].content == "WebKit")
+        try requireEqual(items[2].tokens.count, 1)
+        expectEqual(items[2].tokens[0].content, "WebKit")
     }
 
     @Test
@@ -571,12 +697,12 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 2)
-        #expect(items[0].tokens[0].content == "Hello")
-        #expect(items[0].tokens[1].content == " world")
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "More text")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 2)
+        expectEqual(items[0].tokens[0].content, "Hello")
+        expectEqual(items[0].tokens[1].content, " world")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "More text")
     }
 
     @Test
@@ -598,7 +724,7 @@ struct TextManipulationTests {
 
         await webView._startTextManipulations(with: nil)
 
-        #expect(delegate.items.count == 1)
+        expectEqual(delegate.items.count, 1)
 
         try await webView.callJavaScript {
             """
@@ -618,12 +744,12 @@ struct TextManipulationTests {
         }
         let items = await delegate.waitForItems(count: 3)
 
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello, world")
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "before")
-        try #require(items[2].tokens.count == 1)
-        #expect(items[2].tokens[0].content == "after")
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello, world")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "before")
+        try requireEqual(items[2].tokens.count, 1)
+        expectEqual(items[2].tokens[0].content, "after")
     }
 
     @Test
@@ -646,13 +772,13 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
         let items = delegate.items
 
-        let onscreen = try #require(proximity(forItemContaining: "Onscreen text", in: items))
-        #expect(onscreen.relation == .intersecting)
-        #expect(onscreen.viewportSizedDistance == 0)
+        let onscreen = try requireNonNil(proximity(forItemContaining: "Onscreen text", in: items))
+        expectEqual(onscreen.relation, .intersecting)
+        expectEqual(onscreen.viewportSizedDistance, 0)
         #expect(onscreen.viewportCoverage > 0)
 
-        let offscreen = try #require(proximity(forItemContaining: "Offscreen text", in: items))
-        #expect(offscreen.relation == .offscreen)
+        let offscreen = try requireNonNil(proximity(forItemContaining: "Offscreen text", in: items))
+        expectEqual(offscreen.relation, .offscreen)
         #expect(offscreen.viewportSizedDistance > 0)
     }
 
@@ -675,14 +801,14 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
         let items = delegate.items
 
-        let onscreen = try #require(proximity(forItemContaining: "Onscreen text", in: items))
-        #expect(onscreen.relation == .intersecting)
+        let onscreen = try requireNonNil(proximity(forItemContaining: "Onscreen text", in: items))
+        expectEqual(onscreen.relation, .intersecting)
         #expect(onscreen.viewportCoverage > 0)
 
-        let toTheRight = try #require(proximity(forItemContaining: "Right of viewport", in: items))
-        #expect(toTheRight.relation == .offscreen)
+        let toTheRight = try requireNonNil(proximity(forItemContaining: "Right of viewport", in: items))
+        expectEqual(toTheRight.relation, .offscreen)
         #expect(abs(toTheRight.viewportSizedDistance - 1.5) <= 0.1)
-        #expect(toTheRight.viewportCoverage == 0)
+        expectEqual(toTheRight.viewportCoverage, 0)
     }
 
     @Test
@@ -705,9 +831,9 @@ struct TextManipulationTests {
             await webView._startTextManipulations(with: nil)
             let items = delegate.items
 
-            let largerThanViewport = try #require(proximity(forItemContaining: "WWWW", in: items))
-            #expect(largerThanViewport.relation == .intersecting)
-            #expect(largerThanViewport.viewportCoverage == 1)
+            let largerThanViewport = try requireNonNil(proximity(forItemContaining: "WWWW", in: items))
+            expectEqual(largerThanViewport.relation, .intersecting)
+            expectEqual(largerThanViewport.viewportCoverage, 1)
         }
 
         do {
@@ -730,13 +856,13 @@ struct TextManipulationTests {
             await webView._startTextManipulations(with: nil)
             let items = delegate.items
 
-            let fullyVisible = try #require(proximity(forItemContaining: "AAAA", in: items))
-            #expect(fullyVisible.relation == .intersecting)
+            let fullyVisible = try requireNonNil(proximity(forItemContaining: "AAAA", in: items))
+            expectEqual(fullyVisible.relation, .intersecting)
             #expect(fullyVisible.viewportCoverage > 0)
             #expect(fullyVisible.viewportCoverage < 1)
 
-            let straddlingBottomEdge = try #require(proximity(forItemContaining: "BBBB", in: items))
-            #expect(straddlingBottomEdge.relation == .intersecting)
+            let straddlingBottomEdge = try requireNonNil(proximity(forItemContaining: "BBBB", in: items))
+            expectEqual(straddlingBottomEdge.relation, .intersecting)
             #expect(straddlingBottomEdge.viewportCoverage > 0)
             #expect(straddlingBottomEdge.viewportCoverage < fullyVisible.viewportCoverage / 2)
         }
@@ -752,19 +878,19 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
         let items = delegate.items
 
-        let first = try #require(proximity(forItemContaining: "First paragraph", in: items))
-        #expect(first.relation == .intersecting)
-        #expect(first.viewportSizedDistance == 0)
+        let first = try requireNonNil(proximity(forItemContaining: "First paragraph", in: items))
+        expectEqual(first.relation, .intersecting)
+        expectEqual(first.viewportSizedDistance, 0)
         #expect(first.viewportCoverage > 0)
 
-        let second = try #require(proximity(forItemContaining: "Second paragraph", in: items))
-        #expect(second.relation == .clippedByAncestor)
-        #expect(second.viewportCoverage == 0)
+        let second = try requireNonNil(proximity(forItemContaining: "Second paragraph", in: items))
+        expectEqual(second.relation, .clippedByAncestor)
+        expectEqual(second.viewportCoverage, 0)
 
-        let offscreen = try #require(proximity(forItemContaining: "Offscreen text", in: items))
-        #expect(offscreen.relation == .offscreen)
+        let offscreen = try requireNonNil(proximity(forItemContaining: "Offscreen text", in: items))
+        expectEqual(offscreen.relation, .offscreen)
         #expect(offscreen.viewportSizedDistance > 0)
-        #expect(offscreen.viewportCoverage == 0)
+        expectEqual(offscreen.viewportCoverage, 0)
     }
 
     @Test
@@ -778,13 +904,13 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
         let items = delegate.items
 
-        let first = try #require(proximity(forItemContaining: "First paragraph", in: items))
-        #expect(first.relation == .clippedByAncestor)
-        #expect(first.viewportCoverage == 0)
+        let first = try requireNonNil(proximity(forItemContaining: "First paragraph", in: items))
+        expectEqual(first.relation, .clippedByAncestor)
+        expectEqual(first.viewportCoverage, 0)
 
-        let second = try #require(proximity(forItemContaining: "Second paragraph", in: items))
-        #expect(second.relation == .intersecting)
-        #expect(second.viewportSizedDistance == 0)
+        let second = try requireNonNil(proximity(forItemContaining: "Second paragraph", in: items))
+        expectEqual(second.relation, .intersecting)
+        expectEqual(second.viewportSizedDistance, 0)
         #expect(second.viewportCoverage > 0)
     }
 
@@ -807,14 +933,113 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
         let items = delegate.items
 
-        let clipped = try #require(proximity(forItemContaining: "Clipped text", in: items))
-        #expect(clipped.relation == .clippedByAncestor)
-        #expect(clipped.viewportCoverage == 0)
-        #expect(clipped.viewportSizedDistance == 0)
+        let clipped = try requireNonNil(proximity(forItemContaining: "Clipped text", in: items))
+        expectEqual(clipped.relation, .clippedByAncestor)
+        expectEqual(clipped.viewportCoverage, 0)
+        expectEqual(clipped.viewportSizedDistance, 0)
 
-        let onscreen = try #require(proximity(forItemContaining: "Onscreen text", in: items))
-        #expect(onscreen.relation == .intersecting)
+        let onscreen = try requireNonNil(proximity(forItemContaining: "Onscreen text", in: items))
+        expectEqual(onscreen.relation, .intersecting)
         #expect(onscreen.viewportCoverage > 0)
+    }
+
+    @Test
+    func webViewBoundingRect() async throws {
+        let webView = TestWKWebView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        webView._textManipulationDelegate = delegate
+
+        try await webView.load(html: boundingRectHTML)
+
+        await webView._startTextManipulations(with: nil)
+        let items = delegate.items
+
+        let first = try requireNonNil(item(containing: "First text", in: items))
+        let second = try requireNonNil(item(containing: "Second text", in: items))
+        #expect(first !== second)
+
+        let firstRect = first.webViewBoundingRect
+        #expect(abs(firstRect.origin.x - 50) <= 1)
+        #expect(abs(firstRect.origin.y - 100) <= 2)
+        #expect(firstRect.size.width > 0)
+        #expect(firstRect.size.height > 0)
+
+        let secondRect = second.webViewBoundingRect
+        #expect(abs(secondRect.origin.x - 50) <= 1)
+        #expect(abs(secondRect.origin.y - (firstRect.maxY + 1100)) <= 2)
+    }
+
+    @Test
+    func webViewBoundingRectAfterScrolling() async throws {
+        let webView = TestWKWebView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        webView._textManipulationDelegate = delegate
+
+        try await webView.load(html: boundingRectHTML)
+
+        await webView._startTextManipulations(with: nil)
+        let items = delegate.items
+
+        let first = try requireNonNil(item(containing: "First text", in: items))
+        let second = try requireNonNil(item(containing: "Second text", in: items))
+        let firstBeforeScrolling = first.webViewBoundingRect
+        let secondBeforeScrolling = second.webViewBoundingRect
+
+        try await scrollMainFrame(of: webView, to: 1000)
+        expectRect(first.webViewBoundingRect, isOffsetFrom: firstBeforeScrolling, dy: -1000)
+        expectRect(second.webViewBoundingRect, isOffsetFrom: secondBeforeScrolling, dy: -1000)
+
+        try await scrollMainFrame(of: webView, to: 0)
+        expectRect(first.webViewBoundingRect, isOffsetFrom: firstBeforeScrolling, dy: 0)
+        expectRect(second.webViewBoundingRect, isOffsetFrom: secondBeforeScrolling, dy: 0)
+    }
+
+    #if WTF_PLATFORM_MAC
+    @Test
+    func webViewBoundingRectWithObscuredContentInsets() async throws {
+        let referenceDelegate = TextManipulationDelegate()
+        let referenceWebView = TestWKWebView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        referenceWebView._textManipulationDelegate = referenceDelegate
+
+        try await referenceWebView.load(html: boundingRectHTML)
+
+        await referenceWebView._startTextManipulations(with: nil)
+        let referenceItems = referenceDelegate.items
+
+        let firstReference = try requireNonNil(item(containing: "First text", in: referenceItems)).webViewBoundingRect
+        let secondReference = try requireNonNil(item(containing: "Second text", in: referenceItems)).webViewBoundingRect
+
+        let webView = TestWKWebView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        webView._textManipulationDelegate = delegate
+        webView.obscuredContentInsets = NSEdgeInsets(top: 75, left: 0, bottom: 0, right: 0)
+        await webView.nextPresentationUpdate()
+
+        try await webView.load(html: boundingRectHTML)
+
+        await webView._startTextManipulations(with: nil)
+        let items = delegate.items
+
+        let first = try requireNonNil(item(containing: "First text", in: items))
+        let second = try requireNonNil(item(containing: "Second text", in: items))
+        expectRect(first.webViewBoundingRect, isOffsetFrom: firstReference, dy: 75)
+        expectRect(second.webViewBoundingRect, isOffsetFrom: secondReference, dy: 75)
+
+        try await scrollMainFrame(of: webView, to: 1000)
+        expectRect(first.webViewBoundingRect, isOffsetFrom: firstReference, dy: 75 - 1000)
+        expectRect(second.webViewBoundingRect, isOffsetFrom: secondReference, dy: 75 - 1000)
+    }
+    #endif
+
+    @Test
+    func webViewBoundingRectWithoutRect() async throws {
+        let webView = TestWKWebView(frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        webView._textManipulationDelegate = delegate
+
+        try await webView.load(html: "<!DOCTYPE html><title>Title text</title><body>Body text</body>")
+
+        await webView._startTextManipulations(with: nil)
+        let items = delegate.items
+
+        let title = try requireNonNil(item(containing: "Title text", in: items))
+        expectTrue(title.webViewBoundingRect.isNull)
     }
 
     @Test
@@ -845,21 +1070,21 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 7)
-        try #require(items[0].tokens.count == 1)
-        try #require(items[1].tokens.count == 1)
-        try #require(items[2].tokens.count == 1)
-        try #require(items[3].tokens.count == 1)
-        try #require(items[4].tokens.count == 1)
-        try #require(items[5].tokens.count == 1)
-        try #require(items[6].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "One")
-        #expect(items[1].tokens[0].content == "Two")
-        #expect(items[2].tokens[0].content == "Three")
-        #expect(items[3].tokens[0].content == "Four")
-        #expect(items[4].tokens[0].content == "Five")
-        #expect(items[5].tokens[0].content == "Six")
-        #expect(items[6].tokens[0].content == "End")
+        try requireEqual(items.count, 7)
+        try requireEqual(items[0].tokens.count, 1)
+        try requireEqual(items[1].tokens.count, 1)
+        try requireEqual(items[2].tokens.count, 1)
+        try requireEqual(items[3].tokens.count, 1)
+        try requireEqual(items[4].tokens.count, 1)
+        try requireEqual(items[5].tokens.count, 1)
+        try requireEqual(items[6].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "One")
+        expectEqual(items[1].tokens[0].content, "Two")
+        expectEqual(items[2].tokens[0].content, "Three")
+        expectEqual(items[3].tokens[0].content, "Four")
+        expectEqual(items[4].tokens[0].content, "Five")
+        expectEqual(items[5].tokens[0].content, "Six")
+        expectEqual(items[6].tokens[0].content, "End")
     }
 
     @Test
@@ -892,15 +1117,15 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 4)
-        try #require(items[0].tokens.count == 1)
-        try #require(items[1].tokens.count == 1)
-        try #require(items[2].tokens.count == 1)
-        try #require(items[3].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "Foo")
-        #expect(items[1].tokens[0].content == "Bar")
-        #expect(items[2].tokens[0].content == "Baz")
-        #expect(items[3].tokens[0].content == "Garply")
+        try requireEqual(items.count, 4)
+        try requireEqual(items[0].tokens.count, 1)
+        try requireEqual(items[1].tokens.count, 1)
+        try requireEqual(items[2].tokens.count, 1)
+        try requireEqual(items[3].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "Foo")
+        expectEqual(items[1].tokens[0].content, "Bar")
+        expectEqual(items[2].tokens[0].content, "Baz")
+        expectEqual(items[3].tokens[0].content, "Garply")
     }
 
     @Test
@@ -924,15 +1149,15 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 4)
-        try #require(items[0].tokens.count == 1)
-        try #require(items[1].tokens.count == 1)
-        try #require(items[2].tokens.count == 1)
-        try #require(items[3].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "One")
-        #expect(items[1].tokens[0].content == "Two")
-        #expect(items[2].tokens[0].content == "Three")
-        #expect(items[3].tokens[0].content == "Four")
+        try requireEqual(items.count, 4)
+        try requireEqual(items[0].tokens.count, 1)
+        try requireEqual(items[1].tokens.count, 1)
+        try requireEqual(items[2].tokens.count, 1)
+        try requireEqual(items[3].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "One")
+        expectEqual(items[1].tokens[0].content, "Two")
+        expectEqual(items[2].tokens[0].content, "Three")
+        expectEqual(items[3].tokens[0].content, "Four")
     }
 
     @Test
@@ -956,77 +1181,82 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 5)
-        try #require(items[0].tokens.count == 1)
-        try #require(items[1].tokens.count == 1)
-        try #require(items[2].tokens.count == 1)
-        try #require(items[3].tokens.count == 1)
-        try #require(items[4].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "This is a test")
-        #expect(items[1].tokens[0].content == "First")
-        #expect(items[2].tokens[0].content == "Second")
-        #expect(items[3].tokens[0].content == "Third")
-        #expect(items[4].tokens[0].content == "Fourth")
+        try requireEqual(items.count, 5)
+        try requireEqual(items[0].tokens.count, 1)
+        try requireEqual(items[1].tokens.count, 1)
+        try requireEqual(items[2].tokens.count, 1)
+        try requireEqual(items[3].tokens.count, 1)
+        try requireEqual(items[4].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "This is a test")
+        expectEqual(items[1].tokens[0].content, "First")
+        expectEqual(items[2].tokens[0].content, "Second")
+        expectEqual(items[3].tokens[0].content, "Third")
+        expectEqual(items[4].tokens[0].content, "Fourth")
         do {
-            let userInfo = try #require(items[0].tokens[0].userInfo)
+            let userInfo = try requireNonNil(items[0].tokens[0].userInfo)
             #if WTF_PLATFORM_MAC
-            #expect((userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent == "Resources")
+            expectEqual((userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent, "Resources")
             #else
-            #expect(
-                (userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent == "TestWebKitAPIResources.bundle"
+            expectEqual(
+                (userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent,
+                "TestWebKitAPIResources.bundle"
             )
             #endif
-            #expect(userInfo[_WKTextManipulationTokenUserInfoTagNameKey] as? String == "TITLE")
-            #expect(userInfo[_WKTextManipulationTokenUserInfoVisibilityKey] as? Bool == false)
+            expectEqual(userInfo[_WKTextManipulationTokenUserInfoTagNameKey] as? String, "TITLE")
+            expectEqual(userInfo[_WKTextManipulationTokenUserInfoVisibilityKey] as? Bool, false)
         }
         do {
-            let userInfo = try #require(items[1].tokens[0].userInfo)
+            let userInfo = try requireNonNil(items[1].tokens[0].userInfo)
             #if WTF_PLATFORM_MAC
-            #expect((userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent == "Resources")
+            expectEqual((userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent, "Resources")
             #else
-            #expect(
-                (userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent == "TestWebKitAPIResources.bundle"
+            expectEqual(
+                (userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent,
+                "TestWebKitAPIResources.bundle"
             )
             #endif
-            #expect(userInfo[_WKTextManipulationTokenUserInfoTagNameKey] as? String == "P")
-            #expect(userInfo[_WKTextManipulationTokenUserInfoVisibilityKey] as? Bool == false)
+            expectEqual(userInfo[_WKTextManipulationTokenUserInfoTagNameKey] as? String, "P")
+            expectEqual(userInfo[_WKTextManipulationTokenUserInfoVisibilityKey] as? Bool, false)
         }
         do {
-            let userInfo = try #require(items[2].tokens[0].userInfo)
+            let userInfo = try requireNonNil(items[2].tokens[0].userInfo)
             #if WTF_PLATFORM_MAC
-            #expect((userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent == "Resources")
+            expectEqual((userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent, "Resources")
             #else
-            #expect(
-                (userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent == "TestWebKitAPIResources.bundle"
+            expectEqual(
+                (userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent,
+                "TestWebKitAPIResources.bundle"
             )
             #endif
-            #expect(userInfo[_WKTextManipulationTokenUserInfoTagNameKey] as? String == "DIV")
-            #expect(userInfo[_WKTextManipulationTokenUserInfoRoleAttributeKey] as? String == "button")
-            #expect(userInfo[_WKTextManipulationTokenUserInfoVisibilityKey] as? Bool == false)
+            expectEqual(userInfo[_WKTextManipulationTokenUserInfoTagNameKey] as? String, "DIV")
+            expectEqual(userInfo[_WKTextManipulationTokenUserInfoRoleAttributeKey] as? String, "button")
+            expectEqual(userInfo[_WKTextManipulationTokenUserInfoVisibilityKey] as? Bool, false)
         }
         do {
-            let userInfo = try #require(items[3].tokens[0].userInfo)
+            let userInfo = try requireNonNil(items[3].tokens[0].userInfo)
             #if WTF_PLATFORM_MAC
-            #expect((userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent == "Resources")
+            expectEqual((userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent, "Resources")
             #else
-            #expect(
-                (userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent == "TestWebKitAPIResources.bundle"
+            expectEqual(
+                (userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent,
+                "TestWebKitAPIResources.bundle"
             )
             #endif
-            #expect(userInfo[_WKTextManipulationTokenUserInfoTagNameKey] as? String == "SPAN")
-            #expect(userInfo[_WKTextManipulationTokenUserInfoVisibilityKey] as? Bool == false)
+            expectEqual(userInfo[_WKTextManipulationTokenUserInfoTagNameKey] as? String, "SPAN")
+            expectEqual(userInfo[_WKTextManipulationTokenUserInfoVisibilityKey] as? Bool, false)
         }
         do {
-            let userInfo = try #require(items[4].tokens[0].userInfo)
+            let userInfo = try requireNonNil(items[4].tokens[0].userInfo)
             #if WTF_PLATFORM_MAC
-            #expect((userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent == "Resources")
+            expectEqual((userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent, "Resources")
             #else
-            #expect(
-                (userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent == "TestWebKitAPIResources.bundle"
+            expectEqual(
+                (userInfo[_WKTextManipulationTokenUserInfoDocumentURLKey] as? URL)?.lastPathComponent,
+                "TestWebKitAPIResources.bundle"
             )
             #endif
-            #expect(userInfo[_WKTextManipulationTokenUserInfoTagNameKey] as? String == "DIV")
-            #expect(userInfo[_WKTextManipulationTokenUserInfoVisibilityKey] as? Bool == true)
+            expectEqual(userInfo[_WKTextManipulationTokenUserInfoTagNameKey] as? String, "DIV")
+            expectEqual(userInfo[_WKTextManipulationTokenUserInfoVisibilityKey] as? Bool, true)
         }
     }
 
@@ -1048,11 +1278,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 1)
-        try #require(items[1].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "One")
-        #expect(items[1].tokens[0].content == "Two")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 1)
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "One")
+        expectEqual(items[1].tokens[0].content, "Two")
     }
 
     @Test
@@ -1081,11 +1311,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 1)
-        try #require(items[1].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "One")
-        #expect(items[1].tokens[0].content == "Two")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 1)
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "One")
+        expectEqual(items[1].tokens[0].content, "Two")
     }
 
     @Test
@@ -1094,7 +1324,7 @@ struct TextManipulationTests {
 
         await webView._startTextManipulations(with: nil)
 
-        #expect(delegate.items.isEmpty)
+        expectTrue(delegate.items.isEmpty)
 
         try await webView.callJavaScript {
             """
@@ -1106,11 +1336,11 @@ struct TextManipulationTests {
 
         let items = await delegate.waitForItems(count: 1)
 
-        try #require(items.count == 1)
+        try requireEqual(items.count, 1)
 
         let tokens = items[0].tokens
-        #expect(tokens.count == 1)
-        #expect(tokens.first?.content == "bar")
+        expectEqual(tokens.count, 1)
+        expectEqual(tokens.first?.content, "bar")
     }
 
     @Test
@@ -1129,18 +1359,18 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 4)
-        #expect(items[0].tokens[0].content == "\n ")
-        #expect(items[0].tokens[0].isExcluded)
-        #expect(items[0].tokens[1].content == "one")
-        #expect(!items[0].tokens[1].isExcluded)
-        #expect(items[0].tokens[2].content == "\n  ")
-        #expect(items[0].tokens[2].isExcluded)
-        #expect(items[0].tokens[3].content == "two")
-        #expect(!items[0].tokens[3].isExcluded)
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "three four")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 4)
+        expectEqual(items[0].tokens[0].content, "\n ")
+        expectTrue(items[0].tokens[0].isExcluded)
+        expectEqual(items[0].tokens[1].content, "one")
+        expectFalse(items[0].tokens[1].isExcluded)
+        expectEqual(items[0].tokens[2].content, "\n  ")
+        expectTrue(items[0].tokens[2].isExcluded)
+        expectEqual(items[0].tokens[3].content, "two")
+        expectFalse(items[0].tokens[3].isExcluded)
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "three four")
     }
 
     @Test
@@ -1151,20 +1381,20 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         let items = delegate.items
-        try #require(items.count == 1)
+        try requireEqual(items.count, 1)
 
-        let item = try #require(items.first)
-        try #require(item.tokens.count == 5)
-        #expect(item.tokens[0].content == "foo")
-        #expect(!item.tokens[0].isExcluded)
-        #expect(item.tokens[1].content == "\u{E607}")
-        #expect(item.tokens[1].isExcluded)
-        #expect(item.tokens[2].content == "bar")
-        #expect(!item.tokens[2].isExcluded)
-        #expect(item.tokens[3].content == "\u{E607}")
-        #expect(item.tokens[3].isExcluded)
-        #expect(item.tokens[4].content == "baz")
-        #expect(!item.tokens[4].isExcluded)
+        let item = try requireNonNil(items.first)
+        try requireEqual(item.tokens.count, 5)
+        expectEqual(item.tokens[0].content, "foo")
+        expectFalse(item.tokens[0].isExcluded)
+        expectEqual(item.tokens[1].content, "\u{E607}")
+        expectTrue(item.tokens[1].isExcluded)
+        expectEqual(item.tokens[2].content, "bar")
+        expectFalse(item.tokens[2].isExcluded)
+        expectEqual(item.tokens[3].content, "\u{E607}")
+        expectTrue(item.tokens[3].isExcluded)
+        expectEqual(item.tokens[4].content, "baz")
+        expectFalse(item.tokens[4].isExcluded)
     }
 
     @Test
@@ -1183,19 +1413,19 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 5)
-        #expect(items[0].tokens[0].content == "one")
-        #expect(items[0].tokens[1].content == "two")
-        #expect(items[0].tokens[2].content == " \n ")
-        #expect(items[0].tokens[3].content == "three")
-        #expect(items[0].tokens[4].content == "four")
-        try #require(items[1].tokens.count == 5)
-        #expect(items[1].tokens[0].content == "\n")
-        #expect(items[1].tokens[1].content == "five")
-        #expect(items[1].tokens[2].content == " six")
-        #expect(items[1].tokens[3].content == " ")
-        #expect(items[1].tokens[4].content == "seven")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 5)
+        expectEqual(items[0].tokens[0].content, "one")
+        expectEqual(items[0].tokens[1].content, "two")
+        expectEqual(items[0].tokens[2].content, " \n ")
+        expectEqual(items[0].tokens[3].content, "three")
+        expectEqual(items[0].tokens[4].content, "four")
+        try requireEqual(items[1].tokens.count, 5)
+        expectEqual(items[1].tokens[0].content, "\n")
+        expectEqual(items[1].tokens[1].content, "five")
+        expectEqual(items[1].tokens[2].content, " six")
+        expectEqual(items[1].tokens[3].content, " ")
+        expectEqual(items[1].tokens[4].content, "seven")
     }
 
     @Test
@@ -1228,17 +1458,17 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        let item = try #require(items.first)
-        try #require(item.tokens.count == 4)
-        #expect(item.tokens[0].content == "one")
-        #expect(!item.tokens[0].isExcluded)
-        #expect(item.tokens[1].content == "two")
-        #expect(item.tokens[1].isExcluded)
-        #expect(item.tokens[2].content == "three")
-        #expect(!item.tokens[2].isExcluded)
-        #expect(item.tokens[3].content == "four")
-        #expect(!item.tokens[3].isExcluded)
+        try requireEqual(items.count, 1)
+        let item = try requireNonNil(items.first)
+        try requireEqual(item.tokens.count, 4)
+        expectEqual(item.tokens[0].content, "one")
+        expectFalse(item.tokens[0].isExcluded)
+        expectEqual(item.tokens[1].content, "two")
+        expectTrue(item.tokens[1].isExcluded)
+        expectEqual(item.tokens[2].content, "three")
+        expectFalse(item.tokens[2].isExcluded)
+        expectEqual(item.tokens[3].content, "four")
+        expectFalse(item.tokens[3].isExcluded)
     }
 
     @Test
@@ -1248,9 +1478,9 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello world")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello world")
 
         try await webView.callJavaScript {
             """
@@ -1277,9 +1507,9 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         var items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello world")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello world")
 
         try await webView.callJavaScript {
             """
@@ -1299,9 +1529,9 @@ struct TextManipulationTests {
 
         items = await delegate.waitForItems(count: 2)
 
-        try #require(items.count == 2)
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "testing")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "testing")
     }
 
     @Test
@@ -1322,11 +1552,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "Hello world")
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "This is a heading")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "Hello world")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "This is a heading")
     }
 
     @Test
@@ -1336,11 +1566,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "Hello")
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "World")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "Hello")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "World")
     }
 
     @Test
@@ -1374,17 +1604,17 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 5)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "Hello")
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "World")
-        try #require(items[2].tokens.count == 1)
-        #expect(items[2].tokens[0].content == "Foo")
-        try #require(items[3].tokens.count == 1)
-        #expect(items[3].tokens[0].content == "Bar")
-        try #require(items[4].tokens.count == 1)
-        #expect(items[4].tokens[0].content == "Baz")
+        try requireEqual(items.count, 5)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "Hello")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "World")
+        try requireEqual(items[2].tokens.count, 1)
+        expectEqual(items[2].tokens[0].content, "Foo")
+        try requireEqual(items[3].tokens.count, 1)
+        expectEqual(items[3].tokens[0].content, "Bar")
+        try requireEqual(items[4].tokens.count, 1)
+        expectEqual(items[4].tokens[0].content, "Baz")
     }
 
     @Test
@@ -1396,13 +1626,13 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        #expect(!items[0].isSubframe)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello")
-        #expect(!items[1].isSubframe)
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "world")
+        try requireEqual(items.count, 2)
+        expectFalse(items[0].isSubframe)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello")
+        expectFalse(items[1].isSubframe)
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "world")
     }
 
     @Test
@@ -1415,19 +1645,19 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         let items = delegate.items
-        try #require(items.count == 3)
-        #expect(!items[0].isSubframe)
-        #expect(!items[0].isCrossSiteSubframe)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello")
-        #expect(!items[1].isSubframe)
-        #expect(!items[1].isCrossSiteSubframe)
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "world")
-        #expect(items[2].isSubframe)
-        #expect(items[2].isCrossSiteSubframe)
-        try #require(items[2].tokens.count == 1)
-        #expect(items[2].tokens[0].content == "WebKit")
+        try requireEqual(items.count, 3)
+        expectFalse(items[0].isSubframe)
+        expectFalse(items[0].isCrossSiteSubframe)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello")
+        expectFalse(items[1].isSubframe)
+        expectFalse(items[1].isCrossSiteSubframe)
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "world")
+        expectTrue(items[2].isSubframe)
+        expectTrue(items[2].isCrossSiteSubframe)
+        try requireEqual(items[2].tokens.count, 1)
+        expectEqual(items[2].tokens[0].content, "WebKit")
     }
 
     @Test
@@ -1440,15 +1670,15 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         var items = delegate.items
-        try #require(items.count == 2)
-        #expect(!items[0].isSubframe)
-        #expect(!items[0].isCrossSiteSubframe)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello")
-        #expect(!items[1].isSubframe)
-        #expect(!items[1].isCrossSiteSubframe)
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "world")
+        try requireEqual(items.count, 2)
+        expectFalse(items[0].isSubframe)
+        expectFalse(items[0].isCrossSiteSubframe)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello")
+        expectFalse(items[1].isSubframe)
+        expectFalse(items[1].isCrossSiteSubframe)
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "world")
 
         try await webView.callJavaScript {
             """
@@ -1459,19 +1689,19 @@ struct TextManipulationTests {
 
         items = await delegate.waitForItems(count: 3)
 
-        try #require(items.count == 3)
-        #expect(!items[0].isSubframe)
-        #expect(!items[0].isCrossSiteSubframe)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello")
-        #expect(!items[1].isSubframe)
-        #expect(!items[1].isCrossSiteSubframe)
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "world")
-        #expect(items[2].isSubframe)
-        #expect(!items[2].isCrossSiteSubframe)
-        try #require(items[2].tokens.count == 1)
-        #expect(items[2].tokens[0].content == "WebKit")
+        try requireEqual(items.count, 3)
+        expectFalse(items[0].isSubframe)
+        expectFalse(items[0].isCrossSiteSubframe)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello")
+        expectFalse(items[1].isSubframe)
+        expectFalse(items[1].isCrossSiteSubframe)
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "world")
+        expectTrue(items[2].isSubframe)
+        expectFalse(items[2].isCrossSiteSubframe)
+        try requireEqual(items[2].tokens.count, 1)
+        expectEqual(items[2].tokens[0].content, "WebKit")
     }
 
     @Test
@@ -1485,23 +1715,23 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         var items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 2)
-        #expect(items[0].tokens[0].content == "hey, ")
-        #expect(items[0].tokens[1].content == "earth")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 2)
+        expectEqual(items[0].tokens[0].content, "hey, ")
+        expectEqual(items[0].tokens[1].content, "earth")
 
         try await webView.load(testPageNamed: "copy-html")
 
         try await Task.sleep(for: .milliseconds(50))
 
-        #expect(delegate.items.count == 1)
+        expectEqual(delegate.items.count, 1)
 
         await webView._startTextManipulations(with: configuration)
 
         items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "some text")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "some text")
     }
 
     @Test
@@ -1511,9 +1741,9 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "helllo, wooorld")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "helllo, wooorld")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -1521,8 +1751,8 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[0].tokens[0].identifier, content: "hello, world")]
             )
         ])
-        #expect(errors == nil)
-        #expect(try await bodyInnerHTML() == "<p>hello, world</p>")
+        expectNil(errors)
+        expectEqual(try await bodyInnerHTML(), "<p>hello, world</p>")
     }
 
     @Test
@@ -1540,9 +1770,9 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
+        try requireEqual(items.count, 2)
 
-        #expect(try await selectionDirectionProbe(elementID: "translated") == "backward")
+        expectEqual(try await selectionDirectionProbe(elementID: "translated"), "backward")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -1555,14 +1785,14 @@ struct TextManipulationTests {
                 ]
             )
         ])
-        #expect(errors == nil)
+        expectNil(errors)
 
         let translatedText = try await webView.callJavaScript(returning: String.self) {
             "return document.getElementById('translated').textContent"
         }
-        #expect(translatedText == "The quick brown fox jumps over the lazy dog")
-        #expect(try await selectionDirectionProbe(elementID: "control") == "forward")
-        #expect(try await selectionDirectionProbe(elementID: "translated") == "forward")
+        expectEqual(translatedText, "The quick brown fox jumps over the lazy dog")
+        expectEqual(try await selectionDirectionProbe(elementID: "control"), "forward")
+        expectEqual(try await selectionDirectionProbe(elementID: "translated"), "forward")
     }
 
     @Test
@@ -1572,9 +1802,9 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "helllo, wooorld")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "helllo, wooorld")
 
         let success = await webView._completeTextManipulation(
             _WKTextManipulationItem(
@@ -1582,8 +1812,8 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[0].tokens[0].identifier, content: "hello, world")]
             )
         )
-        #expect(success)
-        #expect(try await bodyInnerHTML() == "<p>hello, world</p>")
+        expectTrue(success)
+        expectEqual(try await bodyInnerHTML(), "<p>hello, world</p>")
     }
 
     @Test
@@ -1593,12 +1823,12 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 4)
-        #expect(items[0].tokens[0].content == "hello, ")
-        #expect(items[0].tokens[1].content == "world")
-        #expect(items[0].tokens[2].content == ". ")
-        #expect(items[0].tokens[3].content == "WebKit")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 4)
+        expectEqual(items[0].tokens[0].content, "hello, ")
+        expectEqual(items[0].tokens[1].content, "world")
+        expectEqual(items[0].tokens[2].content, ". ")
+        expectEqual(items[0].tokens[3].content, "WebKit")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -1609,8 +1839,8 @@ struct TextManipulationTests {
                 ]
             )
         ])
-        #expect(errors == nil)
-        #expect(try await bodyInnerHTML() == "<p>hello, <i>WebKit</i></p>")
+        expectNil(errors)
+        expectEqual(try await bodyInnerHTML(), "<p>hello, <i>WebKit</i></p>")
     }
 
     @Test
@@ -1621,11 +1851,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello")
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "world")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "world")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -1637,9 +1867,9 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[1].tokens[0].identifier, content: "World")]
             ),
         ])
-        #expect(errors == nil)
+        expectNil(errors)
 
-        #expect(try await bodyInnerHTML() == "<p>Hello</p>World")
+        expectEqual(try await bodyInnerHTML(), "<p>Hello</p>World")
     }
 
     @Test
@@ -1651,15 +1881,15 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "helllo, wooorld")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "helllo, wooorld")
 
-        try #require(items[1].tokens.count == 4)
-        #expect(items[1].tokens[0].content == "hey, ")
-        #expect(items[1].tokens[1].content == "Kits")
-        #expect(items[1].tokens[2].content == " is ")
-        #expect(items[1].tokens[3].content == "cuuute")
+        try requireEqual(items[1].tokens.count, 4)
+        expectEqual(items[1].tokens[0].content, "hey, ")
+        expectEqual(items[1].tokens[1].content, "Kits")
+        expectEqual(items[1].tokens[2].content, " is ")
+        expectEqual(items[1].tokens[3].content, "cuuute")
 
         var errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -1672,8 +1902,8 @@ struct TextManipulationTests {
                 ]
             )
         ])
-        #expect(errors == nil)
-        #expect(try await bodyInnerHTML() == "<p>helllo, wooorld</p><p>Hello, <b>kittens</b> are <em>cute</em></p>")
+        expectNil(errors)
+        expectEqual(try await bodyInnerHTML(), "<p>helllo, wooorld</p><p>Hello, <b>kittens</b> are <em>cute</em></p>")
 
         errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -1681,8 +1911,8 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[0].tokens[0].identifier, content: "Hello, world.")]
             )
         ])
-        #expect(errors == nil)
-        #expect(try await bodyInnerHTML() == "<p>Hello, world.</p><p>Hello, <b>kittens</b> are <em>cute</em></p>")
+        expectNil(errors)
+        expectEqual(try await bodyInnerHTML(), "<p>Hello, world.</p><p>Hello, <b>kittens</b> are <em>cute</em></p>")
     }
 
     @Test
@@ -1694,15 +1924,15 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "helllo, wooorld")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "helllo, wooorld")
 
-        try #require(items[1].tokens.count == 4)
-        #expect(items[1].tokens[0].content == "hey, ")
-        #expect(items[1].tokens[1].content == "Kits")
-        #expect(items[1].tokens[2].content == " is ")
-        #expect(items[1].tokens[3].content == "cuuute")
+        try requireEqual(items[1].tokens.count, 4)
+        expectEqual(items[1].tokens[0].content, "hey, ")
+        expectEqual(items[1].tokens[1].content, "Kits")
+        expectEqual(items[1].tokens[2].content, " is ")
+        expectEqual(items[1].tokens[3].content, "cuuute")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -1719,8 +1949,8 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[0].tokens[0].identifier, content: "Hello, world.")]
             ),
         ])
-        #expect(errors == nil)
-        #expect(try await bodyInnerHTML() == "<p>Hello, world.</p><p>Hello, <b>kittens</b> are <em>cute</em></p>")
+        expectNil(errors)
+        expectEqual(try await bodyInnerHTML(), "<p>Hello, world.</p><p>Hello, <b>kittens</b> are <em>cute</em></p>")
     }
 
     @Test
@@ -1730,11 +1960,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "helllo, wooorld")
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "webKit")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "helllo, wooorld")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "webKit")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -1746,8 +1976,8 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[1].tokens[0].identifier, content: "WebKit")]
             ),
         ])
-        #expect(errors == nil)
-        #expect(try await bodyInnerHTML() == "<p>Hello, World<br>WebKit</p>")
+        expectNil(errors)
+        expectEqual(try await bodyInnerHTML(), "<p>Hello, World<br>WebKit</p>")
     }
 
     @Test
@@ -1757,12 +1987,12 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 2)
-        #expect(items[0].tokens[0].content == "earth, ")
-        #expect(items[0].tokens[1].content == "hey")
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "webKit")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 2)
+        expectEqual(items[0].tokens[0].content, "earth, ")
+        expectEqual(items[0].tokens[1].content, "hey")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "webKit")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -1777,8 +2007,8 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[1].tokens[0].identifier, content: "WebKit")]
             ),
         ])
-        #expect(errors == nil)
-        #expect(try await bodyInnerHTML() == "<p><b>Hello, </b>World<b><br></b>WebKit</p>")
+        expectNil(errors)
+        expectEqual(try await bodyInnerHTML(), "<p><b>Hello, </b>World<b><br></b>WebKit</p>")
     }
 
     @Test
@@ -1793,11 +2023,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "helllo")
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "worrld")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "helllo")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "worrld")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -1809,8 +2039,8 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[1].tokens[0].identifier, content: "world")]
             ),
         ])
-        #expect(errors == nil)
-        #expect(try await bodyInnerHTML() == "<div><a>hello</a> <a>world</a></div>")
+        expectNil(errors)
+        expectEqual(try await bodyInnerHTML(), "<div><a>hello</a> <a>world</a></div>")
     }
 
     @Test
@@ -1820,10 +2050,10 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 2)
-        #expect(items[0].tokens[0].content == "helllo, ")
-        #expect(items[0].tokens[1].content == "worrld")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 2)
+        expectEqual(items[0].tokens[0].content, "helllo, ")
+        expectEqual(items[0].tokens[1].content, "worrld")
 
         try await webView.callJavaScript { "document.querySelector('b').before(document.createElement('br'))" }
 
@@ -1834,13 +2064,13 @@ struct TextManipulationTests {
                 _WKTextManipulationToken(identifier: items[0].tokens[1].identifier, content: "World"),
             ]
         )
-        let errors = try #require(await webView._completeTextManipulation(for: [item]))
-        #expect(errors.count == 1)
-        let error = try #require(errors.first) as NSError
-        #expect(error.domain == _WKTextManipulationItemErrorDomain)
-        #expect(error.code == _WKTextManipulationItemErrorCode.contentChanged.rawValue)
-        #expect(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem === item)
-        #expect(try await bodyInnerHTML() == "<p>helllo, <br><b>worrld</b></p>")
+        let errors = try await requireNonNil(webView._completeTextManipulation(for: [item]))
+        expectEqual(errors.count, 1)
+        let error = try requireNonNil(errors.first) as NSError
+        expectEqual(error.domain, _WKTextManipulationItemErrorDomain)
+        expectEqual(error.code, _WKTextManipulationItemErrorCode.contentChanged.rawValue)
+        expectIdentical(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem, item)
+        expectEqual(try await bodyInnerHTML(), "<p>helllo, <br><b>worrld</b></p>")
     }
 
     @Test
@@ -1850,9 +2080,9 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
+        try requireEqual(items.count, 1)
         let tokens = items[0].tokens
-        try #require(tokens.count == 1)
+        try requireEqual(tokens.count, 1)
 
         await withCheckedContinuation { continuation in
             webView.perform(afterReceivingMessage: "DoneRemovingParagraph") {
@@ -1875,10 +2105,10 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: tokens[0].identifier, content: "Simple HTML file!")]
             )
         ])
-        #expect(errors == nil)
+        expectNil(errors)
 
         let bodyText = try await webView.callJavaScript(returning: String.self) { "return document.body.textContent" }
-        #expect(bodyText == "Simple HTML file!")
+        expectEqual(bodyText, "Simple HTML file!")
     }
 
     @Test
@@ -1888,15 +2118,15 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
+        try requireEqual(items.count, 1)
         let tokens = items[0].tokens
-        try #require(tokens.count == 3)
-        #expect(tokens[0].content == "hello, ")
-        #expect(!tokens[0].isExcluded)
-        #expect(tokens[1].content == "[]")
-        #expect(tokens[1].isExcluded)
-        #expect(tokens[2].content == " world")
-        #expect(!tokens[2].isExcluded)
+        try requireEqual(tokens.count, 3)
+        expectEqual(tokens[0].content, "hello, ")
+        expectFalse(tokens[0].isExcluded)
+        expectEqual(tokens[1].content, "[]")
+        expectTrue(tokens[1].isExcluded)
+        expectEqual(tokens[2].content, " world")
+        expectFalse(tokens[2].isExcluded)
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -1908,8 +2138,8 @@ struct TextManipulationTests {
                 ]
             )
         ])
-        #expect(errors == nil)
-        #expect(try await bodyInnerHTML() == "<div>this is <img src=\"apple.gif\"> a test</div>")
+        expectNil(errors)
+        expectEqual(try await bodyInnerHTML(), "<div>this is <img src=\"apple.gif\"> a test</div>")
     }
 
     @Test
@@ -1927,19 +2157,19 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
+        try requireEqual(items.count, 2)
         let tokens = items[0].tokens
-        try #require(tokens.count == 3)
-        #expect(tokens[0].content == "hello")
-        #expect(!tokens[0].isExcluded)
-        #expect(tokens[1].content == "[]")
-        #expect(tokens[1].isExcluded)
-        #expect(tokens[2].content == "webkit")
-        #expect(!tokens[2].isExcluded)
+        try requireEqual(tokens.count, 3)
+        expectEqual(tokens[0].content, "hello")
+        expectFalse(tokens[0].isExcluded)
+        expectEqual(tokens[1].content, "[]")
+        expectTrue(tokens[1].isExcluded)
+        expectEqual(tokens[2].content, "webkit")
+        expectFalse(tokens[2].isExcluded)
 
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "world")
-        #expect(!items[1].tokens[0].isExcluded)
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "world")
+        expectFalse(items[1].tokens[0].isExcluded)
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -1951,13 +2181,13 @@ struct TextManipulationTests {
                 ]
             )
         ])
-        #expect(errors == nil)
+        expectNil(errors)
         let expectedHTML = """
             <section><div style="display: inline-block;">hey<span style="display: inline-flex;">\
             <svg viewBox="0 0 20 20" width="20" height="20"><rect width="20" height="20" fill="#06f"></rect></svg>\
             </span>WebKit</div></section><p>world</p>
             """
-        #expect(try await bodyInnerHTML() == expectedHTML)
+        expectEqual(try await bodyInnerHTML(), expectedHTML)
     }
 
     @Test
@@ -1974,10 +2204,10 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "helllo world")
-        #expect(!items[0].tokens[0].isExcluded)
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "helllo world")
+        expectFalse(items[0].tokens[0].isExcluded)
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -1985,13 +2215,13 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[0].tokens[0].identifier, content: "hello, world")]
             )
         ])
-        #expect(errors == nil)
+        expectNil(errors)
         let expectedHTML = """
             <svg viewBox="0 0 10 10" width="100" height="100"><rect width="10" height="10" fill="red"></rect></svg>\
             <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAAAXNSR0IArs4c6QAAAAxJREFUCN\
             djYKhnAAABAgCAbV7tZwAAAABJRU5ErkJggg==" style="display: block; width: 100px;"><section>hello, world</section>
             """
-        #expect(try await bodyInnerHTML() == expectedHTML)
+        expectEqual(try await bodyInnerHTML(), expectedHTML)
     }
 
     @Test
@@ -2006,18 +2236,18 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 4)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hey")
+        try requireEqual(items.count, 4)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hey")
 
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "this is greet")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "this is greet")
 
-        try #require(items[2].tokens.count == 1)
-        #expect(items[2].tokens[0].content == "fruit")
+        try requireEqual(items[2].tokens.count, 1)
+        expectEqual(items[2].tokens[0].content, "fruit")
 
-        try #require(items[3].tokens.count == 1)
-        #expect(items[3].tokens[0].content == "hello")
+        try requireEqual(items[3].tokens.count, 1)
+        expectEqual(items[3].tokens[0].content, "hello")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -2033,13 +2263,13 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[2].tokens[0].identifier, content: "Apple")]
             ),
         ])
-        #expect(errors == nil)
+        expectNil(errors)
         let documentHTML = try await webView.callJavaScript(returning: String.self) { "return document.documentElement.innerHTML" }
         let expectedHTML = """
             <head><title>Hello</title></head><body><div><span aria-label="This is a greeting">hello</span>\
             <img src="apple.gif" alt="Apple"></div></body>
             """
-        #expect(documentHTML == expectedHTML)
+        expectEqual(documentHTML, expectedHTML)
     }
 
     @Test
@@ -2055,9 +2285,9 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello world")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello world")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -2065,12 +2295,12 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[0].tokens[0].identifier, content: "hello, world")]
             )
         ])
-        #expect(errors == nil)
+        expectNil(errors)
         let expectedHTML = """
             <div style="display: table"><div style="float: left;"><img src="apple.gif" style="display: flex;"></div>\
             <div><span style="display: block">hello, world</span></div></div>
             """
-        #expect(try await bodyInnerHTML() == expectedHTML)
+        expectEqual(try await bodyInnerHTML(), expectedHTML)
     }
 
     @Test
@@ -2092,19 +2322,19 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 6)
-        try #require(items[0].tokens.count == 1)
-        try #require(items[1].tokens.count == 1)
-        try #require(items[2].tokens.count == 1)
-        try #require(items[3].tokens.count == 1)
-        try #require(items[4].tokens.count == 1)
-        try #require(items[5].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "This is a test")
-        #expect(items[1].tokens[0].content == "Hello world")
-        #expect(items[2].tokens[0].content == "Should not be replaced")
-        #expect(items[3].tokens[0].content == "label")
-        #expect(items[4].tokens[0].content == "image")
-        #expect(items[5].tokens[0].content == "Text")
+        try requireEqual(items.count, 6)
+        try requireEqual(items[0].tokens.count, 1)
+        try requireEqual(items[1].tokens.count, 1)
+        try requireEqual(items[2].tokens.count, 1)
+        try requireEqual(items[3].tokens.count, 1)
+        try requireEqual(items[4].tokens.count, 1)
+        try requireEqual(items[5].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "This is a test")
+        expectEqual(items[1].tokens[0].content, "Hello world")
+        expectEqual(items[2].tokens[0].content, "Should not be replaced")
+        expectEqual(items[3].tokens[0].content, "label")
+        expectEqual(items[4].tokens[0].content, "image")
+        expectEqual(items[5].tokens[0].content, "Text")
 
         let replacementItems = [
             _WKTextManipulationItem(
@@ -2144,28 +2374,28 @@ struct TextManipulationTests {
             ),
         ]
 
-        let errors = try #require(await webView._completeTextManipulation(for: replacementItems))
-        #expect(errors.count == 1)
-        let error = try #require(errors.first) as NSError
-        #expect(error.domain == _WKTextManipulationItemErrorDomain)
-        #expect(error.code == _WKTextManipulationItemErrorCode.invalidToken.rawValue)
-        #expect(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem === replacementItems[2])
+        let errors = try await requireNonNil(webView._completeTextManipulation(for: replacementItems))
+        expectEqual(errors.count, 1)
+        let error = try requireNonNil(errors.first) as NSError
+        expectEqual(error.domain, _WKTextManipulationItemErrorDomain)
+        expectEqual(error.code, _WKTextManipulationItemErrorCode.invalidToken.rawValue)
+        expectIdentical(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem, replacementItems[2])
 
         let options = try await webView.callJavaScript(returning: [String].self) {
             "return Array.from(document.querySelector('select').options).map(option => option.textContent)"
         }
-        #expect(options.first == "Replacement option")
-        #expect(options.last == "Should not be replaced")
+        expectEqual(options.first, "Replacement option")
+        expectEqual(options.last, "Should not be replaced")
         let title = try await webView.callJavaScript(returning: String.self) { "return document.title" }
-        #expect(title == "Replacement title")
+        expectEqual(title, "Replacement title")
         let ariaLabel = try await webView.callJavaScript(returning: String.self) {
             "return document.querySelector('span').getAttribute('aria-label')"
         }
-        #expect(ariaLabel == "Replacement label")
+        expectEqual(ariaLabel, "Replacement label")
         let altText = try await webView.callJavaScript(returning: String.self) {
             "return document.querySelector('img').getAttribute('alt')"
         }
-        #expect(altText == "Replacement image")
+        expectEqual(altText, "Replacement image")
     }
 
     @Test
@@ -2175,11 +2405,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "heeey")
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "woorld")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "heeey")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "woorld")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -2191,8 +2421,8 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[1].tokens[0].identifier, content: "world")]
             ),
         ])
-        #expect(errors == nil)
-        #expect(try await bodyInnerHTML() == "<div>hello</div><div><img src=\"apple.gif\"></div><span>world</span>")
+        expectNil(errors)
+        expectEqual(try await bodyInnerHTML(), "<div>hello</div><div><img src=\"apple.gif\"></div><span>world</span>")
     }
 
     @Test
@@ -2207,10 +2437,10 @@ struct TextManipulationTests {
         #expect(delegate.itemBatchCount >= 2)
 
         let items = delegate.items
-        try #require(items.count == 2000)
+        try requireEqual(items.count, 2000)
         for i in 0..<2000 {
-            try #require(items[i].tokens.count == 1)
-            #expect(items[i].tokens[0].content == "hello \(i)")
+            try requireEqual(items[i].tokens.count, 1)
+            expectEqual(items[i].tokens[0].content, "hello \(i)")
         }
     }
 
@@ -2223,12 +2453,12 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 4)
-        #expect(items[0].tokens[0].content == "cats")
-        #expect(items[0].tokens[1].content == ", ")
-        #expect(items[0].tokens[2].content == "I")
-        #expect(items[0].tokens[3].content == " are")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 4)
+        expectEqual(items[0].tokens[0].content, "cats")
+        expectEqual(items[0].tokens[1].content, ", ")
+        expectEqual(items[0].tokens[2].content, "I")
+        expectEqual(items[0].tokens[3].content, " are")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -2240,8 +2470,8 @@ struct TextManipulationTests {
                 ]
             )
         ])
-        #expect(errors == nil)
-        #expect(try await bodyInnerHTML() == "<p><i>I</i>'m a <a href=\"https://en.wikipedia.org/wiki/Cat\">cat</a></p>")
+        expectNil(errors)
+        expectEqual(try await bodyInnerHTML(), "<p><i>I</i>'m a <a href=\"https://en.wikipedia.org/wiki/Cat\">cat</a></p>")
     }
 
     @Test
@@ -2254,10 +2484,10 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 2)
-        #expect(items[0].tokens[0].content == "hello world")
-        #expect(items[0].tokens[1].content == " WebKit")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 2)
+        expectEqual(items[0].tokens[0].content, "hello world")
+        expectEqual(items[0].tokens[1].content, " WebKit")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -2269,19 +2499,19 @@ struct TextManipulationTests {
                 ]
             )
         ])
-        #expect(errors == nil)
-        #expect(
-            try await bodyInnerHTML()
-                == "<p id=\"paragraph\"><b class=\"hello-world\">hello</b> WebKit <b class=\"hello-world\">world</b></p>"
+        expectNil(errors)
+        expectEqual(
+            try await bodyInnerHTML(),
+            "<p id=\"paragraph\"><b class=\"hello-world\">hello</b> WebKit <b class=\"hello-world\">world</b></p>"
         )
         let didClickFirstChild = try await webView.callJavaScript(returning: Bool.self) {
             "didClick = false; paragraph.firstChild.click(); return didClick"
         }
-        #expect(didClickFirstChild)
+        expectTrue(didClickFirstChild)
         let didClickLastChild = try await webView.callJavaScript(returning: Bool.self) {
             "didClick = false; paragraph.lastChild.click(); return didClick"
         }
-        #expect(didClickLastChild)
+        expectTrue(didClickLastChild)
     }
 
     @Test
@@ -2291,11 +2521,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 3)
-        #expect(items[0].tokens[0].content == "hello ")
-        #expect(items[0].tokens[1].content == "world")
-        #expect(items[0].tokens[2].content == " WebKit")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 3)
+        expectEqual(items[0].tokens[0].content, "hello ")
+        expectEqual(items[0].tokens[1].content, "world")
+        expectEqual(items[0].tokens[2].content, " WebKit")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -2306,8 +2536,8 @@ struct TextManipulationTests {
                 ]
             )
         ])
-        #expect(errors == nil)
-        #expect(try await bodyInnerHTML() == "<p><b>hello world</b></p>")
+        expectNil(errors)
+        expectEqual(try await bodyInnerHTML(), "<p><b>hello world</b></p>")
     }
 
     @Test
@@ -2317,10 +2547,10 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 2)
-        #expect(items[0].tokens[0].content == "hello, ")
-        #expect(items[0].tokens[1].content == "world")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 2)
+        expectEqual(items[0].tokens[0].content, "hello, ")
+        expectEqual(items[0].tokens[1].content, "world")
 
         let firstItem = _WKTextManipulationItem(
             identifier: items[0].identifier,
@@ -2330,13 +2560,13 @@ struct TextManipulationTests {
             identifier: items[0].identifier,
             tokens: [_WKTextManipulationToken(identifier: items[0].tokens[0].identifier, content: "bad")]
         )
-        let errors = try #require(await webView._completeTextManipulation(for: [firstItem, secondItem]))
-        #expect(errors.count == 1)
-        let error = try #require(errors.first) as NSError
-        #expect(error.domain == _WKTextManipulationItemErrorDomain)
-        #expect(error.code == _WKTextManipulationItemErrorCode.invalidItem.rawValue)
-        #expect(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem === secondItem)
-        #expect(try await bodyInnerHTML() == "<p>done</p>")
+        let errors = try await requireNonNil(webView._completeTextManipulation(for: [firstItem, secondItem]))
+        expectEqual(errors.count, 1)
+        let error = try requireNonNil(errors.first) as NSError
+        expectEqual(error.domain, _WKTextManipulationItemErrorDomain)
+        expectEqual(error.code, _WKTextManipulationItemErrorCode.invalidItem.rawValue)
+        expectIdentical(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem, secondItem)
+        expectEqual(try await bodyInnerHTML(), "<p>done</p>")
     }
 
     @Test
@@ -2346,13 +2576,13 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 2)
-        #expect(items[0].tokens[0].content == "hey, ")
-        #expect(items[0].tokens[1].content == "dude")
-        try #require(items[1].tokens.count == 2)
-        #expect(items[1].tokens[0].content == "this is ")
-        #expect(items[1].tokens[1].content == "bad")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 2)
+        expectEqual(items[0].tokens[0].content, "hey, ")
+        expectEqual(items[0].tokens[1].content, "dude")
+        try requireEqual(items[1].tokens.count, 2)
+        expectEqual(items[1].tokens[0].content, "this is ")
+        expectEqual(items[1].tokens[1].content, "bad")
 
         let firstItem = _WKTextManipulationItem(
             identifier: items[0].identifier,
@@ -2362,13 +2592,13 @@ struct TextManipulationTests {
             identifier: items[1].identifier,
             tokens: [_WKTextManipulationToken(identifier: items[1].tokens[0].identifier, content: "good")]
         )
-        let errors = try #require(await webView._completeTextManipulation(for: [firstItem, secondItem]))
-        #expect(errors.count == 1)
-        let error = try #require(errors.first) as NSError
-        #expect(error.domain == _WKTextManipulationItemErrorDomain)
-        #expect(error.code == _WKTextManipulationItemErrorCode.invalidToken.rawValue)
-        #expect(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem === firstItem)
-        #expect(try await bodyInnerHTML() == "<p>hey, <b>dude</b></p><p>good</p>")
+        let errors = try await requireNonNil(webView._completeTextManipulation(for: [firstItem, secondItem]))
+        expectEqual(errors.count, 1)
+        let error = try requireNonNil(errors.first) as NSError
+        expectEqual(error.domain, _WKTextManipulationItemErrorDomain)
+        expectEqual(error.code, _WKTextManipulationItemErrorCode.invalidToken.rawValue)
+        expectIdentical(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem, firstItem)
+        expectEqual(try await bodyInnerHTML(), "<p>hey, <b>dude</b></p><p>good</p>")
     }
 
     @Test
@@ -2388,15 +2618,15 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        #expect(!items[0].isSubframe)
-        #expect(!items[0].isCrossSiteSubframe)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "helllo")
-        #expect(items[1].isSubframe)
-        #expect(!items[1].isCrossSiteSubframe)
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "worrld")
+        try requireEqual(items.count, 2)
+        expectFalse(items[0].isSubframe)
+        expectFalse(items[0].isCrossSiteSubframe)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "helllo")
+        expectTrue(items[1].isSubframe)
+        expectFalse(items[1].isCrossSiteSubframe)
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "worrld")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -2408,11 +2638,11 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[1].tokens[0].identifier, content: "world")]
             ),
         ])
-        #expect(errors == nil)
+        expectNil(errors)
         let containerHTML = try await webView.callJavaScript(returning: String.self) { "return container.innerHTML" }
-        #expect(containerHTML == "<p>hello</p>")
+        expectEqual(containerHTML, "<p>hello</p>")
         let frameBodyHTML = try await webView.callJavaScript(returning: String.self) { "return frame.contentDocument.body.innerHTML" }
-        #expect(frameBodyHTML == "<p>world</p>")
+        expectEqual(frameBodyHTML, "<p>world</p>")
     }
 
     @Test
@@ -2422,11 +2652,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 3)
-        #expect(items[0].tokens[0].content == "what ")
-        #expect(items[0].tokens[1].content == "time")
-        #expect(items[0].tokens[2].content == " are they now?")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 3)
+        expectEqual(items[0].tokens[0].content, "what ")
+        expectEqual(items[0].tokens[1].content, "time")
+        expectEqual(items[0].tokens[2].content, " are they now?")
 
         try await webView.callJavaScript { "document.querySelector('em').nextSibling.data = ' is it now in London?'" }
 
@@ -2438,13 +2668,13 @@ struct TextManipulationTests {
                 _WKTextManipulationToken(identifier: items[0].tokens[2].identifier, content: " is it now?"),
             ]
         )
-        let errors = try #require(await webView._completeTextManipulation(for: [item]))
-        #expect(errors.count == 1)
-        let error = try #require(errors.first) as NSError
-        #expect(error.domain == _WKTextManipulationItemErrorDomain)
-        #expect(error.code == _WKTextManipulationItemErrorCode.contentChanged.rawValue)
-        #expect(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem === item)
-        #expect(try await bodyInnerHTML() == "<p> what <em>time</em> is it now in London?</p>")
+        let errors = try await requireNonNil(webView._completeTextManipulation(for: [item]))
+        expectEqual(errors.count, 1)
+        let error = try requireNonNil(errors.first) as NSError
+        expectEqual(error.domain, _WKTextManipulationItemErrorDomain)
+        expectEqual(error.code, _WKTextManipulationItemErrorCode.contentChanged.rawValue)
+        expectIdentical(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem, item)
+        expectEqual(try await bodyInnerHTML(), "<p> what <em>time</em> is it now in London?</p>")
     }
 
     @Test
@@ -2454,9 +2684,9 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello, world")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello, world")
 
         try await webView.callJavaScript { "document.body.innerHTML = 'new content'" }
 
@@ -2464,13 +2694,13 @@ struct TextManipulationTests {
             identifier: items[0].identifier,
             tokens: [_WKTextManipulationToken(identifier: items[0].tokens[0].identifier, content: "hey")]
         )
-        let errors = try #require(await webView._completeTextManipulation(for: [item]))
-        #expect(errors.count == 1)
-        let error = try #require(errors.first) as NSError
-        #expect(error.domain == _WKTextManipulationItemErrorDomain)
-        #expect(error.code == _WKTextManipulationItemErrorCode.contentChanged.rawValue)
-        #expect(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem === item)
-        #expect(try await bodyInnerHTML() == "new content")
+        let errors = try await requireNonNil(webView._completeTextManipulation(for: [item]))
+        expectEqual(errors.count, 1)
+        let error = try requireNonNil(errors.first) as NSError
+        expectEqual(error.domain, _WKTextManipulationItemErrorDomain)
+        expectEqual(error.code, _WKTextManipulationItemErrorCode.contentChanged.rawValue)
+        expectIdentical(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem, item)
+        expectEqual(try await bodyInnerHTML(), "new content")
     }
 
     @Test
@@ -2480,9 +2710,9 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         var items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello, world")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello, world")
 
         try await webView.callJavaScript {
             """
@@ -2496,14 +2726,14 @@ struct TextManipulationTests {
             identifier: items[0].identifier,
             tokens: [_WKTextManipulationToken(identifier: items[0].tokens[0].identifier, content: "Hello, World")]
         )
-        let errors = try #require(await webView._completeTextManipulation(for: [item]))
-        #expect(errors.count == 1)
-        let error = try #require(errors.first) as NSError
-        #expect(error.domain == _WKTextManipulationItemErrorDomain)
-        #expect(error.code == _WKTextManipulationItemErrorCode.contentChanged.rawValue)
-        #expect(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem === item)
+        let errors = try await requireNonNil(webView._completeTextManipulation(for: [item]))
+        expectEqual(errors.count, 1)
+        let error = try requireNonNil(errors.first) as NSError
+        expectEqual(error.domain, _WKTextManipulationItemErrorDomain)
+        expectEqual(error.code, _WKTextManipulationItemErrorCode.contentChanged.rawValue)
+        expectIdentical(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem, item)
 
-        #expect(try await bodyInnerHTML() == "<p>hello, world \n bye</p><div>end</div>")
+        expectEqual(try await bodyInnerHTML(), "<p>hello, world \n bye</p><div>end</div>")
     }
 
     @Test
@@ -2522,15 +2752,15 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        #expect(!items[0].isSubframe)
-        #expect(!items[0].isCrossSiteSubframe)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "helllo")
-        #expect(items[1].isSubframe)
-        #expect(!items[1].isCrossSiteSubframe)
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "worrld")
+        try requireEqual(items.count, 2)
+        expectFalse(items[0].isSubframe)
+        expectFalse(items[0].isCrossSiteSubframe)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "helllo")
+        expectTrue(items[1].isSubframe)
+        expectFalse(items[1].isCrossSiteSubframe)
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "worrld")
 
         try await webView.callJavaScript { "frame.contentDocument.body.innerHTML = 'new content'" }
 
@@ -2542,14 +2772,14 @@ struct TextManipulationTests {
             identifier: items[1].identifier,
             tokens: [_WKTextManipulationToken(identifier: items[1].tokens[0].identifier, content: "dude")]
         )
-        let errors = try #require(await webView._completeTextManipulation(for: [item0, item1]))
-        #expect(errors.count == 1)
-        let error = try #require(errors.first) as NSError
-        #expect(error.domain == _WKTextManipulationItemErrorDomain)
-        #expect(error.code == _WKTextManipulationItemErrorCode.contentChanged.rawValue)
-        #expect(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem === item1)
+        let errors = try await requireNonNil(webView._completeTextManipulation(for: [item0, item1]))
+        expectEqual(errors.count, 1)
+        let error = try requireNonNil(errors.first) as NSError
+        expectEqual(error.domain, _WKTextManipulationItemErrorDomain)
+        expectEqual(error.code, _WKTextManipulationItemErrorCode.contentChanged.rawValue)
+        expectIdentical(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem, item1)
         let frameBodyHTML = try await webView.callJavaScript(returning: String.self) { "return frame.contentDocument.body.innerHTML" }
-        #expect(frameBodyHTML == "new content")
+        expectEqual(frameBodyHTML, "new content")
     }
 
     @Test
@@ -2560,9 +2790,9 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         var items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello world")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello world")
 
         try await webView.callJavaScript {
             """
@@ -2579,11 +2809,11 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[0].tokens[0].identifier, content: "Hello World")]
             )
         ])
-        #expect(errors == nil)
+        expectNil(errors)
 
-        #expect(
-            try await bodyInnerHTML()
-                == "<p style=\"white-space:pre;background-color:blue;\"><span>Hello World</span><span>inserted</span><u>   </u></p>"
+        expectEqual(
+            try await bodyInnerHTML(),
+            "<p style=\"white-space:pre;background-color:blue;\"><span>Hello World</span><span>inserted</span><u>   </u></p>"
         )
     }
 
@@ -2595,10 +2825,10 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 2)
-        #expect(items[0].tokens[0].content == "hey, ")
-        #expect(items[0].tokens[1].content == "earth")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 2)
+        expectEqual(items[0].tokens[0].content, "hey, ")
+        expectEqual(items[0].tokens[1].content, "earth")
 
         try await webView.load(testPageNamed: "copy-html")
         try await webView.callJavaScript { "document.body.innerHTML = '<p>hey, <em>earth</em></p>'" }
@@ -2612,12 +2842,12 @@ struct TextManipulationTests {
                 _WKTextManipulationToken(identifier: items[0].tokens[1].identifier, content: "world"),
             ]
         )
-        let errors = try #require(await webView._completeTextManipulation(for: [item]))
-        #expect(errors.count == 1)
-        let error = try #require(errors.first) as NSError
-        #expect(error.domain == _WKTextManipulationItemErrorDomain)
-        #expect(error.code == _WKTextManipulationItemErrorCode.invalidItem.rawValue)
-        #expect(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem === item)
+        let errors = try await requireNonNil(webView._completeTextManipulation(for: [item]))
+        expectEqual(errors.count, 1)
+        let error = try requireNonNil(errors.first) as NSError
+        expectEqual(error.domain, _WKTextManipulationItemErrorDomain)
+        expectEqual(error.code, _WKTextManipulationItemErrorCode.invalidItem.rawValue)
+        expectIdentical(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem, item)
     }
 
     @Test
@@ -2633,11 +2863,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 3)
-        #expect(items[0].tokens[0].content == "hi, ")
-        #expect(items[0].tokens[1].content == "WebKitten")
-        #expect(items[0].tokens[2].content == " bye")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 3)
+        expectEqual(items[0].tokens[0].content, "hi, ")
+        expectEqual(items[0].tokens[1].content, "WebKitten")
+        expectEqual(items[0].tokens[2].content, " bye")
 
         let item = _WKTextManipulationItem(
             identifier: items[0].identifier,
@@ -2647,14 +2877,14 @@ struct TextManipulationTests {
                 _WKTextManipulationToken(identifier: items[0].tokens[2].identifier, content: "Bye"),
             ]
         )
-        let errors = try #require(await webView._completeTextManipulation(for: [item]))
-        #expect(errors.count == 1)
-        let error = try #require(errors.first) as NSError
-        #expect(error.domain == _WKTextManipulationItemErrorDomain)
-        #expect(error.code == _WKTextManipulationItemErrorCode.exclusionViolation.rawValue)
-        #expect(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem === item)
+        let errors = try await requireNonNil(webView._completeTextManipulation(for: [item]))
+        expectEqual(errors.count, 1)
+        let error = try requireNonNil(errors.first) as NSError
+        expectEqual(error.domain, _WKTextManipulationItemErrorDomain)
+        expectEqual(error.code, _WKTextManipulationItemErrorCode.exclusionViolation.rawValue)
+        expectIdentical(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem, item)
 
-        #expect(try await bodyInnerHTML() == "<p>hi, <em>WebKitten</em> bye</p>")
+        expectEqual(try await bodyInnerHTML(), "<p>hi, <em>WebKitten</em> bye</p>")
     }
 
     @Test
@@ -2670,11 +2900,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 3)
-        #expect(items[0].tokens[0].content == "hi, ")
-        #expect(items[0].tokens[1].content == "WebKitten")
-        #expect(items[0].tokens[2].content == " bye")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 3)
+        expectEqual(items[0].tokens[0].content, "hi, ")
+        expectEqual(items[0].tokens[1].content, "WebKitten")
+        expectEqual(items[0].tokens[2].content, " bye")
 
         let item = _WKTextManipulationItem(
             identifier: items[0].identifier,
@@ -2685,14 +2915,14 @@ struct TextManipulationTests {
                 _WKTextManipulationToken(identifier: items[0].tokens[2].identifier, content: "Bye"),
             ]
         )
-        let errors = try #require(await webView._completeTextManipulation(for: [item]))
-        #expect(errors.count == 1)
-        let error = try #require(errors.first) as NSError
-        #expect(error.domain == _WKTextManipulationItemErrorDomain)
-        #expect(error.code == _WKTextManipulationItemErrorCode.exclusionViolation.rawValue)
-        #expect(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem === item)
+        let errors = try await requireNonNil(webView._completeTextManipulation(for: [item]))
+        expectEqual(errors.count, 1)
+        let error = try requireNonNil(errors.first) as NSError
+        expectEqual(error.domain, _WKTextManipulationItemErrorDomain)
+        expectEqual(error.code, _WKTextManipulationItemErrorCode.exclusionViolation.rawValue)
+        expectIdentical(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem, item)
 
-        #expect(try await bodyInnerHTML() == "<p>hi, <em>WebKitten</em> bye</p>")
+        expectEqual(try await bodyInnerHTML(), "<p>hi, <em>WebKitten</em> bye</p>")
     }
 
     @Test
@@ -2707,11 +2937,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 3)
-        #expect(items[0].tokens[0].content == "hi, ")
-        #expect(items[0].tokens[1].content == "WebKitten")
-        #expect(items[0].tokens[2].content == " bye")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 3)
+        expectEqual(items[0].tokens[0].content, "hi, ")
+        expectEqual(items[0].tokens[1].content, "WebKitten")
+        expectEqual(items[0].tokens[2].content, " bye")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -2723,9 +2953,9 @@ struct TextManipulationTests {
                 ]
             )
         ])
-        #expect(errors == nil)
+        expectNil(errors)
 
-        #expect(try await bodyInnerHTML() == "<p>Hello, <em>WebKitten</em> Bye</p>")
+        expectEqual(try await bodyInnerHTML(), "<p>Hello, <em>WebKitten</em> Bye</p>")
     }
 
     @Test
@@ -2737,10 +2967,10 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         let items = delegate.items
-        try #require(items.count == 1)
+        try requireEqual(items.count, 1)
 
-        let firstItem = try #require(items.first)
-        try #require(firstItem.tokens.count == 3)
+        let firstItem = try requireNonNil(items.first)
+        try requireEqual(firstItem.tokens.count, 3)
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -2752,12 +2982,12 @@ struct TextManipulationTests {
                 ]
             )
         ])
-        #expect(errors == nil)
+        expectNil(errors)
 
         await webView.nextPresentationUpdate()
 
-        #expect(delegate.items.count == items.count)
-        #expect(try await bodyInnerHTML() == "<p>bar <strong>garply</strong> foo</p>")
+        expectEqual(delegate.items.count, items.count)
+        expectEqual(try await bodyInnerHTML(), "<p>bar <strong>garply</strong> foo</p>")
     }
 
     @Test
@@ -2775,11 +3005,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 1)
-        try #require(items[1].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "holle")
-        #expect(items[1].tokens[0].content == "wdrlo")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 1)
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "holle")
+        expectEqual(items[1].tokens[0].content, "wdrlo")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -2791,14 +3021,14 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[1].tokens[0].identifier, content: "world")]
             ),
         ])
-        #expect(errors == nil)
+        expectNil(errors)
 
         let expectedHTML = """
             <div class="frame"><div class="subframe"></div></div><style></style><div class="inline"><div>\
             <li><a href="#">hello</a></li><li><a href="#">world</a></li></div></div>\
             <div class="frame"><div class="subframe"></div></div>
             """
-        #expect(try await bodyInnerHTML() == expectedHTML)
+        expectEqual(try await bodyInnerHTML(), expectedHTML)
     }
 
     @Test
@@ -2815,12 +3045,12 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 4)
-        #expect(items[0].tokens[0].content == "one")
-        #expect(items[0].tokens[1].content == " \n ")
-        #expect(items[0].tokens[2].content == "two")
-        #expect(items[0].tokens[3].content == " \n")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 4)
+        expectEqual(items[0].tokens[0].content, "one")
+        expectEqual(items[0].tokens[1].content, " \n ")
+        expectEqual(items[0].tokens[2].content, "two")
+        expectEqual(items[0].tokens[3].content, " \n")
 
         let replacementItems = [
             _WKTextManipulationItem(
@@ -2835,9 +3065,9 @@ struct TextManipulationTests {
         ]
 
         let errors = await webView._completeTextManipulation(for: replacementItems)
-        #expect(errors == nil)
+        expectNil(errors)
 
-        #expect(try await bodyInnerHTML() == "<span style=\"white-space:pre;\">ONE \n TWO \n</span>")
+        expectEqual(try await bodyInnerHTML(), "<span style=\"white-space:pre;\">ONE \n TWO \n</span>")
     }
 
     @Test
@@ -2862,11 +3092,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello")
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "world")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "world")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -2878,7 +3108,7 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[1].tokens[0].identifier, content: "World")]
             ),
         ])
-        #expect(errors == nil)
+        expectNil(errors)
     }
 
     @Test
@@ -2899,11 +3129,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 3)
-        #expect(items[0].tokens[0].content == "This is another set of text to be translated. (1) ")
-        #expect(items[0].tokens[1].content == "If this text is to be translated, then it should be something noteworthy")
-        #expect(items[0].tokens[2].content == " (2) A monthly subscription is just $10.")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 3)
+        expectEqual(items[0].tokens[0].content, "This is another set of text to be translated. (1) ")
+        expectEqual(items[0].tokens[1].content, "If this text is to be translated, then it should be something noteworthy")
+        expectEqual(items[0].tokens[2].content, " (2) A monthly subscription is just $10.")
 
         try await webView.callJavaScript { "document.documentElement.setAttribute('lang', 'zh-CN')" }
 
@@ -2913,7 +3143,7 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[0].tokens[0].identifier, content: "Hello")]
             )
         ])
-        #expect(errors == nil)
+        expectNil(errors)
     }
 
     @Test
@@ -2930,12 +3160,12 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 2)
-        #expect(items[0].tokens[0].content == "hello")
-        #expect(items[0].tokens[1].content == "world")
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "from")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 2)
+        expectEqual(items[0].tokens[0].content, "hello")
+        expectEqual(items[0].tokens[1].content, "world")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "from")
 
         let replacementItems = [
             _WKTextManipulationItem(
@@ -2952,9 +3182,9 @@ struct TextManipulationTests {
         ]
 
         let errors = await webView._completeTextManipulation(for: replacementItems)
-        #expect(errors == nil)
+        expectNil(errors)
 
-        #expect(try await bodyInnerHTML() == "<p>Hello<b>World<br><br><i>From WebKit</i></b></p>")
+        expectEqual(try await bodyInnerHTML(), "<p>Hello<b>World<br><br><i>From WebKit</i></b></p>")
     }
 
     @Test
@@ -2971,11 +3201,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 3)
-        #expect(items[0].tokens[0].content == "hello")
-        #expect(items[0].tokens[1].content == "world")
-        #expect(items[0].tokens[2].content == "from")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 3)
+        expectEqual(items[0].tokens[0].content, "hello")
+        expectEqual(items[0].tokens[1].content, "world")
+        expectEqual(items[0].tokens[2].content, "from")
 
         let replacementItems = [
             _WKTextManipulationItem(
@@ -2989,9 +3219,9 @@ struct TextManipulationTests {
         ]
 
         let errors = await webView._completeTextManipulation(for: replacementItems)
-        #expect(errors == nil)
+        expectNil(errors)
 
-        #expect(try await bodyInnerHTML() == "<p><b><br><br>Hello<i>World</i></b>From WebKit</p>")
+        expectEqual(try await bodyInnerHTML(), "<p><b><br><br>Hello<i>World</i></b>From WebKit</p>")
     }
 
     @Test
@@ -3003,12 +3233,12 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         var items = delegate.items
-        try #require(items.count == 1)
+        try requireEqual(items.count, 1)
 
-        let firstItem = try #require(items.first)
-        try #require(firstItem.tokens.count == 2)
-        #expect(firstItem.tokens[0].content == "hey")
-        #expect(firstItem.tokens[1].content == " dude")
+        let firstItem = try requireNonNil(items.first)
+        try requireEqual(firstItem.tokens.count, 2)
+        expectEqual(firstItem.tokens[0].content, "hey")
+        expectEqual(firstItem.tokens[1].content, " dude")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -3019,15 +3249,15 @@ struct TextManipulationTests {
                 ]
             )
         ])
-        #expect(errors == nil)
+        expectNil(errors)
 
         try await webView.callJavaScript {
             "span = document.createElement('span'); span.textContent = ' WebKit!'; document.querySelector('b').after(span);"
         }
         items = await delegate.waitForItems(count: 2)
 
-        #expect(items.count == 2)
-        #expect(try await bodyInnerHTML() == "<p><i><b>hello,</b><span> WebKit!</span></i> world</p>")
+        expectEqual(items.count, 2)
+        expectEqual(try await bodyInnerHTML(), "<p><i><b>hello,</b><span> WebKit!</span></i> world</p>")
     }
 
     @Test
@@ -3038,14 +3268,14 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: configuration)
 
         let items = delegate.items
-        try #require(items.count == 2)
+        try requireEqual(items.count, 2)
 
-        let firstItem = try #require(items.first)
-        let lastItem = try #require(items.last)
-        try #require(firstItem.tokens.count == 1)
-        try #require(lastItem.tokens.count == 1)
-        #expect(firstItem.tokens[0].content == "hello1")
-        #expect(lastItem.tokens[0].content == "hello2")
+        let firstItem = try requireNonNil(items.first)
+        let lastItem = try requireNonNil(items.last)
+        try requireEqual(firstItem.tokens.count, 1)
+        try requireEqual(lastItem.tokens.count, 1)
+        expectEqual(firstItem.tokens[0].content, "hello1")
+        expectEqual(lastItem.tokens[0].content, "hello2")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -3057,16 +3287,16 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: lastItem.tokens[0].identifier, content: "world2")]
             ),
         ])
-        #expect(errors == nil)
+        expectNil(errors)
 
         let textFieldValue = try await webView.callJavaScript(returning: String.self) {
             "return document.querySelector('input[type=text]').value"
         }
-        #expect(textFieldValue == "world1")
+        expectEqual(textFieldValue, "world1")
         let submitButtonValue = try await webView.callJavaScript(returning: String.self) {
             "return document.querySelector('input[type=submit]').value"
         }
-        #expect(submitButtonValue == "world2")
+        expectEqual(submitButtonValue, "world2")
     }
 
     @Test
@@ -3089,10 +3319,10 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         var items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 2)
-        #expect(items[0].tokens[0].content == "webkit!")
-        #expect(items[0].tokens[1].content == "hello world")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 2)
+        expectEqual(items[0].tokens[0].content, "webkit!")
+        expectEqual(items[0].tokens[1].content, "hello world")
 
         var errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -3103,14 +3333,14 @@ struct TextManipulationTests {
                 ]
             )
         ])
-        #expect(errors == nil)
+        expectNil(errors)
 
         try await webView.callJavaScript { "document.querySelector('i').removeAttribute('class');" }
         items = await delegate.waitForItems(count: 2)
 
-        try #require(items.count == 2)
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "bye")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "bye")
 
         errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -3118,10 +3348,10 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[1].tokens[0].identifier, content: "Bye")]
             )
         ])
-        #expect(errors == nil)
+        expectNil(errors)
 
         let divHTML = try await webView.callJavaScript(returning: String.self) { "return document.querySelector('div').innerHTML" }
-        #expect(divHTML == "<b>WebKit!</b><span>Hello World<i>Bye</i></span>")
+        expectEqual(divHTML, "<b>WebKit!</b><span>Hello World<i>Bye</i></span>")
     }
 
     @Test
@@ -3140,9 +3370,9 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         var items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello world")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello world")
 
         var errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -3150,15 +3380,15 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[0].tokens[0].identifier, content: "Hello World")]
             )
         ])
-        #expect(errors == nil)
-        #expect(try await bodyInnerHTML() == "<a>Hello World</a>")
+        expectNil(errors)
+        expectEqual(try await bodyInnerHTML(), "<a>Hello World</a>")
 
         try await webView.callJavaScript {
             "document.querySelector('a').innerHTML=''; document.querySelector('a').innerHTML='hello world again';"
         }
         items = await delegate.waitForItems(count: 2)
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "hello world again")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "hello world again")
 
         errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -3166,8 +3396,8 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[1].tokens[0].identifier, content: "Hello World Again")]
             )
         ])
-        #expect(errors == nil)
-        #expect(try await bodyInnerHTML() == "<a>Hello World Again</a>")
+        expectNil(errors)
+        expectEqual(try await bodyInnerHTML(), "<a>Hello World Again</a>")
     }
 
     @Test
@@ -3185,11 +3415,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         var items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello world")
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "hello webkit")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello world")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "hello webkit")
 
         var errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -3201,17 +3431,17 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[1].tokens[0].identifier, content: "Hello WebKit")]
             ),
         ])
-        #expect(errors == nil)
-        #expect(try await bodyInnerHTML() == "<span>Hello World</span><p>Hello WebKit</p>")
+        expectNil(errors)
+        expectEqual(try await bodyInnerHTML(), "<span>Hello World</span><p>Hello WebKit</p>")
 
         try await webView.callJavaScript { "document.querySelector('span').innerHTML='hello world again';" }
         try await webView.callJavaScript { "document.querySelector('p').childNodes[0].nodeValue='hello webkit again';" }
         items = await delegate.waitForItems(count: 4)
 
-        try #require(items[2].tokens.count == 1)
-        #expect(items[2].tokens[0].content == "hello world again")
-        try #require(items[3].tokens.count == 1)
-        #expect(items[3].tokens[0].content == "hello webkit again")
+        try requireEqual(items[2].tokens.count, 1)
+        expectEqual(items[2].tokens[0].content, "hello world again")
+        try requireEqual(items[3].tokens.count, 1)
+        expectEqual(items[3].tokens[0].content, "hello webkit again")
 
         errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -3223,8 +3453,8 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[3].tokens[0].identifier, content: "Hello WebKit Again")]
             ),
         ])
-        #expect(errors == nil)
-        #expect(try await bodyInnerHTML() == "<span>Hello World Again</span><p>Hello WebKit Again</p>")
+        expectNil(errors)
+        expectEqual(try await bodyInnerHTML(), "<span>Hello World Again</span><p>Hello WebKit Again</p>")
     }
 
     @Test
@@ -3233,12 +3463,12 @@ struct TextManipulationTests {
 
         await webView._startTextManipulations(with: nil)
         var items = delegate.items
-        #expect(items.isEmpty)
+        expectTrue(items.isEmpty)
 
         try await webView.callJavaScript { "document.title = 'page title'" }
         items = await delegate.waitForItems(count: 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "page title")
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "page title")
 
         var errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -3246,16 +3476,16 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[0].tokens[0].identifier, content: "Page Title")]
             )
         ])
-        #expect(errors == nil)
+        expectNil(errors)
         let title = try await webView.callJavaScript(returning: String.self) { "return document.title" }
-        #expect(title == "Page Title")
+        expectEqual(title, "Page Title")
         let documentHTML = try await webView.callJavaScript(returning: String.self) { "return document.documentElement.innerHTML" }
-        #expect(documentHTML == "<head><title>Page Title</title></head><body></body>")
+        expectEqual(documentHTML, "<head><title>Page Title</title></head><body></body>")
 
         try await webView.callJavaScript { "document.title = 'new page title'" }
         items = await delegate.waitForItems(count: 2)
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "new page title")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "new page title")
 
         errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -3263,11 +3493,11 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[1].tokens[0].identifier, content: "New Page Title")]
             )
         ])
-        #expect(errors == nil)
+        expectNil(errors)
         let newTitle = try await webView.callJavaScript(returning: String.self) { "return document.title" }
-        #expect(newTitle == "New Page Title")
+        expectEqual(newTitle, "New Page Title")
         let newDocumentHTML = try await webView.callJavaScript(returning: String.self) { "return document.documentElement.innerHTML" }
-        #expect(newDocumentHTML == "<head><title>New Page Title</title></head><body></body>")
+        expectEqual(newDocumentHTML, "<head><title>New Page Title</title></head><body></body>")
     }
 
     @Test
@@ -3277,11 +3507,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         var items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "foo")
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == "bar")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "foo")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, "bar")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -3293,9 +3523,9 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[1].tokens[0].identifier, content: "BAR")]
             ),
         ])
-        #expect(errors == nil)
+        expectNil(errors)
 
-        #expect(try await bodyInnerHTML() == "<p>FOO<br>BAR</p>")
+        expectEqual(try await bodyInnerHTML(), "<p>FOO<br>BAR</p>")
 
         try await webView.callJavaScript { "document.querySelector('p').style.display = 'none'" }
         try await webView.callJavaScript { "document.querySelector('p').style.display = ''" }
@@ -3309,9 +3539,9 @@ struct TextManipulationTests {
 
         items = await delegate.waitForItems(count: 3)
 
-        try #require(items.count == 3)
-        try #require(items[2].tokens.count == 1)
-        #expect(items[2].tokens[0].content == "end")
+        try requireEqual(items.count, 3)
+        try requireEqual(items[2].tokens.count, 1)
+        expectEqual(items[2].tokens[0].content, "end")
     }
 
     @Test
@@ -3350,11 +3580,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "A")
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == " Hello world")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "A")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, " Hello world")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -3366,18 +3596,18 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[1].tokens[0].identifier, content: " Foo bar")]
             ),
         ])
-        #expect(errors == nil)
+        expectNil(errors)
 
         let linkText = try await webView.callJavaScript(returning: String.self) { "return document.querySelector('a').textContent.trim()" }
-        #expect(linkText == "This is a long translation Foo bar")
+        expectEqual(linkText, "This is a long translation Foo bar")
         let overflowX = try await webView.callJavaScript(returning: String.self) {
             "return getComputedStyle(document.querySelector('span')).overflowX"
         }
-        #expect(overflowX == "hidden")
+        expectEqual(overflowX, "hidden")
         let overflowY = try await webView.callJavaScript(returning: String.self) {
             "return getComputedStyle(document.querySelector('span')).overflowY"
         }
-        #expect(overflowY == "auto")
+        expectEqual(overflowY, "auto")
     }
 
     @Test
@@ -3400,11 +3630,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello")
-        try #require(items[1].tokens.count == 1)
-        #expect(items[1].tokens[0].content == " world")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello")
+        try requireEqual(items[1].tokens.count, 1)
+        expectEqual(items[1].tokens[0].content, " world")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -3416,9 +3646,9 @@ struct TextManipulationTests {
                 tokens: [_WKTextManipulationToken(identifier: items[1].tokens[0].identifier, content: "World")]
             ),
         ])
-        #expect(errors == nil)
+        expectNil(errors)
 
-        #expect(try await bodyInnerHTML() == "<span>Hello</span><span>World</span>")
+        expectEqual(try await bodyInnerHTML(), "<span>Hello</span><span>World</span>")
     }
 
     @Test
@@ -3439,11 +3669,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 3)
-        #expect(items[0].tokens[0].content == "webkit")
-        #expect(items[0].tokens[1].content == " and ")
-        #expect(items[0].tokens[2].content == "apple")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 3)
+        expectEqual(items[0].tokens[0].content, "webkit")
+        expectEqual(items[0].tokens[1].content, " and ")
+        expectEqual(items[0].tokens[2].content, "apple")
 
         try await webView.callJavaScript { "document.getElementById('div').style.width='9ch';" }
 
@@ -3457,13 +3687,13 @@ struct TextManipulationTests {
                 ]
             )
         ])
-        #expect(errors == nil)
+        expectNil(errors)
 
         let expectedHTML = """
             <div id="div" style="width: 9ch;"><a href="https://www.webkit.org">WebKit</a> And \
             <a href="https://www.apple.com">Apple</a></div>
             """
-        #expect(try await bodyInnerHTML() == expectedHTML)
+        expectEqual(try await bodyInnerHTML(), expectedHTML)
     }
 
     @Test
@@ -3485,10 +3715,10 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 2)
-        #expect(items[0].tokens[0].content == "images")
-        #expect(items[0].tokens[1].content == "link")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 2)
+        expectEqual(items[0].tokens[0].content, "images")
+        expectEqual(items[0].tokens[1].content, "link")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -3499,9 +3729,9 @@ struct TextManipulationTests {
                 ]
             )
         ])
-        #expect(errors == nil)
+        expectNil(errors)
 
-        #expect(try await bodyInnerHTML() == "<div role=\"img\">Images<a>Link</a><img src=\"hello.png\"><img src=\"webkit.png\"></div>")
+        expectEqual(try await bodyInnerHTML(), "<div role=\"img\">Images<a>Link</a><img src=\"hello.png\"><img src=\"webkit.png\"></div>")
     }
 
     @Test
@@ -3525,14 +3755,14 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 2)
-        try #require(items[0].tokens.count == 2)
-        #expect(items[0].tokens[0].content == "zero")
-        #expect(items[0].tokens[1].content == " \n")
-        try #require(items[1].tokens.count == 3)
-        #expect(items[1].tokens[0].content == "two four")
-        #expect(items[1].tokens[1].content == "one")
-        #expect(items[1].tokens[2].content == "three")
+        try requireEqual(items.count, 2)
+        try requireEqual(items[0].tokens.count, 2)
+        expectEqual(items[0].tokens[0].content, "zero")
+        expectEqual(items[0].tokens[1].content, " \n")
+        try requireEqual(items[1].tokens.count, 3)
+        expectEqual(items[1].tokens[0].content, "two four")
+        expectEqual(items[1].tokens[1].content, "one")
+        expectEqual(items[1].tokens[2].content, "three")
 
         let errors = await webView._completeTextManipulation(for: [
             _WKTextManipulationItem(
@@ -3545,8 +3775,8 @@ struct TextManipulationTests {
                 ]
             )
         ])
-        #expect(errors == nil)
-        #expect(try await bodyInnerHTML() == "<span>zero \n</span>one<span><b>two</b></span><i>three</i><span><b>four</b></span>")
+        expectNil(errors)
+        expectEqual(try await bodyInnerHTML(), "<span>zero \n</span>one<span><b>two</b></span><i>three</i><span><b>four</b></span>")
     }
 
     @Test
@@ -3562,25 +3792,25 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello")
 
         let result = try await webView.evaluateJavaScript("document.querySelector('span').classList.add('hidden');")
-        #expect(result == nil)
+        expectNil(result)
 
         let item = _WKTextManipulationItem(
             identifier: items[0].identifier,
             tokens: [_WKTextManipulationToken(identifier: items[0].tokens[0].identifier, content: "Hello")]
         )
-        let errors = try #require(await webView._completeTextManipulation(for: [item]))
-        #expect(errors.count == 1)
-        let error = try #require(errors.first) as NSError
-        #expect(error.domain == _WKTextManipulationItemErrorDomain)
-        #expect(error.code == _WKTextManipulationItemErrorCode.contentChanged.rawValue)
-        #expect(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem === item)
+        let errors = try await requireNonNil(webView._completeTextManipulation(for: [item]))
+        expectEqual(errors.count, 1)
+        let error = try requireNonNil(errors.first) as NSError
+        expectEqual(error.domain, _WKTextManipulationItemErrorDomain)
+        expectEqual(error.code, _WKTextManipulationItemErrorCode.contentChanged.rawValue)
+        expectIdentical(error.userInfo[_WKTextManipulationItemErrorItemKey] as? _WKTextManipulationItem, item)
 
-        #expect(try await bodyInnerHTML() == "<span class=\"hidden\">hello</span>")
+        expectEqual(try await bodyInnerHTML(), "<span class=\"hidden\">hello</span>")
     }
 
     @Test
@@ -3595,11 +3825,11 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 3)
-        #expect(items[0].tokens[0].content == "Guten")
-        #expect(items[0].tokens[1].content == "[]")
-        #expect(items[0].tokens[2].content == "Tag")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 3)
+        expectEqual(items[0].tokens[0].content, "Guten")
+        expectEqual(items[0].tokens[1].content, "[]")
+        expectEqual(items[0].tokens[2].content, "Tag")
 
         let replacement = _WKTextManipulationItem(
             identifier: items[0].identifier,
@@ -3610,18 +3840,18 @@ struct TextManipulationTests {
         )
 
         let errors = await webView._completeTextManipulation(for: [replacement])
-        #expect((errors ?? []).isEmpty)
+        expectTrue((errors ?? []).isEmpty)
 
         let targetParentTagName = try await webView.callJavaScript(returning: String.self) {
             "return document.getElementById('target').parentElement.tagName"
         }
-        #expect(targetParentTagName == "SECTION")
+        expectEqual(targetParentTagName, "SECTION")
         let textContents = try await webView.callJavaScript(returning: [String].self) {
             "return Array.from(document.links).map(a => a.textContent)"
         }
-        #expect(textContents.count == 2)
-        #expect(textContents.first == "Good")
-        #expect(textContents.last == "Day")
+        expectEqual(textContents.count, 2)
+        expectEqual(textContents.first, "Good")
+        expectEqual(textContents.last, "Day")
     }
 
     @Test
@@ -3631,21 +3861,21 @@ struct TextManipulationTests {
         await webView._startTextManipulations(with: nil)
 
         let items = delegate.items
-        try #require(items.count == 1)
-        try #require(items[0].tokens.count == 1)
-        #expect(items[0].tokens[0].content == "hello")
+        try requireEqual(items.count, 1)
+        try requireEqual(items[0].tokens.count, 1)
+        expectEqual(items[0].tokens[0].content, "hello")
 
         let item = _WKTextManipulationItem(
             identifier: items[0].identifier,
             tokens: [_WKTextManipulationToken(identifier: items[0].tokens[0].identifier, content: "world")]
         )
         let errors = await webView._completeTextManipulation(for: [item])
-        #expect((errors ?? []).isEmpty)
+        expectTrue((errors ?? []).isEmpty)
 
         let shadowRootText = try await webView.callJavaScript(returning: String.self) {
             "return document.getElementById('host').shadowRoot.textContent"
         }
-        #expect(shadowRootText == "world")
+        expectEqual(shadowRootText, "world")
     }
 
     @Test
@@ -3674,7 +3904,7 @@ struct TextManipulationTests {
         let textFieldValue = try await webView.callJavaScript(returning: String.self) {
             "return document.getElementById('textField').value"
         }
-        #expect(textFieldValue == "foo")
+        expectEqual(textFieldValue, "foo")
     }
 
     @Test
@@ -3684,12 +3914,12 @@ struct TextManipulationTests {
         token.content = "bar_is_the_content"
 
         let description = token.description
-        #expect(description.contains("foo_is_the_identifier"))
-        #expect(!description.contains("bar_is_the_content"))
+        expectTrue(description.contains("foo_is_the_identifier"))
+        expectEqual(description.contains("bar_is_the_content"), false)
 
         let debugDescription = token.debugDescription
-        #expect(debugDescription.contains("foo_is_the_identifier"))
-        #expect(debugDescription.contains("bar_is_the_content"))
+        expectTrue(debugDescription.contains("foo_is_the_identifier"))
+        expectTrue(debugDescription.contains("bar_is_the_content"))
     }
 
     @Test
@@ -3698,13 +3928,13 @@ struct TextManipulationTests {
         tokenA.identifier = "A"
         tokenA.content = "A"
 
-        #expect(!tokenA.isEqual(to: nil, includingContentEquality: true))
-        #expect(!tokenA.isEqual(to: nil, includingContentEquality: false))
+        expectEqual(tokenA.isEqual(to: nil, includingContentEquality: true), false)
+        expectEqual(tokenA.isEqual(to: nil, includingContentEquality: false), false)
 
         tokenA.identifier = nil
         tokenA.content = nil
-        #expect(!tokenA.isEqual(to: nil, includingContentEquality: true))
-        #expect(!tokenA.isEqual(to: nil, includingContentEquality: false))
+        expectEqual(tokenA.isEqual(to: nil, includingContentEquality: true), false)
+        expectEqual(tokenA.isEqual(to: nil, includingContentEquality: false), false)
     }
 
     @Test
@@ -3714,28 +3944,28 @@ struct TextManipulationTests {
         let token2 = _WKTextManipulationToken()
         token2.identifier = "A"
 
-        #expect(token1.isEqual(to: token2, includingContentEquality: true))
-        #expect(token1.isEqual(to: token2, includingContentEquality: false))
+        expectTrue(token1.isEqual(to: token2, includingContentEquality: true))
+        expectTrue(token1.isEqual(to: token2, includingContentEquality: false))
 
         // Same identifiers, different content.
         token1.content = "1"
         token2.content = "2"
-        #expect(!token1.isEqual(to: token2, includingContentEquality: true))
-        #expect(token1.isEqual(to: token2, includingContentEquality: false))
+        expectEqual(token1.isEqual(to: token2, includingContentEquality: true), false)
+        expectTrue(token1.isEqual(to: token2, includingContentEquality: false))
 
         // Same identifiers, different exclusion.
         token1.isExcluded = false
         token2.isExcluded = true
         token1.content = nil
         token2.content = nil
-        #expect(!token1.isEqual(to: token2, includingContentEquality: true))
-        #expect(!token1.isEqual(to: token2, includingContentEquality: false))
+        expectEqual(token1.isEqual(to: token2, includingContentEquality: true), false)
+        expectEqual(token1.isEqual(to: token2, includingContentEquality: false), false)
 
         // Same identifiers, different exclusion and different content.
         token1.content = "1"
         token2.content = "2"
-        #expect(!token1.isEqual(to: token2, includingContentEquality: true))
-        #expect(!token1.isEqual(to: token2, includingContentEquality: false))
+        expectEqual(token1.isEqual(to: token2, includingContentEquality: true), false)
+        expectEqual(token1.isEqual(to: token2, includingContentEquality: false), false)
     }
 
     @Test
@@ -3745,61 +3975,61 @@ struct TextManipulationTests {
         let tokenB = _WKTextManipulationToken()
         tokenB.identifier = "B"
 
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: false))
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: true), false)
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: false), false)
 
         // Different identifiers, same content.
         tokenA.content = "content"
         tokenB.content = "content"
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: false))
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: true), false)
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: false), false)
 
         // Different identifiers, same exclusion.
         tokenA.content = nil
         tokenB.content = nil
         tokenA.isExcluded = true
         tokenB.isExcluded = true
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: false))
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: true), false)
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: false), false)
 
         // Different identifiers, same content and same exclusion.
         tokenA.content = "content"
         tokenB.content = "content"
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: false))
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: true), false)
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: false), false)
     }
 
     @Test
     func textManipulationTokenEqualityWithNilIdentifiers() {
         let tokenA = _WKTextManipulationToken()
-        #expect(tokenA.identifier == nil)
+        expectNil(tokenA.identifier)
         let tokenB = _WKTextManipulationToken()
         tokenB.identifier = "B"
         let tokenC = _WKTextManipulationToken()
-        #expect(tokenC.identifier == nil)
+        expectNil(tokenC.identifier)
 
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: false))
-        #expect(tokenA.isEqual(to: tokenC, includingContentEquality: true))
-        #expect(tokenA.isEqual(to: tokenC, includingContentEquality: false))
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: true), false)
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: false), false)
+        expectTrue(tokenA.isEqual(to: tokenC, includingContentEquality: true))
+        expectTrue(tokenA.isEqual(to: tokenC, includingContentEquality: false))
 
         // Equal content.
         tokenA.content = "content"
         tokenB.content = "content"
         tokenC.content = "content"
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: false))
-        #expect(tokenA.isEqual(to: tokenC, includingContentEquality: true))
-        #expect(tokenA.isEqual(to: tokenC, includingContentEquality: false))
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: true), false)
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: false), false)
+        expectTrue(tokenA.isEqual(to: tokenC, includingContentEquality: true))
+        expectTrue(tokenA.isEqual(to: tokenC, includingContentEquality: false))
 
         // Different content.
         tokenA.content = "contentA"
         tokenB.content = "contentB"
         tokenC.content = "contentC"
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: false))
-        #expect(!tokenA.isEqual(to: tokenC, includingContentEquality: true))
-        #expect(tokenA.isEqual(to: tokenC, includingContentEquality: false))
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: true), false)
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: false), false)
+        expectEqual(tokenA.isEqual(to: tokenC, includingContentEquality: true), false)
+        expectTrue(tokenA.isEqual(to: tokenC, includingContentEquality: false))
     }
 
     @Test
@@ -3811,28 +4041,28 @@ struct TextManipulationTests {
         let tokenC = _WKTextManipulationToken()
         tokenC.identifier = ""
 
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: false))
-        #expect(tokenA.isEqual(to: tokenC, includingContentEquality: true))
-        #expect(tokenA.isEqual(to: tokenC, includingContentEquality: false))
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: true), false)
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: false), false)
+        expectTrue(tokenA.isEqual(to: tokenC, includingContentEquality: true))
+        expectTrue(tokenA.isEqual(to: tokenC, includingContentEquality: false))
 
         // Equal content.
         tokenA.content = "content"
         tokenB.content = "content"
         tokenC.content = "content"
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: false))
-        #expect(tokenA.isEqual(to: tokenC, includingContentEquality: true))
-        #expect(tokenA.isEqual(to: tokenC, includingContentEquality: false))
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: true), false)
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: false), false)
+        expectTrue(tokenA.isEqual(to: tokenC, includingContentEquality: true))
+        expectTrue(tokenA.isEqual(to: tokenC, includingContentEquality: false))
 
         // Different content.
         tokenA.content = "contentA"
         tokenB.content = "contentB"
         tokenC.content = "contentC"
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: false))
-        #expect(!tokenA.isEqual(to: tokenC, includingContentEquality: true))
-        #expect(tokenA.isEqual(to: tokenC, includingContentEquality: false))
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: true), false)
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: false), false)
+        expectEqual(tokenA.isEqual(to: tokenC, includingContentEquality: true), false)
+        expectTrue(tokenA.isEqual(to: tokenC, includingContentEquality: false))
     }
 
     @Test
@@ -3842,18 +4072,18 @@ struct TextManipulationTests {
         let tokenB = _WKTextManipulationToken()
         tokenB.identifier = "A"
 
-        #expect(tokenA.content == nil)
-        #expect(tokenB.content == nil)
-        #expect(tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(tokenA.isEqual(to: tokenB, includingContentEquality: false))
+        expectNil(tokenA.content)
+        expectNil(tokenB.content)
+        expectTrue(tokenA.isEqual(to: tokenB, includingContentEquality: true))
+        expectTrue(tokenA.isEqual(to: tokenB, includingContentEquality: false))
 
         tokenB.content = ""
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(tokenA.isEqual(to: tokenB, includingContentEquality: false))
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: true), false)
+        expectTrue(tokenA.isEqual(to: tokenB, includingContentEquality: false))
 
         tokenB.content = "B"
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(tokenA.isEqual(to: tokenB, includingContentEquality: false))
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: true), false)
+        expectTrue(tokenA.isEqual(to: tokenB, includingContentEquality: false))
     }
 
     @Test
@@ -3865,16 +4095,16 @@ struct TextManipulationTests {
         tokenB.identifier = "A"
         tokenB.content = ""
 
-        #expect(tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(tokenA.isEqual(to: tokenB, includingContentEquality: false))
+        expectTrue(tokenA.isEqual(to: tokenB, includingContentEquality: true))
+        expectTrue(tokenA.isEqual(to: tokenB, includingContentEquality: false))
 
         tokenB.content = nil
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(tokenA.isEqual(to: tokenB, includingContentEquality: false))
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: true), false)
+        expectTrue(tokenA.isEqual(to: tokenB, includingContentEquality: false))
 
         tokenB.content = "B"
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(tokenA.isEqual(to: tokenB, includingContentEquality: false))
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: true), false)
+        expectTrue(tokenA.isEqual(to: tokenB, includingContentEquality: false))
     }
 
     @Test
@@ -3886,8 +4116,8 @@ struct TextManipulationTests {
         tokenB.identifier = "A"
         tokenB.content = "content"
 
-        #expect(tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(tokenA.isEqual(to: tokenB, includingContentEquality: false))
+        expectTrue(tokenA.isEqual(to: tokenB, includingContentEquality: true))
+        expectTrue(tokenA.isEqual(to: tokenB, includingContentEquality: false))
     }
 
     @Test
@@ -3901,8 +4131,8 @@ struct TextManipulationTests {
         tokenA.content = contentString
         tokenB.content = contentString
 
-        #expect(tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(tokenA.isEqual(to: tokenB, includingContentEquality: false))
+        expectTrue(tokenA.isEqual(to: tokenB, includingContentEquality: true))
+        expectTrue(tokenA.isEqual(to: tokenB, includingContentEquality: false))
     }
 
     @Test
@@ -3914,8 +4144,8 @@ struct TextManipulationTests {
         tokenB.identifier = "A"
         tokenB.content = "content "
 
-        #expect(!tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(tokenA.isEqual(to: tokenB, includingContentEquality: false))
+        expectEqual(tokenA.isEqual(to: tokenB, includingContentEquality: true), false)
+        expectTrue(tokenA.isEqual(to: tokenB, includingContentEquality: false))
     }
 
     @Test
@@ -3924,9 +4154,9 @@ struct TextManipulationTests {
         token.identifier = "A"
         token.content = "content"
 
-        #expect(token.isEqual(to: token, includingContentEquality: true))
-        #expect(token.isEqual(to: token, includingContentEquality: false))
-        #expect(token.isEqual(token))
+        expectTrue(token.isEqual(to: token, includingContentEquality: true))
+        expectTrue(token.isEqual(to: token, includingContentEquality: false))
+        expectTrue(token.isEqual(token))
     }
 
     @Test
@@ -3941,11 +4171,11 @@ struct TextManipulationTests {
         tokenC.identifier = "A"
         tokenC.content = "content "
 
-        #expect(tokenA.isEqual(to: tokenB, includingContentEquality: true))
-        #expect(tokenA.isEqual(tokenB))
+        expectTrue(tokenA.isEqual(to: tokenB, includingContentEquality: true))
+        expectTrue(tokenA.isEqual(tokenB))
 
-        #expect(!tokenA.isEqual(to: tokenC, includingContentEquality: true))
-        #expect(!tokenA.isEqual(tokenC))
+        expectEqual(tokenA.isEqual(to: tokenC, includingContentEquality: true), false)
+        expectEqual(tokenA.isEqual(tokenC), false)
     }
 
     @Test
@@ -3955,8 +4185,8 @@ struct TextManipulationTests {
         token.content = "content"
         let string = "content"
 
-        #expect(!token.isEqual(string))
-        #expect(!token.isEqual(nil))
+        expectEqual(token.isEqual(string), false)
+        expectEqual(token.isEqual(nil), false)
     }
 
     @Test
@@ -3966,26 +4196,26 @@ struct TextManipulationTests {
         let item = _WKTextManipulationItem(identifier: "public_item_identifier", tokens: [tokenA, tokenB])
 
         let debugDescription = item.debugDescription
-        #expect(debugDescription.contains("public_identifier_A"))
-        #expect(debugDescription.contains("public_identifier_B"))
-        #expect(debugDescription.contains("private_content_A"))
-        #expect(debugDescription.contains("private_content_B"))
-        #expect(debugDescription.contains("public_item_identifier"))
+        expectTrue(debugDescription.contains("public_identifier_A"))
+        expectTrue(debugDescription.contains("public_identifier_B"))
+        expectTrue(debugDescription.contains("private_content_A"))
+        expectTrue(debugDescription.contains("private_content_B"))
+        expectTrue(debugDescription.contains("public_item_identifier"))
 
         let description = item.description
-        #expect(description.contains("public_identifier_A"))
-        #expect(description.contains("public_identifier_B"))
-        #expect(!description.contains("private_content_A"))
-        #expect(!description.contains("private_content_B"))
-        #expect(description.contains("public_item_identifier"))
+        expectTrue(description.contains("public_identifier_A"))
+        expectTrue(description.contains("public_identifier_B"))
+        expectEqual(description.contains("private_content_A"), false)
+        expectEqual(description.contains("private_content_B"), false)
+        expectTrue(description.contains("public_item_identifier"))
     }
 
     @Test
     func textManipulationItemEqualityToNilItem() {
         let item = _WKTextManipulationItem(identifier: "A", tokens: [])
 
-        #expect(!item.isEqual(to: nil, includingContentEquality: true))
-        #expect(!item.isEqual(to: nil, includingContentEquality: false))
+        expectEqual(item.isEqual(to: nil, includingContentEquality: true), false)
+        expectEqual(item.isEqual(to: nil, includingContentEquality: false), false)
     }
 
     @Test
@@ -3993,9 +4223,9 @@ struct TextManipulationTests {
         let token = _WKTextManipulationToken(identifier: "A", content: "token")
         let item = _WKTextManipulationItem(identifier: "B", tokens: [token])
 
-        #expect(item.isEqual(to: item, includingContentEquality: true))
-        #expect(item.isEqual(to: item, includingContentEquality: false))
-        #expect(item.isEqual(item))
+        expectTrue(item.isEqual(to: item, includingContentEquality: true))
+        expectTrue(item.isEqual(to: item, includingContentEquality: false))
+        expectTrue(item.isEqual(item))
     }
 
     @Test
@@ -4005,8 +4235,8 @@ struct TextManipulationTests {
         let itemA = _WKTextManipulationItem(identifier: "A", tokens: [token1])
         let itemB = _WKTextManipulationItem(identifier: "A", tokens: [token2])
 
-        #expect(itemA.isEqual(to: itemB, includingContentEquality: true))
-        #expect(itemA.isEqual(to: itemB, includingContentEquality: false))
+        expectTrue(itemA.isEqual(to: itemB, includingContentEquality: true))
+        expectTrue(itemA.isEqual(to: itemB, includingContentEquality: false))
     }
 
     @Test
@@ -4019,8 +4249,8 @@ struct TextManipulationTests {
         let itemA = _WKTextManipulationItem(identifier: "A", tokens: [tokenA1, tokenA2])
         let itemB = _WKTextManipulationItem(identifier: "A", tokens: [tokenB1, tokenB2])
 
-        #expect(itemA.isEqual(to: itemB, includingContentEquality: true))
-        #expect(itemA.isEqual(to: itemB, includingContentEquality: false))
+        expectTrue(itemA.isEqual(to: itemB, includingContentEquality: true))
+        expectTrue(itemA.isEqual(to: itemB, includingContentEquality: false))
     }
 
     @Test
@@ -4030,8 +4260,8 @@ struct TextManipulationTests {
         let itemA = _WKTextManipulationItem(identifier: "A", tokens: [token1])
         let itemB = _WKTextManipulationItem(identifier: "A", tokens: [token2])
 
-        #expect(!itemA.isEqual(to: itemB, includingContentEquality: true))
-        #expect(itemA.isEqual(to: itemB, includingContentEquality: false))
+        expectEqual(itemA.isEqual(to: itemB, includingContentEquality: true), false)
+        expectTrue(itemA.isEqual(to: itemB, includingContentEquality: false))
     }
 
     @Test
@@ -4044,8 +4274,8 @@ struct TextManipulationTests {
         let itemA = _WKTextManipulationItem(identifier: "A", tokens: [tokenA1, tokenA2])
         let itemB = _WKTextManipulationItem(identifier: "A", tokens: [tokenB2, tokenB1])
 
-        #expect(!itemA.isEqual(to: itemB, includingContentEquality: true))
-        #expect(!itemA.isEqual(to: itemB, includingContentEquality: false))
+        expectEqual(itemA.isEqual(to: itemB, includingContentEquality: true), false)
+        expectEqual(itemA.isEqual(to: itemB, includingContentEquality: false), false)
     }
 
     @Test
@@ -4056,8 +4286,8 @@ struct TextManipulationTests {
         let itemA = _WKTextManipulationItem(identifier: "A", tokens: [token1, token2])
         let itemB = _WKTextManipulationItem(identifier: "A", tokens: [token1, token2])
 
-        #expect(itemA.isEqual(to: itemB, includingContentEquality: true))
-        #expect(itemA.isEqual(to: itemB, includingContentEquality: false))
+        expectTrue(itemA.isEqual(to: itemB, includingContentEquality: true))
+        expectTrue(itemA.isEqual(to: itemB, includingContentEquality: false))
     }
 
     @Test
@@ -4069,8 +4299,8 @@ struct TextManipulationTests {
         let itemA = _WKTextManipulationItem(identifier: "A", tokens: tokens)
         let itemB = _WKTextManipulationItem(identifier: "A", tokens: tokens)
 
-        #expect(itemA.isEqual(to: itemB, includingContentEquality: true))
-        #expect(itemA.isEqual(to: itemB, includingContentEquality: false))
+        expectTrue(itemA.isEqual(to: itemB, includingContentEquality: true))
+        expectTrue(itemA.isEqual(to: itemB, includingContentEquality: false))
     }
 
     @Test
@@ -4084,11 +4314,11 @@ struct TextManipulationTests {
         let itemA = _WKTextManipulationItem(identifier: "A", tokens: [tokenA1, tokenA2, tokenA3])
         let itemB = _WKTextManipulationItem(identifier: "A", tokens: [tokenB1, tokenB2])
 
-        #expect(!itemA.isEqual(to: itemB, includingContentEquality: true))
-        #expect(!itemA.isEqual(to: itemB, includingContentEquality: false))
+        expectEqual(itemA.isEqual(to: itemB, includingContentEquality: true), false)
+        expectEqual(itemA.isEqual(to: itemB, includingContentEquality: false), false)
 
-        #expect(!itemB.isEqual(to: itemA, includingContentEquality: true))
-        #expect(!itemB.isEqual(to: itemA, includingContentEquality: false))
+        expectEqual(itemB.isEqual(to: itemA, includingContentEquality: true), false)
+        expectEqual(itemB.isEqual(to: itemA, includingContentEquality: false), false)
     }
 
     @Test
@@ -4098,8 +4328,8 @@ struct TextManipulationTests {
         let itemA = _WKTextManipulationItem(identifier: "A", tokens: [tokenA])
         let itemB = _WKTextManipulationItem(identifier: "A", tokens: [tokenB])
 
-        #expect(!itemA.isEqual(to: itemB, includingContentEquality: true))
-        #expect(!itemA.isEqual(to: itemB, includingContentEquality: false))
+        expectEqual(itemA.isEqual(to: itemB, includingContentEquality: true), false)
+        expectEqual(itemA.isEqual(to: itemB, includingContentEquality: false), false)
     }
 
     @Test
@@ -4108,8 +4338,8 @@ struct TextManipulationTests {
         let itemA = _WKTextManipulationItem(identifier: nil, tokens: [token])
         let itemB = _WKTextManipulationItem(identifier: nil, tokens: [token])
 
-        #expect(itemA.isEqual(to: itemB, includingContentEquality: true))
-        #expect(itemA.isEqual(to: itemB, includingContentEquality: false))
+        expectTrue(itemA.isEqual(to: itemB, includingContentEquality: true))
+        expectTrue(itemA.isEqual(to: itemB, includingContentEquality: false))
     }
 
     @Test
@@ -4119,8 +4349,8 @@ struct TextManipulationTests {
         let itemA = _WKTextManipulationItem(identifier: "A", tokens: [tokenA])
         let itemB = _WKTextManipulationItem(identifier: "A", tokens: [tokenB])
 
-        #expect(!itemA.isEqual(to: itemB, includingContentEquality: true))
-        #expect(!itemA.isEqual(to: itemB, includingContentEquality: false))
+        expectEqual(itemA.isEqual(to: itemB, includingContentEquality: true), false)
+        expectEqual(itemA.isEqual(to: itemB, includingContentEquality: false), false)
     }
 
     @Test
@@ -4133,15 +4363,15 @@ struct TextManipulationTests {
         let itemA = _WKTextManipulationItem(identifier: "A", tokens: [tokenA1, tokenA2])
         let itemB = _WKTextManipulationItem(identifier: "A", tokens: [tokenB1, tokenB2])
 
-        #expect(itemA.isEqual(to: itemB, includingContentEquality: true))
-        #expect(itemA.isEqual(to: itemB, includingContentEquality: false))
-        #expect(itemA.isEqual(itemB))
+        expectTrue(itemA.isEqual(to: itemB, includingContentEquality: true))
+        expectTrue(itemA.isEqual(to: itemB, includingContentEquality: false))
+        expectTrue(itemA.isEqual(itemB))
 
         tokenB2.content = "something else"
 
-        #expect(!itemA.isEqual(to: itemB, includingContentEquality: true))
-        #expect(itemA.isEqual(to: itemB, includingContentEquality: false))
-        #expect(!itemA.isEqual(itemB))
+        expectEqual(itemA.isEqual(to: itemB, includingContentEquality: true), false)
+        expectTrue(itemA.isEqual(to: itemB, includingContentEquality: false))
+        expectEqual(itemA.isEqual(itemB), false)
     }
 
     @Test
@@ -4150,7 +4380,7 @@ struct TextManipulationTests {
         _ = _WKTextManipulationItem(identifier: "A", tokens: [token])
         let string = "content"
 
-        #expect(!token.isEqual(string))
-        #expect(!token.isEqual(nil))
+        expectEqual(token.isEqual(string), false)
+        expectEqual(token.isEqual(nil), false)
     }
 }

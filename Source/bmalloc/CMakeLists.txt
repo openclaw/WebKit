@@ -157,8 +157,6 @@ set(bmalloc_C_SOURCES
     libpas/src/libpas/pas_megapage_cache.c
     libpas/src/libpas/pas_monotonic_time.c
     libpas/src/libpas/pas_mte.c
-    libpas/src/libpas/pas_mte_bootstrap_free_heap.c
-    libpas/src/libpas/pas_mte_bootstrap_heap_page_provider.c
     libpas/src/libpas/pas_mte_config.c
     libpas/src/libpas/pas_page_base.c
     libpas/src/libpas/pas_page_base_config.c
@@ -451,11 +449,10 @@ set(bmalloc_PUBLIC_HEADERS
     libpas/src/libpas/pas_mar_report_crash.h
     libpas/src/libpas/pas_medium_megapage_cache.h
     libpas/src/libpas/pas_megapage_cache.h
+    libpas/src/libpas/pas_memory_flavor.h
     libpas/src/libpas/pas_min_heap.h
     libpas/src/libpas/pas_monotonic_time.h
     libpas/src/libpas/pas_mte.h
-    libpas/src/libpas/pas_mte_bootstrap_free_heap.h
-    libpas/src/libpas/pas_mte_bootstrap_heap_page_provider.h
     libpas/src/libpas/pas_mte_config.h
     libpas/src/libpas/pas_mutation_count.h
     libpas/src/libpas/pas_page_base_and_kind.h
@@ -466,7 +463,6 @@ set(bmalloc_PUBLIC_HEADERS
     libpas/src/libpas/pas_page_base_inlines.h
     libpas/src/libpas/pas_page_config_kind.h
     libpas/src/libpas/pas_page_config_size_category.h
-    libpas/src/libpas/pas_page_flags.h
     libpas/src/libpas/pas_page_granule_use_count.h
     libpas/src/libpas/pas_page_header_placement_mode.h
     libpas/src/libpas/pas_page_header_table.h
@@ -593,7 +589,6 @@ set(bmalloc_PRIVATE_HEADERS
     libpas/src/libpas/pas_bitfit_view_inlines.h
     libpas/src/libpas/pas_compact_atomic_biasing_directory_ptr.h
     libpas/src/libpas/pas_compact_atomic_bitfit_biasing_directory_ptr.h
-    libpas/src/libpas/pas_compact_atomic_bitfit_global_size_class_ptr.h
     libpas/src/libpas/pas_compact_atomic_segregated_exclusive_view_ptr.h
     libpas/src/libpas/pas_compact_atomic_segregated_heap_page_sharing_pools_ptr.h
     libpas/src/libpas/pas_compact_atomic_unsigned_ptr.h
@@ -680,6 +675,10 @@ set(bmalloc_COMPILE_OPTIONS
     -Wno-cast-align
     -Wno-missing-field-initializers
 )
+
+if (NOT MSVC)
+    list(APPEND bmalloc_COMPILE_OPTIONS $<$<CONFIG:Debug>:-O3>)
+endif ()
 
 set(bmalloc_INTERFACE_LIBRARIES bmalloc)
 set(bmalloc_INTERFACE_INCLUDE_DIRECTORIES ${bmalloc_FRAMEWORK_HEADERS_DIR})

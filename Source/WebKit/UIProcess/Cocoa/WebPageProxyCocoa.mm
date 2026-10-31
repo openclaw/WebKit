@@ -112,6 +112,7 @@
 #import <pal/spi/ios/BrowserEngineKitSPI.h>
 #import <pal/spi/mac/QuarantineSPI.h>
 #import <wtf/BlockPtr.h>
+#import <wtf/Borrow.h>
 #import <wtf/SoftLinking.h>
 #import <wtf/cf/TypeCastsCF.h>
 #import <wtf/cf/VectorCF.h>
@@ -190,7 +191,7 @@ void WebPageProxy::didGeneratePageLoadTiming(const WebPageLoadTiming& timing)
         state->didGeneratePageLoadTiming(timing);
 }
 
-static bool NODELETE exceedsRenderTreeSizeSizeThreshold(uint64_t thresholdSize, uint64_t committedSize)
+static bool LEGACY_NODELETE exceedsRenderTreeSizeSizeThreshold(uint64_t thresholdSize, uint64_t committedSize)
 {
     const double thesholdSizeFraction = 0.5; // Empirically-derived.
     return committedSize > thresholdSize * thesholdSizeFraction;
@@ -319,7 +320,7 @@ void WebPageProxy::beginSafeBrowsingCheck(const URL& url, API::Navigation& navig
 
             navigation->setSafeBrowsingCheckOngoing(redirectChainIndex, false);
             if (error) {
-                RELEASE_LOG(Loading, "beginSafeBrowsingCheck: error navigationID=%" PRIu64, navigation->navigationID().toUInt64());
+                RELEASE_LOG(Loading, "beginSafeBrowsingCheck: error navigationID=%" PRIu64, navigation->navigationID().object().toUInt64());
                 if (!navigation->safeBrowsingCheckOngoing())
                     navigation->fireSafeBrowsingCheckCompletionCallbacks();
                 if (protectedThis->m_committedMainFrameNavigationID == navigation->navigationID())
@@ -334,10 +335,11 @@ void WebPageProxy::beginSafeBrowsingCheck(const URL& url, API::Navigation& navig
                     [historyDelegate _webView:webView.get() didReceiveSafeBrowsingResult:result forURL:url.createNSURL().get()];
             }
 
-            for (SSBServiceLookupResult *lookupResult in [result serviceLookupResults]) {
+            // FIXME: Remove the suppression once https://github.com/llvm/llvm-project/pull/230818 is deployed (rdar://189710680).
+            for (SUPPRESS_UNRETAINED_LOCAL SSBServiceLookupResult *lookupResult in [result serviceLookupResults]) {
                 SAFE_BROWSING_LOOKUP_RESULT_ADDITIONS(lookupResult);
                 if (lookupResult.isPhishing || lookupResult.isMalware || lookupResult.isUnwantedSoftware || SAFE_BROWSING_RESULT_CHECK_ADDITIONS) {
-                    RELEASE_LOG(Loading, "beginSafeBrowsingCheck: threat found navigationID=%" PRIu64 ", type=%s", navigation->navigationID().toUInt64(), lookupResult.isPhishing ? "phishing" : lookupResult.isMalware ? "malware" : "unwanted");
+                    RELEASE_LOG(Loading, "beginSafeBrowsingCheck: threat found navigationID=%" PRIu64 ", type=%s", navigation->navigationID().object().toUInt64(), lookupResult.isPhishing ? "phishing" : lookupResult.isMalware ? "malware" : "unwanted");
                     navigation->setSafeBrowsingWarning(BrowsingWarning::create(url, forMainFrameNavigation, BrowsingWarning::SafeBrowsingWarningData { lookupResult }));
                     break;
                 }
@@ -349,7 +351,7 @@ void WebPageProxy::beginSafeBrowsingCheck(const URL& url, API::Navigation& navig
             navigation->fireSafeBrowsingCheckCompletionCallbacks();
 
             if (navigation->safeBrowsingWarning()) {
-                RELEASE_LOG(Loading, "beginSafeBrowsingCheck: showing warning navigationID=%" PRIu64, navigation->navigationID().toUInt64());
+                RELEASE_LOG(Loading, "beginSafeBrowsingCheck: showing warning navigationID=%" PRIu64, navigation->navigationID().object().toUInt64());
                 if (navigation->safeBrowsingWarning()->forMainFrameNavigation()) {
                     RefPtr safeBrowsingWarning = navigation->safeBrowsingWarning();
                     navigation->setSafeBrowsingWarning(nullptr);
@@ -364,7 +366,7 @@ void WebPageProxy::beginSafeBrowsingCheck(const URL& url, API::Navigation& navig
                     protectedThis->showBrowsingWarning(WTF::move(safeBrowsingWarning));
                 }
             } else {
-                RELEASE_LOG(Loading, "beginSafeBrowsingCheck: no threat, completing navigationID=%" PRIu64, navigation->navigationID().toUInt64());
+                RELEASE_LOG(Loading, "beginSafeBrowsingCheck: no threat, completing navigationID=%" PRIu64, navigation->navigationID().object().toUInt64());
                 if (protectedThis->m_committedMainFrameNavigationID == navigation->navigationID())
                     protectedThis->completeSafeBrowsingCheckForModals(true);
             }
@@ -456,10 +458,11 @@ void WebPageProxy::createSandboxExtensionsIfNeeded(const Vector<String>& files, 
 
     if (files.size() == 1) {
         BOOL isDirectory;
-        if ([[NSFileManager defaultManager] fileExistsAtPath:files[0].createNSString().get() isDirectory:&isDirectory] && !isDirectory) {
+        Borrow borrowedFiles = files;
+        if ([[NSFileManager defaultManager] fileExistsAtPath:borrowedFiles[0].createNSString().get() isDirectory:&isDirectory] && !isDirectory) {
             if (auto handle = createReadOnlySandboxExtensionForProcess(process, "/"_s))
                 fileReadHandle = WTF::move(*handle);
-            else if (auto handle = createReadOnlySandboxExtensionForProcess(process, files[0]))
+            else if (auto handle = createReadOnlySandboxExtensionForProcess(process, borrowedFiles[0]))
                 fileReadHandle = WTF::move(*handle);
             willAcquireUniversalFileReadSandboxExtension(process);
         }
@@ -470,7 +473,7 @@ void WebPageProxy::createSandboxExtensionsIfNeeded(const Vector<String>& files, 
 
 void WebPageProxy::createSandboxExtensionsForUpload(const WebProcessProxy& process, const Vector<String>& files, Vector<SandboxExtension::Handle>& fileUploadHandles)
 {
-    for (auto& file : files) {
+    for (auto& file : borrow(files)) {
         if (![[NSFileManager defaultManager] fileExistsAtPath:file.createNSString().get()])
             continue;
         if (auto handle = createReadOnlySandboxExtensionForProcess(process, file))
@@ -576,8 +579,22 @@ void WebPageProxy::performDictionaryLookupAtLocation(const WebCore::FloatPoint& 
 {
     if (!hasRunningProcess())
         return;
-    
-    protect(legacyMainFrameProcess())->send(Messages::WebPage::PerformDictionaryLookupAtLocation(point), webPageIDInMainFrameProcess());
+
+    RefPtr mainFrame = m_mainFrame;
+    if (!mainFrame)
+        return;
+
+    performDictionaryLookupAtLocationInFrame(mainFrame->frameID(), point);
+}
+
+void WebPageProxy::performDictionaryLookupAtLocationInFrame(WebCore::FrameIdentifier frameID, const WebCore::FloatPoint& point)
+{
+    sendWithAsyncReplyToProcessContainingFrame(frameID, Messages::WebPage::PerformDictionaryLookupAtLocation(frameID, point), Messages::WebPage::PerformDictionaryLookupAtLocation::Reply { [weakThis = WeakPtr { *this }](std::optional<WebCore::RemoteUserInputEventData> remoteUserInputEventData) {
+        RefPtr protectedThis = weakThis.get();
+        if (!protectedThis || !remoteUserInputEventData)
+            return;
+        protectedThis->performDictionaryLookupAtLocationInFrame(remoteUserInputEventData->targetFrameID, WebCore::FloatPoint(remoteUserInputEventData->transformedPoint));
+    } });
 }
 
 void WebPageProxy::insertDictatedTextAsync(const String& text, const EditingRange& replacementRange, const Vector<TextAlternativeWithRange>& dictationAlternativesWithRange, InsertTextOptions&& options)
@@ -590,7 +607,7 @@ void WebPageProxy::insertDictatedTextAsync(const String& text, const EditingRang
         return;
 
     Vector<DictationAlternative> dictationAlternatives;
-    for (const auto& alternativeWithRange : dictationAlternativesWithRange) {
+    for (const auto& alternativeWithRange : borrow(dictationAlternativesWithRange)) {
         if (auto context = pageClient->addDictationAlternatives(alternativeWithRange.alternatives.get()))
             dictationAlternatives.append({ alternativeWithRange.range, *context });
     }
@@ -927,7 +944,7 @@ void WebPageProxy::createTextFragmentDirectiveFromSelection(CompletionHandler<vo
     if (!hasRunningProcess())
         return;
 
-    protect(legacyMainFrameProcess())->sendWithAsyncReply(Messages::WebPage::CreateTextFragmentDirectiveFromSelection(), WTF::move(completionHandler), webPageIDInMainFrameProcess());
+    sendWithAsyncReplyToFocusedOrMainFrameProcess(Messages::WebPage::CreateTextFragmentDirectiveFromSelection(), Messages::WebPage::CreateTextFragmentDirectiveFromSelection::Reply { WTF::move(completionHandler) });
 }
 
 void WebPageProxy::getTextFragmentRanges(CompletionHandler<void(const Vector<EditingRange>&&)>&& completionHandler)
@@ -943,6 +960,12 @@ void WebPageProxy::getTextFragmentRanges(CompletionHandler<void(const Vector<Edi
 #if ENABLE(APP_HIGHLIGHTS)
 void WebPageProxy::createAppHighlightInSelectedRange(WebCore::CreateNewGroupForHighlight createNewGroup, WebCore::HighlightRequestOriginatedInApp requestOriginatedInApp)
 {
+    if (RefPtr frame = focusedOrMainFrame())
+        createAppHighlightInSelectedRange(frame->frameID(), createNewGroup, requestOriginatedInApp);
+}
+
+void WebPageProxy::createAppHighlightInSelectedRange(WebCore::FrameIdentifier frameID, WebCore::CreateNewGroupForHighlight createNewGroup, WebCore::HighlightRequestOriginatedInApp requestOriginatedInApp)
+{
     if (!hasRunningProcess())
         return;
 
@@ -956,7 +979,7 @@ void WebPageProxy::createAppHighlightInSelectedRange(WebCore::CreateNewGroupForH
         if (RefPtr pageClient = this->pageClient())
             pageClient->storeAppHighlight(highlight);
     };
-    sendWithAsyncReplyToFocusedOrMainFrameProcess(Messages::WebPage::CreateAppHighlightInSelectedRange(createNewGroup, requestOriginatedInApp), Messages::WebPage::CreateAppHighlightInSelectedRange::Reply { WTF::move(completionHandler) });
+    sendWithAsyncReplyToProcessContainingFrame(frameID, Messages::WebPage::CreateAppHighlightInSelectedRange(frameID, createNewGroup, requestOriginatedInApp), Messages::WebPage::CreateAppHighlightInSelectedRange::Reply { WTF::move(completionHandler) });
 }
 
 void WebPageProxy::restoreAppHighlightsAndScrollToIndex(const Vector<Ref<SharedMemory>>& highlights, const std::optional<unsigned> index)
@@ -1214,7 +1237,8 @@ void WebPageProxy::setCocoaView(WKWebView *view)
 
 void WebPageProxy::replaceImageForRemoveBackground(const ElementContext& elementContext, const Vector<String>& types, std::span<const uint8_t> data)
 {
-    protect(legacyMainFrameProcess())->send(Messages::WebPage::ReplaceImageForRemoveBackground(elementContext, types, data), webPageIDInMainFrameProcess());
+    if (RefPtr process = processForElementContext(elementContext))
+        process->send(Messages::WebPage::ReplaceImageForRemoveBackground(elementContext, types, data), *elementContext.webPageIdentifier);
 }
 
 #endif
@@ -2323,21 +2347,21 @@ void WebPageProxy::selectPositionAtPoint(std::optional<WebCore::FrameIdentifier>
     } });
 }
 
-void WebPageProxy::selectTextWithGranularityAtPoint(std::optional<WebCore::FrameIdentifier> frameID, WebCore::IntPoint point, WebCore::TextGranularity granularity, bool isInteractingWithFocusedElement, CompletionHandler<void()>&& callbackFunction)
+void WebPageProxy::selectTextWithGranularityAtPoint(std::optional<WebCore::FrameIdentifier> frameID, WebCore::IntPoint point, WebCore::TextGranularity granularity, bool isInteractingWithFocusedElement, CompletionHandler<void(bool preventedByPage)>&& callbackFunction)
 {
     if (!hasRunningProcess()) {
-        callbackFunction();
+        callbackFunction(false);
         return;
     }
 
-    sendWithAsyncReplyToProcessContainingFrame(frameID, Messages::WebPage::SelectTextWithGranularityAtPoint(frameID, point, granularity, isInteractingWithFocusedElement), Messages::WebPage::SelectTextWithGranularityAtPoint::Reply { [weakThis = WeakPtr { *this }, granularity, isInteractingWithFocusedElement, callbackFunction = WTF::move(callbackFunction)](std::optional<WebCore::RemoteUserInputEventData> remoteUserInputEventData) mutable {
+    sendWithAsyncReplyToProcessContainingFrame(frameID, Messages::WebPage::SelectTextWithGranularityAtPoint(frameID, point, granularity, isInteractingWithFocusedElement), Messages::WebPage::SelectTextWithGranularityAtPoint::Reply { [weakThis = WeakPtr { *this }, granularity, isInteractingWithFocusedElement, callbackFunction = WTF::move(callbackFunction)](std::optional<WebCore::RemoteUserInputEventData> remoteUserInputEventData, bool preventedByPage) mutable {
         RefPtr protectedThis = weakThis.get();
         if (protectedThis && remoteUserInputEventData) {
             // The gesture landed on a cross-origin frame; re-dispatch it into that frame's process.
             protectedThis->selectTextWithGranularityAtPoint(remoteUserInputEventData->targetFrameID, roundedIntPoint(FloatPoint { remoteUserInputEventData->transformedPoint }), granularity, isInteractingWithFocusedElement, WTF::move(callbackFunction));
             return;
         }
-        callbackFunction();
+        callbackFunction(preventedByPage);
     } });
 }
 
@@ -2410,6 +2434,16 @@ void WebPageProxy::updateVisibleContentRectsLocally(const VisibleContentRectUpda
 {
     internals().lastVisibleContentRectUpdate = visibleContentRectUpdate;
 }
+
+#if PLATFORM(MAC)
+bool WebPageProxy::isRedundantUnstableVisibleContentRectUpdate(const VisibleContentRectUpdateInfo& visibleContentRectUpdate) const
+{
+    const auto& lastUpdate = internals().lastVisibleContentRectUpdate;
+    if (!lastUpdate || !lastUpdate->inStableState() || visibleContentRectUpdate.inStableState())
+        return false;
+    return equalIgnoringViewStability(*lastUpdate, visibleContentRectUpdate);
+}
+#endif
 
 FloatRect WebPageProxy::updateVisibleContentRectsAndAdjustLayers(const VisibleContentRectUpdateInfo& visibleContentRectUpdate, bool sendEvenIfUnchanged)
 {
@@ -2498,11 +2532,6 @@ WebCore::FloatRect WebPageProxy::computeLayoutViewportRect(const FloatRect& unob
 
     double minimumScale = pageClient->minimumZoomScale();
     bool isBelowMinimumScale = displayedContentScale < minimumScale && !WebKit::scalesAreEssentiallyEqual(displayedContentScale, minimumScale);
-
-#if PLATFORM(MAC)
-    if (delegatesScalingToUIProcess())
-        isBelowMinimumScale = false;
-#endif
 
     // Below the minimum scale the viewport's off-document edges get pulled back onto the document, so fixed
     // elements stay with the page as it shrinks inside the view.
@@ -2598,10 +2627,10 @@ void WebPageProxy::cancelPotentialTap()
     protect(legacyMainFrameProcess())->send(Messages::WebPage::CancelPotentialTap(), webPageIDInMainFrameProcess());
 }
 
-void WebPageProxy::didGetTapHighlightGeometries(WebKit::TapIdentifier requestID, const WebCore::Color& color, const Vector<WebCore::FloatQuad>& highlightedQuads, const WebCore::IntSize& topLeftRadius, const WebCore::IntSize& topRightRadius, const WebCore::IntSize& bottomLeftRadius, const WebCore::IntSize& bottomRightRadius, bool nodeHasBuiltInClickHandling)
+void WebPageProxy::didGetTapHighlightGeometries(WebKit::TapIdentifier requestID, const WebCore::Color& color, const Vector<WebCore::FloatQuad>& highlightedQuads, WebCore::CornerRadii&& cornerRadii, bool nodeHasBuiltInClickHandling)
 {
     if (RefPtr pageClient = this->pageClient())
-        pageClient->didGetTapHighlightGeometries(requestID, color, highlightedQuads, topLeftRadius, topRightRadius, bottomLeftRadius, bottomRightRadius, nodeHasBuiltInClickHandling);
+        pageClient->didGetTapHighlightGeometries(requestID, color, highlightedQuads, WTF::move(cornerRadii), nodeHasBuiltInClickHandling);
 }
 
 void WebPageProxy::commitPotentialTapFailed()

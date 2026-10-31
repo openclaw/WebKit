@@ -575,8 +575,9 @@ TEST(WebKit, LockdownModeDefaultFirstUseMessage)
     [webView addToTestWindow];
 
     EXPECT_EQ(presentViewControllerCallCount, 0);
-    [webView waitForNextPresentationUpdate];
-    EXPECT_EQ(presentViewControllerCallCount, 1);
+    TestWebKitAPI::Util::waitFor([&] {
+        return presentViewControllerCallCount == 1;
+    });
 
     EXPECT_TRUE([[NSUserDefaults standardUserDefaults] boolForKey:WebKitLockdownModeAlertShownKey]);
     
@@ -686,8 +687,9 @@ TEST(WebKit, LockdownModeAskAgainFirstUseMessage)
     [secondWebView addToTestWindow];
 
     EXPECT_EQ(presentViewControllerCallCount, 0);
-    [secondWebView waitForNextPresentationUpdate];
-    EXPECT_EQ(presentViewControllerCallCount, 1);
+    TestWebKitAPI::Util::waitFor([&] {
+        return presentViewControllerCallCount == 1;
+    });
 
     EXPECT_FALSE(showedCustomFirstUseMessage);
     EXPECT_FALSE(requestFutureFirstUseMessage);
@@ -1256,31 +1258,6 @@ static bool readytoResign;
 
 @end
 
-@interface AutoFillAvailableDelegate : NSObject <WKUIDelegatePrivate>
-@end
-
-@implementation AutoFillAvailableDelegate
-
-- (void)webView:(WKWebView *)webView runJavaScriptAlertPanelWithMessage:(NSString *)message initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)())completionHandler
-{
-    completionHandler();
-    done = true;
-    ASSERT_STREQ(message.UTF8String, "autofill available");
-}
-
-@end
-
-TEST(WebKit, AutoFillAvailable)
-{
-    WKWebViewConfiguration *configuration = [WKWebViewConfiguration _test_configurationWithTestPlugInClassName:@"AutoFillAvailable"];
-
-    RetainPtr webView = adoptNS([[TestWKWebView alloc] initWithFrame:CGRectMake(0, 0, 800, 600) configuration:configuration]);
-    RetainPtr delegate = adoptNS([[AutoFillAvailableDelegate alloc] init]);
-    [webView setUIDelegate:delegate.get()];
-    [webView evaluateJavaScript:@"" completionHandler: nil]; // Ensure the WebProcess and injected bundle are running.
-    TestWebKitAPI::Util::run(&done);
-}
-
 @interface InjectedBundleNodeHandleIsTextFieldDelegate : NSObject <WKUIDelegatePrivate>
 @end
 
@@ -1494,7 +1471,6 @@ TEST(WebKit, SaveDataToFile)
             [[configuration preferences] _setEnabled:YES forFeature:feature];
     }
     RetainPtr webView = adoptNS([[TestWKWebView alloc] initWithFrame:CGRectMake(0, 0, 800, 600) configuration:configuration.get()]);
-    [webView _setWindowOcclusionDetectionEnabled:NO];
     RetainPtr delegate = adoptNS([[SaveDataToFileDelegate alloc] init]);
     [webView setUIDelegate:delegate.get()];
     [webView setNavigationDelegate:delegate.get()];
@@ -1534,7 +1510,6 @@ static void runOpenPDFWithPreviewTraversalTest(NSString *injectedFilename, NSStr
     }
 
     RetainPtr webView = adoptNS([[TestWKWebView alloc] initWithFrame:CGRectMake(0, 0, 800, 600) configuration:configuration.get()]);
-    [webView _setWindowOcclusionDetectionEnabled:NO];
 
     RetainPtr delegate = adoptNS([OpenPDFWithPreviewDelegate new]);
     [webView setUIDelegate:delegate.get()];

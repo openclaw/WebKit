@@ -26,17 +26,15 @@
 #include "config.h"
 #include "FrameDebugger.h"
 
-#include "ActiveDOMObject.h"
 #include "CommonVM.h"
 #include "DOMWrapperWorld.h"
-#include "Document.h"
+#include "DebuggerSuspensionController.h"
 #include "JSDOMExceptionHandling.h"
 #include "JSDOMWindowCustom.h"
 #include "JSWindowProxy.h"
 #include "LocalFrame.h"
 #include "LocalFrameInlines.h"
 #include "Page.h"
-#include "ScriptController.h"
 #include "Timer.h"
 #include "WindowProxy.h"
 #include <JavaScriptCore/JSLock.h>
@@ -63,6 +61,7 @@ FrameDebugger::FrameDebugger(LocalFrame& frame)
 
 FrameDebugger::~FrameDebugger()
 {
+    ASSERT(s_pausedFrameDebugger != this);
     if (s_pausedFrameDebugger == this)
         s_pausedFrameDebugger = nullptr;
 }
@@ -71,13 +70,9 @@ void FrameDebugger::attachDebugger()
 {
     JSC::Debugger::attachDebugger();
 
-    RefPtr frame = m_frame.get();
-    if (!frame)
-        return;
-
     m_isAttachedToFrame = true;
 
-    Ref windowProxy = frame->windowProxy();
+    Ref windowProxy = protect(m_frame)->windowProxy();
     for (auto& jsWindowProxy : windowProxy->jsWindowProxiesAsVector()) {
         auto* globalObject = jsWindowProxy->window();
         if (globalObject && !globalObject->debugger())
@@ -116,17 +111,17 @@ void FrameDebugger::didPause(JSGlobalObject* globalObject)
     ASSERT(!s_pausedFrameDebugger);
     s_pausedFrameDebugger = this;
 
-    setJavaScriptPausedInAllPages(true);
+    DebuggerSuspensionController::frameDebuggerDidPause(protect(m_frame.get()));
 }
 
 void FrameDebugger::didContinue(JSGlobalObject* globalObject)
 {
     JSC::Debugger::didContinue(globalObject);
 
-    setJavaScriptPausedInAllPages(false);
-
     if (s_pausedFrameDebugger == this)
         s_pausedFrameDebugger = nullptr;
+
+    DebuggerSuspensionController::frameDebuggerDidContinue();
 }
 
 bool FrameDebugger::isPauseBlockedByAnotherDebugger() const
@@ -159,10 +154,7 @@ void FrameDebugger::runEventLoopWhilePausedInternal()
 {
     TimerBase::fireTimersInNestedEventLoop();
 
-    RefPtr protectedFrame = m_frame.get();
-    if (!protectedFrame)
-        return;
-
+    Ref protectedFrame = m_frame;
     while (!m_doneProcessingDebuggerEvents) {
         if (!platformShouldContinueRunningEventLoopWhilePaused())
             break;
@@ -186,35 +178,6 @@ void FrameDebugger::reportException(JSGlobalObject* state, JSC::Exception* excep
     JSC::Debugger::reportException(state, exception);
 
     WebCore::reportException(state, exception);
-}
-
-void FrameDebugger::setJavaScriptPausedInAllPages(bool paused)
-{
-    Page::forEachPage([&](Page& page) {
-        page.forEachLocalFrame([&](LocalFrame& frame) {
-            setJavaScriptPaused(frame, paused);
-        });
-    });
-}
-
-void FrameDebugger::setJavaScriptPaused(LocalFrame& frame, bool paused)
-{
-    Ref protectedFrame = frame;
-    CheckedRef script = protectedFrame->script();
-    if (!script->canExecuteScripts(ReasonForCallingCanExecuteScripts::NotAboutToExecuteScript))
-        return;
-
-    script->setPaused(paused);
-
-    ASSERT(protectedFrame->document());
-    Ref document = *protectedFrame->document();
-    if (paused) {
-        document->suspendScriptedAnimationControllerCallbacks();
-        document->suspendActiveDOMObjects(ReasonForSuspension::JavaScriptDebuggerPaused);
-    } else {
-        document->resumeActiveDOMObjects(ReasonForSuspension::JavaScriptDebuggerPaused);
-        document->resumeScriptedAnimationControllerCallbacks();
-    }
 }
 
 #if !PLATFORM(MAC)

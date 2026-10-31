@@ -36,7 +36,7 @@ namespace JSC {
 
 DEFINE_ALLOCATOR_WITH_HEAP_IDENTIFIER(StringSourceProvider);
 
-SourceProvider::SourceProvider(const SourceOrigin& sourceOrigin, String&& sourceURL, String&& preRedirectURL, SourceTaintedOrigin taintedness, const TextPosition& startPosition, SourceProviderSourceType sourceType)
+SourceProvider::SourceProvider(const SourceOrigin& sourceOrigin, String&& sourceURL, String&& preRedirectURL, SourceTaintedness taintedness, const TextPosition& startPosition, SourceProviderSourceType sourceType)
     : m_sourceType(sourceType)
     , m_sourceOrigin(sourceOrigin)
     , m_sourceURL(WTF::move(sourceURL))
@@ -45,6 +45,14 @@ SourceProvider::SourceProvider(const SourceOrigin& sourceOrigin, String&& source
     , m_taintedness(taintedness)
 {
 }
+
+#if USE(BUN_JSC_ADDITIONS)
+SourceProvider::SourceProvider(const SourceOrigin& sourceOrigin, String&& sourceURL, String&& preRedirectURL, SourceTaintedness taintedness, const TextPosition& startPosition, SourceProviderSourceType sourceType, SourceProvenance provenance)
+    : SourceProvider(sourceOrigin, WTF::move(sourceURL), WTF::move(preRedirectURL), taintedness, startPosition, sourceType)
+{
+    m_provenance = provenance;
+}
+#endif
 
 SourceProvider::~SourceProvider() = default;
 
@@ -391,8 +399,12 @@ static ALWAYS_INLINE size_t lineStartAfterTerminator(std::span<const CharType> t
 
 LineColumn BuiltinsSourceProvider::lineColumnInTextForOffset(unsigned offset)
 {
+    StringView wholeSource = source();
+    auto allText = wholeSource.span8();
+    if (!allText.data())
+        return { };
     unsigned start = *(std::ranges::upper_bound(m_starts, offset) - 1);
-    auto text = source().span8().subspan(start, offset - start);
+    auto text = allText.subspan(start, offset - start);
     unsigned line = 0;
     size_t lineStart = 0;
     while (lineStart < text.size()) {
@@ -404,5 +416,12 @@ LineColumn BuiltinsSourceProvider::lineColumnInTextForOffset(unsigned offset)
     }
     return { line, static_cast<unsigned>(text.size() - lineStart) };
 }
+
+#if USE(BUN_JSC_ADDITIONS)
+std::optional<uint32_t> BuiltinsSourceProvider::builtinFunctionAt(unsigned offset) const
+{
+    return m_firstID + static_cast<uint32_t>(std::ranges::upper_bound(m_starts, offset) - m_starts.begin()) - 1;
+}
+#endif
 
 } // namespace JSC

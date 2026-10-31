@@ -35,6 +35,7 @@
 #include "APIObject.h"
 #include "APISecurityOrigin.h"
 #include "APIString.h"
+#include "DisplayOnlyImageProxy.h"
 #include "DrawingArea.h"
 #include "FindController.h"
 #include "FrameInfoData.h"
@@ -137,6 +138,7 @@
 #include <WebCore/ViewportConfiguration.h>
 #include <WebCore/WindowFeatures.h>
 #include <wtf/JSONValues.h>
+#include <wtf/NativePromise.h>
 #include <wtf/TZoneMallocInlines.h>
 
 #if HAVE(WEBGPU_IMPLEMENTATION)
@@ -299,7 +301,7 @@ void WebChromeClient::unfocus()
         page->send(Messages::WebPageProxy::SetFocus(false, std::nullopt));
 }
 
-#if PLATFORM(COCOA)
+#if PLATFORM(COCOA) || PLATFORM(GTK) || PLATFORM(WPE)
 
 void WebChromeClient::elementDidFocus(Element& element, const FocusOptions& options)
 {
@@ -325,11 +327,35 @@ void WebChromeClient::focusedElementDidChangeInputMode(Element& element, InputMo
         page->focusedElementDidChangeInputMode(element, mode);
 }
 
+#endif
+
+#if PLATFORM(IOS_FAMILY)
+
 void WebChromeClient::focusedSelectElementDidChangeOptions(const WebCore::HTMLSelectElement& element)
 {
     if (RefPtr page = m_page.get())
         page->focusedSelectElementDidChangeOptions(element);
 }
+
+#endif
+
+#if PLATFORM(GTK) || PLATFORM(WPE)
+
+void WebChromeClient::focusedElementDidChangeReadOnly(Element& element)
+{
+    if (RefPtr page = m_page.get())
+        page->focusedElementDidChangeReadOnly(element);
+}
+
+void WebChromeClient::focusedElementDidChangeType(Element& element)
+{
+    if (RefPtr page = m_page.get())
+        page->focusedElementDidChangeType(element);
+}
+
+#endif
+
+#if PLATFORM(COCOA)
 
 void WebChromeClient::makeFirstResponder()
 {
@@ -357,13 +383,11 @@ void WebChromeClient::takeFocus(FocusDirection direction)
         page->send(Messages::WebPageProxy::TakeFocus(direction));
 }
 
-void WebChromeClient::focusedElementChanged(Element* element, LocalFrame* frame, FocusOptions options, BroadcastFocusedElement broadcast)
+void WebChromeClient::focusedElementChanged(Element* element, LocalFrame* frame, FocusOptions)
 {
     RefPtr coreFrame =  element ? element->document().frame() : frame;
     RefPtr webFrame = coreFrame ? WebFrame::fromCoreFrame(*coreFrame) : nullptr;
     RefPtr page = m_page.get();
-    if (page && broadcast == BroadcastFocusedElement::Yes)
-        protect(WebProcess::singleton().parentProcessConnection())->send(Messages::WebPageProxy::FocusedElementChanged(webFrame ? std::make_optional(webFrame->frameID()) : std::nullopt, options), page->identifier());
 
     RefPtr inputElement = dynamicDowncast<HTMLInputElement>(element);
     if (!inputElement || !inputElement->isText())
@@ -421,11 +445,13 @@ RefPtr<Page> WebChromeClient::createWindow(LocalFrame& frame, const String& open
         navigationAction.isInitialFrameSrcLoad(),
         navigationAction.isContentRuleListRedirect(),
         openedMainFrameName,
+        navigationAction.openedByScriptDomain(), /* openedByScriptDomain */
         std::nullopt, /* targetBackForwardItemIdentifier */
         std::nullopt, /* sourceBackForwardItemIdentifier */
         WebCore::LockHistory::No,
         WebCore::LockBackForwardList::No,
         WebCore::NavigationHistoryBehavior::Auto,
+        WebCore::ReplaceIfNotCompletelyLoaded::No,
         { }, /* clientRedirectSourceForHistory */
         frame.effectiveSandboxFlags(),
         frame.document()->referrerPolicy(),
@@ -435,6 +461,7 @@ RefPtr<Page> WebChromeClient::createWindow(LocalFrame& frame, const String& open
         { }, /* originatorAdvancedPrivacyProtections */
 #if PLATFORM(MAC) || HAVE(UIKIT_WITH_MOUSE_SUPPORT)
         std::nullopt, /* webHitTestResultData */
+        std::nullopt, /* hitTestJSHandleInfo */
 #endif
         webFrame->info(), /* originatingFrameInfoData */
         webFrame->page()->webPageProxyIdentifier(),
@@ -590,7 +617,7 @@ void WebChromeClient::rootFrameRemoved(const WebCore::LocalFrame& frame)
         drawingArea->removeRootFrame(frame.frameID());
 }
 
-static bool NODELETE shouldSuppressJavaScriptDialogs(LocalFrame& frame)
+static bool LEGACY_NODELETE shouldSuppressJavaScriptDialogs(LocalFrame& frame)
 {
     if (frame.opener() && frame.loader().stateMachine().isDisplayingInitialEmptyDocument() && frame.loader().provisionalDocumentLoader())
         return true;
@@ -1197,6 +1224,21 @@ WebCore::DisplayRefreshMonitorFactory* WebChromeClient::displayRefreshMonitorFac
 }
 
 #if ENABLE(GPU_PROCESS)
+#if HAVE(IOSURFACE)
+bool WebChromeClient::useIOSurfaceWebKitBehavior() const
+{
+#if USE(APPLE_INTERNAL_SDK)
+    RefPtr page = m_page.get();
+    if (!page)
+        return false;
+    auto preferences = page->sharedPreferencesForWebProcess();
+    return preferences && preferences->useIOSurfaceWebKitBehavior;
+#else
+    return false;
+#endif
+}
+#endif
+
 RefPtr<ImageBuffer> WebChromeClient::createImageBuffer(const FloatSize& size, RenderingMode renderingMode, RenderingPurpose purpose, float resolutionScale, const ColorSpace& colorSpace, ImageBufferFormat pixelFormat) const
 {
     if (WebProcess::singleton().shouldUseRemoteRenderingFor(purpose)) {
@@ -1245,6 +1287,17 @@ void WebChromeClient::offscreenCanvasPlaceholderLayerChanged(WebCore::Placeholde
         page->send(Messages::WebPageProxy::SetOffscreenCanvasPlaceholderLayer(identifier, layerID));
 }
 #endif
+
+#if HAVE(IOSURFACE)
+RefPtr<NativePromise<Ref<WebCore::NativeImage>, void>> WebChromeClient::createDisplayOnlyImage(WebCore::FrameIdentifier rootFrameIdentifier, const WebCore::FloatSize& size, float scale, const WebCore::ColorSpace& colorSpace, NOESCAPE const Function<void(WebCore::GraphicsContext&)>& paint)
+{
+    RefPtr page = m_page.get();
+    // Only layers composited in the UI process can display the result.
+    if (!page || !page->corePage()->settings().remoteSnapshottingEnabled() || !isUsingUISideCompositing())
+        return nullptr;
+    return DisplayOnlyImageProxy::create(*page, rootFrameIdentifier, size, scale, colorSpace, paint);
+}
+#endif
 #endif
 
 std::unique_ptr<WebCore::WorkerClient> WebChromeClient::createWorkerClient(SerialFunctionDispatcher& dispatcher)
@@ -1275,7 +1328,7 @@ RefPtr<GraphicsContextGL> WebChromeClient::createGraphicsContextGL(const Graphic
 #endif
 
 #if HAVE(WEBGPU_IMPLEMENTATION)
-RefPtr<WebCore::WebGPU::GPU> WebChromeClient::createGPUForWebGPU() const
+RefPtr<WebCore::WebGPUIntegration> WebChromeClient::createGPUForWebGPU() const
 {
 #if ENABLE(GPU_PROCESS)
     RefPtr page = m_page.get();
@@ -1283,7 +1336,7 @@ RefPtr<WebCore::WebGPU::GPU> WebChromeClient::createGPUForWebGPU() const
         return nullptr;
     return RemoteGPUProxy::create(WebGPU::DowncastConvertToBackingContext::create(), ModelDowncastConvertToBackingContext::create(), page.releaseNonNull());
 #else
-    return WebCore::WebGPU::create([](WebCore::WebGPU::WorkItem&& workItem) {
+    return WebCore::createWebGPUIntegration([](Function<void()>&& workItem) {
         callOnMainRunLoop(WTF::move(workItem));
     }, nullptr);
 #endif
@@ -1418,6 +1471,12 @@ void WebChromeClient::renderingUpdateFramesPerSecondChanged()
 
     if (RefPtr drawingArea = page->drawingArea())
         drawingArea->renderingUpdateFramesPerSecondChanged();
+}
+
+void WebChromeClient::syncLocalFrameInfoToRemote()
+{
+    if (RefPtr page = m_page.get())
+        page->broadcastFrameGeometryUpdatesIfNeeded();
 }
 
 unsigned WebChromeClient::remoteImagesCountForTesting() const
@@ -1995,6 +2054,12 @@ void WebChromeClient::continueAccessibilitySearchFromChildFrame(FrameIdentifier 
     else
         callback({ });
 }
+
+void WebChromeClient::relayAccessibilitySelectedTextChangeToMainFrame(FrameIdentifier frameID, AXRemoteFrameSelectedTextChange&& change)
+{
+    if (RefPtr page = m_page)
+        page->send(Messages::WebPageProxy::RelayAccessibilitySelectedTextChangeToMainFrame(frameID, WTF::move(change)));
+}
 #endif
 
 void WebChromeClient::isPlayingMediaDidChange(MediaProducerMediaStateFlags state)
@@ -2054,16 +2119,16 @@ bool WebChromeClient::hasRelevantSelectionServices(bool isTextOnly) const
     return (isTextOnly && WebProcess::singleton().hasSelectionServices()) || WebProcess::singleton().hasRichContentServices();
 }
 
-void WebChromeClient::handleImageServiceClick(WebCore::FrameIdentifier frameID, const IntPoint& point, Image& image, HTMLImageElement& element)
+bool WebChromeClient::handleImageServiceClick(WebCore::FrameIdentifier frameID, const IntPoint& point, HTMLImageElement& element)
 {
-    if (RefPtr page = m_page.get())
-        page->handleImageServiceClick(frameID, point, image, element);
+    RefPtr page = m_page.get();
+    return page && page->handleImageServiceClick(frameID, point, element);
 }
 
-void WebChromeClient::handlePDFServiceClick(WebCore::FrameIdentifier frameID, const IntPoint& point, HTMLAttachmentElement& element)
+bool WebChromeClient::handlePDFServiceClick(WebCore::FrameIdentifier frameID, const IntPoint& point, HTMLAttachmentElement& element)
 {
-    if (RefPtr page = m_page.get())
-        page->handlePDFServiceClick(frameID, point, element);
+    RefPtr page = m_page.get();
+    return page && page->handlePDFServiceClick(frameID, point, element);
 }
 
 #endif

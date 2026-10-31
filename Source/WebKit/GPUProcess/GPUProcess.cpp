@@ -31,6 +31,7 @@
 #include "ArgumentCoders.h"
 #include "Attachment.h"
 #include "AuxiliaryProcessMessages.h"
+#include "DisplayListDataTester.h"
 #include "GPUConnectionToWebProcess.h"
 #include "GPUProcessConnectionParameters.h"
 #include "GPUProcessCreationParameters.h"
@@ -52,6 +53,7 @@
 #include <WebCore/MediaPlayer.h>
 #include <WebCore/MemoryRelease.h>
 #include <WebCore/NowPlayingManager.h>
+#include <wtf/Borrow.h>
 #include <wtf/CallbackAggregator.h>
 #include <wtf/Language.h>
 #include <wtf/LogInitialization.h>
@@ -75,6 +77,7 @@
 #if PLATFORM(COCOA)
 #include "ArgumentCodersCocoa.h"
 #include <WebCore/CoreAudioCaptureUnit.h>
+#include <WebCore/IOSurface.h>
 #include <WebCore/UTIUtilities.h>
 #include <WebCore/VP9UtilitiesCocoa.h>
 #endif
@@ -157,6 +160,7 @@ void GPUProcess::removeGPUConnectionToWebProcess(GPUConnectionToWebProcess& conn
 
     removeTransferredImageBuffersForProcess(connection.webProcessIdentifier());
     abandonSnapshotFramesOwnedBy(connection.webProcessIdentifier());
+    removeSnapshotsForProcess(connection.webProcessIdentifier());
 
     recomputeNowPlayingOwner();
 
@@ -226,6 +230,11 @@ void GPUProcess::lowMemoryHandler(Critical critical, Synchronous synchronous)
         connection->lowMemoryHandler(critical, synchronous);
 
     WebCore::releaseGraphicsMemory(critical, synchronous);
+
+#if PLATFORM(COCOA)
+    if (critical == Critical::Yes)
+        WebCore::IOSurface::releaseCGIOSurfaceContextResources();
+#endif
 }
 
 void GPUProcess::initializeGPUProcess(GPUProcessCreationParameters&& parameters, CompletionHandler<void()>&& completionHandler)
@@ -557,7 +566,7 @@ std::optional<MediaSessionIdentifier> GPUProcess::remoteCommandTargetSessionInPr
 void GPUProcess::updateSandboxAccess(const Vector<SandboxExtension::Handle>& extensions)
 {
     RELEASE_LOG(WebRTC, "GPUProcess::updateSandboxAccess: Adding %zu extensions", extensions.size());
-    for (auto& extension : extensions)
+    for (auto& extension : borrow(extensions))
         SandboxExtension::consumePermanently(extension);
 }
 
@@ -757,6 +766,31 @@ void GPUProcess::sinkCompletedSnapshotToBitmap(RemoteSnapshotIdentifier identifi
     });
 }
 
+#if HAVE(IOSURFACE)
+
+void GPUProcess::sinkCompletedSnapshotToIOSurface(RemoteSnapshotIdentifier identifier, float scale, const ColorSpace& colorSpace, FrameIdentifier rootFrameIdentifier, CompletionHandler<void(std::optional<ImageBufferBackendHandle>&&)>&& completionHandler)
+{
+    takeSnapshotWhenComplete(identifier, rootFrameIdentifier, [identifier, scale, colorSpace, rootFrameIdentifier, completionHandler = WTF::move(completionHandler)](RefPtr<RemoteSnapshot>&& snapshot) mutable {
+        if (!snapshot) {
+            completionHandler({ });
+            return;
+        }
+        // The surface outlives this call in the UI process, so charge it to the process that asked for it.
+        RefPtr connection = GPUProcess::singleton().webProcessConnection(identifier.processIdentifier());
+        if (!connection) {
+            completionHandler({ });
+            return;
+        }
+        bool useIOSurfaceWebKitBehavior = false;
+#if USE(APPLE_INTERNAL_SDK)
+        useIOSurfaceWebKitBehavior = connection->sharedPreferencesForWebProcessValue().useIOSurfaceWebKitBehavior;
+#endif
+        completionHandler(snapshot->drawToIOSurface(snapshot->size(), scale, colorSpace, rootFrameIdentifier, connection->webProcessIdentity(), useIOSurfaceWebKitBehavior));
+    });
+}
+
+#endif
+
 void GPUProcess::releaseSnapshot(RemoteSnapshotIdentifier identifier)
 {
     // Currently it's not possible to know if a snapshot exists, hence no ASSERT.
@@ -782,6 +816,23 @@ void GPUProcess::waitForSnapshot(RemoteSnapshotIdentifier identifier, Completion
     snapshot->whenComplete([completionHandler = WTF::move(completionHandler)](bool) mutable {
         completionHandler();
     });
+}
+
+void GPUProcess::removeSnapshotsForProcess(WebCore::ProcessIdentifier processIdentifier)
+{
+    // Only the minting process can ask for a snapshot to be drawn.
+    Vector<Ref<RemoteSnapshot>> snapshots;
+    {
+        Locker locker(m_globalResourceLocker);
+        m_snapshots.removeIf([&](auto& entry) {
+            if (entry.key.processIdentifier() != processIdentifier)
+                return false;
+            snapshots.append(entry.value);
+            return true;
+        });
+    }
+    for (Ref snapshot : snapshots)
+        snapshot->fail();
 }
 
 #if ENABLE(MEDIA_STREAM)
@@ -960,10 +1011,10 @@ WebCore::NowPlayingManager& GPUProcess::nowPlayingManager()
 }
 
 #if ENABLE(GPU_PROCESS) && USE(AUDIO_SESSION)
-RemoteAudioSessionProxyManager& GPUProcess::audioSessionManager() const
+RemoteAudioSessionProxyManager& GPUProcess::audioSessionManager()
 {
     if (!m_audioSessionManager)
-        m_audioSessionManager = RemoteAudioSessionProxyManager::create(const_cast<GPUProcess&>(*this));
+        m_audioSessionManager = RemoteAudioSessionProxyManager::create(*this);
     return *m_audioSessionManager;
 }
 #endif
@@ -989,6 +1040,11 @@ WorkQueue& GPUProcess::libWebRTCCodecsQueue()
 void GPUProcess::webProcessConnectionCountForTesting(CompletionHandler<void(uint64_t)>&& completionHandler)
 {
     completionHandler(GPUConnectionToWebProcess::objectCountForTesting());
+}
+
+void GPUProcess::runDisplayListDataTestsForTesting(CompletionHandler<void(Vector<String>&&)>&& completionHandler)
+{
+    completionHandler(testDisplayListData());
 }
 
 void GPUProcess::terminateWebProcess(WebCore::ProcessIdentifier identifier, IPC::MessageName invalidMessageName)

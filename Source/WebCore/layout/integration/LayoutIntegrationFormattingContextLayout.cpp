@@ -35,6 +35,7 @@
 #include "RenderBlockFlowInlines.h"
 #include "RenderStyleConstants.h"
 #include "RenderBoxInlines.h"
+#include "RenderElementInlines.h"
 #include "RenderLayoutState.h"
 #include "RenderObjectInlines.h"
 #include "TextBoxTrimmer.h"
@@ -91,6 +92,13 @@ void layoutWithFormattingContextForBox(const Layout::ElementBox& box, std::optio
     layoutRendererAndUpdateBoxGeometry(box, renderer.get(), overridingBorderBoxLogicalWidth, overridingBorderBoxLogicalHeight, containingBlockInlineSize, layoutState);
 }
 
+static void updateGridItemBoxGeometry(const Layout::ElementBox& box, LayoutUnit gridAreaInlineSize, Layout::LayoutState& layoutState)
+{
+    ASSERT(box.isGridItem());
+    auto updater = BoxGeometryUpdater { layoutState, rootLayoutBox(box) };
+    updater.updateBoxGeometryAfterIntegrationLayout(box, gridAreaInlineSize);
+}
+
 void layoutGridItemWithFormattingContext(const Layout::ElementBox& box, std::optional<LayoutUnit> overridingBorderBoxLogicalWidth, std::optional<LayoutUnit> overridingBorderBoxLogicalHeight, LayoutUnit gridAreaInlineSize, Layout::LayoutState& layoutState)
 {
     ASSERT(box.isGridItem());
@@ -100,7 +108,8 @@ void layoutGridItemWithFormattingContext(const Layout::ElementBox& box, std::opt
     // descendants resolve percentage/calc sizes against it during layout, and resolve the item's own geometry
     // against it below rather than against the grid container's content box.
     renderer->setGridAreaContentLogicalWidth(gridAreaInlineSize);
-    layoutRendererAndUpdateBoxGeometry(box, renderer.get(), overridingBorderBoxLogicalWidth, overridingBorderBoxLogicalHeight, gridAreaInlineSize, layoutState);
+    layoutRendererWithOverridingBorderBoxSize(renderer.get(), overridingBorderBoxLogicalWidth, overridingBorderBoxLogicalHeight);
+    updateGridItemBoxGeometry(box, gridAreaInlineSize, layoutState);
     renderer->clearGridAreaContentSize();
 }
 
@@ -157,21 +166,22 @@ static inline void populateIFCWithNewlyPlacedFloats(auto& blockRenderer, auto& p
         auto shapeOutsideInfo = floatingObject->renderer()->shapeOutsideInfo();
         RefPtr shape = shapeOutsideInfo ? &shapeOutsideInfo->computedShape() : nullptr;
 
-        auto usedPosition = Style::ComputedStyle::usedFloat(*floatingObject->renderer()) == UsedFloat::Left ? Layout::PlacedFloats::Item::Position::Start : Layout::PlacedFloats::Item::Position::End;
+        auto usedPosition = floatingObject->renderer()->usedStyle().floating() == UsedFloat::Left ? Layout::PlacedFloats::Item::Position::Start : Layout::PlacedFloats::Item::Position::End;
         placedFloats.add({ usedPosition, boxGeometry, borderBoxTopLeft, WTF::move(shape) });
     }
 }
 
-static inline size_t NODELETE remainingLinesForLineClamp(auto& inlineLayoutState)
+static inline size_t LEGACY_NODELETE remainingLinesForLineClamp(auto& inlineLayoutState)
 {
     // The lines we have already put on the parent's own lines (and in its earlier nested blocks) are part of the clamp's
     // budget, and the nested block has to lay out within what is left of it. A block level sibling gets this from
     // LineClampUpdater, which drops each preceding sibling's line count from the budget as it goes.
     auto maximumLines = inlineLayoutState.parentBlockLayoutState().lineClamp()->maximumLines;
-    return maximumLines - std::min(maximumLines, inlineLayoutState.lineCountWithInlineContentIncludingNestedBlocks());
+    auto lineCount = inlineLayoutState.lineCountWithInlineContentIncludingNestedBlocks();
+    return maximumLines > lineCount ? maximumLines - lineCount : 0;
 }
 
-static inline void NODELETE updateRenderTreeLineClampBeforeLayout(auto& inlineLayoutState, auto& renderTreeLayoutState)
+static inline void updateRenderTreeLineClampBeforeLayout(auto& inlineLayoutState, auto& renderTreeLayoutState)
 {
     auto& parentBlockLayoutState = inlineLayoutState.parentBlockLayoutState();
 
@@ -188,10 +198,10 @@ static inline void NODELETE updateRenderTreeLineClampBeforeLayout(auto& inlineLa
     }
 
     if (auto renderTreeLineClamp = renderTreeLayoutState.lineClamp())
-        renderTreeLayoutState.setLineClamp(RenderLayoutState::LineClamp { remainingLinesForLineClamp(inlineLayoutState), renderTreeLineClamp->shouldDiscardOverflow });
+        renderTreeLayoutState.setLineClamp(RenderLayoutState::LineClamp { remainingLinesForLineClamp(inlineLayoutState), renderTreeLineClamp->shouldDiscardOverflow, renderTreeLineClamp->clampAfterBox, renderTreeLineClamp->isStableTextWrap, renderTreeLineClamp->hasConstrainedTextWrapContent });
 }
 
-static inline void NODELETE updateIFCLineClampAfterLayout(auto& inlineLayoutState, auto& renderTreeLayoutState)
+static inline void LEGACY_NODELETE updateIFCLineClampAfterLayout(auto& inlineLayoutState, auto& renderTreeLayoutState)
 {
     auto& parentBlockLayoutState = inlineLayoutState.parentBlockLayoutState();
 
@@ -282,25 +292,36 @@ LayoutUnit formattingContextRootLogicalWidthForType(const Layout::ElementBox& bo
 {
     // Either a box inline layout treats as atomic, or a block level box on a line: the render tree lays both of them
     // out, so it is the render tree that knows what they cost (see LineBuilder::handleBlockContent).
-    ASSERT(box.establishesFormattingContext() || box.isBlockLevelBox());
+    ASSERT(box.establishesFormattingContext() || box.isBlockLevelBox() || box.isAtomicInlineBox());
 
     CheckedRef renderer = downcast<RenderBox>(*box.rendererForIntegration());
 
-    auto isOrthogonalBlockLevelBox = [&] {
-        if (!box.isBlockLevelBox())
+    auto isOrthogonalToContainingBlock = [&] {
+        if (!box.isBlockLevelBox() && !box.isAtomicInlineBox())
             return false;
         CheckedPtr containingBlock = renderer->containingBlock();
         return containingBlock && containingBlock->writingMode().isOrthogonal(renderer->writingMode());
     };
 
+    auto intrinsicBlockSizeOfOrthogonalBox = [&] {
+        // Laying the box out for its block size lays out its content too, where the box is the root and gets its geometry set in its
+        // own writing mode (one BoxGeometry per box, see BoxGeometryUpdater::updateBoxGeometryAfterIntegrationLayout).
+        // Put back the geometry the formatting context asking for this width has for the box, e.g. its margins along the line.
+        auto& boxGeometry = renderer->view().layoutState().ensureGeometryForBox(box);
+        auto boxGeometryInParentFormattingContext = Layout::BoxGeometry { boxGeometry };
+        auto intrinsicBlockSize = renderer->computeIntrinsicLogicalHeight();
+        boxGeometry = boxGeometryInParentFormattingContext;
+        return intrinsicBlockSize;
+    };
+
     switch (logicalWidthType) {
     case LogicalWidthType::MaxContentContribution:
-        if (isOrthogonalBlockLevelBox())
-            return renderer->computeIntrinsicLogicalHeight();
+        if (isOrthogonalToContainingBlock())
+            return intrinsicBlockSizeOfOrthogonalBox();
         return renderer->maxContentLogicalWidthContribution();
     case LogicalWidthType::MinContentContribution:
-        if (isOrthogonalBlockLevelBox())
-            return renderer->computeIntrinsicLogicalHeight();
+        if (isOrthogonalToContainingBlock())
+            return intrinsicBlockSizeOfOrthogonalBox();
         return renderer->minContentLogicalWidthContribution();
     case LogicalWidthType::MaxContent:
     case LogicalWidthType::MinContent: {

@@ -58,20 +58,22 @@ using BackForwardListMap = HashMap<WeakRef<BackForwardList>, WebBackForwardList*
 
 // FIXME: Instead of this we could just create a class derived from BackForwardList
 // with a pointer to a WebBackForwardList in it.
-static BackForwardListMap& NODELETE backForwardLists()
+static BackForwardListMap& LEGACY_NODELETE backForwardLists()
 {
     static NeverDestroyed<BackForwardListMap> staticBackForwardLists;
     return staticBackForwardLists;
 }
 
-@implementation WebBackForwardList
+@implementation WebBackForwardList {
+    RefPtr<BackForwardList> _backForwardList;
+}
 
 BackForwardList* core(WebBackForwardList *webBackForwardList)
 {
     if (!webBackForwardList)
         return 0;
 
-    return reinterpret_cast<BackForwardList*>(webBackForwardList->_private);
+    return webBackForwardList->_backForwardList.get();
 }
 
 WebBackForwardList *kit(BackForwardList* backForwardList)
@@ -92,7 +94,7 @@ WebBackForwardList *kit(BackForwardList* backForwardList)
     if (!self)
         return nil;
 
-    _private = reinterpret_cast<WebBackForwardListPrivate*>(&backForwardList.leakRef());
+    _backForwardList = WTF::move(backForwardList);
     backForwardLists().set(*core(self), self);
     return self;
 }
@@ -112,7 +114,7 @@ WebBackForwardList *kit(BackForwardList* backForwardList)
     if (WebCoreObjCScheduleDeallocateOnMainThread([WebBackForwardList class], self))
         return;
 
-    RefPtr backForwardList = adoptRef(core(self));
+    RefPtr backForwardList = core(self);
     ASSERT(backForwardList);
     if (backForwardList) {
         ASSERT(backForwardList->closed());
@@ -275,9 +277,7 @@ static bool bumperCarBackForwardHackNeeded()
 
 -(NSString *)description
 {
-    NSMutableString *result;
-    
-    result = [NSMutableString stringWithCapacity:512];
+    RetainPtr result = [NSMutableString stringWithCapacity:512];
     
     [result appendString:@"\n--------------------------------------------\n"];    
     [result appendString:@"WebBackForwardList:\n"];
@@ -293,7 +293,7 @@ static bool bumperCarBackForwardHackNeeded()
         }   
         [result appendFormat:@"%2d) ", i];
         int currPos = [result length];
-        [result appendString:[protect(kit(const_cast<WebCore::HistoryItem*>(entries[i].ptr()))) description]];
+        [result appendString:[protect(kit(entries[i].ptr())) description]];
 
         // shift all the contents over.  a bit slow, but this is for debugging
         NSRange replRange = { static_cast<NSUInteger>(currPos), [result length] - currPos };
@@ -304,7 +304,7 @@ static bool bumperCarBackForwardHackNeeded()
 
     [result appendString:@"\n--------------------------------------------\n"];    
 
-    return result;
+    return result.autorelease();
 }
 
 - (void)setPageCacheSize:(NSUInteger)size

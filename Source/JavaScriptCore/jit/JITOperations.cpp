@@ -889,11 +889,10 @@ static ALWAYS_INLINE JSValue inByValMegamorphic(JSGlobalObject* globalObject, VM
         RELEASE_AND_RETURN(scope, jsBoolean(CommonSlowPaths::opInByVal(globalObject, baseValue, subscript, profile)));
     }
 
-    Identifier propertyName = subscript.toPropertyKey(globalObject);
-    RETURN_IF_EXCEPTION(scope, { });
+    auto propertyName = CacheableIdentifier::getCacheableIdentifier(subscript.asCell());
+    UniquedStringImpl* uid = const_cast<UniquedStringImpl*>(propertyName.data);
 
     JSObject* baseObject = asObject(baseValue);
-    UniquedStringImpl* uid = propertyName.impl();
     if (!canUseMegamorphicInById(vm, uid)) [[unlikely]] {
         dataLogLnIf(verbose, " ", __LINE__);
         if (propertyCache && propertyCache->considerRepatchingCacheMegamorphic(vm)) {
@@ -2011,12 +2010,11 @@ ALWAYS_INLINE static void putByValMegamorphic(JSGlobalObject* globalObject, VM& 
         return;
     }
 
-    Identifier propertyName = subscript.toPropertyKey(globalObject);
-    RETURN_IF_EXCEPTION(scope, void());
+    auto propertyName = CacheableIdentifier::getCacheableIdentifier(subscript.asCell());
+    UniquedStringImpl* uid = const_cast<UniquedStringImpl*>(propertyName.data);
 
     PutPropertySlot slot(baseValue, isStrict);
 
-    UniquedStringImpl* uid = propertyName.impl();
     if (!canUseMegamorphicPutById(vm, uid)) [[unlikely]] {
         if (propertyCache && propertyCache->considerRepatchingCacheMegamorphic(vm))
             repatchPutBySlowPathCall(callFrame->codeBlock(), *propertyCache, kind);
@@ -2612,20 +2610,6 @@ JSC_DEFINE_JIT_OPERATION(operationCompareStrictEq, size_t, (JSGlobalObject* glob
     OPERATION_RETURN(scope, JSValue::strictEqual(globalObject, src1, src2));
 }
 
-#if USE(BIGINT32)
-JSC_DEFINE_JIT_OPERATION(operationCompareEqHeapBigIntToInt32, size_t, (JSGlobalObject* globalObject, JSCell* heapBigInt, int32_t smallInt))
-{
-    VM& vm = globalObject->vm();
-    CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
-    JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
-    auto scope = DECLARE_THROW_SCOPE(vm);
-
-    ASSERT(heapBigInt->isHeapBigInt());
-
-    OPERATION_RETURN(scope, static_cast<JSBigInt*>(heapBigInt)->equalsToInt32(smallInt));
-}
-#endif
-
 JSC_DEFINE_JIT_OPERATION(operationNewArrayWithProfile, EncodedJSValue, (JSGlobalObject* globalObject, ArrayAllocationProfile* profile, const JSValue* values, int size))
 {
     VM& vm = globalObject->vm();
@@ -3018,12 +3002,6 @@ JSC_DEFINE_JIT_OPERATION(operationOptimize, UGPRPair, (VM* vmPointer, uint32_t b
     if (level == DFG::CannotCompile)
         OPERATION_RETURN(scope, encodeResult(nullptr, nullptr));
     
-    if (bytecodeIndex) {
-        // If we're attempting to OSR from a loop, assume that this should be
-        // separately optimized.
-        codeBlock->m_shouldAlwaysBeInlined = false;
-    }
-
     if (Options::verboseOSR()) [[unlikely]] {
         dataLog(
             *codeBlock, ": Entered optimize with bytecodeIndex = ", bytecodeIndex,
@@ -3057,13 +3035,6 @@ JSC_DEFINE_JIT_OPERATION(operationOptimize, UGPRPair, (VM* vmPointer, uint32_t b
     if (debugger && (debugger->isStepping() || codeBlock->baselineAlternative()->hasDebuggerRequests())) [[unlikely]] {
         CODEBLOCK_LOG_EVENT(codeBlock, "delayOptimizeToDFG", ("debugger is stepping or has requests"));
         updateAllPredictionsAndOptimizeAfterWarmUp(codeBlock);
-        OPERATION_RETURN(scope, encodeResult(nullptr, nullptr));
-    }
-
-    if (codeBlock->m_shouldAlwaysBeInlined) {
-        CODEBLOCK_LOG_EVENT(codeBlock, "delayOptimizeToDFG", ("should always be inlined"));
-        updateAllPredictionsAndOptimizeAfterWarmUp(codeBlock);
-        dataLogLnIf(Options::verboseOSR(), "Choosing not to optimize ", *codeBlock, " yet, because m_shouldAlwaysBeInlined == true.");
         OPERATION_RETURN(scope, encodeResult(nullptr, nullptr));
     }
 
@@ -3745,17 +3716,8 @@ static ALWAYS_INLINE JSValue getByValMegamorphic(JSGlobalObject* globalObject, V
 
     JSObject* baseObject = asObject(baseValue);
 
-    GCOwnedDataScope<AtomStringImpl*> propertyName;
-    Identifier propertyKey;
-    UniquedStringImpl* uid = nullptr;
-    if (subscript.isString()) {
-        propertyName = asString(subscript)->toAtomString(globalObject);
-        uid = propertyName.data;
-    } else {
-        propertyKey = subscript.toPropertyKey(globalObject);
-        uid = propertyKey.impl();
-    }
-    RETURN_IF_EXCEPTION(scope, { });
+    auto propertyName = CacheableIdentifier::getCacheableIdentifier(subscript.asCell());
+    UniquedStringImpl* uid = const_cast<UniquedStringImpl*>(propertyName.data);
 
     if (!canUseMegamorphicGetByIdExcludingIndex(vm, uid)) [[unlikely]] {
         if (propertyCache && propertyCache->considerRepatchingCacheMegamorphic(vm))
@@ -5108,10 +5070,6 @@ JSC_DEFINE_JIT_OPERATION(operationArithNegate, EncodedJSValue, (JSGlobalObject* 
     JSValue primValue = operand.toPrimitive(globalObject, PreferNumber);
     OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
 
-#if USE(BIGINT32)
-    if (primValue.isBigInt32())
-        OPERATION_RETURN(scope, JSValue::encode(JSBigInt::unaryMinus(globalObject, primValue.bigInt32AsInt32())));
-#endif
     if (primValue.isHeapBigInt())
         OPERATION_RETURN(scope, JSValue::encode(JSBigInt::unaryMinus(globalObject, primValue.asHeapBigInt())));
 
@@ -5136,14 +5094,6 @@ JSC_DEFINE_JIT_OPERATION(operationArithNegateProfiled, EncodedJSValue, (JSGlobal
     JSValue primValue = operand.toPrimitive(globalObject, PreferNumber);
     OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
 
-#if USE(BIGINT32)
-    if (primValue.isBigInt32()) {
-        JSValue result = JSBigInt::unaryMinus(globalObject, primValue.bigInt32AsInt32());
-        OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
-        arithProfile->observeResult(result);
-        OPERATION_RETURN(scope, JSValue::encode(result));
-    }
-#endif
     if (primValue.isHeapBigInt()) {
         JSValue result = JSBigInt::unaryMinus(globalObject, primValue.asHeapBigInt());
         OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
@@ -5180,14 +5130,6 @@ JSC_DEFINE_JIT_OPERATION(operationArithNegateProfiledOptimize, EncodedJSValue, (
     JSValue primValue = operand.toPrimitive(globalObject, PreferNumber);
     OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
 
-#if USE(BIGINT32)
-    if (primValue.isBigInt32()) {
-        JSValue result = JSBigInt::unaryMinus(globalObject, primValue.bigInt32AsInt32());
-        OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
-        arithProfile->observeResult(result);
-        OPERATION_RETURN(scope, JSValue::encode(result));
-    }
-#endif
     if (primValue.isHeapBigInt()) {
         JSValue result = JSBigInt::unaryMinus(globalObject, primValue.asHeapBigInt());
         OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
@@ -5223,11 +5165,6 @@ JSC_DEFINE_JIT_OPERATION(operationArithNegateOptimize, EncodedJSValue, (JSGlobal
     JSValue primValue = operand.toPrimitive(globalObject, PreferNumber);
     OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
 
-#if USE(BIGINT32)
-    // FIXME: why does this function profile the argument but not the result?
-    if (primValue.isBigInt32())
-        OPERATION_RETURN(scope, JSValue::encode(JSBigInt::unaryMinus(globalObject, primValue.bigInt32AsInt32())));
-#endif
     if (primValue.isHeapBigInt())
         OPERATION_RETURN(scope, JSValue::encode(JSBigInt::unaryMinus(globalObject, primValue.asHeapBigInt())));
 

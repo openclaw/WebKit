@@ -132,5 +132,30 @@ class SourceHistory(unittest.TestCase):
                 self.rejects_before_lane(repository, base, floor, subprocess.CalledProcessError)
 
 
+class ArtifactHeaders(unittest.TestCase):
+    def test_lane_abi_defaults_and_consumer_overrides(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'include').mkdir()
+            for aot in (0, 1):
+                with self.subTest(aot=aot):
+                    (root / 'include/cmakeconfig.h').write_text('/* generated config */\n')
+                    artifacts.write_build_defines(root, {
+                        'aot': aot, 'defines': 'BUN_HARDENED=1 ENABLE_AOT_GUARDED_PAGES=1',
+                    }, 'a' * 40)
+                    consumer = ('#include "cmakeconfig.h"\n'
+                        '#if !defined(ENABLE_AOT)\n#define ENABLE_AOT 1\n#endif\n'
+                        '#if BUN_WEBKIT_ENABLE_AOT != ' + str(aot) + '\n#error library ABI mismatch\n#endif\n'
+                        '#if ENABLE_AOT != EXPECTED_AOT || BUN_HARDENED != EXPECTED_HARDENED || ENABLE_AOT_GUARDED_PAGES != 1\n'
+                        '#error consumer ABI mismatch\n#endif\n')
+                    command = ['cc', '-E', '-x', 'c', '-I' + str(root / 'include'), '-']
+                    for overrides in [
+                        ['-DEXPECTED_AOT=' + str(aot), '-DEXPECTED_HARDENED=1'],
+                        ['-DENABLE_AOT=' + str(1 - aot), '-DEXPECTED_AOT=' + str(1 - aot),
+                         '-DBUN_HARDENED=0', '-DEXPECTED_HARDENED=0'],
+                    ]:
+                        subprocess.run(command + overrides, input=consumer, text=True, capture_output=True, check=True)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -69,6 +69,7 @@
 #include "RenderBoxInlines.h"
 #include "RenderElement.h"
 #include "RenderHTMLCanvas.h"
+#include "RenderLayerBacking.h"
 #include "ResourceLoadObserver.h"
 #include "ScriptController.h"
 #include "ScriptTrackingPrivacyCategory.h"
@@ -232,6 +233,11 @@ CanvasContent HTMLCanvasElement::canvasContent() const
     return toValidCanvasContent(canvasContentForBindings());
 }
 
+bool HTMLCanvasElement::hasDrawableContent() const
+{
+    return document().settings().htmlInCanvasEnabled() && canvasContent() == CanvasContent::Drawable;
+}
+
 void HTMLCanvasElement::requestPaint()
 {
     protect(document())->requestCanvasPaintEvent(*this);
@@ -239,26 +245,39 @@ void HTMLCanvasElement::requestPaint()
 
 void HTMLCanvasElement::dispatchPaintEvent()
 {
-    // FIXME: Populate changedElements.
-    dispatchEvent(CanvasPaintEvent::create(eventNames().paintEvent, { }, Event::IsTrusted::Yes));
+    Vector<Ref<Element>> changedElements;
+    for (Ref element : std::exchange(m_changedDrawableElements, { })) {
+        if (element->isDescendantOf(*this) && element->isCanvasDrawable())
+            changedElements.append(WTF::move(element));
+    }
+
+    CanvasPaintEvent::Init init;
+    init.changedElements = WTF::move(changedElements);
+    dispatchEvent(CanvasPaintEvent::create(eventNames().paintEvent, WTF::move(init), Event::IsTrusted::Yes));
 }
 
-std::optional<CanvasElementSnapshot> HTMLCanvasElement::drawableElementSnapshot(Element& drawableElement) const
+void HTMLCanvasElement::drawableElementDidChange(Element& drawableElement)
 {
-    CheckedPtr drawableRenderer = drawableElement.renderer();
-    if (!drawableRenderer)
+    m_changedDrawableElements.add(drawableElement);
+    protect(document())->requestCanvasPaintEvent(*this);
+}
+
+std::optional<CanvasElementSnapshot> HTMLCanvasElement::canvasDrawableSnapshot(Element& element) const
+{
+    CheckedPtr elementRenderer = element.renderer();
+    if (!elementRenderer)
         return std::nullopt;
 
     CheckedPtr canvasRenderer = dynamicDowncast<RenderHTMLCanvas>(renderer());
     if (!canvasRenderer)
         return std::nullopt;
 
-    return canvasRenderer->drawableRendererSnapshot(*drawableRenderer);
+    return canvasRenderer->canvasDrawableSnapshot(*elementRenderer);
 }
 
-ExceptionOr<Ref<CanvasElementImage>> HTMLCanvasElement::captureElementImage(Element& drawableElement)
+ExceptionOr<Ref<CanvasElementImage>> HTMLCanvasElement::captureElementImage(Element& element) const
 {
-    if (auto snapshot = drawableElementSnapshot(drawableElement))
+    if (auto snapshot = canvasDrawableSnapshot(element))
         return CanvasElementImage::create(WTF::move(*snapshot));
 
     return Exception { ExceptionCode::InvalidStateError };
@@ -322,7 +341,7 @@ ExceptionOr<std::optional<RenderingContext>> HTMLCanvasElement::getContext(JSC::
         }
 #endif
 
-        if (RefPtr context = dynamicDowncast<GPUCanvasContext>(m_context.get())) {
+        if (RefPtr context = dynamicDowncast<GPUCanvasContext>(m_context)) {
             if (!isWebGPUType(contextId))
                 return { std::nullopt };
             return { context.releaseNonNull() };
@@ -452,12 +471,16 @@ CanvasRenderingContext2D* HTMLCanvasElement::createContext2d(const String& type,
         protect(document())->setHasHDRContent();
 #endif
 
+#if ENABLE(PIXEL_FORMAT_RGBA16F)
+    protect(m_context.get())->setDynamicRangeLimit(m_dynamicRangeLimit);
+#endif
+
 #if USE(CA) || USE(SKIA)
     // Need to make sure a RenderLayer and compositing layer get created for the Canvas.
     invalidateStyleAndLayerComposition();
 #endif
 
-    return downcast<CanvasRenderingContext2D>(m_context.get());
+    return downcast<CanvasRenderingContext2D>(m_context);
 }
 
 CanvasRenderingContext2D* HTMLCanvasElement::getContext2d(const String& type, CanvasRenderingContext2DSettings&& settings)
@@ -466,7 +489,7 @@ CanvasRenderingContext2D* HTMLCanvasElement::getContext2d(const String& type, Ca
 
     if (!m_context)
         return createContext2d(type, WTF::move(settings));
-    return dynamicDowncast<CanvasRenderingContext2D>(m_context.get());
+    return dynamicDowncast<CanvasRenderingContext2D>(m_context);
 }
 
 #if ENABLE(WEBGL)
@@ -517,7 +540,7 @@ WebGLRenderingContextBase* HTMLCanvasElement::createContextWebGL(WebGLVersion ty
 #endif
     }
 
-    return downcast<WebGLRenderingContextBase>(m_context.get());
+    return downcast<WebGLRenderingContextBase>(m_context);
 }
 
 RefPtr<WebGLRenderingContextBase> HTMLCanvasElement::getContextWebGL(WebGLVersion type, WebGLContextAttributes&& attrs)
@@ -550,7 +573,7 @@ ImageBitmapRenderingContext* HTMLCanvasElement::createContextBitmapRenderer(cons
     auto context = ImageBitmapRenderingContext::create(*this, WTF::move(settings));
     WeakPtr weakContext = *context;
     m_context = WTF::move(context);
-    weakContext->transferFromImageBitmap(nullptr);
+    protect(weakContext)->transferFromImageBitmap(nullptr);
 
 #if USE(CA) || USE(SKIA)
     // Need to make sure a RenderLayer and compositing layer get created for the Canvas.
@@ -566,7 +589,7 @@ ImageBitmapRenderingContext* HTMLCanvasElement::getContextBitmapRenderer(const S
 
     if (!m_context)
         return createContextBitmapRenderer(type, WTF::move(settings));
-    return dynamicDowncast<ImageBitmapRenderingContext>(m_context.get());
+    return dynamicDowncast<ImageBitmapRenderingContext>(m_context);
 }
 
 bool HTMLCanvasElement::isWebGPUType(const String& type)
@@ -593,7 +616,7 @@ GPUCanvasContext* HTMLCanvasElement::createContextWebGPU(const String& type, GPU
 #endif // ENABLE(PIXEL_FORMAT_RGBA16F)
     }
 
-    return downcast<GPUCanvasContext>(m_context.get());
+    return downcast<GPUCanvasContext>(m_context);
 }
 
 GPUCanvasContext* HTMLCanvasElement::getContextWebGPU(const String& type, GPU* gpu)
@@ -606,43 +629,33 @@ GPUCanvasContext* HTMLCanvasElement::getContextWebGPU(const String& type, GPU* g
     if (!m_context)
         return createContextWebGPU(type, gpu);
 
-    return dynamicDowncast<GPUCanvasContext>(m_context.get());
-}
-
-std::optional<FloatRect> HTMLCanvasElement::computeDirtyRectangleIfNeeded(const std::optional<FloatRect>& rect) const
-{
-    if (!rect)
-        return std::nullopt;
-
-#if ENABLE(DAMAGE_TRACKING)
-    if (usesContentsAsLayerContents() && !document().settings().propagateDamagingInformation())
-        return std::nullopt;
-#else
-    if (usesContentsAsLayerContents())
-        return std::nullopt;
-#endif
-
-    FloatRect destRect;
-    CheckedPtr renderer = renderBox();
-    if (CheckedPtr renderReplaced = dynamicDowncast<RenderReplaced>(*renderer))
-        destRect = renderReplaced->replacedContentRect();
-    else
-        destRect = renderer->contentBoxRect();
-
-    FloatRect dirtyRect = mapRect(*rect, FloatRect { { }, size() }, destRect);
-    dirtyRect.intersect(destRect);
-    if (dirtyRect.isEmpty())
-        return std::nullopt;
-
-    return dirtyRect;
+    return dynamicDowncast<GPUCanvasContext>(m_context);
 }
 
 void HTMLCanvasElement::willUpdateContents(const std::optional<FloatRect>& rect, ShouldApplyPostProcessingToDirtyRect shouldApplyPostProcessingToDirtyRect)
 {
     m_copiedImage = nullptr;
     if (CheckedPtr renderer = renderBox()) {
-        const std::optional<FloatRect> dirtyRect = computeDirtyRectangleIfNeeded(rect);
-        if (usesContentsAsLayerContents())
+        bool usesLayerContents = usesContentsAsLayerContents();
+#if ENABLE(DAMAGE_TRACKING)
+        bool needsDirtyRect = !usesLayerContents || document().settings().propagateDamagingInformation();
+#else
+        bool needsDirtyRect = !usesLayerContents;
+#endif
+        std::optional<FloatRect> dirtyRect;
+        if (rect && needsDirtyRect) {
+            FloatRect destRect;
+            if (CheckedPtr renderReplaced = dynamicDowncast<RenderReplaced>(*renderer))
+                destRect = renderReplaced->replacedContentRect();
+            else
+                destRect = renderer->contentBoxRect();
+
+            dirtyRect = mapRect(*rect, FloatRect { { }, size() }, destRect);
+            dirtyRect->intersect(destRect);
+            if (dirtyRect->isEmpty())
+                dirtyRect = std::nullopt;
+        }
+        if (usesLayerContents)
             renderer->contentChanged(ContentChangeType::CanvasPixels, dirtyRect);
         else if (dirtyRect)
             renderer->repaintRectangle(enclosingIntRect(*dirtyRect));
@@ -681,9 +694,11 @@ bool HTMLCanvasElement::usesContentsAsLayerContents() const
     CheckedPtr renderBox = this->renderBox();
     if (!renderBox)
         return false;
-    if (!m_context)
+    CheckedPtr layer = renderBox->layer();
+    if (!layer)
         return false;
-    return renderBox->hasAcceleratedCompositing() && m_context->delegatesDisplay();
+    auto* backing = layer->backing();
+    return backing && backing->hasContentsDisplayDelegate();
 }
 
 void HTMLCanvasElement::paint(GraphicsContext& context, const LayoutRect& r)
@@ -703,8 +718,14 @@ void HTMLCanvasElement::paint(GraphicsContext& context, const LayoutRect& r)
                     context.fillRect(snappedIntRect(r), Color::transparentBlack);
             } else {
                 RefPtr buffer = renderingContext->surfaceBufferToImageBuffer(CanvasRenderingContext::SurfaceBuffer::DisplayBuffer);
-                if (buffer)
-                    context.drawImageBuffer(*buffer, snappedIntRect(r), { context.compositeOperation() });
+                if (buffer) {
+#if ENABLE(PIXEL_FORMAT_RGBA16F)
+                    ImageDrawingOptions options { renderingContext->drawingOptionsForDisplay(), context.compositeOperation() };
+#else
+                    ImageDrawingOptions options { context.compositeOperation() };
+#endif
+                    context.drawImageBuffer(*buffer, snappedIntRect(r), options);
+                }
             }
         }
     }
@@ -721,7 +742,7 @@ static String toEncodingMimeType(const String& mimeType)
 }
 
 // https://html.spec.whatwg.org/multipage/canvas.html#a-serialisation-of-the-bitmap-as-a-file
-static std::optional<double> NODELETE qualityFromJSValue(JSC::JSValue qualityValue)
+static std::optional<double> LEGACY_NODELETE qualityFromJSValue(JSC::JSValue qualityValue)
 {
     if (!qualityValue.isNumber())
         return std::nullopt;
@@ -811,7 +832,7 @@ ExceptionOr<Ref<OffscreenCanvas>> HTMLCanvasElement::transferControlToOffscreen(
     std::unique_ptr placeholderContext = PlaceholderRenderingContext::create(*this);
     Ref offscreen = OffscreenCanvas::create(protect(document()).get(), *placeholderContext);
     m_context = WTF::move(placeholderContext);
-    if (m_context->delegatesDisplay())
+    if (protect(m_context.get())->delegatesDisplay())
         invalidateStyleAndLayerComposition();
     return offscreen;
 }
@@ -820,7 +841,7 @@ ExceptionOr<Ref<OffscreenCanvas>> HTMLCanvasElement::transferControlToOffscreen(
 RefPtr<ImageData> HTMLCanvasElement::getImageData()
 {
 #if ENABLE(WEBGL)
-    RefPtr context = dynamicDowncast<WebGLRenderingContextBase>(m_context.get());
+    RefPtr context = dynamicDowncast<WebGLRenderingContextBase>(m_context);
     if (!context)
         return nullptr;
 
@@ -846,7 +867,7 @@ RefPtr<VideoFrame> HTMLCanvasElement::toVideoFrame()
 #if PLATFORM(COCOA) || USE(GSTREAMER)
     Ref document = this->document();
 #if ENABLE(WEBGL)
-    if (RefPtr context = dynamicDowncast<WebGLRenderingContextBase>(m_context.get())) {
+    if (RefPtr context = dynamicDowncast<WebGLRenderingContextBase>(m_context)) {
         if (document->settings().webAPIStatisticsEnabled())
             ResourceLoadObserver::singleton().logCanvasRead(document.get());
         return context->surfaceBufferToVideoFrame(CanvasRenderingContext::SurfaceBuffer::DrawingBuffer);
@@ -901,7 +922,7 @@ SecurityOrigin* HTMLCanvasElement::securityOrigin() const
     return &protect(document())->securityOrigin();
 }
 
-Image* HTMLCanvasElement::copiedImage() const
+BitmapImage* HTMLCanvasElement::copiedImage() const
 {
     if (m_copiedImage)
         return m_copiedImage.get();
@@ -915,7 +936,7 @@ bool HTMLCanvasElement::virtualHasPendingActivity() const
 #if ENABLE(WEBGL)
     if (m_hasRelevantWebGLEventListener) {
         // This runs on a GC thread.
-        SUPPRESS_UNCOUNTED_LOCAL auto* context = dynamicDowncast<WebGLRenderingContextBase>(m_context.get());
+        SUPPRESS_UNCOUNTED_LOCAL auto* context = dynamicDowncast<WebGLRenderingContextBase>(m_context);
         // WebGL rendering context may fire contextlost / contextrestored events at any point.
         return context && !context->isContextUnrecoverablyLost();
     }

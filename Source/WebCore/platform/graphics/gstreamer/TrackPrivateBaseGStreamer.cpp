@@ -84,7 +84,7 @@ static std::optional<String> getTag(GstTagList* tags, ASCIILiteral tagName)
 
 static std::optional<String> getLanguageCode(GstTagList* tags)
 {
-    auto language = getTag(tags, ASCIILiteral::fromLiteralUnsafe(GST_TAG_LANGUAGE_CODE));
+    auto language = getTag(tags, GST_TAG_LANGUAGE_CODE);
     if (!language)
         return std::nullopt;
 
@@ -336,7 +336,7 @@ void TrackDataHolder::tagsChanged()
                 GstTagList* tagsFromEvent = nullptr;
                 gst_event_parse_tag(tagEvent.get(), &tagsFromEvent);
                 tags = adoptGRef(gst_tag_list_copy(tagsFromEvent));
-                auto language = getTag(tags.get(), ASCIILiteral::fromLiteralUnsafe(GST_TAG_LANGUAGE_CODE));
+                auto language = getTag(tags.get(), GST_TAG_LANGUAGE_CODE);
                 if (language)
                     break;
             }
@@ -371,13 +371,13 @@ void TrackDataHolder::notifyTrackOfTagsChanged()
     if (!tags)
         return;
 
-    m_track.tagsChanged(GRefPtr<GstTagList>(tags));
-
     RefPtr owner = m_owner.get();
     if (!owner)
         return;
 
-    auto label = getTag(tags.get(), ASCIILiteral::fromLiteralUnsafe(GST_TAG_TITLE));
+    m_track.tagsChanged(GRefPtr<GstTagList>(tags));
+
+    auto label = getTag(tags.get(), GST_TAG_TITLE);
     if (label) {
         m_label = *label;
         owner->notifyMainThreadClient([&](auto& client) {

@@ -43,7 +43,7 @@
 namespace WebCore {
 
 typedef HashMap<const CSSStyleRule*, String> SelectorTextCache;
-static SelectorTextCache& NODELETE selectorTextCache()
+static SelectorTextCache& LEGACY_NODELETE selectorTextCache()
 {
     static NeverDestroyed<SelectorTextCache> cache;
     return cache;
@@ -302,16 +302,18 @@ CSSRule* CSSStyleRule::item(unsigned index) const
     ASSERT(m_childRuleCSSOMWrappers.size() == nestedRules().size());
 
     auto& rule = m_childRuleCSSOMWrappers[index];
-    if (!rule)
+    if (!rule) {
         rule = protect(nestedRules()[index])->createCSSOMWrapper(const_cast<CSSStyleRule&>(*this));
+    }
 
     return rule.get();
 }
 
 CSSRuleList& CSSStyleRule::cssRules() const
 {
-    if (!m_ruleListCSSOMWrapper)
+    if (!m_ruleListCSSOMWrapper) {
         lazyInitialize(m_ruleListCSSOMWrapper, makeUniqueWithoutRefCountedCheck<LiveCSSRuleList<CSSStyleRule>>(const_cast<CSSStyleRule&>(*this)));
+    }
 
     return *m_ruleListCSSOMWrapper;
 }

@@ -339,6 +339,12 @@ module WebKit_Internal [system] {
         requires objc
     }
 
+    module PhoneNumberPossessionTypes {
+        requires cplusplus20
+        header "../../UIProcess/PhoneNumberPossession/Cocoa/PhoneNumberPossessionTypes.h"
+        export *
+    }
+
     module UIWindowScene_Extras {
         header "../../UIProcess/Cocoa/UIWindowScene+Extras.h"
         export *
@@ -438,6 +444,12 @@ module WebKit_Internal [system] {
     module WKMouseTrackingGestureRecognizer {
         requires objc
         header "../../UIProcess/mac/AppKitGestures/WKMouseTrackingGestureRecognizer.h"
+        export *
+    }
+
+    module WKPointerTrackingGestureRecognizer {
+        requires objc
+        header "../../UIProcess/mac/AppKitGestures/WKPointerTrackingGestureRecognizer.h"
         export *
     }
 

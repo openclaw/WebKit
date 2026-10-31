@@ -115,7 +115,7 @@ public:
 #endif
 
     WTF_EXPORT_PRIVATE static RunLoop& currentSingleton();
-    WTF_EXPORT_PRIVATE static RunLoop& NODELETE mainSingleton();
+    WTF_EXPORT_PRIVATE static RunLoop& LEGACY_NODELETE mainSingleton();
 #if USE(WEB_THREAD)
     WTF_EXPORT_PRIVATE static RunLoop& webSingleton();
     WTF_EXPORT_PRIVATE static RunLoop* webIfExists();
@@ -367,6 +367,12 @@ private:
     RunLoop();
 
     void performWork();
+
+#if USE(GLIB_EVENT_LOOP) || USE(WINDOWS_EVENT_LOOP)
+    // If libdispatch is loaded, drains its main queue from this run loop, as CFRunLoop does on Cocoa.
+    // Swift concurrency enqueues main actor jobs there, so they never run otherwise.
+    void drainDispatchMainQueue();
+#endif
 
     void registerTimer(TimerBase&);
     void unregisterTimer(TimerBase&);

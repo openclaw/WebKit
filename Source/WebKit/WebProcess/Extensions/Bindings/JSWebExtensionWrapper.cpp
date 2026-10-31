@@ -103,7 +103,7 @@ WebExtensionCallbackHandler::~WebExtensionCallbackHandler()
 JSValueRef WebExtensionCallbackHandler::callbackFunction() const
 {
     if (!m_globalContext || !m_callbackFunction)
-        return nil;
+        return nullptr;
 
     return m_callbackFunction;
 }
@@ -327,7 +327,7 @@ static JSValueRef fromJSONArray(JSContextRef context, const JSON::Array& array)
     for (Ref value : array)
         retArray.append(Protected(globalContext, fromJSON(context, value.get())));
 
-    auto rawValues = retArray.map([](const Protected<JSValueRef>& ptr) {
+    const Vector rawValues = retArray.map([](const Protected<JSValueRef>& ptr) {
         return ptr.get();
     });
 
@@ -344,7 +344,8 @@ static JSValueRef fromJSONObject(JSContextRef context, const JSON::Object& objec
 
     auto result = JSObjectMake(context, nullptr, nullptr);
 
-    for (auto& key : object.keys()) {
+    const Vector keys = object.keys();
+    for (auto& key : keys) {
         if (auto value = object.getValue(key)) {
             RefPtr jsKey = toJSString(key);
             JSObjectSetProperty(context, result, jsKey.get(), fromJSON(context, value), 0, nullptr);
@@ -386,7 +387,7 @@ JSValueRef fromArray(JSContextRef context, Vector<Protected<JSValueRef>>&& array
     if (!context)
         return nullptr;
 
-    auto rawValues = array.map([](const Protected<JSValueRef>& ptr) {
+    const Vector rawValues = array.map([](const Protected<JSValueRef>& ptr) {
         return ptr.get();
     });
 
@@ -430,7 +431,7 @@ JSValueRef fromObject(JSContextRef context, HashMap<String, Protected<JSValueRef
     return result;
 }
 
-static HashMap<JSGlobalContextRef, JSWeakObjectMapRef>& NODELETE wrapperCache()
+static HashMap<JSGlobalContextRef, JSWeakObjectMapRef>& LEGACY_NODELETE wrapperCache()
 {
     static NeverDestroyed<HashMap<JSGlobalContextRef, JSWeakObjectMapRef>> wrappers;
     return wrappers;
@@ -649,7 +650,7 @@ static RefPtr<JSON::Value> toJSONArray(JSContextRef context, JSValueRef value)
     return result;
 }
 
-RefPtr<JSON::Value> fromJSValue(JSContextRef context, JSValueRef value)
+RefPtr<JSON::Value> fromJSValue(JSContextRef context, JSValueRef value, NullValuePolicy nullPolicy, ValuePolicy valuePolicy)
 {
     switch (JSValueGetType(context, value)) {
     case kJSTypeBoolean:
@@ -661,7 +662,7 @@ RefPtr<JSON::Value> fromJSValue(JSContextRef context, JSValueRef value)
     case kJSTypeObject:
         if (JSValueIsArray(context, value))
             return toJSONArray(context, value);
-        return toJSONValue(context, value);
+        return toJSONValue(context, value, nullPolicy, valuePolicy);
     case kJSTypeNull:
         return JSON::Value::null();
     case kJSTypeUndefined:

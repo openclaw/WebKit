@@ -48,7 +48,6 @@
 #import "RemoteWebTouchEvent.h"
 #import "RevealItem.h"
 #import "SandboxUtilities.h"
-#import "ShareableBitmapUtilities.h"
 #import "SharedBufferReference.h"
 #import "SyntheticEditingCommandType.h"
 #import "TapHandlingResult.h"
@@ -286,6 +285,11 @@ void WebPage::relayAriaNotifyNotification(WebCore::AriaNotifyData&& notification
 void WebPage::relayLiveRegionNotification(WebCore::LiveRegionAnnouncementData&& notificationData)
 {
     send(Messages::WebPageProxy::RelayLiveRegionNotification(WTF::move(notificationData)));
+}
+
+void WebPage::didDisplayCaptions(Vector<String>&& captions)
+{
+    send(Messages::WebPageProxy::DidDisplayCaptions(WTF::move(captions)));
 }
 
 static void computeEditableRootHasContentAndPlainText(const VisibleSelection& selection, EditorState::PostLayoutData& data)
@@ -1010,7 +1014,7 @@ Awaitable<DragInitiationResult> WebPage::requestAdditionalItemsForDragSession(st
     // This process is opaque to the UI process, which still maintains the old drag item in its drag session. Similarly, this persistent drag session
     // is opaque to the web process, which only sees that the current drag has ended, and that a new one is beginning.
     PlatformMouseEvent event(clientPosition, globalPosition, MouseButton::Left, PlatformEvent::Type::MouseMoved, 0, { }, MonotonicTime::now(), 0, WebCore::SyntheticClickType::NoTap, WebCore::MouseEventInputSource::UserDriven);
-    m_page->dragController().dragEnded();
+    m_page->dragController().dragEnded(MayExtendDragSession::Yes);
     RefPtr localRootFrame = this->localRootFrame(rootFrameID);
     if (!localRootFrame)
         co_return { false };
@@ -1078,8 +1082,10 @@ void WebPage::didConcludeEditDrag()
     m_pendingImageElementsForDropSnapshot.clear();
 
     RefPtr frame = m_page->focusController().focusedOrMainFrame();
-    if (!frame)
+    if (!frame) {
+        computeAndSendEditDragSnapshot();
         return;
+    }
 
     if (auto selectionRange = frame->selection().selection().toNormalizedRange()) {
         m_pendingImageElementsForDropSnapshot = visibleImageElementsInRangeWithNonLoadedImages(*selectionRange);
@@ -4012,6 +4018,8 @@ void WebPage::drawPrintingPagesToSnapshotiOS(RemoteSnapshotIdentifier snapshotId
 
 void WebPage::contentSizeCategoryDidChange(const String& contentSizeCategory)
 {
+    if (contentSizeCategory == String { WebCore::contentSizeCategory() })
+        return;
     setContentSizeCategory(contentSizeCategory);
     FontCache::invalidateAllFontCaches();
 }
@@ -4843,6 +4851,16 @@ void WebPage::requestPDFDisplayMode(PDFPluginDisplayMode mode)
 {
     if (RefPtr pluginView = mainFramePlugIn())
         return pluginView->setPDFDisplayMode(mode);
+}
+
+PDFPluginDisplayMode WebPage::initialPDFDisplayMode() const
+{
+    return m_internals->initialPDFDisplayMode;
+}
+
+void WebPage::setInitialPDFDisplayMode(PDFPluginDisplayMode mode)
+{
+    m_internals->initialPDFDisplayMode = mode;
 }
 
 #endif

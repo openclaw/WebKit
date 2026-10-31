@@ -62,6 +62,7 @@
 #import <WebCore/WebCoreURLResponse.h>
 #import <objc/runtime.h>
 #import <wtf/RetainPtr.h>
+#import <wtf/cocoa/TypeCastsCocoa.h>
 #import <wtf/text/WTFString.h>
 
 #if PLATFORM(IOS_FAMILY)
@@ -99,7 +100,7 @@ static void installFlip4MacPlugInWorkaroundIfNecessary();
 #endif
 
 
-static RetainPtr<NSMutableSet>& NODELETE pluginViews()
+static RetainPtr<NSMutableSet>& LEGACY_NODELETE pluginViews()
 {
     static NeverDestroyed<RetainPtr<NSMutableSet>> pluginViews;
     return pluginViews;
@@ -136,22 +137,14 @@ static RetainPtr<NSMutableSet>& NODELETE pluginViews()
     if (!self)
         return nil;
     _documentView = view;
-    _views = [[NSMutableArray alloc] init];
-    _checksInProgress = (NSMutableSet *)CFSetCreateMutable(NULL, 0, NULL);
+    _views = adoptNS([[NSMutableArray alloc] init]);
+    _checksInProgress = adoptCF(CFSetCreateMutable(NULL, 0, NULL));
     return self;
 }
 
 - (void)setDataSource:(WebDataSource *)dataSource
 {
     _dataSource = dataSource;    
-}
-
-- (void)dealloc
-{
-    // Retaining the member just to release it would be pointless.
-    SUPPRESS_UNRETAINED_ARG [_views release];
-    SUPPRESS_UNRETAINED_ARG [_checksInProgress release];
-    [super dealloc];
 }
 
 #if PLATFORM(IOS_FAMILY)
@@ -245,7 +238,7 @@ static RetainPtr<NSMutableSet>& NODELETE pluginViews()
     
     int viewsCount = [views count];
     for (int i = 0; i < viewsCount; i++)
-        [self stopOnePlugin:[views objectAtIndex:i]];
+        [self stopOnePlugin:checked_objc_cast<NSView>([views objectAtIndex:i])];
 
     _started = NO;
 }
@@ -356,7 +349,7 @@ static RetainPtr<NSMutableSet>& NODELETE pluginViews()
 - (void)_webPluginContainerCancelCheckIfAllowedToLoadRequest:(id)checkIdentifier
 {
     [checkIdentifier cancel];
-    [protect(_checksInProgress) removeObject:checkIdentifier];
+    CFSetRemoveValue(protect(_checksInProgress).get(), (__bridge CFTypeRef)checkIdentifier);
 }
 
 static void cancelOutstandingCheck(const void *item, void *context)
@@ -367,9 +360,8 @@ static void cancelOutstandingCheck(const void *item, void *context)
 - (void)_cancelOutstandingChecks
 {
     if (_checksInProgress) {
-        CFSetApplyFunction(protect((__bridge CFSetRef)_checksInProgress), cancelOutstandingCheck, NULL);
-        SUPPRESS_UNRETAINED_ARG [_checksInProgress release];
-        _checksInProgress = nil;
+        CFSetApplyFunction(protect(_checksInProgress).get(), cancelOutstandingCheck, NULL);
+        _checksInProgress = nullptr;
     }
 }
 
@@ -386,7 +378,7 @@ static void cancelOutstandingCheck(const void *item, void *context)
     
     int viewsCount = [views count];
     for (int i = 0; i < viewsCount; i++) {
-        id aView = [views objectAtIndex:i];
+        RetainPtr aView = checked_objc_cast<NSView>([views objectAtIndex:i]);
         [self destroyOnePlugin:aView];
 
         [pluginViews() removeObject:aView];
@@ -400,7 +392,6 @@ static void cancelOutstandingCheck(const void *item, void *context)
 #else
     [protect(_views) makeObjectsPerformSelector:@selector(removeFromSuperview)];
 #endif
-    [views release];
     _views = nil;
 
     _documentView = nil;
@@ -416,7 +407,7 @@ static void cancelOutstandingCheck(const void *item, void *context)
 - (id)_webPluginContainerCheckIfAllowedToLoadRequest:(NSURLRequest *)request inFrame:(NSString *)target resultObject:(id)obj selector:(SEL)selector
 {
     WebPluginContainerCheck *check = [WebPluginContainerCheck checkWithRequest:request target:target resultObject:obj selector:selector controller:self contextInfo:nil];
-    [protect(_checksInProgress) addObject:check];
+    CFSetAddValue(protect(_checksInProgress).get(), (__bridge CFTypeRef)check);
     [check start];
 
     return check;
@@ -452,10 +443,11 @@ static void cancelOutstandingCheck(const void *item, void *context)
             LOG_ERROR("could not load URL %@", [request URL]);
             return;
         }
-        WebCore::FrameLoadRequest frameLoadRequest { *core(frame), request };
+        RefPtr coreFrame = core(frame);
+        WebCore::FrameLoadRequest frameLoadRequest { *coreFrame, request };
         frameLoadRequest.setFrameName(target);
         frameLoadRequest.setShouldCheckNewWindowPolicy(true);
-        core(frame)->loader().load(WTF::move(frameLoadRequest));
+        protect(coreFrame->loader())->load(WTF::move(frameLoadRequest));
     }
 }
 

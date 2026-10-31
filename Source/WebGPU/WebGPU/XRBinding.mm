@@ -45,7 +45,7 @@ XRBinding::XRBinding(Device& device)
 
 XRBinding::~XRBinding() = default;
 
-Ref<XRBinding> Device::createXRBinding()
+RefPtr<WebGPU::XRBinding> Device::createXRBinding()
 {
     if (!isValid())
         return XRBinding::createInvalid(*this);
@@ -65,24 +65,4 @@ bool XRBinding::isValid() const
 } // namespace WebGPU::Metal
 
 #pragma mark WGPU Stubs
-
-void NODELETE wgpuXRBindingAddRef(WGPUXRBinding binding)
-{
-    WebGPU::Metal::fromAPI(binding).ref();
-}
-
-void wgpuXRBindingRelease(WGPUXRBinding binding)
-{
-    WebGPU::Metal::fromAPI(binding).deref();
-}
-
-WGPUXRProjectionLayer wgpuBindingCreateXRProjectionLayer(WGPUXRBinding binding, WGPUTextureFormat colorFormat, WGPUTextureFormat* optionalDepthStencilFormat, WGPUTextureUsage flags, double scale)
-{
-    return WebGPU::Metal::releaseToAPI(protect(WebGPU::Metal::fromAPI(binding))->createXRProjectionLayer(colorFormat, optionalDepthStencilFormat, flags, scale));
-}
-
-WGPUXRSubImage wgpuBindingGetViewSubImage(WGPUXRBinding binding, WGPUXRProjectionLayer layer)
-{
-    return WebGPU::Metal::releaseToAPI(protect(WebGPU::Metal::fromAPI(binding))->getViewSubImage(protect(WebGPU::Metal::fromAPI(layer))));
-}
 

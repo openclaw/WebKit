@@ -42,12 +42,13 @@
 #import "WebViewPrivate.h"
 #import <pal/spi/cocoa/NSURLFileTypeMappingsSPI.h>
 #import <wtf/Assertions.h>
+#import <wtf/cocoa/TypeCastsCocoa.h>
 
 #if PLATFORM(IOS_FAMILY)
 #import "WebUIKitSupport.h"
 #endif
 
-static void checkCandidate(WebBasePluginPackage **currentPlugin, WebBasePluginPackage **candidatePlugin);
+static void checkCandidate(WebBasePluginPackage * __weak *currentPlugin, WebBasePluginPackage **candidatePlugin);
 
 @interface WebPluginDatabase (Internal)
 + (NSArray *)_defaultPlugInPaths;
@@ -57,9 +58,16 @@ static void checkCandidate(WebBasePluginPackage **currentPlugin, WebBasePluginPa
 - (NSMutableSet *)_scanForNewPlugins;
 @end
 
-@implementation WebPluginDatabase
+@implementation WebPluginDatabase {
+    RetainPtr<NSMutableDictionary> plugins;
+    RetainPtr<NSMutableSet> registeredMIMETypes;
+    RetainPtr<NSArray> plugInPaths;
 
-static RetainPtr<WebPluginDatabase>& NODELETE sharedDatabase()
+    // Set of views with plugins attached
+    RetainPtr<NSMutableSet> pluginInstanceViews;
+}
+
+static RetainPtr<WebPluginDatabase>& LEGACY_NODELETE sharedDatabase()
 {
     static NeverDestroyed<RetainPtr<WebPluginDatabase>> sharedDatabase;
     return sharedDatabase;
@@ -87,7 +95,7 @@ static RetainPtr<WebPluginDatabase>& NODELETE sharedDatabase()
     [sharedDatabase() close];
 }
 
-static void checkCandidate(WebBasePluginPackage * __strong *currentPlugin, WebBasePluginPackage * __strong *candidatePlugin)
+static void checkCandidate(WebBasePluginPackage * __weak *currentPlugin, WebBasePluginPackage **candidatePlugin)
 {
     if (!*currentPlugin) {
         *currentPlugin = *candidatePlugin;
@@ -132,8 +140,8 @@ struct PluginPackageCandidates {
         return nil;
     }
     
-    WebBasePluginPackage *webPlugin;
-    WebBasePluginPackage *netscapePlugin;
+    __weak WebBasePluginPackage *webPlugin;
+    __weak WebBasePluginPackage *netscapePlugin;
 };
 
 - (WebBasePluginPackage *)pluginForMIMEType:(NSString *)MIMEType
@@ -181,7 +189,7 @@ struct PluginPackageCandidates {
     return [protect(plugins) allValues];
 }
 
-static RetainPtr<NSArray>& NODELETE additionalWebPlugInPaths()
+static RetainPtr<NSArray>& LEGACY_NODELETE additionalWebPlugInPaths()
 {
     static NeverDestroyed<RetainPtr<NSArray>> _additionalWebPlugInPaths;
     return _additionalWebPlugInPaths;
@@ -205,19 +213,16 @@ static RetainPtr<NSArray>& NODELETE additionalWebPlugInPaths()
 {
     if (plugInPaths == newPaths)
         return;
-        
-    // Retaining the member just to release it would be pointless.
-    SUPPRESS_UNRETAINED_ARG [plugInPaths release];
-    plugInPaths = [newPaths copy];
+
+    plugInPaths = adoptNS([newPaths copy]);
 }
 
 - (void)close
 {
     NSEnumerator *pluginEnumerator = [[self plugins] objectEnumerator];
-    WebBasePluginPackage *plugin;
-    while ((plugin = [pluginEnumerator nextObject]) != nil)
+    RetainPtr<WebBasePluginPackage> plugin;
+    while ((plugin = checked_objc_cast<WebBasePluginPackage>([pluginEnumerator nextObject])))
         [self _removePlugin:plugin];
-    SUPPRESS_UNRETAINED_ARG [plugins release];
     plugins = nil;
 }
 
@@ -226,20 +231,10 @@ static RetainPtr<NSArray>& NODELETE additionalWebPlugInPaths()
     if (!(self = [super init]))
         return nil;
         
-    registeredMIMETypes = [[NSMutableSet alloc] init];
-    pluginInstanceViews = [[NSMutableSet alloc] init];
+    registeredMIMETypes = adoptNS([[NSMutableSet alloc] init]);
+    pluginInstanceViews = adoptNS([[NSMutableSet alloc] init]);
     
     return self;
-}
-
-- (void)dealloc
-{
-    SUPPRESS_UNRETAINED_ARG [plugInPaths release];
-    SUPPRESS_UNRETAINED_ARG [plugins release];
-    SUPPRESS_UNRETAINED_ARG [registeredMIMETypes release];
-    SUPPRESS_UNRETAINED_ARG [pluginInstanceViews release];
-    
-    [super dealloc];
 }
 
 - (void)refresh
@@ -249,7 +244,7 @@ static RetainPtr<NSArray>& NODELETE additionalWebPlugInPaths()
     @autoreleasepool {
         // Create map from plug-in path to WebBasePluginPackage
         if (!plugins)
-            plugins = [[NSMutableDictionary alloc] initWithCapacity:12];
+            plugins = adoptNS([[NSMutableDictionary alloc] initWithCapacity:12]);
         RetainPtr pluginMap = plugins;
 
         // Find all plug-ins on disk
@@ -258,8 +253,8 @@ static RetainPtr<NSArray>& NODELETE additionalWebPlugInPaths()
         // Find plug-ins to remove from database (i.e., plug-ins that no longer exist on disk)
         NSMutableSet *pluginsToRemove = [NSMutableSet set];
         NSEnumerator *pluginEnumerator = [pluginMap objectEnumerator];
-        WebBasePluginPackage *plugin;
-        while ((plugin = [pluginEnumerator nextObject]) != nil) {
+        RetainPtr<WebBasePluginPackage> plugin;
+        while ((plugin = checked_objc_cast<WebBasePluginPackage>([pluginEnumerator nextObject]))) {
             // Any plug-ins that were removed from disk since the last refresh should be removed from
             // the database.
             if (![newPlugins containsObject:plugin])
@@ -279,18 +274,18 @@ static RetainPtr<NSArray>& NODELETE additionalWebPlugInPaths()
 
         // Remove plugins from database
         pluginEnumerator = [pluginsToRemove objectEnumerator];
-        while ((plugin = [pluginEnumerator nextObject]) != nil)
+        while ((plugin = checked_objc_cast<WebBasePluginPackage>([pluginEnumerator nextObject])))
             [self _removePlugin:plugin];
 
         // Add new plugins to database
         pluginEnumerator = [newPlugins objectEnumerator];
-        while ((plugin = [pluginEnumerator nextObject]) != nil)
+        while ((plugin = checked_objc_cast<WebBasePluginPackage>([pluginEnumerator nextObject])))
             [self _addPlugin:plugin];
 
         // Build a list of MIME types.
         auto MIMETypes = adoptNS([[NSMutableSet alloc] init]);
         pluginEnumerator = [pluginMap objectEnumerator];
-        while ((plugin = [pluginEnumerator nextObject])) {
+        while ((plugin = checked_objc_cast<WebBasePluginPackage>([pluginEnumerator nextObject]))) {
             const auto& pluginInfo = [plugin pluginInfo];
             for (size_t i = 0; i < pluginInfo.mimes.size(); ++i)
                 [MIMETypes addObject:pluginInfo.mimes[i].type.createNSString().get()];
@@ -298,8 +293,8 @@ static RetainPtr<NSArray>& NODELETE additionalWebPlugInPaths()
 
         // Register plug-in views and representations.
         NSEnumerator *MIMEEnumerator = [MIMETypes objectEnumerator];
-        NSString *MIMEType;
-        while ((MIMEType = [MIMEEnumerator nextObject]) != nil) {
+        RetainPtr<NSString> MIMEType;
+        while ((MIMEType = checked_objc_cast<NSString>([MIMEEnumerator nextObject]))) {
             [protect(registeredMIMETypes) addObject:MIMEType];
 
             if ([WebView canShowMIMETypeAsHTML:MIMEType]) {
@@ -347,7 +342,8 @@ static RetainPtr<NSArray>& NODELETE additionalWebPlugInPaths()
 
     NSView <WebDocumentView> *documentView = [[webFrame frameView] documentView]; 
     if ([documentView isKindOfClass:[WebHTMLView class]]) {
-        for (NSView *subview in [documentView subviews]) {
+        // FIXME: Remove the suppression once https://github.com/llvm/llvm-project/pull/230818 is deployed (rdar://189710680).
+        for (SUPPRESS_UNRETAINED_LOCAL NSView *subview in [documentView subviews]) {
             if ([WebPluginController isPlugInView:subview])
                 [instanceViews removeObject:subview];
         }
@@ -356,10 +352,10 @@ static RetainPtr<NSArray>& NODELETE additionalWebPlugInPaths()
 
 - (void)destroyAllPluginInstanceViews
 {
-    NSView *view;
+    RetainPtr<NSView> view;
     RetainPtr pli = [protect(pluginInstanceViews) allObjects];
     NSEnumerator *enumerator = [pli objectEnumerator];
-    while ((view = [enumerator nextObject]) != nil) {
+    while ((view = checked_objc_cast<NSView>([enumerator nextObject]))) {
         if ([WebPluginController isPlugInView:view]) {
             ASSERT([[view superview] isKindOfClass:[WebHTMLView class]]);
             ASSERT([[view superview] respondsToSelector:@selector(_destroyAllWebPlugins)]);
@@ -398,7 +394,7 @@ static RetainPtr<NSArray>& NODELETE additionalWebPlugInPaths()
         // backward compatibility with earlier versions of the +setAdditionalWebPlugInPaths: SPI,
         // which simply saved a copy of the additional paths and did not cause the plugin DB to 
         // refresh.  See Radars 4608487 and 4609047.
-        auto modifiedPlugInPaths = adoptNS([plugInPaths mutableCopy]);
+        RetainPtr modifiedPlugInPaths = adoptNS([protect(plugInPaths) mutableCopy]);
         [modifiedPlugInPaths addObjectsFromArray:additionalWebPlugInPaths().get()];
         return modifiedPlugInPaths.autorelease();
     }
@@ -445,12 +441,12 @@ static RetainPtr<NSArray>& NODELETE additionalWebPlugInPaths()
     NSEnumerator *directoryEnumerator = [[self _plugInPaths] objectEnumerator];
     auto uniqueFilenames = adoptNS([[NSMutableSet alloc] init]);
     NSFileManager *fileManager = [NSFileManager defaultManager];
-    NSString *pluginDirectory;
-    while ((pluginDirectory = [directoryEnumerator nextObject]) != nil) {
+    RetainPtr<NSString> pluginDirectory;
+    while ((pluginDirectory = checked_objc_cast<NSString>([directoryEnumerator nextObject]))) {
         // Get contents of each plug-in directory
         NSEnumerator *filenameEnumerator = [[fileManager contentsOfDirectoryAtPath:pluginDirectory error:NULL] objectEnumerator];
-        NSString *filename;
-        while ((filename = [filenameEnumerator nextObject]) != nil) {
+        RetainPtr<NSString> filename;
+        while ((filename = checked_objc_cast<NSString>([filenameEnumerator nextObject]))) {
             // Unique plug-ins by filename
             if ([uniqueFilenames containsObject:filename])
                 continue;

@@ -63,20 +63,13 @@ static void* allocate(void* unused)
     return NULL;
 }
 
-// The guarded allocator calls this only after it has closed admission and
-// observed an active setter. An unguarded allocator reaches the deletion hook
-// instead, which records the violation and releases the setter there.
-void mi_test_thread_key_wait(void)
+static void checkExit(void)
 {
+    mi_process_done();
     CHECK(!pthread_mutex_lock(&lock));
     releaseAssociation = 1;
     CHECK(!pthread_cond_signal(&condition));
     CHECK(!pthread_mutex_unlock(&lock));
-}
-
-static void checkExit(void)
-{
-    mi_process_done();
     CHECK(!pthread_join(worker, NULL));
     CHECK(!deletedWhilePaused);
     puts("mimalloc in-flight exit TLS ownership: PASS");

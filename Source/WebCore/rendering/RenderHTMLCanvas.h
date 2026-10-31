@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2004, 2006, 2007, 2009 Apple Inc. All rights reserved.
+ * Copyright (C) 2004-2026 Apple Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -46,22 +46,28 @@ public:
     RenderHTMLCanvas(HTMLCanvasElement&, Style::ComputedStyle&&);
     virtual ~RenderHTMLCanvas();
 
-    HTMLCanvasElement& NODELETE canvasElement() const;
+    HTMLCanvasElement& LEGACY_NODELETE canvasElement() const;
 
     void canvasSizeChanged();
 
     RenderBlock* innerRenderer() const { return m_innerRenderer.get(); }
-    void setInnerRenderer(RenderBlock*);
+    void LEGACY_NODELETE setInnerRenderer(RenderBlock*);
 
-    bool hasDrawableContent() const;
+    bool hasDrawableContent() const final;
 
-    std::optional<CanvasElementSnapshot> drawableRendererSnapshot(RenderElement&) const;
+    DisplayList::RecorderImpl* canvasDrawableRecorder(RenderElement&, GraphicsContext&, const IntRect& elementRelativeBounds) const;
+    std::optional<CanvasElementSnapshot> canvasDrawableSnapshot(RenderElement&) const;
+
+    void requestPaintEventIfNeeded(const RenderElement& repaintedRenderer) const;
 
 private:
     void element() const = delete;
 
     bool requiresLayer() const override;
     ASCIILiteral renderName() const override { return "RenderHTMLCanvas"_s; }
+
+    NaturalDimensions zoomedNaturalDimensions() const final;
+
     bool canHaveChildren() const override;
 
     void layout() override;
@@ -72,7 +78,7 @@ private:
     void styleDidChange(Style::Difference, const Style::ComputedStyle* oldStyle) override;
 
     SingleThreadWeakPtr<RenderBlock> m_innerRenderer;
-    HashMap<SingleThreadWeakRef<RenderElement>, UniqueRef<DisplayList::RecorderImpl>> m_drawableRendererSnapshotRecorderMap;
+    mutable HashMap<SingleThreadWeakRef<RenderElement>, Ref<DisplayList::RecorderImpl>> m_canvasDrawableRecorderMap;
 };
 
 } // namespace WebCore

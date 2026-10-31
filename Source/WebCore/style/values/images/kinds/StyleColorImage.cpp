@@ -38,7 +38,7 @@ namespace WebCore {
 namespace Style {
 
 ColorImage::ColorImage(Color&& color)
-    : GeneratedImage { Type::ColorImage, ColorImage::isFixedSize }
+    : GeneratedImage { Type::ColorImage }
     , m_color { WTF::move(color) }
 {
 }
@@ -75,7 +75,7 @@ void ColorImage::load(CachedResourceLoader&, const ResourceLoaderOptions&)
 {
 }
 
-ImageDrawResult ColorImage::draw(GraphicsContext& context, const RenderElement& renderer, ConcreteObjectSize concreteObjectSize, const FloatRect& destination, const FloatRect&, ImagePaintingOptions options, bool) const
+ImageDrawResult ColorImage::draw(GraphicsContext& context, const RenderElement& renderer, ConcreteObjectSize concreteObjectSize, const FloatRect& destination, const FloatRect&, ImageDrawingOptions options, bool) const
 {
     auto size = concreteObjectSize.size() * concreteObjectSize.zoom();
     if (size.isEmpty())
@@ -85,7 +85,7 @@ ImageDrawResult ColorImage::draw(GraphicsContext& context, const RenderElement& 
     return ImageDrawResult::DidDraw;
 }
 
-ImageDrawResult ColorImage::drawAsPattern(GraphicsContext& context, const RenderElement& renderer, ConcreteObjectSize concreteObjectSize, const FloatRect& destination, const FloatRect& tile, const AffineTransform& patternTransform, const FloatPoint& phase, const FloatSize& spacing, ImagePaintingOptions options, bool) const
+ImageDrawResult ColorImage::drawAsPattern(GraphicsContext& context, const RenderElement& renderer, ConcreteObjectSize concreteObjectSize, const FloatRect& destination, const FloatRect& tile, const AffineTransform& patternTransform, const FloatPoint& phase, const FloatSize& spacing, ImageDrawingOptions options, bool) const
 {
     auto size = concreteObjectSize.size() * concreteObjectSize.zoom();
     if (size.isEmpty() || context.paintingDisabled())
@@ -114,14 +114,14 @@ bool ColorImage::knownToBeOpaque(const RenderElement& renderer) const
     return resolvedColor(renderer).isOpaque();
 }
 
-FloatSize ColorImage::fixedSize(const RenderElement&) const
+bool ColorImage::containsCurrentColor() const
 {
-    return { };
+    return m_color.containsCurrentColor();
 }
 
 WebCore::Color ColorImage::resolvedColor(const RenderElement& renderer) const
 {
-    return ColorResolver { renderer.style() }.colorResolvingCurrentColor(m_color);
+    return ColorResolver { renderer.style() }.colorResolvingCurrentColorApplyingColorFilter(m_color);
 }
 
 } // namespace Style

@@ -27,7 +27,7 @@
 
 #include "BoxExtents.h"
 #include "GraphicsContext.h"
-#include "ImagePaintingOptions.h"
+#include "ImageDrawingOptions.h"
 #include "ImageQualityController.h"
 #include "LayoutRect.h"
 #include "NinePieceGeometry.h"
@@ -35,6 +35,7 @@
 #include "StyleComputedStyle+GettersInlines.h"
 #include "StyleImage.h"
 #include "StylePrimitiveNumericTypes+Evaluation.h"
+#include "UsedStyle.h"
 
 #if ENABLE(AX_CUSTOM_COLOR_MODE)
 #include <WebKitAdditions/AXCustomColorModeController.h>
@@ -80,7 +81,7 @@ static LayoutBoxExtent computeSlices(const LayoutSize& size, const SliceValues& 
     };
 }
 
-static void scaleSlicesIfNeeded(const LayoutSize& size, LayoutBoxExtent& slices, float deviceScaleFactor)
+static void LEGACY_NODELETE scaleSlicesIfNeeded(const LayoutSize& size, LayoutBoxExtent& slices, float deviceScaleFactor)
 {
     LayoutUnit width  = std::max(LayoutUnit(1 / deviceScaleFactor), slices.left() + slices.right());
     LayoutUnit height = std::max(LayoutUnit(1 / deviceScaleFactor), slices.top() + slices.bottom());
@@ -97,7 +98,7 @@ static void scaleSlicesIfNeeded(const LayoutSize& size, LayoutBoxExtent& slices,
     slices.left()   *= sliceScaleFactor;
 }
 
-static bool NODELETE isEmptyPieceRect(ImagePiece piece, const NinePieceRects& destinationRects, const NinePieceRects& sourceRects)
+static bool LEGACY_NODELETE isEmptyPieceRect(ImagePiece piece, const NinePieceRects& destinationRects, const NinePieceRects& sourceRects)
 {
     return destinationRects[piece].isEmpty() || sourceRects[piece].isEmpty();
 }
@@ -138,7 +139,7 @@ static NinePieceRects computeNineRects(const FloatRect& outer, const LayoutBoxEx
     return rects;
 }
 
-static FloatSize NODELETE computeSideTileScale(ImagePiece piece, const NinePieceRects& destinationRects, const NinePieceRects& sourceRects)
+static FloatSize LEGACY_NODELETE computeSideTileScale(ImagePiece piece, const NinePieceRects& destinationRects, const NinePieceRects& sourceRects)
 {
     ASSERT(!isCornerPiece(piece) && piece != ImagePiece::Middle);
     if (isEmptyPieceRect(piece, destinationRects, sourceRects))
@@ -153,7 +154,7 @@ static FloatSize NODELETE computeSideTileScale(ImagePiece piece, const NinePiece
     return FloatSize(scale, scale);
 }
 
-static FloatSize NODELETE computeMiddleTileScale(const NinePieceScales& scales, const NinePieceRects& destinationRects, const NinePieceRects& sourceRects, NinePieceImageRule hRule, NinePieceImageRule vRule)
+static FloatSize LEGACY_NODELETE computeMiddleTileScale(const NinePieceScales& scales, const NinePieceRects& destinationRects, const NinePieceRects& sourceRects, NinePieceImageRule hRule, NinePieceImageRule vRule)
 {
     using enum ImagePiece;
 
@@ -180,7 +181,7 @@ static FloatSize NODELETE computeMiddleTileScale(const NinePieceScales& scales, 
     return scale;
 }
 
-static NinePieceScales computeTileScales(const NinePieceRects& destinationRects, const NinePieceRects& sourceRects, NinePieceImageRule hRule, NinePieceImageRule vRule)
+static NinePieceScales LEGACY_NODELETE computeTileScales(const NinePieceRects& destinationRects, const NinePieceRects& sourceRects, NinePieceImageRule hRule, NinePieceImageRule vRule)
 {
     using enum ImagePiece;
 
@@ -198,16 +199,17 @@ static NinePieceScales computeTileScales(const NinePieceRects& destinationRects,
 }
 
 template<typename T>
-static void paintNinePieceImage(const T& ninePieceImage, GraphicsContext& graphicsContext, const RenderElement& renderer, const Style::ComputedStyle& style, const LayoutRect& destination, const LayoutSize& source, float deviceScaleFactor, ImagePaintingOptions options)
+static void paintNinePieceImage(const T& ninePieceImage, GraphicsContext& graphicsContext, const RenderElement& renderer, const UsedStyle& usedStyle, const LayoutRect& destination, const LayoutSize& source, float deviceScaleFactor, ImageDrawingOptions options)
 {
     auto styleImage = ninePieceImage.source().tryStyleImage();
     ASSERT(styleImage);
     ASSERT(styleImage->isLoaded(&renderer));
 
+    auto& style = usedStyle.computedStyle();
     auto zoom = style.usedZoomForLength();
 
     auto sourceSlices      = computeSlices(source, ninePieceImage.slice(), styleImage->imageScaleFactor());
-    auto destinationSlices = computeSlices(destination.size(), ninePieceImage.width(), Style::evaluate<LayoutBoxExtent>(style.usedBorderWidths().to<Style::LineWidthBox>(), zoom, deviceScaleFactor), sourceSlices, zoom);
+    auto destinationSlices = computeSlices(destination.size(), ninePieceImage.width(), usedStyle.borderWidths(), sourceSlices, zoom);
 
     scaleSlicesIfNeeded(destination.size(), destinationSlices, deviceScaleFactor);
 
@@ -231,22 +233,23 @@ static void paintNinePieceImage(const T& ninePieceImage, GraphicsContext& graphi
     InterpolationQualityMaintainer interpolationMaintainer(graphicsContext, ImageQualityController::interpolationQualityFromStyle(style));
 
 #if ENABLE(AX_CUSTOM_COLOR_MODE)
-    options = { options, styleImage->drawsSVGImage() && AXCustomColorModeController::shouldInvertSVGImage(renderer) ? InvertContent::Yes : InvertContent::No };
+    options = { options, styleImage->drawsSVGImage() && AXCustomColorModeController::shouldInvertSVGImage(renderer, *styleImage) ? InvertContent::Yes : InvertContent::No };
 #endif
 
-    styleImage->drawNinePiece(graphicsContext, renderer, ConcreteObjectSize::fixed(FloatSize(source)), geometry, options);
+    // FIXME: Remove suppression once rdar://189998444 is fixed.
+    SUPPRESS_MEMORY_UNSAFE_CAST styleImage->drawNinePiece(graphicsContext, renderer, ConcreteObjectSize::fixed(FloatSize(source)), geometry, options);
 }
 
 // MARK: - Painter entry point
 
-void NinePieceImagePainter::paint(const Style::BorderImage& ninePieceImage, GraphicsContext& graphicsContext, const RenderElement& renderer, const Style::ComputedStyle& style, const LayoutRect& destination, const LayoutSize& source, float deviceScaleFactor, ImagePaintingOptions options)
+void NinePieceImagePainter::paint(const Style::BorderImage& ninePieceImage, GraphicsContext& graphicsContext, const RenderElement& renderer, const UsedStyle& usedStyle, const LayoutRect& destination, const LayoutSize& source, float deviceScaleFactor, ImageDrawingOptions options)
 {
-    return paintNinePieceImage(ninePieceImage, graphicsContext, renderer, style, destination, source, deviceScaleFactor, options);
+    return paintNinePieceImage(ninePieceImage, graphicsContext, renderer, usedStyle, destination, source, deviceScaleFactor, options);
 }
 
-void NinePieceImagePainter::paint(const Style::MaskBorder& ninePieceImage, GraphicsContext& graphicsContext, const RenderElement& renderer, const Style::ComputedStyle& style, const LayoutRect& destination, const LayoutSize& source, float deviceScaleFactor, ImagePaintingOptions options)
+void NinePieceImagePainter::paint(const Style::MaskBorder& ninePieceImage, GraphicsContext& graphicsContext, const RenderElement& renderer, const UsedStyle& usedStyle, const LayoutRect& destination, const LayoutSize& source, float deviceScaleFactor, ImageDrawingOptions options)
 {
-    return paintNinePieceImage(ninePieceImage, graphicsContext, renderer, style, destination, source, deviceScaleFactor, options);
+    return paintNinePieceImage(ninePieceImage, graphicsContext, renderer, usedStyle, destination, source, deviceScaleFactor, options);
 }
 
 } // namespace WebCore

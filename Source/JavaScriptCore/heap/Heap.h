@@ -46,6 +46,7 @@
 #include "StructureID.h"
 #include "Synchronousness.h"
 #include "WeakHandleOwner.h"
+#include <JavaScriptCore/AOTHeapCellClasses.h>
 #include <JavaScriptCore/SubspaceAccess.h>
 #include <wtf/ApproximateTime.h>
 #include <wtf/AutomaticThread.h>
@@ -73,6 +74,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
 namespace JSC {
 
+class CagedAlignedMemoryAllocator;
 class CodeBlock;
 class CodeBlockSet;
 class CollectingScope;
@@ -93,13 +95,13 @@ class JITStubRoutine;
 class JITStubRoutineSet;
 class JSCell;
 class JSArrayBufferView;
-class JSCellButterfly;
 class JSRopeString;
 class JSString;
 class JSValue;
 class MachineThreads;
 class MarkStackArray;
 class MarkStackMergingConstraint;
+class MarkedBlockCage;
 class BlockDirectory;
 class MarkedVectorBase;
 class MarkingConstraint;
@@ -108,10 +110,10 @@ class RunningScope;
 class SlotVisitor;
 class SpaceTimeMutatorScheduler;
 class StopIfNecessaryTimer;
+class StoredCellLog;
 class StructureAlignedMemoryAllocator;
 class SweepingScope;
 class VM;
-class VerifierSlotVisitor;
 class WeakGCHashTable;
 struct CurrentThreadState;
 
@@ -170,14 +172,14 @@ class Heap;
 #define FOR_EACH_JSC_WEBASSEMBLY_STRUCTURE_ISO_SUBSPACE(v)
 #endif
 
-#define FOR_EACH_JSC_STRUCTURE_ISO_SUBSPACE(v) \
+#define FOR_EACH_JSC_STATIC_STRUCTURE_ISO_SUBSPACE(v) \
     v(structureSpace, destructibleCellHeapCellType, Structure) \
     v(brandedStructureSpace, destructibleCellHeapCellType, BrandedStructure) \
     FOR_EACH_JSC_WEBASSEMBLY_STRUCTURE_ISO_SUBSPACE(v)
 
 #define FOR_EACH_JSC_ISO_SUBSPACE(v) \
     FOR_EACH_JSC_COMMON_ISO_SUBSPACE(v) \
-    FOR_EACH_JSC_STRUCTURE_ISO_SUBSPACE(v)
+    FOR_EACH_JSC_STATIC_STRUCTURE_ISO_SUBSPACE(v)
 
 #if JSC_OBJC_API_ENABLED
 #define FOR_EACH_JSC_OBJC_API_DYNAMIC_ISO_SUBSPACE(v) \
@@ -219,7 +221,7 @@ class Heap;
 #define FOR_EACH_JSC_WEBASSEMBLY_DYNAMIC_NON_ISO_SUBSPACE(v)
 #endif
 
-#if USE(BUN_JSC_ADDITIONS)
+#if ENABLE(FFI)
 #define FOR_EACH_JSC_FFI_DYNAMIC_ISO_SUBSPACE(v) \
     v(ffiFunctionSpace, ffiFunctionHeapCellType, JSFFIFunction) \
     v(ffiCallbackSpace, ffiCallbackHeapCellType, JSFFICallback)
@@ -227,10 +229,26 @@ class Heap;
 #define FOR_EACH_JSC_FFI_DYNAMIC_ISO_SUBSPACE(v)
 #endif
 
-#define FOR_EACH_JSC_DYNAMIC_ISO_SUBSPACE(v) \
+#if ENABLE(AOT)
+#define FOR_EACH_JSC_AOT_DYNAMIC_NON_ISO_SUBSPACE(v) \
+    v(aotClosureSpace, cellHeapCellType, AOT::Closure, CompleteSubspace) \
+    v(cagedAuxiliarySpace, auxiliaryHeapCellType, HeapCell, CompleteSubspace)
+#else
+#define FOR_EACH_JSC_AOT_DYNAMIC_NON_ISO_SUBSPACE(v)
+#endif
+
+#define FOR_EACH_JSC_DYNAMIC_NON_ISO_SUBSPACE(v) \
+    FOR_EACH_JSC_AOT_DYNAMIC_NON_ISO_SUBSPACE(v) \
+    FOR_EACH_JSC_WEBASSEMBLY_DYNAMIC_NON_ISO_SUBSPACE(v)
+
+#define FOR_EACH_JSC_DYNAMIC_STRUCTURE_ISO_SUBSPACE(v) \
+    FOR_EACH_JSC_AOT_STRUCTURE_ISO_SUBSPACE(v)
+
+#define FOR_EACH_JSC_DYNAMIC_COMMON_ISO_SUBSPACE(v) \
     FOR_EACH_JSC_OBJC_API_DYNAMIC_ISO_SUBSPACE(v) \
     FOR_EACH_JSC_GLIB_API_DYNAMIC_ISO_SUBSPACE(v) \
     FOR_EACH_JSC_FFI_DYNAMIC_ISO_SUBSPACE(v) \
+    FOR_EACH_JSC_AOT_DYNAMIC_ISO_SUBSPACE(v) \
     \
     v(apiGlobalObjectSpace, apiGlobalObjectHeapCellType, JSAPIGlobalObject) \
     v(apiValueWrapperSpace, cellHeapCellType, JSAPIValueWrapper) \
@@ -289,7 +307,6 @@ class Heap;
     v(moduleNamespaceObjectSpace, moduleNamespaceObjectHeapCellType, JSModuleNamespaceObject) \
     v(nativeStdFunctionSpace, nativeStdFunctionHeapCellType, JSNativeStdFunction) \
     v(proxyObjectSpace, cellHeapCellType, ProxyObject) \
-    v(proxyRevokeSpace, cellHeapCellType, ProxyRevoke) \
     v(rawJSONObjectSpace, cellHeapCellType, JSRawJSONObject) \
     v(remoteFunctionSpace, cellHeapCellType, JSRemoteFunction) \
     v(scopedArgumentsTableSpace, destructibleCellHeapCellType, ScopedArgumentsTable) \
@@ -335,6 +352,10 @@ class Heap;
     \
     FOR_EACH_JSC_WEBASSEMBLY_DYNAMIC_ISO_SUBSPACE(v)
 
+#define FOR_EACH_JSC_DYNAMIC_ISO_SUBSPACE(v) \
+    FOR_EACH_JSC_DYNAMIC_COMMON_ISO_SUBSPACE(v) \
+    FOR_EACH_JSC_DYNAMIC_STRUCTURE_ISO_SUBSPACE(v)
+
 typedef HashCountedSet<JSCell*> ProtectCountSet;
 typedef HashCountedSet<ASCIILiteral> TypeCountSet;
 
@@ -345,9 +366,7 @@ class HeapUtil;
 class Heap {
     WTF_MAKE_NONCOPYABLE(Heap);
 public:
-    friend class JIT;
     friend class StopIfNecessaryTimer;
-    friend class DFG::SpeculativeJIT;
     static JSC::Heap* heap(const JSValue); // 0 for immediate values
     static JSC::Heap* heap(const HeapCell*);
 
@@ -364,6 +383,8 @@ public:
     
     // Take this if you know that from->cellState() < barrierThreshold.
     JS_EXPORT_PRIVATE void writeBarrierSlowPath(const JSCell* from);
+    JS_EXPORT_PRIVATE void writeBarrierSlowPath(const JSCell* from, JSCell* to);
+    JS_EXPORT_PRIVATE StoredCellLog& storedCellLog() LIFETIME_BOUND;
 
     Heap(VM&, HeapType);
     ~Heap();
@@ -373,6 +394,16 @@ public:
     VM& vm() const;
 
     MarkedSpace& objectSpace() LIFETIME_BOUND { return m_objectSpace; }
+    JS_EXPORT_PRIVATE MarkedBlockCage& cage();
+    JS_EXPORT_PRIVATE AlignedMemoryAllocator* cellAllocator();
+    // The allocator that found no memory, or null for a table of the VM.
+    bool tryCollectForExhaustedCage(GCDeferralContext*, AlignedMemoryAllocator*);
+    bool isOutsideCage(AlignedMemoryAllocator*) const;
+    void collectForExhaustedCage();
+    bool tryUseReserveOfExhaustedCage(AlignedMemoryAllocator*);
+
+    bool validatesCellVisits() const { return m_validatesCellVisits; }
+    void setValidatesCellVisits(bool validates) { m_validatesCellVisits = validates; }
     MachineThreads& machineThreads() { return *m_machineThreads; }
 
     Collector& collector() LIFETIME_BOUND { return *m_collector; }
@@ -397,6 +428,7 @@ public:
     MutatorState mutatorState() const { return m_mutatorState; }
     std::optional<CollectionScope> collectionScope() const { return m_collectionScope; }
     std::optional<CollectionScope> lastCollectionScope() const { return m_lastCollectionScope; }
+    bool didSkipMarkingInLastCollection() const { return m_didSkipMarkingInLastCollection; }
 #if USE(BUN_JSC_ADDITIONS)
     // The most recent collection boundary: the end of the last one, or the start of the one in progress.
     MonotonicTime lastGCBoundaryTime() const { return std::max(m_lastGCEndTime, m_currentGCStartTime); }
@@ -410,8 +442,14 @@ public:
     size_t allocationBudgetThisCycle() { return effectiveMaxEdenSize(); }
 #endif
     bool hasHeapAccess() const { return m_worldState.load() & hasAccessBit; }
+    bool needCollectionEpilogue() const { return m_worldState.load() & needCollectionEpilogueBit; }
     bool worldIsStopped() const { return m_worldIsStopped; }
     bool worldIsRunning() const { return !worldIsStopped(); }
+#if ASSERT_ENABLED
+    JS_EXPORT_PRIVATE void assertIsMutatorOrMutatorIsStopped() const;
+#else
+    ALWAYS_INLINE void assertIsMutatorOrMutatorIsStopped() const { }
+#endif
 
     // We're always busy on the collection threads. On the main thread, this returns true if we're
     // helping heap.
@@ -423,7 +461,6 @@ public:
     JS_EXPORT_PRIVATE void addFinalizer(JSCell*, LambdaFinalizer);
 
     void notifyIsSafeToCollect();
-    bool isSafeToCollect() const { return m_isSafeToCollect; }
     
     bool isShuttingDown() const { return m_isShuttingDown; }
 
@@ -463,7 +500,9 @@ public:
     void collectIfNecessaryOrDefer(GCDeferralContext* = nullptr);
 
     void completeAllJITPlans();
-    
+
+    void reportBytesMarked(size_t bytes) { m_bytesMarkedThisCycle.exchangeAdd(bytes, std::memory_order_relaxed); }
+
     // Note that:
     // 1. Use this API to report non-GC memory referenced by GC objects. Be sure to
     // call both of these functions: Calling only one may trigger catastropic
@@ -548,6 +587,11 @@ public:
     // first such collection: a VM that has not allocated Options::optimizedCodeAgingQuietAllocationMB in total yet reads
     // as quiet since the epoch, which is the right answer for "has it been busy lately".
     ApproximateTime lastActiveCollectionTime() const { return m_lastActiveCollectionTime.load(std::memory_order_relaxed); }
+    // Read once when the current (or last) collection began; CodeBlock aging measures against it instead of reading the
+    // clock for every block it visits.
+    ApproximateTime currentGCStartApproximateTime() const { return m_currentGCStartApproximateTime; }
+    // The collection in progress was requested by the embedder because the application went idle (GCRequest::isIdle).
+    bool isIdleCollection() const;
 #endif
 
 #if USE(BUN_JSC_ADDITIONS)
@@ -580,7 +624,9 @@ public:
 
     JS_EXPORT_PRIVATE void didAllocate(size_t);
 
-    const JITStubRoutineSet& jitStubRoutines() { return *m_jitStubRoutines; }
+    void addGCAwareJITStubRoutine(GCAwareJITStubRoutine*);
+
+    void noteStringFoundOnStack(const JSString* string) { m_stringsFoundOnStack.add(string); }
     
     // bytesAlreadyReported is the part of the buffer that this heap has already counted as allocated, because the
     // buffer adopted storage that reportExtraMemoryAllocated() had reported. The first reference counts only the rest
@@ -719,13 +765,6 @@ public:
     
     Seconds totalGCTime() const { return m_totalGCTime; }
 
-    UncheckedKeyHashMap<JSCellButterfly*, JSString*> immutableButterflyToStringCache;
-
-    bool isMarkingForGCVerifier() const { return m_isMarkingForGCVerifier; }
-
-    void setKeepVerifierSlotVisitor();
-    void clearVerifierSlotVisitor();
-
     void appendPossiblyAccessedStringFromConcurrentThreadsOrGCOwnedDataScope(const JSString* owner, String&& string)
     {
         m_possiblyAccessedStringsFromConcurrentThreadsOrGCOwnedDataScope.constructAndAppend(owner, WTF::move(string));
@@ -744,36 +783,20 @@ public:
     bool markWasmCalleeIfPending(Wasm::Callee*);
 #endif
 
-    // This is a debug function for checking who marked the target cell.
-    void dumpVerifierMarkerData(HeapCell*);
 
 private:
     friend class AllocatingScope;
-    friend class CodeBlock;
     friend class CollectingScope;
     friend class Collector;
-    friend class ConservativeRoots;
     friend class DeferGC;
     friend class DeferGCForAWhile;
-    friend class GCAwareJITStubRoutine;
-    friend class GCLogging;
-    friend class GCThread;
     friend class HeapUtil;
-    friend class HeapVerifier;
-    friend class JITStubRoutine;
-    friend class LLIntOffsetsExtractor;
     friend class MarkStackMergingConstraint;
     friend class MarkedSpace;
-    friend class BlockDirectory;
-    friend class MarkedBlock;
     friend class RunningScope;
     friend class SlotVisitor;
-    friend class SpaceTimeMutatorScheduler;
-    friend class StochasticSpaceTimeMutatorScheduler;
     friend class SweepingScope;
-    friend class IncrementalSweeper;
     friend class VM;
-    friend class VerifierSlotVisitor;
     friend class WeakBlock;
     friend class WeakSet;
 
@@ -798,17 +821,13 @@ private:
     JS_EXPORT_PRIVATE void deprecatedReportExtraMemorySlowCase(size_t);
     
     size_t totalBytesAllocatedThisCycle() { return m_nonOversizedBytesAllocatedThisCycle + m_oversizedBytesAllocatedThisCycle; }
-#if USE(BUN_JSC_ADDITIONS)
-    // Read once when the current (or last) collection began; CodeBlock aging measures against it instead of reading the
-    // clock for every block it visits.
-    ApproximateTime currentGCStartApproximateTime() const { return m_currentGCStartApproximateTime; }
-    // The collection in progress was requested by the embedder because the application went idle (GCRequest::isIdle).
-    bool isIdleCollection() const;
-#endif
+    bool isEdenCollectionWithEmptyEden() const { return !m_hasAllocatedSinceLastCollection && m_collectionScope && m_collectionScope.value() == CollectionScope::Eden; }
+    bool canSkipMarking() const;
 
     void checkConn(GCConductor);
 
     void collectInMutatorThread();
+    void collectInMutatorThreadUntilDone();
     
     void stopThePeriphery();
     void resumeThePeriphery();
@@ -837,8 +856,8 @@ private:
     
     void setMutatorWaiting();
     void clearMutatorWaiting();
-    void notifyThreadStopping(const AbstractLocker&);
     
+    void waitForMembershipChange(uint64_t ticket);
     void waitForCollection(GCRequest::Ticket);
     void waitForAllCollections();
 #if USE(BUN_JSC_ADDITIONS)
@@ -857,10 +876,10 @@ private:
 #endif
     void visitCompilerWorklistWeakReferences();
     void removeDeadCompilerWorklistEntries();
-    void rememberExecutingAndCompilingCodeBlocks(SlotVisitor&);
-    void recordBytesVisited(size_t bytesVisited);
-    void endMarking(size_t bytesVisited);
-    void verifyMarking();
+    void rememberExecutingAndCompilingCodeBlocks();
+    void updateOldGenerationCellBytes(size_t bytesMarked);
+    void endMarking();
+    void verifyHeapAfterMarking();
     void pruneDeadReferences();
     void prepareForAllocation();
 
@@ -869,7 +888,7 @@ private:
     void reconcileWeakGCHashTables();
     void sweepArrayBuffers();
     void snapshotUnswept();
-    void deleteSourceProviderCaches();
+    void pruneUnusedSourceProviderCaches();
     void harvestWeakReferences();
 
     template<typename CellType, typename CellSet>
@@ -881,6 +900,7 @@ private:
     void releaseUnusedSharedBaselineCode();
     JS_EXPORT_PRIVATE void addToRememberedSet(const JSCell*);
     void updateAllocationLimits();
+    size_t memoryLimitForGrowth();
     void didFinishCollection();
     void recordCollectionTime(Seconds duration);
 #if USE(BUN_JSC_ADDITIONS)
@@ -889,6 +909,7 @@ private:
     void gatherExtraHeapData(HeapProfiler&);
     void removeDeadHeapSnapshotNodes(HeapProfiler&);
     void runCollectionEpilogue();
+    void sweepAndClearCachesInEpilogue();
     void sweepEagerlyInEpilogue();
     
     void addDetachedWeakBlock(WeakBlock*);
@@ -909,7 +930,7 @@ private:
     
     void setMutatorShouldBeFenced(bool value);
     
-    void addCoreConstraints();
+    Vector<std::unique_ptr<MarkingConstraint>> createCoreConstraints();
 
     enum class MemoryThresholdCallType {
         Cached,
@@ -933,14 +954,20 @@ private:
 
     bool shouldSweepSynchronously();
 
-    void verifyGC();
-    void verifierMark();
 
     Lock m_lock;
     const HeapType m_heapType;
     MutatorState m_mutatorState { MutatorState::Running };
+    bool m_hasAllocatedSinceLastCollection { true };
+    bool m_didSkipMarkingInLastCollection { false };
+    bool m_validatesCellVisits { false };
     const size_t m_ramSize;
     const size_t m_minBytesPerCycle;
+
+    // Sizes count the bytes of cells plus the extra memory they keep alive.
+    // A size "after" a collection is measured when it ends. A size "before" a collection is estimated
+    // when it starts: the size after the previous collection plus the bytes allocated since.
+    // "This cycle" means since the last collection ended.
     size_t m_bytesAllocatedBeforeLastEdenCollect { 0 };
 #if USE(BUN_JSC_ADDITIONS)
     std::atomic<ApproximateTime> m_lastActiveCollectionTime { ApproximateTime() };
@@ -958,7 +985,7 @@ private:
     size_t m_sizeBeforeLastEdenCollect { 0 };
 
     size_t m_oversizedBytesAllocatedThisCycle { 0 };
-    size_t m_lastOversidedAllocationThisCycle { 0 };
+    size_t m_lastOversizedAllocationThisCycle { 0 };
 
     size_t m_nonOversizedBytesAllocatedThisCycle { 0 };
     size_t m_bytesAbandonedSinceLastFullCollect { 0 };
@@ -981,9 +1008,14 @@ private:
     std::atomic<GCRequest::Ticket> m_workerVerificationTicket { 0 };
     bool m_heapLimitExceeded { false };
 #endif
-    size_t m_totalBytesVisitedAfterLastFullCollect { 0 };
-    size_t m_totalBytesVisited { 0 };
-    size_t m_totalBytesVisitedThisCycle { 0 };
+
+    // The old generation's cells, in bytes: those the last Full collection marked, plus those each later
+    // Eden collection marked. Old cells that die stay counted until the next Full collection.
+    size_t m_oldGenerationCellBytes { 0 };
+    size_t m_oldGenerationCellBytesAtStartOfLastFullCollect { 0 };
+    // Bytes the visitors have marked this cycle, gathered for the End step.
+    Atomic<size_t> m_bytesMarkedThisCycle { 0 };
+
     double m_incrementBalance { 0 };
     
     bool m_shouldDoOpportunisticFullCollection { false };
@@ -1025,10 +1057,13 @@ private:
 
     std::unique_ptr<MachineThreads> m_machineThreads;
     
-    const std::unique_ptr<Collector> m_collector;
+    // The Collector this heap owns, which collects only this heap. Null with useGlobalGC.
+    const std::unique_ptr<Collector> m_localCollector;
+    // The Collector that collects this heap: m_localCollector, or the global Collector.
+    Collector* const m_collector;
     std::unique_ptr<SlotVisitor> m_mutatorSlotVisitor;
     std::unique_ptr<MarkStackArray> m_mutatorMarkStack;
-    std::unique_ptr<VerifierSlotVisitor> m_verifierSlotVisitor;
+    std::unique_ptr<StoredCellLog> m_storedCellLog;
     
     StrongSet m_strongSet;
     std::unique_ptr<CodeBlockSet> m_codeBlocks;
@@ -1039,8 +1074,6 @@ private:
     bool m_isSafeToCollect { false };
     bool m_isShuttingDown { false };
     bool m_mutatorShouldBeFenced { false };
-    bool m_isMarkingForGCVerifier { false };
-    bool m_keepVerifierSlotVisitor { false };
     Lock m_wasmCalleesPendingDestructionLock;
 
     unsigned m_barrierThreshold { blackThreshold };
@@ -1070,7 +1103,7 @@ private:
     // Since this list is walked once to deref all the strings
     // We don't need fast access.
     SegmentedVector<std::pair<const JSString*, String>, 256, 10, SegmentedVectorGrowthPolicy::Doubling> m_possiblyAccessedStringsFromConcurrentThreadsOrGCOwnedDataScope;
-   UncheckedKeyHashSet<const JSString*> m_discoveredAccessedStringsFromGCOwnedDataScope;
+    UncheckedKeyHashSet<const JSString*> m_stringsFoundOnStack;
     
     RefPtr<GCActivityCallback> m_fullActivityCallback;
     RefPtr<GCActivityCallback> m_edenActivityCallback;
@@ -1124,7 +1157,6 @@ private:
     bool m_didDeferGCWork { false };
 
     uint64_t m_mutatorExecutionVersion { 0 };
-    uint64_t m_gcVersion { 0 };
 
     MonotonicTime m_lastGCEndTime;
     MonotonicTime m_currentGCStartTime;
@@ -1187,7 +1219,7 @@ public:
     IsoHeapCellType intlSegmentIteratorHeapCellType;
     IsoHeapCellType intlSegmenterHeapCellType;
     IsoHeapCellType intlSegmentsHeapCellType;
-#if USE(BUN_JSC_ADDITIONS)
+#if ENABLE(FFI)
     IsoHeapCellType ffiFunctionHeapCellType;
     IsoHeapCellType ffiCallbackHeapCellType;
 #endif
@@ -1208,6 +1240,7 @@ public:
     std::unique_ptr<FastMallocAlignedMemoryAllocator> fastMallocAllocator;
     std::unique_ptr<GigacageAlignedMemoryAllocator> primitiveGigacageAllocator;
     std::unique_ptr<StructureAlignedMemoryAllocator> structureAllocator;
+    std::unique_ptr<CagedAlignedMemoryAllocator> cagedAllocator;
 
     // Subspaces
     CompleteSubspace primitiveGigacageAuxiliarySpace; // Typed arrays, strings, bitvectors, etc go here.
@@ -1364,7 +1397,7 @@ public:
     JS_EXPORT_PRIVATE SubspaceType* name##Slow(); \
     std::unique_ptr<SubspaceType> m_##name;
 
-    FOR_EACH_JSC_WEBASSEMBLY_DYNAMIC_NON_ISO_SUBSPACE(DEFINE_NON_ISO_SUBSPACE_MEMBER)
+    FOR_EACH_JSC_DYNAMIC_NON_ISO_SUBSPACE(DEFINE_NON_ISO_SUBSPACE_MEMBER)
 #undef DEFINE_NON_ISO_SUBSPACE_MEMBER
 
 };

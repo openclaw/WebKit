@@ -432,6 +432,11 @@ void InjectedBundlePage::didFailProvisionalLoadWithErrorForFrame(WKBundleFrameRe
 
 void InjectedBundlePage::didCommitLoadForFrame(WKBundleFrameRef frame)
 {
+    if (WKBundleFrameIsMainFrame(frame)) {
+        static uint64_t mainFrameCommitCount;
+        m_mainFrameCommitOrder = ++mainFrameCommitCount;
+    }
+
     RefPtr testRunner = InjectedBundle::singleton().testRunner();
     if (!testRunner)
         return;
@@ -1130,6 +1135,10 @@ void InjectedBundlePage::frameDidChangeLocation(WKBundleFrameRef frame)
 
 void InjectedBundlePage::notifyDone()
 {
+    // With site isolation, a provisional load that continues in another process (e.g. after a cross-site redirect)
+    // never gets didFinishLoad or didFailProvisionalLoad in this process, so stop waiting once the frame is no longer loading here.
+    if (m_topLoadingFrame && WKBundleFrameGetFrameLoadState(m_topLoadingFrame) == kWKFrameLoadStateFinished)
+        setTopLoadingFrame(nullptr);
     if (m_topLoadingFrame)
         return;
     forceImmediateCompletion();

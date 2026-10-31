@@ -228,7 +228,7 @@ struct ExpressionInfo::Diff {
     using FieldID = ExpressionInfo::FieldID;
 
     template<unsigned bitCount>
-    void NODELETE set(FieldID fieldID, unsigned value)
+    void LEGACY_NODELETE set(FieldID fieldID, unsigned value)
     {
         switch (fieldID) {
         case FieldID::InstPC:
@@ -480,6 +480,8 @@ emitExtensionIsland:
 
 void ExpressionInfo::Encoder::encode(InstPC instPC, unsigned divot, unsigned startOffset, unsigned endOffset)
 {
+    ASSERT(instPC >= m_entry.instPC);
+
     unsigned numWides = 0;
     std::array<Wide, 4> wides;
 

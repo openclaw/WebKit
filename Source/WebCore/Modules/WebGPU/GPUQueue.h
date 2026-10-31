@@ -26,6 +26,7 @@
 #pragma once
 
 #include "BufferSource.h"
+#include "CanvasElementImage.h"
 #include "EventTarget.h"
 #include "GPUCommandBuffer.h"
 #include "GPUExtent3DDict.h"
@@ -33,7 +34,8 @@
 #include "GPUImageCopyTextureTagged.h"
 #include "GPUImageDataLayout.h"
 #include "GPUIntegralTypes.h"
-#include "WebGPUQueue.h"
+#include "WebGPU.h"
+#include <WebCore/WebGPUCppAPI.h>
 #include <optional>
 #include <wtf/Ref.h>
 #include <wtf/RefCountedAndCanMakeWeakPtr.h>
@@ -52,12 +54,12 @@ struct GPUDrawElementImageSource;
 
 class GPUQueue : public RefCountedAndCanMakeWeakPtr<GPUQueue> {
 public:
-    static Ref<GPUQueue> create(Ref<WebGPU::Queue>&& backing, GPUDevice& device)
+    static Ref<GPUQueue> create(Ref<::WebGPU::Queue>&& backing, Ref<WebGPUIntegration>&& gpu, GPUDevice& device)
     {
-        return adoptRef(*new GPUQueue(WTF::move(backing), device));
+        return adoptRef(*new GPUQueue(WTF::move(backing), WTF::move(gpu), device));
     }
 
-    String NODELETE label() const;
+    String LEGACY_NODELETE label() const;
     void setLabel(String&&);
 
     void submit(Vector<Ref<GPUCommandBuffer>>&&);
@@ -66,7 +68,7 @@ public:
     void onSubmittedWorkDone(OnSubmittedWorkDonePromise&&);
 
     ExceptionOr<void> writeBuffer(
-        const GPUBuffer&,
+        GPUBuffer&,
         GPUSize64 bufferOffset,
         BufferSource&& data,
         GPUSize64 dataOffset,
@@ -88,17 +90,25 @@ public:
         const GPUDrawElementImageSource&,
         const GPUDrawElementImageDestination&);
 
-    WebGPU::Queue& backing() { return m_backing; }
-    const WebGPU::Queue& backing() const { return m_backing; }
+    ::WebGPU::Queue& backing() { return m_backing; }
+    const ::WebGPU::Queue& backing() const { return m_backing; }
 
-    GPUDevice* device() const;
+    GPUDevice* LEGACY_NODELETE device() const;
 
     bool hasActiveInspectorCanvasCallTracer() const;
 
 private:
-    GPUQueue(Ref<WebGPU::Queue>&&, GPUDevice&);
+    GPUQueue(Ref<::WebGPU::Queue>&&, Ref<WebGPUIntegration>&&, GPUDevice&);
 
-    const Ref<WebGPU::Queue> m_backing;
+    ExceptionOr<void> drawSnapshotToTexture(
+        const CanvasElementSnapshot&,
+        const GPUDrawElementImageSource&,
+        const GPUDrawElementImageDestination&);
+
+    const Ref<::WebGPU::Queue> m_backing;
+    // The root, which has the commands that take WebCore sources.
+    const Ref<WebGPUIntegration> m_gpu;
+    String m_label;
     WeakPtr<GPUDevice, WeakPtrImplWithEventTargetData> m_device;
 };
 

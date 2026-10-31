@@ -87,8 +87,7 @@
 #include "ImageOverlay.h"
 #include "InlineIteratorBoxInlines.h"
 #include "InlineIteratorLogicalOrderTraversal.h"
-#include "InlineIteratorTextBoxInlines.h"
-#include "LegacyLineLayout.h"
+#include "InlineIteratorTextBox.h"
 #include "LegacyRenderSVGRoot.h"
 #include "LegacyRenderSVGShape.h"
 #include "LineSelection.h"
@@ -111,7 +110,6 @@
 #include "RenderGlyph.h"
 #include "RenderHTMLCanvas.h"
 #include "RenderImage.h"
-#include "RenderInline.h"
 #include "RenderIterator.h"
 #include "RenderLayer.h"
 #include "RenderLayerScrollableArea.h"
@@ -163,7 +161,7 @@ namespace WebCore {
 
 using namespace HTMLNames;
 
-static Node* NODELETE nodeForRenderer(RenderObject& renderer)
+static Node* LEGACY_NODELETE nodeForRenderer(RenderObject& renderer)
 {
     if (!renderer.isRenderView()) [[likely]]
         return renderer.node();
@@ -294,7 +292,7 @@ AccessibilityObject* AccessibilityRenderObject::parentObject() const
     if (!m_renderer)
         return AccessibilityNodeObject::parentObject();
 
-    WeakPtr cache = axObjectCache();
+    CheckedPtr cache = axObjectCache();
     if (!cache)
         return nullptr;
 
@@ -375,7 +373,7 @@ bool AccessibilityRenderObject::isOffScreen() const
 
     IntRect contentRect = snappedIntRect(protect(m_renderer)->absoluteClippedOverflowRectForSpatialNavigation());
     // FIXME: unclear if we need LegacyIOSDocumentVisibleRect.
-    IntRect viewRect = m_renderer->view().frameView().visibleContentRect(ScrollableArea::LegacyIOSDocumentVisibleRect);
+    IntRect viewRect = protect(m_renderer->view().frameView())->visibleContentRect(ScrollableArea::LegacyIOSDocumentVisibleRect);
     viewRect.intersect(contentRect);
     return viewRect.isEmpty();
 }
@@ -385,7 +383,7 @@ Element* AccessibilityRenderObject::anchorElement() const
     if (!m_renderer)
         return AccessibilityNodeObject::anchorElement();
 
-    WeakPtr cache = axObjectCache();
+    CheckedPtr cache = axObjectCache();
     if (!cache)
         return nullptr;
 
@@ -413,7 +411,7 @@ Element* AccessibilityRenderObject::anchorElement() const
 }
 
 // Null is distinct from empty: empty asks for the content to be ignored.
-static const String& generatedContentAltText(const RenderText* renderText)
+static const String& LEGACY_NODELETE generatedContentAltText(const RenderText* renderText)
 {
     if (auto* renderTextFragment = dynamicDowncast<RenderTextFragment>(renderText))
         return renderTextFragment->altText();
@@ -576,16 +574,11 @@ String AccessibilityRenderObject::stringValue() const
         return text();
     }
 
-    // For menu list select elements, get the selected option's aria-label or label.
-    if (RefPtr selectElement = dynamicDowncast<HTMLSelectElement>(node()); selectElement && selectElement->usesMenuList()) {
-        if (RefPtr option = selectElement->selectedOption()) {
-            auto overriddenDescription = option->attributeTrimmedWithDefaultARIA(aria_labelAttr);
-            if (!overriddenDescription.isEmpty())
-                return overriddenDescription;
-            return option->label();
-        }
-        return String();
-    }
+    if (RefPtr selectElement = dynamicDowncast<HTMLSelectElement>(node()); selectElement && selectElement->isDropdownBox())
+        return selectElement->buttonText(HTMLSelectElement::ForAccessibility::Yes);
+
+    if (RefPtr optGroup = optGroupForLabel(); optGroup && role() == AccessibilityRole::ListBoxOption)
+        return optGroup->groupLabelText();
 
 #if PLATFORM(COCOA)
     if (is<RenderListItem>(m_renderer.get()))
@@ -612,7 +605,7 @@ String AccessibilityRenderObject::stringValue() const
 
         // As fallback, gather the static text under this.
         String value;
-        Accessibility::enumerateUnignoredDescendants(*const_cast<AccessibilityRenderObject*>(this), false, [&value] (const auto& object) {
+        Accessibility::enumerateUnignoredDescendants(*const_cast<AccessibilityRenderObject*>(this), false, [&value](const auto& object) {
             if (object.isStaticText())
                 value = makeString(value, object.stringValue());
         });
@@ -721,14 +714,23 @@ bool AccessibilityRenderObject::isNonLayerSVGObject() const
     return renderer ? is<RenderSVGInlineText>(renderer.get()) || is<LegacyRenderSVGModelObject>(renderer.get()) : false;
 }
 
+// Maps a path in the renderer's local coordinates to absolute document coordinates, including any transforms
+// of the renderer and its ancestors, so that, for example, the path of an element inside a scaled container is
+// scaled like its bounding box is.
+static void mapLocalPathToAbsolute(Path& path, const RenderObject& renderer)
+{
+    path.transform(localToAbsoluteLinearTransform(renderer));
+    auto absoluteOrigin = flooredLayoutPoint(renderer.localToAbsolute(FloatPoint(), MapCoordinatesMode::UseTransforms));
+    path.transform(AffineTransform().translate(absoluteOrigin.x(), absoluteOrigin.y()));
+}
+
 static Path computePathForRenderBox(const RenderBox& renderBox)
 {
-    auto borderShape = BorderShape::shapeForBorderRect(protect(renderBox.style()), renderBox.borderBoxRect());
+    auto borderShape = BorderShape::shapeForBorderRect(renderBox.usedStyle(), renderBox.borderBoxRect());
     auto path = borderShape.pathForOuterShape(protect(renderBox.document())->deviceScaleFactor());
-    // borderBoxRect() is in local coordinates. Offset it to absolute document coordinates
-    // to match the coordinate system used by SVG, RenderText, and RenderInline paths.
-    auto absoluteOrigin = flooredLayoutPoint(renderBox.localToAbsolute(FloatPoint(), MapCoordinatesMode::UseTransforms));
-    path.transform(AffineTransform().translate(absoluteOrigin.x(), absoluteOrigin.y()));
+    // borderBoxRect() is in local coordinates. Map it to absolute document coordinates
+    // to match the coordinate system used by SVG, RenderText, and inline box paths.
+    mapLocalPathToAbsolute(path, renderBox);
     return path;
 }
 
@@ -736,7 +738,7 @@ static Path computePathForRenderBox(const RenderBox& renderBox)
 // different block-direction positions. For horizontal text, rects on different
 // lines have different Y positions. For vertical text, different columns have
 // different X positions.
-static bool rectsSpanMultipleLines(const Vector<LayoutRect>& rects, bool isHorizontal)
+static bool LEGACY_NODELETE rectsSpanMultipleLines(const Vector<LayoutRect>& rects, bool isHorizontal)
 {
     for (size_t i = 1; i < rects.size(); ++i) {
         if (isHorizontal) {
@@ -750,19 +752,19 @@ static bool rectsSpanMultipleLines(const Vector<LayoutRect>& rects, bool isHoriz
     return false;
 }
 
-static Path computePathForMultiLineRenderInline(const RenderInline& renderInline)
+static Path computePathForMultiLineInlineBox(const RenderBoxModelObject& inlineBox)
 {
     Vector<LayoutRect> rects;
-    renderInline.boundingRects(rects, flooredLayoutPoint(renderInline.localToAbsolute()));
+    inlineBox.boundingRects(rects, flooredLayoutPoint(inlineBox.localToAbsolute()));
     // Single-line inlines don't need a path -- the bounding rect is sufficient.
     if (rects.size() < 2)
         return { };
 
-    CheckedRef style = renderInline.style();
+    CheckedRef style = inlineBox.style();
     if (!rectsSpanMultipleLines(rects, style->writingMode().isHorizontal()))
         return { };
 
-    float deviceScaleFactor = protect(renderInline.document())->deviceScaleFactor();
+    float deviceScaleFactor = protect(inlineBox.document())->deviceScaleFactor();
     Vector<FloatRect> pixelSnappedRects;
     for (auto rect : rects)
         pixelSnappedRects.append(snapRectToDevicePixels(rect, deviceScaleFactor));
@@ -801,7 +803,9 @@ Path AccessibilityRenderObject::elementPath() const
             return { };
 
         float deviceScaleFactor = protect(renderText->document())->deviceScaleFactor();
-        auto outlineOffset = Style::evaluate<float>(style->usedOutlineOffset(), style->usedZoomForLength(), deviceScaleFactor);
+        // The rects are inflated like the outline of the parent would be.
+        CheckedRef parentStyle = renderText->parent()->style();
+        auto outlineOffset = Style::evaluate<float>(Style::effectiveOutlineOffset(parentStyle), parentStyle->usedZoomForLength(), deviceScaleFactor);
         Vector<FloatRect> pixelSnappedRects;
         for (auto rect : rects) {
             rect.inflate(outlineOffset);
@@ -847,10 +851,10 @@ Path AccessibilityRenderObject::elementPath() const
             std::optional<Path> clipPathResult;
             WTF::switchOn(renderBox->style().clipPath(),
                 [&](const Style::BasicShapePath& clipPath) {
-                    auto referenceBox = FloatRect(renderBox->borderBoxRect());
+                    // FIXME: Remove suppression once rdar://189998444 is fixed.
+                    SUPPRESS_MEMORY_UNSAFE_CAST auto referenceBox = FloatRect(renderBox->borderBoxRect());
                     auto path = Style::path(clipPath.shape(), referenceBox, renderBox->style().usedZoomForLength());
-                    auto absoluteOrigin = flooredLayoutPoint(renderBox->localToAbsolute(FloatPoint(), MapCoordinatesMode::UseTransforms));
-                    path.transform(AffineTransform().translate(absoluteOrigin.x(), absoluteOrigin.y()));
+                    mapLocalPathToAbsolute(path, *renderBox);
                     clipPathResult = WTF::move(path);
                 },
                 [](const auto&) { }
@@ -862,8 +866,10 @@ Path AccessibilityRenderObject::elementPath() const
             return computePathForRenderBox(*renderBox);
     }
 
-    if (CheckedPtr renderInline = dynamicDowncast<RenderInline>(*m_renderer))
-        return computePathForMultiLineRenderInline(*renderInline);
+    if (m_renderer->isInlineBox()) {
+        CheckedRef inlineBox = downcast<RenderBoxModelObject>(*m_renderer);
+        return computePathForMultiLineInlineBox(inlineBox.get());
+    }
 
     return { };
 }
@@ -992,7 +998,7 @@ AccessibilityObject* AccessibilityRenderObject::containingTree() const
     });
 }
 
-static AccessibilityObjectInclusion NODELETE objectInclusionFromAltText(const String& altText)
+static AccessibilityObjectInclusion LEGACY_NODELETE objectInclusionFromAltText(const String& altText)
 {
     // Don't ignore an image that has alt text.
     if (!altText.containsOnly<isASCIIWhitespace>())
@@ -1021,11 +1027,12 @@ bool AccessibilityRenderObject::computeIsIgnored() const
     AX_ASSERT(m_initialized);
 #endif
 
-    if (is<SelectPopoverElement>(node())) {
-        // The base-appearance select popover (Menu) must always be included so that it
+    if (RefPtr popover = dynamicDowncast<SelectPopoverElement>(node())) {
+        // The base-appearance picker (Menu) must always be included so that it
         // properly wraps the menu items. Check before the !m_renderer bailout
         // because the popover has display:contents (no renderer) when closed.
-        return false;
+        RefPtr select = popover->selectElement();
+        return !select || !select->usesBaseAppearancePicker();
     }
 
     if (!m_renderer)
@@ -1109,7 +1116,7 @@ bool AccessibilityRenderObject::computeIsIgnored() const
         }
 
         for (Ref ancestor : ancestorsOfType<HTMLSelectElement>(*node)) {
-            if (ancestor->usesMenuList() && !ancestor->usesBaseAppearancePicker())
+            if (ancestor->isDropdownBox() && !ancestor->usesBaseAppearancePicker())
                 return true;
         }
     }
@@ -1121,7 +1128,7 @@ bool AccessibilityRenderObject::computeIsIgnored() const
     if (m_renderer->isBR())
         return true;
 
-    if (WeakPtr renderText = dynamicDowncast<RenderText>(m_renderer.get())) {
+    if (CheckedPtr renderText = dynamicDowncast<RenderText>(m_renderer.get())) {
         // Text elements with no rendered text, or only whitespace should not be part of the AX tree.
         if (!renderText->hasRenderedText()) {
             // Layout must be clean to make the right decision here (because hasRenderedText() can return false solely because layout is dirty).
@@ -1231,7 +1238,7 @@ bool AccessibilityRenderObject::computeIsIgnored() const
         // First check the RenderImage's altText (which can be set through a style sheet, or come from the Element).
         // However, if this is not a native image, fallback to the attribute on the Element.
         AccessibilityObjectInclusion altTextInclusion = AccessibilityObjectInclusion::DefaultBehavior;
-        WeakPtr image = dynamicDowncast<RenderImage>(*m_renderer);
+        CheckedPtr image = dynamicDowncast<RenderImage>(*m_renderer);
         if (image)
             altTextInclusion = objectInclusionFromAltText(image->altText());
         else
@@ -1313,11 +1320,9 @@ bool AccessibilityRenderObject::computeIsIgnored() const
     // This logic, originally added in:
     // https://github.com/WebKit/WebKit/commit/ddeb923489b58fd890527bf0e432ebe6a477d2ef
     // Results in a lot of useless generics being exposed, which is wasteful. We should remove this.
-    WeakPtr blockFlow = dynamicDowncast<RenderBlockFlow>(*m_renderer);
+    CheckedPtr blockFlow = dynamicDowncast<RenderBlockFlow>(*m_renderer);
     if (blockFlow && m_renderer->childrenInline() && !canSetFocusAttribute() && !blockFlow->hasBlocksInInlineLayout()) {
-        // FIXME: Do we really need to check for SVG content here?
-        auto hasInlineOrSVGContent = blockFlow->hasContentfulInlineLine() || (blockFlow->svgTextLayout() && blockFlow->svgTextLayout()->lineCount());
-        return !hasInlineOrSVGContent && !clickableSelfOrAncestor();
+        return !blockFlow->hasContentfulInlineLine() && !clickableSelfOrAncestor();
     }
 
     if (isCanvas()) {
@@ -1463,7 +1468,7 @@ CharacterRange AccessibilityRenderObject::selectedTextRange() const
 // content cannot be a valid text position nor be selected (with a mouse or otherwise), so emitting
 // text runs for it would make the isolated tree's text-marker strings diverge from what can actually
 // be represented on the main-thread.
-static bool shouldExcludeTextRunsForPseudoElement(std::optional<PseudoElementType> pseudoElementType)
+static bool LEGACY_NODELETE shouldExcludeTextRunsForPseudoElement(std::optional<PseudoElementType> pseudoElementType)
 {
     if (!pseudoElementType) {
         // No pseudo type, so this function is not applicable.
@@ -1569,7 +1574,7 @@ AXTextRuns AccessibilityRenderObject::textRuns()
         );
     }
 
-    WeakPtr renderText = dynamicDowncast<RenderText>(renderer.get());
+    CheckedPtr renderText = dynamicDowncast<RenderText>(renderer.get());
     if (!renderText)
         return { };
 
@@ -1623,7 +1628,7 @@ AXTextRuns AccessibilityRenderObject::textRuns()
     };
 
     // Appends text to the current lineString, collapsing whitespace as necessary (similar to how TextIterator::handleTextRun() does).
-    auto appendToLineString = [&] (const InlineIterator::TextBoxIterator& textBox) {
+    auto appendToLineString = [&](const InlineIterator::TextBoxIterator& textBox) {
         auto text = textBox->originalText();
         if (text.isEmpty())
             return;
@@ -1640,9 +1645,7 @@ AXTextRuns AccessibilityRenderObject::textRuns()
 
         auto textRun = textBox->textRun(InlineIterator::TextRunMode::Editing);
         auto lineBox = textBox->lineBox();
-        if (!lineBox)
-            return;
-        lineHeight = LineSelection::logicalRect(*lineBox).height();
+        lineHeight = LineSelection::logicalRect(lineBox).height();
 
         // Compute distanceFromBoundsInDirection only for the first text box on each
         // line. Multiple text boxes can share a line (e.g. due to inline formatting
@@ -1652,7 +1655,7 @@ AXTextRuns AccessibilityRenderObject::textRuns()
         if (!didComputeDistanceFromBounds) {
             didComputeDistanceFromBounds = true;
             computeBoundsOffsetsIfNeeded();
-            distanceFromBoundsInDirection = isHorizontal ? textRun.xPos() + lineBox->contentLogicalLeft() + containingBlockOffset - elementRectOffset : -textRun.xPos() + containingBlockOffset - elementRectOffset;
+            distanceFromBoundsInDirection = isHorizontal ? textRun.xPos() + lineBox.contentLogicalLeft() + containingBlockOffset - elementRectOffset : -textRun.xPos() + containingBlockOffset - elementRectOffset;
         }
 
         // Populate GlyphBuffer with all of the glyphs for the text runs, enabling us to measure character widths.
@@ -1812,7 +1815,7 @@ int AccessibilityRenderObject::insertionPointLineNumber() const
     return lineForPosition(makeDeprecatedLegacyPosition(selectedTextRange->start));
 }
 
-static void NODELETE setTextSelectionIntent(AXObjectCache* cache, AXTextStateChangeType type)
+static void LEGACY_NODELETE setTextSelectionIntent(AXObjectCache* cache, AXTextStateChangeType type)
 {
     if (!cache)
         return;
@@ -1821,7 +1824,7 @@ static void NODELETE setTextSelectionIntent(AXObjectCache* cache, AXTextStateCha
     cache->setIsSynchronizingSelection(true);
 }
 
-static void NODELETE clearTextSelectionIntent(AXObjectCache* cache)
+static void LEGACY_NODELETE clearTextSelectionIntent(AXObjectCache* cache)
 {
     if (!cache)
         return;
@@ -2369,7 +2372,7 @@ RefPtr<AXCoreObject> AccessibilityRenderObject::accessibilityHitTest(const IntPo
     adjustedPoint.moveBy(-remoteFrameOffset());
 #endif
 
-    constexpr OptionSet<HitTestRequest::Type> hitType { HitTestRequest::Type::ReadOnly, HitTestRequest::Type::Active, HitTestRequest::Type::AccessibilityHitTest };
+    constexpr OptionSet hitType { HitTestRequest::Type::ReadOnly, HitTestRequest::Type::Active, HitTestRequest::Type::AccessibilityHitTest };
     HitTestResult hitTestResult { adjustedPoint };
 
     protect(protect(dynamicDowncast<RenderLayerModelObject>(*m_renderer))->layer())->hitTest(hitType, hitTestResult);
@@ -2427,7 +2430,7 @@ bool AccessibilityRenderObject::renderObjectIsObservable(RenderObject& renderer)
         return true;
 
     // Element-based check for HTMLSelectElement listbox.
-    if (auto* selectElement = dynamicDowncast<HTMLSelectElement>(*element); selectElement && !selectElement->usesMenuList())
+    if (auto* selectElement = dynamicDowncast<HTMLSelectElement>(*element); selectElement && !selectElement->isDropdownBox())
         return true;
 
     // Textboxes should send out notifications.
@@ -2498,6 +2501,10 @@ AccessibilityRole AccessibilityRenderObject::determineAccessibilityRole()
     if (m_ariaRole != AccessibilityRole::Unknown && !shouldIgnoreAttributeRole())
         return m_ariaRole;
 
+    // An optgroup with base appearance is represented by its label, as an item of the list box or picker.
+    if (RefPtr optGroup = optGroupForLabel())
+        return protect(optGroup->ownerSelectElement())->usesBaseAppearancePicker() ? AccessibilityRole::MenuItem : AccessibilityRole::ListBoxOption;
+
     if (isExposableTable())
         return AccessibilityRole::Table;
 
@@ -2539,20 +2546,13 @@ AccessibilityRole AccessibilityRenderObject::determineAccessibilityRole()
     if (m_renderer->isRenderTextControlMultiLine())
         return AccessibilityRole::TextArea;
     // Element-based check for HTMLSelectElement with any renderer.
-    if (RefPtr selectElement = dynamicDowncast<HTMLSelectElement>(node)) {
-        if (selectElement->usesMenuList())
-            return selectElement->multiple() ? AccessibilityRole::ListBox : AccessibilityRole::PopUpButton;
-        return AccessibilityRole::ListBox;
-    }
+    if (RefPtr selectElement = dynamicDowncast<HTMLSelectElement>(node))
+        return selectElement->isDropdownBox() ? AccessibilityRole::PopUpButton : AccessibilityRole::ListBox;
 
     // Options inside base-appearance selects are menu items.
     if (RefPtr option = dynamicDowncast<HTMLOptionElement>(node)) {
         if (RefPtr select = option->ownerSelectElement(); select && select->usesBaseAppearancePicker())
             return AccessibilityRole::MenuItem;
-    }
-    if (RefPtr optGroup = dynamicDowncast<HTMLOptGroupElement>(node)) {
-        if (RefPtr select = optGroup->ownerSelectElement(); select && select->usesBaseAppearancePicker())
-            return AccessibilityRole::Group;
     }
 
     if (m_renderer->isRenderOrLegacyRenderSVGRoot())
@@ -2720,7 +2720,7 @@ void AccessibilityRenderObject::addImageMapChildren()
     if (!map)
         return;
 
-    WeakPtr cache = axObjectCache();
+    CheckedPtr cache = axObjectCache();
     if (!cache)
         return;
     for (Ref area : descendantsOfType<HTMLAreaElement>(*map)) {
@@ -2795,7 +2795,7 @@ AccessibilitySVGObject* AccessibilityRenderObject::remoteSVGRootElement(CreateIf
 
     RefPtr rootSVGObject = createIfNecessary == CreateIfNecessary::Yes ? cache->getOrCreate(*rendererRoot) : cache->get(rendererRoot.get());
     AX_ASSERT(createIfNecessary == CreateIfNecessary::No || rootSVGObject);
-    return dynamicDowncast<AccessibilitySVGObject>(rootSVGObject).unsafeGet();
+    return dynamicDowncast<AccessibilitySVGObject>(rootSVGObject.unsafeGet());
 }
 
 void AccessibilityRenderObject::addRemoteSVGChildren()
@@ -2923,7 +2923,7 @@ void AccessibilityRenderObject::updateAttachmentViewParents()
     // updateChildrenIfNeeded == false because this is called right after we've added children, so we know
     // they're clean and don't need updating.
     for (const auto& child : children(/* updateChildrenIfNeeded */ false))
-        downcast<AccessibilityObject>(child)->overrideAttachmentParent(this);
+        downcast<AccessibilityObject>(child).overrideAttachmentParent(this);
 }
 #endif // PLATFORM(MAC)
 
@@ -3015,14 +3015,15 @@ void AccessibilityRenderObject::addChildren()
         addChild(object);
     };
 
-    WeakPtr cache = axObjectCache();
+    CheckedPtr cache = axObjectCache();
     auto addListItemMarker = [&] () {
         if (CheckedPtr marker = markerRenderer(); marker && cache)
             addChild(protect(cache->getOrCreate(*marker)));
     };
 
     auto addListBoxChildrenIfNecessary = [&](Node& node) -> bool {
-        if (role() == AccessibilityRole::ListBox) {
+        // Only a RenderListBox paints its list items itself.
+        if (role() == AccessibilityRole::ListBox && is<RenderListBox>(m_renderer)) {
             if (RefPtr selectElement = dynamicDowncast<HTMLSelectElement>(node)) {
                 for (const auto& listItem : selectElement->listItems())
                     addChild(protect(cache->getOrCreate(protect(listItem.get()))), AccessibilityObject::DescendIfIgnored::No);

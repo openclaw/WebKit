@@ -165,6 +165,12 @@ bool FileReaderLoader::processResponse(const ResourceResponse& response)
     if (m_readType == ReadType::ReadAsBinaryChunks)
         return true;
 
+    // https://encoding.spec.whatwg.org/#utf-8-decode
+    if (m_readType == ReadType::ReadAsUTF8Text) {
+        lazyInitialize(m_decoder, TextResourceDecoder::createUTF8());
+        return true;
+    }
+
     long long length = response.expectedContentLength();
 
     // A negative value means that the content length wasn't specified, so the buffer will need to be dynamically grown.
@@ -216,6 +222,11 @@ void FileReaderLoader::didReceiveData(const SharedBuffer& buffer)
         return;
     }
 
+    if (m_readType == ReadType::ReadAsUTF8Text) {
+        m_utf8Text.append(m_decoder->decode(buffer.span()));
+        return;
+    }
+
     int length = buffer.size();
     unsigned remainingBufferSpace = m_totalBytes - m_bytesLoaded;
     if (length > static_cast<long long>(remainingBufferSpace)) {
@@ -264,6 +275,14 @@ void FileReaderLoader::didFinishLoading(ScriptExecutionContextIdentifier, std::o
     if (m_variableLength && m_totalBytes > m_bytesLoaded) {
         m_rawData = protect(m_rawData)->slice(0, m_bytesLoaded);
         m_totalBytes = m_bytesLoaded;
+    }
+    if (m_readType == ReadType::ReadAsUTF8Text && !m_errorCode) {
+        m_utf8Text.append(m_decoder->flush());
+        if (m_utf8Text.hasOverflowed()) {
+            failed(ExceptionCode::NotReadableError);
+            return;
+        }
+        m_stringResult = m_utf8Text.toString();
     }
     cleanup();
     if (RefPtr client = m_client.get())
@@ -352,6 +371,7 @@ String FileReaderLoader::stringResult()
         break;
     case ReadAsBlob:
     case ReadAsBinaryChunks:
+    case ReadAsUTF8Text:
         ASSERT_NOT_REACHED();
     }
     
@@ -367,15 +387,14 @@ void FileReaderLoader::convertToText()
     // Per the File API "read as text" algorithm, the encoding is determined in order: the explicit
     // encoding argument if it is a supported encoding; otherwise the charset parameter of the Blob's
     // type, if any; otherwise UTF-8.
-    // We intentionally deviate from the spec in one respect, for consistency with how WebKit decodes
-    // web content: a BOM in the data always overrides the selected encoding (handled by
-    // TextResourceDecoder), whereas the spec gives precedence to the explicitly supplied encoding.
+    // The data is decoded with that encoding as the fallback, so a BOM in the data overrides it
+    // (handled by TextResourceDecoder).
     // FIXME: consider supporting incremental decoding to improve the perf.
     if (!m_decoder) {
         auto encoding = m_encoding;
         if (!encoding.isValid())
             encoding = extractCharsetFromMediaType(m_dataType);
-        lazyInitialize(m_decoder, TextResourceDecoder::create("text/plain"_s, encoding.isValid() ? encoding : PAL::UTF8Encoding()));
+        lazyInitialize(m_decoder, TextResourceDecoder::create(TextResourceDecoder::ContentType::PlainText, encoding.isValid() ? encoding : PAL::UTF8Encoding()));
     }
     Ref rawData = *m_rawData;
     if (isCompleted())

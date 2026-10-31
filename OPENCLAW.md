@@ -1,7 +1,7 @@
 # OpenClaw WebKit artifacts
 
 This fork owns the WebKit artifacts consumed by `openclaw/bun`. The engine base is
-`3d3257150c40a1aabdc5f8b48d5b33d0413674cb`. Normal merges retain both the
+`e66916298091dd12469076fd854e135b03fb16ff`. Normal merges retain both the
 main and published fork histories. Upstream `.github/scripts/lanes.mjs`, Dockerfiles, ICU inputs and macOS
 cross tools remain unchanged. No workflow publishes toolchain images.
 
@@ -21,7 +21,7 @@ Bun adapters and a joint rebuild because engine class layouts change.
 commit and each active workflow-to-artifact mapping. The release workflow uses
 LTO for Linux glibc x64/arm64, macOS x64/arm64, and its optional Linux musl
 x64/arm64 and Windows x64 targets. Fork CI adds non-LTO Linux x64 and macOS arm64.
-Windows ARM64 adds the upstream non-LTO release lane, for ten artifacts. LLVM's
+Windows ARM64 adds the upstream non-LTO release lane, for ten artifacts. These existing lanes disable AOT; packaged headers carry the same lane ABI definitions as their libraries. LLVM's
 CodeView register-tuple limitation prevents ARM64 LTO (oven-sh/bun#31345).
 Debug, ASAN, Android and FreeBSD are not selected by these OpenClaw workflows. x64 has one Nehalem baseline.
 
@@ -176,6 +176,10 @@ for process, V8 and worker statistics. Qualification retains ownership, transfer
 worker inspection and external-buffer cases alongside the fork selection.
 
 ## Unreleased
+
+- Merge upstream `e66916298091dd12469076fd854e135b03fb16ff` with both commit histories intact. Adapt worker verification and ArrayBuffer deductions to upstream per-heap collector accounting, preserve runtime AVX detection with upstream CPU feature reporting, and retain namespace facades alongside AOT exports.
+- Use upstream's retained mimalloc pthread key at shutdown, replacing the fork's key-deletion protocol. Keep deterministic late-allocation and in-flight setter regressions without a production drain hook.
+- Invalidate older bytecode cache layouts when combining upstream control-flow loop-header metadata with fork syntax-position tables (format revision 18).
 
 - Retain the native Linux engine archive and provenance for seven days after its successful PR build, before Bun consumer qualification, so failed qualification can reuse the exact engine bytes.
 - Merge the main and published engine histories, then integrate upstream `3d3257150c40a1aabdc5f8b48d5b33d0413674cb` while preserving worker budgets, namespace facades, ALS, accounting, allocation sampling, traps, VM entry storage and all ten artifact lanes.

@@ -129,10 +129,10 @@ public:
 #if PLATFORM(COCOA)
     const String& pasteboardName() const LIFETIME_BOUND { return m_pasteboardName; }
     bool containsURLTypeIdentifier() const;
-    bool containsPromise() const;
+    bool LEGACY_NODELETE containsPromise() const;
 #endif
 
-    bool NODELETE shouldMatchStyleOnDrop() const;
+    bool LEGACY_NODELETE shouldMatchStyleOnDrop() const;
 
     std::optional<PageIdentifier> pageID() const { return m_pageID; }
 

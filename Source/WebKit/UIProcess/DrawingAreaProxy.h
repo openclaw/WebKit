@@ -138,7 +138,7 @@ public:
     virtual bool shouldCoalesceVisualEditorStateUpdates() const { return false; }
     virtual bool shouldSendWheelEventsToEventDispatcher() const { return false; }
 
-    WebPageProxy* NODELETE page() const;
+    WebPageProxy* LEGACY_NODELETE page() const;
     virtual void viewWillStartLiveResize() { };
     virtual void viewWillEndLiveResize() { };
 
@@ -164,6 +164,8 @@ protected:
     WebProcessProxy& webProcessProxy() const { return m_webProcessProxy; }
 
     void removeOutstandingPresentationUpdateCallback(IPC::Connection&, AsyncReplyID);
+
+    void flushOutstandingPresentationUpdateCallbacks(IPC::Connection&);
 
 private:
     virtual void sizeDidChange() = 0;

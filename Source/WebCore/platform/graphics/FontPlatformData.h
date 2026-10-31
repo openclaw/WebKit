@@ -297,6 +297,8 @@ public:
         float minimumValue() const { return m_minimumValue; }
         float maximumValue() const { return m_maximumValue; }
 
+        friend bool operator==(const FontVariationAxis&, const FontVariationAxis&) = default;
+
     private:
         const String m_name;
         const String m_tag;
@@ -422,7 +424,7 @@ public:
     static constexpr bool safeToCompareToHashTableEmptyOrDeletedValue = true;
 
     RefPtr<SharedBuffer> openTypeTable(uint32_t table) const;
-    RefPtr<SharedBuffer> NODELETE platformOpenTypeTable(uint32_t table) const;
+    RefPtr<SharedBuffer> LEGACY_NODELETE platformOpenTypeTable(uint32_t table) const;
 
     String description() const;
 
@@ -434,7 +436,7 @@ public:
 #endif
     };
 
-    WEBCORE_EXPORT const CreationData* NODELETE creationData() const;
+    WEBCORE_EXPORT const CreationData* LEGACY_NODELETE creationData() const;
     const FontCustomPlatformData* customPlatformData() const
     {
         return m_customPlatformData.get();

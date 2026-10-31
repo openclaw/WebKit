@@ -2534,7 +2534,12 @@ void testModArgImmDouble(double a, double b)
     root->clearSuccessors();
     root->appendNew<Value>(proc, Return, Origin(), root->appendNew<Value>(proc, Mod, Origin(), valueA, valueB));
 
-    CHECK(isIdentical(compileAndRun<double>(proc, a), fmod(a, b)));
+    double expected = fmod(a, b);
+    double actual = compileAndRun<double>(proc, a);
+    if (std::isnan(expected))
+        CHECK(std::isnan(actual));
+    else
+        CHECK(isIdentical(actual, expected));
 }
 
 void testModImmArgDouble(double a, double b)
@@ -2560,7 +2565,12 @@ void testModImmsDouble(double a, double b)
     root->clearSuccessors();
     root->appendNew<Value>(proc, Return, Origin(), root->appendNew<Value>(proc, Mod, Origin(), valueA, valueB));
 
-    CHECK(isIdentical(compileAndRun<double>(proc), fmod(a, b)));
+    double expected = fmod(a, b);
+    double actual = compileAndRun<double>(proc);
+    if (std::isnan(expected))
+        CHECK(std::isnan(actual));
+    else
+        CHECK(isIdentical(actual, expected));
 }
 
 void testModArgFloat(float a)
@@ -7210,7 +7220,7 @@ static void testBitAndWithMaskReturnsBooleans(int64_t a, int64_t b)
     CHECK_EQ(compileAndRun<intptr_t>(proc, a, b), expected);
 }
 
-static double NODELETE bitAndDouble(double a, double b)
+static double LEGACY_NODELETE bitAndDouble(double a, double b)
 {
     return std::bit_cast<double>(std::bit_cast<uint64_t>(a) & std::bit_cast<uint64_t>(b));
 }
@@ -7272,7 +7282,7 @@ static void testBitAndImmsDouble(double a, double b)
     CHECK(isIdentical(compileAndRun<double>(proc), bitAndDouble(a, b)));
 }
 
-static float NODELETE bitAndFloat(float a, float b)
+static float LEGACY_NODELETE bitAndFloat(float a, float b)
 {
     return std::bit_cast<float>(std::bit_cast<uint32_t>(a) & std::bit_cast<uint32_t>(b));
 }

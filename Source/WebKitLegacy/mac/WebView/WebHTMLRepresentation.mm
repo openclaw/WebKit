@@ -61,6 +61,7 @@
 #import <WebCore/NodeTraversal.h>
 #import <WebCore/Range.h>
 #import <WebCore/RenderElement.h>
+#import <WebCore/RenderElementInlines.h>
 #import <WebCore/RenderText.h>
 #import <WebCore/ScriptDisallowedScope.h>
 #import <WebCore/Settings.h>
@@ -71,6 +72,7 @@
 #import <wtf/FixedVector.h>
 #import <wtf/NeverDestroyed.h>
 #import <wtf/StdLibExtras.h>
+#import <wtf/cocoa/TypeCastsCocoa.h>
 #import <wtf/cocoa/VectorCocoa.h>
 #import <wtf/text/StringBuilder.h>
 
@@ -92,7 +94,9 @@ using JSC::Yarr::RegularExpression;
 @implementation WebHTMLRepresentationPrivate
 @end
 
-@implementation WebHTMLRepresentation
+@implementation WebHTMLRepresentation {
+    RetainPtr<WebHTMLRepresentationPrivate> _private;
+}
 
 + (NSArray *)supportedMIMETypes
 {
@@ -131,7 +135,7 @@ using JSC::Yarr::RegularExpression;
     if (!self)
         return nil;
     
-    _private = [[WebHTMLRepresentationPrivate alloc] init];
+    _private = adoptNS([[WebHTMLRepresentationPrivate alloc] init]);
 
     return self;
 }
@@ -140,9 +144,6 @@ using JSC::Yarr::RegularExpression;
 {
     if (_private && _private->includedInWebKitStatistics)
         --WebHTMLRepresentationCount;
-
-    // Retaining the member just to release it would be pointless.
-    SUPPRESS_UNRETAINED_ARG [_private release];
 
     [super dealloc];
 }
@@ -371,7 +372,7 @@ static RegularExpression* regExpForLabels(NSArray *labels)
         unsigned numLabels = [labels count];
         unsigned i;
         for (i = 0; i < numLabels; i++) {
-            String label = [labels objectAtIndex:i];
+            String label = dynamic_objc_cast<NSString>([labels objectAtIndex:i]);
 
             bool startsWithWordCharacter = false;
             bool endsWithWordCharacter = false;
@@ -447,7 +448,7 @@ static RetainPtr<NSString> searchForLabelsBeforeElement(WebCore::LocalFrame* fra
                 return result;
             }
             searchedCellAbove = true;
-        } else if (CheckedPtr renderText = dynamicDowncast<WebCore::RenderText>(n->renderer()); renderText && renderText->style().usedVisibility() == WebCore::Visibility::Visible) {
+        } else if (CheckedPtr renderText = dynamicDowncast<WebCore::RenderText>(n->renderer()); renderText && renderText->usedStyle().visibility() == WebCore::UsedVisibility::Visible) {
             // For each text chunk, run the regexp
             String nodeString = n->nodeValue();
             // add 100 for slop, to make it more likely that we'll search whole nodes

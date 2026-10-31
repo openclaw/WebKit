@@ -41,6 +41,7 @@
 #include "RenderBlockFlow.h"
 #include "RenderBlockInlines.h"
 #include "RenderBoxInlines.h"
+#include "RenderElementInlines.h"
 #include "RenderImage.h"
 #include "RenderLayer.h"
 #include "RenderListItem.h"
@@ -66,7 +67,7 @@ namespace WebCore {
 WTF_MAKE_TZONE_ALLOCATED_IMPL(RenderListOutsideMarker);
 
 RenderListOutsideMarker::RenderListOutsideMarker(RenderListItem& listItem, Style::ComputedStyle&& style)
-    : RenderBox(Type::ListOutsideMarker, listItem.document(), WTF::move(style))
+    : RenderBox(Type::ListOutsideMarker, protect(listItem.document()), WTF::move(style))
     , m_listItem(listItem)
 {
     setInline(true);
@@ -129,7 +130,7 @@ bool RenderListOutsideMarker::isImage() const
 
 bool RenderListOutsideMarker::hasContentProperty() const
 {
-    return listMarkerHasContent(style(), protect(document()));
+    return listMarkerHasContent(style(), document());
 }
 
 RenderBlockFlow* RenderListOutsideMarker::contentContainer() const
@@ -144,7 +145,7 @@ LayoutRect RenderListOutsideMarker::localSelectionRect()
 
 void RenderListOutsideMarker::paint(PaintInfo& paintInfo, const LayoutPoint& paintOffset)
 {
-    if (style().usedVisibility() != Visibility::Visible)
+    if (usedStyle().visibility() != UsedVisibility::Visible)
         return;
 
     LayoutPoint boxOrigin(paintOffset + location());
@@ -218,9 +219,6 @@ void RenderListOutsideMarker::layoutContentContainer(RenderBlockFlow& container)
         // content box along the block axis so its own first-line baseline lands on that font baseline —
         // otherwise the content's line-box half-leading shifts it off the list item's baseline. Logical
         // setters keep this correct in vertical writing modes.
-        auto markerAscent = LayoutUnit { style().metricsOfPrimaryFont().ascent(BaselineAlignment::dominantBaseline(writingMode())) };
-        container.setLogicalTop(markerAscent - contentBaseline);
-
         if (hasContentProperty()) {
             setLogicalHeight(container.logicalHeight());
             m_layoutBounds = { contentBaseline, container.logicalHeight() - contentBaseline };
@@ -228,6 +226,9 @@ void RenderListOutsideMarker::layoutContentContainer(RenderBlockFlow& container)
             setLogicalHeight(style().metricsOfPrimaryFont().intHeight());
             m_layoutBounds = layoutBoundForTextContent(m_listItem->markerText());
         }
+
+        auto baselineOffset = writingMode().prefersCentralBaseline() ? logicalHeight() / 2 : LayoutUnit { style().metricsOfPrimaryFont().ascent(BaselineAlignment::dominantBaseline(writingMode())) };
+        container.setLogicalTop(baselineOffset - contentBaseline);
     }
 
     // The content box can extend outside the marker's border box (its baseline offset may be
@@ -476,7 +477,7 @@ ListMarkerTextContent listMarkerTextContent(const Style::ComputedStyle& markerSt
             return ListMarkerTextContent { .textWithSuffix = identifier.value, .textWithoutSuffixLength = identifier.value.length() };
         },
         [&](const auto& counterStyle) {
-            auto counter = protect(listItem.document())->counterStyleRegistry().resolvedCounterStyle(counterStyle);
+            auto counter = listItem.document().counterStyleRegistry().resolvedCounterStyle(counterStyle);
             auto text = makeString(counter->prefix().text, counter->text(listItem.value(), markerStyle.writingMode()));
             return ListMarkerTextContent { .textWithSuffix = makeString(text, counter->suffix().text), .textWithoutSuffixLength = text.length() };
         }

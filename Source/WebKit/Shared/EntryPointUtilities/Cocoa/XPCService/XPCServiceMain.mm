@@ -52,19 +52,15 @@
 #import <wtf/text/MakeString.h>
 #import <wtf/text/TextStream.h>
 
-#if __has_include(<WebKitAdditions/DyldCallbackAdditions.h>)
-#import <WebKitAdditions/DyldCallbackAdditions.h>
-#endif
-
 namespace WebKit {
 
-static Vector<String>& NODELETE overrideLanguagesFromBootstrap()
+static Vector<String>& LEGACY_NODELETE overrideLanguagesFromBootstrap()
 {
     static NeverDestroyed<Vector<String>> languages;
     return languages;
 }
 
-static void NODELETE stageOverrideLanguagesForMainThread(Vector<String>&& languages)
+static void LEGACY_NODELETE stageOverrideLanguagesForMainThread(Vector<String>&& languages)
 {
     RELEASE_ASSERT(overrideLanguagesFromBootstrap().isEmpty());
     overrideLanguagesFromBootstrap().swap(languages);
@@ -117,7 +113,7 @@ NEVER_INLINE NO_RETURN_DUE_TO_CRASH static void crashDueWebKitFrameworkVersionMi
 static void checkFrameworkVersion(xpc_object_t message)
 {
     auto uiProcessWebKitBundleVersion = xpcDictionaryGetString(message, "WebKitBundleVersion"_s);
-    auto webkitBundleVersion = ASCIILiteral::fromLiteralUnsafe(WEBKIT_BUNDLE_VERSION);
+    auto webkitBundleVersion = ASCIILiteral { WEBKIT_BUNDLE_VERSION };
     if (!uiProcessWebKitBundleVersion.isNull() && uiProcessWebKitBundleVersion != webkitBundleVersion) {
         auto errorMessage = makeString("WebKit framework version mismatch: "_s, uiProcessWebKitBundleVersion, " != "_s, webkitBundleVersion);
         logAndSetCrashLogMessage(errorMessage.utf8());
@@ -192,10 +188,6 @@ void XPCServiceEventHandler(xpc_connection_t peer)
                 stageOverrideLanguagesForMainThread(WTF::move(newLanguages));
             } else
                 LOG(Language, "Bootstrap message does not contain OverrideLanguages");
-
-#if __has_include(<WebKitAdditions/DyldCallbackAdditions.h>) && PLATFORM(IOS)
-            register_for_dlsym_callbacks();
-#endif
 
 #if PLATFORM(IOS_FAMILY)
             if (RetainPtr containerEnvironmentVariables = xpc_dictionary_get_value(event, "ContainerEnvironmentVariables")) {

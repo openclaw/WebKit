@@ -21,13 +21,22 @@
 #include "SVGImageIntrinsicSizing.h"
 
 #include "CachedImage.h"
+#include "GraphicsContext.h"
 #include "Image.h"
+#include "ImageDrawingOptions.h"
 #include "RenderElement.h"
+#include "RenderObjectInlines.h"
 #include "SVGImageElement.h"
 #include "SVGImageElementSizing.h"
 #include "SVGLengthContext.h"
+#include "SVGPreserveAspectRatioValue.h"
+#include "Settings.h"
 #include "StyleComputedStyle+GettersInlines.h"
 #include "StyleImage.h"
+
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+#include <WebKitAdditions/AXCustomColorModeController.h>
+#endif
 
 namespace WebCore {
 
@@ -88,7 +97,7 @@ FloatRect calculateSVGImageObjectBoundingBox(const SVGImageElement& imageElement
     return { imageElement.x().value(lengthContext), imageElement.y().value(lengthContext), concreteWidth, concreteHeight };
 }
 
-NaturalDimensions svgImageNaturalDimensions(const Style::Image& styleImage, const RenderElement& renderer)
+static NaturalDimensions calculateSVGImageNaturalDimensions(const Style::Image& styleImage, const RenderElement& renderer)
 {
     if (styleImage.errorOccurred()) {
         if (RefPtr cachedImage = styleImage.cachedImage()) {
@@ -99,12 +108,58 @@ NaturalDimensions svgImageNaturalDimensions(const Style::Image& styleImage, cons
     return styleImage.naturalDimensions(renderer, SVGImageElementSizing { });
 }
 
-FloatSize svgImageRenderingSize(const Style::Image& styleImage, const RenderElement& renderer, FloatSize containerSize)
+SVGImagePlacement calculateSVGImagePlacement(const Style::Image& styleImage, const RenderElement& renderer, const SVGPreserveAspectRatioValue& preserveAspectRatio, const FloatRect& positioningRectangle)
 {
-    if (styleImage.drawsSVGImage())
-        return containerSize;
-    auto naturalDimensions = svgImageNaturalDimensions(styleImage, renderer);
-    return { naturalDimensions.width.value_or(0), naturalDimensions.height.value_or(0) };
+    // "The dimensions of the positioning rectangle ... define the specified size for the embedded object. A concrete
+    // object size and final position must be determined for the object using the Default Sizing Algorithm"
+    // https://svgwg.org/svg2-draft/embedded.html#Placement
+    // FIXME: Apply 'object-fit' and 'object-position'.
+    auto concreteObjectSize = styleImage.negotiate(renderer, SVGImageElementSizing { { positioningRectangle.width(), positioningRectangle.height() } });
+    FloatRect objectRect { positioningRectangle.location(), concreteObjectSize.size() };
+
+    // "The 'preserveAspectRatio' attribute determines how the referenced image is scaled and positioned to fit into
+    // the concrete object size."
+    // https://svgwg.org/svg2-draft/embedded.html#ImageElement
+    auto imageRenderingRectangle = [&] -> FloatRect {
+        auto naturalDimensions = calculateSVGImageNaturalDimensions(styleImage, renderer);
+        auto naturalAspectRatio = naturalDimensions.width && naturalDimensions.height ? std::optional<FloatSize> { { *naturalDimensions.width, *naturalDimensions.height } } : naturalDimensions.aspectRatio;
+        if (!naturalAspectRatio || naturalAspectRatio->isEmpty() || objectRect.isEmpty())
+            return objectRect;
+
+        auto transform = preserveAspectRatio.getCTM(0, 0, naturalAspectRatio->width(), naturalAspectRatio->height(), objectRect.width(), objectRect.height());
+        auto rectangle = transform.mapRect(FloatRect { { }, *naturalAspectRatio });
+        rectangle.moveBy(objectRect.location());
+        return rectangle;
+    }();
+
+    auto destination = intersection(imageRenderingRectangle, positioningRectangle);
+    return { imageRenderingRectangle, destination, { destination.location() - toFloatSize(imageRenderingRectangle.location()), destination.size() } };
+}
+
+ImageDrawingOptions calculateSVGImageDrawingOptions(const Style::Image& styleImage, RenderElement& renderer, GraphicsContext& context, const FloatSize& imageRenderingSize, const FloatSize& destinationSize, OptionSet<PaintBehavior> paintBehavior)
+{
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+    auto invertContent = [&] {
+        if (styleImage.drawsSVGImage())
+            return AXCustomColorModeController::shouldInvertSVGImage(renderer, styleImage);
+        return AXCustomColorModeController::shouldInvertContentImage(renderer, destinationSize);
+    };
+#endif
+
+    Ref settings = renderer.settings();
+    return {
+        IgnoreRootPreserveAspectRatio::Yes,
+        renderer.imageOrientation(),
+        styleImage.interpolationQualityForImageDraw(context, renderer, ConcreteObjectSize::fixed(imageRenderingSize), &styleImage, LayoutSize(destinationSize)),
+        settings->imageSubsamplingEnabled() ? AllowImageSubsampling::Yes : AllowImageSubsampling::No,
+        settings->showDebugBorders() ? ShowDebugBackground::Yes : ShowDebugBackground::No,
+        settings->hdrAcceleratedApplyGainMapEnabled() ? AllowAcceleratedApplyGainMap::Yes : AllowAcceleratedApplyGainMap::No,
+        paintBehavior.contains(PaintBehavior::DrawsHDRContent) ? DrawsHDRContent::Yes : DrawsHDRContent::No,
+        renderer.style().dynamicRangeLimit().toPlatformDynamicRangeLimit(),
+#if ENABLE(AX_CUSTOM_COLOR_MODE)
+        invertContent() ? InvertContent::Yes : InvertContent::No,
+#endif
+    };
 }
 
 } // namespace WebCore

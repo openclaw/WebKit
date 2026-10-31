@@ -75,7 +75,7 @@ static bool indicatorWantsContentCrossfade(const WebCore::TextIndicator& indicat
     return false;
 }
 
-static bool NODELETE indicatorWantsFadeIn(const WebCore::TextIndicator& indicator)
+static bool LEGACY_NODELETE indicatorWantsFadeIn(const WebCore::TextIndicator& indicator)
 {
     switch (indicator.presentationTransition()) {
     case WebCore::TextIndicatorPresentationTransition::FadeIn:
@@ -107,9 +107,9 @@ static bool NODELETE indicatorWantsFadeIn(const WebCore::TextIndicator& indicato
         contentsImageLogicalSize = contentImage->size();
         contentsImageLogicalSize.scale(1 / _textIndicator->contentImageScaleFactor());
         if (RefPtr contentImageWithHighlight = _textIndicator->contentImageWithHighlight(); contentImageWithHighlight && indicatorWantsContentCrossfade(*protect(_textIndicator)))
-            contentsImage = contentImageWithHighlight->nativeImage();
+            contentsImage = WTF::move(contentImageWithHighlight);
         else
-            contentsImage = contentImage->nativeImage();
+            contentsImage = WTF::move(contentImage);
     }
 
     auto bounceLayers = adoptNS([[NSMutableArray alloc] init]);
@@ -232,7 +232,7 @@ static RetainPtr<CAKeyframeAnimation> createBounceAnimation(CFTimeInterval durat
 static RetainPtr<CABasicAnimation> createContentCrossfadeAnimation(CFTimeInterval duration, WebCore::TextIndicator& textIndicator)
 {
     RetainPtr crossfadeAnimation = [CABasicAnimation animationWithKeyPath:@"contents"];
-    RefPtr contentsImage = protect(textIndicator.contentImage())->nativeImage();
+    RefPtr contentsImage = textIndicator.contentImage();
     [crossfadeAnimation setToValue:(__bridge id)contentsImage->platformImage().get()];
     [crossfadeAnimation setFillMode:kCAFillModeForwards];
     [crossfadeAnimation setRemovedOnCompletion:NO];
@@ -305,7 +305,8 @@ static RetainPtr<CABasicAnimation> createFadeInAnimation(CFTimeInterval duration
     }
 
     [CATransaction begin];
-    for (CALayer *bounceLayer in _bounceLayers.get()) {
+    // FIXME: Remove the suppression once https://github.com/llvm/llvm-project/pull/230818 is deployed (rdar://189710680).
+    for (SUPPRESS_UNRETAINED_LOCAL CALayer *bounceLayer in _bounceLayers.get()) {
         if (textIndicator->wantsManualAnimation())
             bounceLayer.speed = 0;
 
@@ -347,7 +348,8 @@ static RetainPtr<CABasicAnimation> createFadeInAnimation(CFTimeInterval duration
     if (progress == 1) {
         _hasCompletedAnimation = true;
 
-        for (CALayer *bounceLayer in _bounceLayers.get()) {
+        // FIXME: Remove the suppression once https://github.com/llvm/llvm-project/pull/230818 is deployed (rdar://189710680).
+        for (SUPPRESS_UNRETAINED_LOCAL CALayer *bounceLayer in _bounceLayers.get()) {
             // Continue the animation from wherever it had manually progressed to.
             CFTimeInterval beginTime = bounceLayer.timeOffset;
             bounceLayer.speed = 1;
@@ -356,7 +358,8 @@ static RetainPtr<CABasicAnimation> createFadeInAnimation(CFTimeInterval duration
         }
     } else {
         CFTimeInterval animationDuration = [self _animationDuration];
-        for (CALayer *bounceLayer in _bounceLayers.get())
+        // FIXME: Remove the suppression once https://github.com/llvm/llvm-project/pull/230818 is deployed (rdar://189710680).
+        for (SUPPRESS_UNRETAINED_LOCAL CALayer *bounceLayer in _bounceLayers.get())
             bounceLayer.timeOffset = progress * animationDuration;
     }
 }

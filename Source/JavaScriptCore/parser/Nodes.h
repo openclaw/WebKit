@@ -223,8 +223,6 @@ namespace JSC {
 
         virtual void emitBytecodeInConditionContext(BytecodeGenerator&, Label&, Label&, FallThroughMode);
 
-        virtual ExpressionNode* stripUnaryPlus() { return this; }
-
         ResultType resultDescriptor() const { return m_resultType; }
 
         std::optional<unsigned> callSitePosition() const { return m_callSitePosition; }
@@ -704,7 +702,7 @@ namespace JSC {
 
         bool isArrayLiteral() const final { return true; }
 
-        ArgumentListNode* NODELETE toArgumentList(ParserArena&, int) const;
+        ArgumentListNode* LEGACY_NODELETE toArgumentList(ParserArena&, int) const;
 
         ElementNode* elements() const { return m_element; }
     private:
@@ -777,7 +775,7 @@ namespace JSC {
         PropertyListNode(const JSTokenLocation&, PropertyNode*);
         PropertyListNode(const JSTokenLocation&, PropertyNode*, PropertyListNode*);
 
-        bool NODELETE hasStaticallyNamedProperty(const Identifier& propName);
+        bool LEGACY_NODELETE hasStaticallyNamedProperty(const Identifier& propName);
         bool isComputedClassField() const
         {
             return m_node->isComputedClassField();
@@ -786,7 +784,7 @@ namespace JSC {
         {
             return m_node->isInstanceClassField();
         }
-        bool NODELETE hasInstanceFields() const;
+        bool LEGACY_NODELETE hasInstanceFields() const;
 
         bool isStaticClassField() const
         {
@@ -813,7 +811,7 @@ namespace JSC {
             return m_hasPrivateAccessors;
         }
 
-        static bool NODELETE shouldCreateLexicalScopeForClass(PropertyListNode*);
+        static bool LEGACY_NODELETE shouldCreateLexicalScopeForClass(PropertyListNode*);
 
         RegisterID* emitBytecode(BytecodeGenerator&, RegisterID*, RegisterID*, Vector<UnlinkedFunctionExecutable::ClassElementDefinition>*, Vector<UnlinkedFunctionExecutable::ClassElementDefinition>*);
 
@@ -1242,8 +1240,6 @@ namespace JSC {
 
     private:
         RegisterID* emitBytecode(BytecodeGenerator&, RegisterID* = nullptr) final;
-
-        ExpressionNode* stripUnaryPlus() final { return expr(); }
     };
 
     class NegateNode final : public UnaryOpNode {
@@ -1446,7 +1442,7 @@ namespace JSC {
 
     class CoalesceNode final : public ExpressionNode {
     public:
-        CoalesceNode(const JSTokenLocation&, ExpressionNode* expr1, ExpressionNode* expr2, bool);
+        CoalesceNode(const JSTokenLocation&, ExpressionNode* expr1, ExpressionNode* expr2, bool, int optionalChainEndOffset = -1);
 
     private:
         RegisterID* emitBytecode(BytecodeGenerator&, RegisterID* = nullptr) final;
@@ -1455,6 +1451,7 @@ namespace JSC {
         ExpressionNode* m_expr1;
         ExpressionNode* m_expr2;
         bool m_hasAbsorbedOptionalChain;
+        int m_optionalChainEndOffset;
     };
 
     class OptionalChainNode final : public ExpressionNode {
@@ -1643,14 +1640,14 @@ namespace JSC {
 
         void append(StatementNode*);
 
-        StatementNode* NODELETE singleStatement() const;
+        StatementNode* LEGACY_NODELETE singleStatement() const;
         StatementNode* firstStatement() const;
-        StatementNode* NODELETE lastStatement() const;
+        StatementNode* LEGACY_NODELETE lastStatement() const;
 
         bool hasCompletionValue() const;
         bool hasEarlyBreakOrContinue() const;
 
-        void emitBytecode(BytecodeGenerator&, RegisterID* destination);
+        void emitBytecode(BytecodeGenerator&, RegisterID* destination, int endOffset);
         bool analyzeModule(ModuleAnalyzer&);
 
     private:
@@ -1839,7 +1836,7 @@ namespace JSC {
     class ContinueNode final : public StatementNode, public ThrowableExpressionData {
     public:
         ContinueNode(const JSTokenLocation&, const Identifier&);
-        Label* NODELETE trivialTarget(BytecodeGenerator&);
+        Label* LEGACY_NODELETE trivialTarget(BytecodeGenerator&);
 
     private:
         bool hasCompletionValue() const final { return false; }
@@ -1853,7 +1850,7 @@ namespace JSC {
     class BreakNode final : public StatementNode, public ThrowableExpressionData {
     public:
         BreakNode(const JSTokenLocation&, const Identifier&);
-        Label* NODELETE trivialTarget(BytecodeGenerator&);
+        Label* LEGACY_NODELETE trivialTarget(BytecodeGenerator&);
 
     private:
         bool hasCompletionValue() const final { return false; }
@@ -1939,7 +1936,7 @@ namespace JSC {
         using ParserArenaRoot::operator new;
 
         ScopeNode(ParserArena&, const JSTokenLocation& start, const JSTokenLocation& end, LexicallyScopedFeatures);
-        ScopeNode(ParserArena&, const JSTokenLocation& start, const JSTokenLocation& end, const SourceCode&, SourceElements*, VariableEnvironment&&, FunctionStack&&, VariableEnvironment&&, CodeFeatures, LexicallyScopedFeatures, InnerArrowFunctionCodeFeatures, int numConstants);
+        ScopeNode(ParserArena&, const JSTokenLocation& start, const JSTokenLocation& end, const SourceCode&, SourceElements*, VariableEnvironment&&, FunctionStack&&, VariableEnvironment&&, CodeFeatures, LexicallyScopedFeatures, InnerArrowFunctionCodeFeatures);
 
         const SourceCode& source() const LIFETIME_BOUND { return m_source; }
         SourceID sourceID() const { return m_source.providerID(); }
@@ -1980,14 +1977,10 @@ namespace JSC {
 
         VariableEnvironment& varDeclarations() LIFETIME_BOUND { return m_varDeclarations; }
 
-        int neededConstants()
-        {
-            // We may need 2 more constants than the count given by the parser,
-            // because of the various uses of jsUndefined() and jsNull().
-            return m_numConstants + 2;
-        }
-
         SourceElements* statements() const { return m_statements; }
+        unsigned usedPrivateNameCount() const { return m_usedPrivateNameCount; }
+        void setUsedPrivateNameCount(unsigned count) { m_usedPrivateNameCount = count; }
+
         StatementNode* singleStatement() const;
 
         bool isEmptyBody() const { return !m_statements; }
@@ -2008,13 +2001,13 @@ namespace JSC {
         InnerArrowFunctionCodeFeatures m_innerArrowFunctionCodeFeatures;
         SourceCode m_source;
         VariableEnvironment m_varDeclarations;
-        int m_numConstants;
+        unsigned m_usedPrivateNameCount { 0 };
         SourceElements* m_statements;
     };
 
     class ProgramNode final : public ScopeNode {
     public:
-        ProgramNode(ParserArena&, const JSTokenLocation& start, const JSTokenLocation& end, SourceElements*, VariableEnvironment&&, FunctionStack&&, VariableEnvironment&&, FunctionParameters*, const SourceCode&, CodeFeatures, LexicallyScopedFeatures, InnerArrowFunctionCodeFeatures, int numConstants, RefPtr<ModuleScopeData>&&);
+        ProgramNode(ParserArena&, const JSTokenLocation& start, const JSTokenLocation& end, SourceElements*, VariableEnvironment&&, FunctionStack&&, VariableEnvironment&&, FunctionParameters*, const SourceCode&, CodeFeatures, LexicallyScopedFeatures, InnerArrowFunctionCodeFeatures, RefPtr<ModuleScopeData>&&);
 
         static constexpr bool scopeIsFunction = false;
 
@@ -2024,7 +2017,7 @@ namespace JSC {
 
     class EvalNode final : public ScopeNode {
     public:
-        EvalNode(ParserArena&, const JSTokenLocation& start, const JSTokenLocation& end, SourceElements*, VariableEnvironment&&, FunctionStack&&, VariableEnvironment&&, FunctionParameters*, const SourceCode&, CodeFeatures, LexicallyScopedFeatures, InnerArrowFunctionCodeFeatures, int numConstants, RefPtr<ModuleScopeData>&&);
+        EvalNode(ParserArena&, const JSTokenLocation& start, const JSTokenLocation& end, SourceElements*, VariableEnvironment&&, FunctionStack&&, VariableEnvironment&&, FunctionParameters*, const SourceCode&, CodeFeatures, LexicallyScopedFeatures, InnerArrowFunctionCodeFeatures, RefPtr<ModuleScopeData>&&);
 
         static constexpr bool scopeIsFunction = false;
 
@@ -2034,7 +2027,7 @@ namespace JSC {
 
     class ModuleProgramNode final : public ScopeNode {
     public:
-        ModuleProgramNode(ParserArena&, const JSTokenLocation& start, const JSTokenLocation& end, SourceElements*, VariableEnvironment&&, FunctionStack&&, VariableEnvironment&&, FunctionParameters*, const SourceCode&, CodeFeatures, LexicallyScopedFeatures, InnerArrowFunctionCodeFeatures, int numConstants, RefPtr<ModuleScopeData>&&);
+        ModuleProgramNode(ParserArena&, const JSTokenLocation& start, const JSTokenLocation& end, SourceElements*, VariableEnvironment&&, FunctionStack&&, VariableEnvironment&&, FunctionParameters*, const SourceCode&, CodeFeatures, LexicallyScopedFeatures, InnerArrowFunctionCodeFeatures, RefPtr<ModuleScopeData>&&);
 
         bool usesAwait() const { return m_usesAwait; }
 
@@ -2311,7 +2304,7 @@ namespace JSC {
 
     class FunctionNode final : public ScopeNode {
     public:
-        FunctionNode(ParserArena&, const JSTokenLocation& start, const JSTokenLocation& end, SourceElements*, VariableEnvironment&&, FunctionStack&&, VariableEnvironment&&, FunctionParameters*, const SourceCode&, CodeFeatures, LexicallyScopedFeatures, InnerArrowFunctionCodeFeatures, int numConstants, RefPtr<ModuleScopeData>&&);
+        FunctionNode(ParserArena&, const JSTokenLocation& start, const JSTokenLocation& end, SourceElements*, VariableEnvironment&&, FunctionStack&&, VariableEnvironment&&, FunctionParameters*, const SourceCode&, CodeFeatures, LexicallyScopedFeatures, InnerArrowFunctionCodeFeatures, RefPtr<ModuleScopeData>&&);
 
         FunctionParameters* parameters() const { return m_parameters; }
 
@@ -2689,11 +2682,13 @@ namespace JSC {
 
         void emitBytecode(BytecodeGenerator&, RegisterID* destination);
         void setStartOffset(int offset) { m_startOffset = offset; }
+        void setEndOffset(int offset) { m_endOffset = offset; }
 
     private:
         ExpressionNode* m_expr;
         SourceElements* m_statements;
         int m_startOffset;
+        int m_endOffset;
     };
 
     class ClauseListNode final : public ParserArenaFreeable {

@@ -43,6 +43,7 @@
 #include "HTMLTextAreaElement.h"
 #include "HTMLVideoElement.h"
 #include "ImageOverlay.h"
+#include "InlineIteratorLineBox.h"
 #include "LocalFrame.h"
 #include "LocalFrameInlines.h"
 #include "OriginAccessPatterns.h"
@@ -50,7 +51,6 @@
 #include "Range.h"
 #include "RenderBlockFlow.h"
 #include "RenderImage.h"
-#include "RenderInline.h"
 #include "RenderObjectStyle.h"
 #include "SVGAElement.h"
 #include "SVGElementTypeHelpers.h"
@@ -159,7 +159,7 @@ HitTestResult& HitTestResult::operator=(const HitTestResult& other)
 
 HitTestResult& HitTestResult::operator=(HitTestResult&&) = default;
 
-static Node* NODELETE moveOutOfUserAgentShadowTree(Node& node)
+static Node* LEGACY_NODELETE moveOutOfUserAgentShadowTree(Node& node)
 {
     if (node.isInShadowTree()) {
         if (ShadowRoot* root = node.containingShadowRoot()) {
@@ -383,11 +383,9 @@ String HitTestResult::innerTextIfTruncated(TextDirection& dir) const
 
         if (auto* block = dynamicDowncast<RenderBlockFlow>(element->renderer())) {
             if (block->style().textOverflow().isEllipsis()) {
-                for (auto lineBox = InlineIterator::firstLineBoxFor(*block); lineBox; lineBox.traverseNext()) {
-                    if (lineBox->hasEllipsis()) {
-                        dir = block->writingMode().computedTextDirection();
-                        return element->innerText();
-                    }
+                if (std::ranges::any_of(InlineIterator::lineBoxesFor(*block), &InlineIterator::LineBox::hasEllipsis)) {
+                    dir = block->writingMode().computedTextDirection();
+                    return element->innerText();
                 }
             }
             break;
@@ -435,18 +433,26 @@ RefPtr<Node> HitTestResult::nodeForImageData() const
     return m_innerNonSharedNode;
 }
 
-Image* HitTestResult::image() const
+RenderImage* HitTestResult::renderImage() const
 {
     auto imageNode = nodeForImageData();
     if (!imageNode)
         return nullptr;
 
-    if (auto* image = dynamicDowncast<RenderImage>(imageNode->renderer())) {
-        if (image->cachedImage() && !image->cachedImage()->errorOccurred())
-            return protect(image->cachedImage())->image();
-    }
+    return dynamicDowncast<RenderImage>(imageNode->renderer());
+}
 
-    return nullptr;
+Image* HitTestResult::image() const
+{
+    CheckedPtr renderImage = this->renderImage();
+    if (!renderImage)
+        return nullptr;
+
+    RefPtr cachedImage = renderImage->cachedImage();
+    if (!cachedImage || cachedImage->errorOccurred())
+        return nullptr;
+
+    return cachedImage->image();
 }
 
 IntRect HitTestResult::imageRect() const
@@ -507,7 +513,7 @@ URL HitTestResult::absolutePDFURL() const
     if (!element)
         return URL();
 
-    auto url = protect(m_innerNonSharedNode)->document().encodingParseURL(element->url());
+    auto url = m_innerNonSharedNode->document().encodingParseURL(element->url());
     if (!url.isValid())
         return URL();
 

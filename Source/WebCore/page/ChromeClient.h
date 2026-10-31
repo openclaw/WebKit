@@ -115,6 +115,7 @@ class FrameDamageHistory;
 class FrameSelection;
 class Geolocation;
 class GraphicsLayer;
+class GraphicsContext;
 class GraphicsLayerFactory;
 class HTMLAttachmentElement;
 class HTMLFrameOwnerElement;
@@ -144,6 +145,7 @@ class SecurityOrigin;
 class SecurityOriginData;
 class TextIndicator;
 class ViewportConstraints;
+class WebGPUIntegration;
 class Widget;
 class WorkerClient;
 
@@ -158,6 +160,7 @@ struct GraphicsContextGLAttributes;
 #endif
 
 struct AppHighlight;
+struct AXRemoteFrameSelectedTextChange;
 struct AccessibilityRemoteToken;
 struct AccessibilitySearchCriteriaIPC;
 struct ApplePayAMSUIRequest;
@@ -187,7 +190,6 @@ enum class ActivityStateForCPUSampling : uint8_t;
 enum class AXLoadingEvent : uint8_t;
 enum class AXNotification : uint8_t;
 enum class AXTextChange : uint8_t;
-enum class BroadcastFocusedElement : bool;
 enum class ContentChange : uint8_t;
 enum class DidFilterLinkDecoration : bool { No, Yes };
 enum class IsLoggedIn : uint8_t;
@@ -228,12 +230,6 @@ using SessionID = WTF::UUID;
 enum class TextSuggestionState : uint8_t;
 }
 
-#if HAVE(WEBGPU_IMPLEMENTATION)
-namespace WebGPU {
-class GPU;
-}
-#endif
-
 class ChromeClient {
 public:
     virtual void chromeDestroyed() = 0;
@@ -249,7 +245,7 @@ public:
     virtual bool canTakeFocus(FocusDirection) const = 0;
     virtual void takeFocus(FocusDirection) = 0;
 
-    virtual void focusedElementChanged(Element*, LocalFrame*, FocusOptions, BroadcastFocusedElement) = 0;
+    virtual void focusedElementChanged(Element*, LocalFrame*, FocusOptions) = 0;
     virtual void focusedFrameChanged(Frame*) = 0;
 
     // The Frame pointer provides the ChromeClient with context about which
@@ -309,6 +305,7 @@ public:
     virtual void relayAccessibilityNotification(String&&, RetainPtr<NSData>&&) const = 0;
     virtual void relayAriaNotifyNotification(AriaNotifyData&&) const = 0;
     virtual void relayLiveRegionNotification(LiveRegionAnnouncementData&&) const = 0;
+    virtual void didDisplayCaptions(Vector<String>&&) const { }
 #endif
 
     virtual void translateAccessibilityAnnouncementStrings(const Vector<String>& strings, const String& targetLocaleIdentifier, CompletionHandler<void(Vector<String>&&)>&& completion) { UNUSED_PARAM(strings); UNUSED_PARAM(targetLocaleIdentifier); completion({ }); }
@@ -460,7 +457,7 @@ public:
         completionHandler(false);
     }
 
-    WEBCORE_EXPORT virtual ExceptionOr<Vector<ValidatedDigitalCredentialRequest>> validateAndParseDigitalCredentialRequests(const SecurityOrigin&, const Document&, const Vector<UnvalidatedDigitalCredentialRequest>&);
+    WEBCORE_EXPORT virtual ExceptionOr<Vector<std::optional<ValidatedDigitalCredentialRequest>>> validateAndParseDigitalCredentialRequests(const SecurityOrigin&, const Document&, const Vector<UnvalidatedDigitalCredentialRequest>&);
 #endif
 
     // Asynchronous request to load an icon for specified filenames.
@@ -470,6 +467,10 @@ public:
     virtual void elementDidRefocus(Element&, const FocusOptions&) { }
 
     virtual void focusedElementDidChangeInputMode(Element&, InputMode) { }
+#if PLATFORM(GTK) || PLATFORM(WPE)
+    virtual void focusedElementDidChangeReadOnly(Element&) { }
+    virtual void focusedElementDidChangeType(Element&) { }
+#endif
     virtual void focusedSelectElementDidChangeOptions(const HTMLSelectElement&) { }
 
     virtual bool shouldPaintEntireContents() const { return false; }
@@ -483,6 +484,9 @@ public:
     virtual DisplayRefreshMonitorFactory* displayRefreshMonitorFactory() const { return nullptr; }
 
     virtual RefPtr<ImageBuffer> createImageBuffer(const FloatSize&, RenderingMode, RenderingPurpose, float, const ColorSpace&, ImageBufferFormat) const { return nullptr; }
+#if HAVE(IOSURFACE)
+    virtual bool useIOSurfaceWebKitBehavior() const { return false; }
+#endif
     WEBCORE_EXPORT virtual RefPtr<WebCore::ImageBuffer> sinkIntoImageBuffer(std::unique_ptr<WebCore::SerializedImageBuffer>);
     virtual RefPtr<WebCore::ImageBuffer> createImageBufferFromTransferHandle(const ImageBufferTransferHandle&) { return nullptr; }
 
@@ -492,11 +496,17 @@ public:
     virtual void offscreenCanvasPlaceholderLayerChanged(PlaceholderRenderingContextIdentifier, std::optional<PlatformLayerIdentifier>) { }
 #endif
 
+    // Frames hosted elsewhere that are painted into the context record themselves into the same
+    // rendering. Resolves, once every frame has recorded, to an image whose pixels this process
+    // never sees, which only the compositor can display. Null when this page cannot record outside
+    // this process.
+    WEBCORE_EXPORT virtual RefPtr<NativePromise<Ref<NativeImage>, void>> createDisplayOnlyImage(FrameIdentifier, const FloatSize&, float scale, const ColorSpace&, NOESCAPE const Function<void(GraphicsContext&)>& paint);
+
 #if ENABLE(WEBGL)
     WEBCORE_EXPORT virtual RefPtr<GraphicsContextGL> createGraphicsContextGL(const GraphicsContextGLAttributes&) const;
 #endif
 #if HAVE(WEBGPU_IMPLEMENTATION)
-    virtual RefPtr<WebGPU::GPU> createGPUForWebGPU() const { return nullptr; }
+    virtual RefPtr<WebGPUIntegration> createGPUForWebGPU() const { return nullptr; }
 #endif
     virtual RefPtr<ShapeDetection::BarcodeDetector> createBarcodeDetector(const ShapeDetection::BarcodeDetectorOptions&) const;
     virtual void getBarcodeDetectorSupportedFormats(CompletionHandler<void(Vector<ShapeDetection::BarcodeFormat>&&)>&&) const;
@@ -518,6 +528,7 @@ public:
     // Schedule a rendering update that coordinates with display refresh. Returns true if scheduled. (This is only used by SVGImageChromeClient.)
     virtual bool scheduleRenderingUpdate() { return false; }
     virtual void renderingUpdateFramesPerSecondChanged() { }
+    virtual void syncLocalFrameInfoToRemote() { }
 
     virtual unsigned remoteImagesCountForTesting() const { return 0; }
 
@@ -667,6 +678,8 @@ public:
     // Called by a child frame to continue a search in its parent frame.
     // The parent searches from the child frame's position in its tree.
     WEBCORE_EXPORT virtual void continueAccessibilitySearchFromChildFrame(FrameIdentifier childFrameID, const AccessibilitySearchCriteriaIPC&, CompletionHandler<void(Vector<AccessibilityRemoteToken>&&)>&&);
+    // Called by a cross-site frame's AXObjectCache to have the main frame's process post AXSelectedTextChanged.
+    virtual void relayAccessibilitySelectedTextChangeToMainFrame(FrameIdentifier, AXRemoteFrameSelectedTextChange&&) { }
 #endif
 
     virtual void isPlayingMediaDidChange(MediaProducerMediaStateFlags) { }
@@ -683,8 +696,8 @@ public:
 #if ENABLE(SERVICE_CONTROLS)
     virtual void handleSelectionServiceClick(FrameIdentifier, FrameSelection&, const Vector<String>&, const IntPoint&) { }
     virtual bool hasRelevantSelectionServices(bool /*isTextOnly*/) const { return false; }
-    virtual void handleImageServiceClick(FrameIdentifier, const IntPoint&, Image&, HTMLImageElement&) { }
-    virtual void handlePDFServiceClick(FrameIdentifier, const IntPoint&, HTMLAttachmentElement&) { }
+    virtual bool handleImageServiceClick(FrameIdentifier, const IntPoint&, HTMLImageElement&) { return false; }
+    virtual bool handlePDFServiceClick(FrameIdentifier, const IntPoint&, HTMLAttachmentElement&) { return false; }
 #endif
 
     virtual std::pair<URL, DidFilterLinkDecoration> applyLinkDecorationFilteringWithResult(const URL& url, LinkDecorationFilteringTrigger) const { return { url, DidFilterLinkDecoration::No }; };

@@ -32,8 +32,6 @@
 #import <wtf/Ref.h>
 #import <wtf/WeakPtr.h>
 
-struct WGPUXRBindingImpl {
-};
 
 namespace WebGPU::Metal {
 
@@ -42,7 +40,7 @@ class Device;
 class XRProjectionLayer;
 class XRSubImage;
 
-class XRBinding final : public WebGPU::XRBinding, public WGPUXRBindingImpl {
+class XRBinding final : public WebGPU::XRBinding {
     WTF_DEPRECATED_MAKE_FAST_ALLOCATED(XRBinding);
 public:
     static Ref<XRBinding> create(Device& device)
@@ -56,11 +54,12 @@ public:
 
     ~XRBinding();
 
-    void NODELETE setLabel(String&&) final;
+    void LEGACY_NODELETE setLabel(String&&) final;
 
-    bool NODELETE isValid() const final;
-    Ref<XRProjectionLayer> createXRProjectionLayer(WGPUTextureFormat, WGPUTextureFormat*, WGPUTextureUsage, double);
+    bool LEGACY_NODELETE isValid() const final;
+    RefPtr<WebGPU::XRProjectionLayer> createProjectionLayer(const WebGPU::XRProjectionLayerDescriptor&) final;
     RefPtr<XRSubImage> getViewSubImage(XRProjectionLayer&);
+    RefPtr<WebGPU::XRSubImage> getViewSubImage(WebGPU::XRProjectionLayer&) final;
     Device& device() { return m_device; }
 
 private:

@@ -113,7 +113,7 @@ RefPtr<VideoInfo> createVideoInfoFromAVCC(std::span<const uint8_t> avcc)
     if (PAL::CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault, paramSetPtrs.size(), paramSetPtrs.span().data(), paramSetSizes.span().data(), lengthSize, &rawDescription))
         return nullptr;
     RetainPtr description = adoptCF(rawDescription);
-    return createVideoInfoFromFormatDescription(description);
+    return createVideoInfoFromFormatDescription(description, findAVCCMaxNumReorderFrames(avcc));
 }
 
 Vector<uint8_t> convertAVCCMSampleBufferToAnnexB(CMSampleBufferRef avccSampleBuffer, bool isKeyframe)
@@ -121,7 +121,7 @@ Vector<uint8_t> convertAVCCMSampleBufferToAnnexB(CMSampleBufferRef avccSampleBuf
     return convertParameterSetsCMSampleBufferToAnnexB(avccSampleBuffer, isKeyframe, PAL::CMVideoFormatDescriptionGetH264ParameterSetAtIndex);
 }
 
-static bool h264AnnexBSpsIsFollowedByPps(std::span<const uint8_t> data, const Vector<NaluIndex>& naluIndices, size_t spsIndex)
+static bool LEGACY_NODELETE h264AnnexBSpsIsFollowedByPps(std::span<const uint8_t> data, const Vector<NaluIndex>& naluIndices, size_t spsIndex)
 {
     if (spsIndex + 1 >= naluIndices.size())
         return false;
@@ -152,7 +152,7 @@ RefPtr<VideoInfo> createVideoInfoFromAVCAnnexBStream(std::span<const uint8_t> da
     if (PAL::CMVideoFormatDescriptionCreateFromH264ParameterSets(kCFAllocatorDefault, paramSetPointers.size(), paramSetPointers.data(), paramSetSizes.data(), 4, &rawDescription) != noErr)
         return nullptr;
     RetainPtr description = adoptCF(rawDescription);
-    return createVideoInfoFromFormatDescription(description);
+    return createVideoInfoFromFormatDescription(description, findH264AnnexBMaxNumReorderFrames(data, naluIndices));
 }
 
 Vector<uint8_t> convertAVCAnnexBToLengthPrefixed(std::span<const uint8_t> data, const Vector<NaluIndex>& naluIndices)

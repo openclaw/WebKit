@@ -59,466 +59,301 @@
 #import <wtf/text/WTFString.h>
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::Adapter)
-    static bool isType(const WGPUAdapterImpl&) { return true; }
     static bool isType(const WebGPU::Adapter&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::BindGroup)
-    static bool isType(const WGPUBindGroupImpl&) { return true; }
     static bool isType(const WebGPU::BindGroup&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::BindGroupLayout)
-    static bool isType(const WGPUBindGroupLayoutImpl&) { return true; }
     static bool isType(const WebGPU::BindGroupLayout&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::Buffer)
-    static bool isType(const WGPUBufferImpl&) { return true; }
     static bool isType(const WebGPU::Buffer&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::CommandBuffer)
-    static bool isType(const WGPUCommandBufferImpl&) { return true; }
     static bool isType(const WebGPU::CommandBuffer&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::CommandEncoder)
-    static bool isType(const WGPUCommandEncoderImpl&) { return true; }
     static bool isType(const WebGPU::CommandEncoder&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::ComputePassEncoder)
-    static bool isType(const WGPUComputePassEncoderImpl&) { return true; }
     static bool isType(const WebGPU::ComputePassEncoder&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::ComputePipeline)
-    static bool isType(const WGPUComputePipelineImpl&) { return true; }
     static bool isType(const WebGPU::ComputePipeline&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::Device)
-    static bool isType(const WGPUDeviceImpl&) { return true; }
     static bool isType(const WebGPU::Device&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::ExternalTexture)
-    static bool isType(const WGPUExternalTextureImpl&) { return true; }
     static bool isType(const WebGPU::ExternalTexture&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::Instance)
-    static bool isType(const WGPUInstanceImpl&) { return true; }
     static bool isType(const WebGPU::Instance&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::PipelineLayout)
-    static bool isType(const WGPUPipelineLayoutImpl&) { return true; }
     static bool isType(const WebGPU::PipelineLayout&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::QuerySet)
-    static bool isType(const WGPUQuerySetImpl&) { return true; }
     static bool isType(const WebGPU::QuerySet&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::Queue)
-    static bool isType(const WGPUQueueImpl&) { return true; }
     static bool isType(const WebGPU::Queue&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::RenderBundle)
-    static bool isType(const WGPURenderBundleImpl&) { return true; }
     static bool isType(const WebGPU::RenderBundle&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::RenderBundleEncoder)
-    static bool isType(const WGPURenderBundleEncoderImpl&) { return true; }
     static bool isType(const WebGPU::RenderBundleEncoder&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::RenderPassEncoder)
-    static bool isType(const WGPURenderPassEncoderImpl&) { return true; }
     static bool isType(const WebGPU::RenderPassEncoder&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::RenderPipeline)
-    static bool isType(const WGPURenderPipelineImpl&) { return true; }
     static bool isType(const WebGPU::RenderPipeline&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::Sampler)
-    static bool isType(const WGPUSamplerImpl&) { return true; }
     static bool isType(const WebGPU::Sampler&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::ShaderModule)
-    static bool isType(const WGPUShaderModuleImpl&) { return true; }
     static bool isType(const WebGPU::ShaderModule&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::PresentationContext)
-    static bool isType(const WGPUSurfaceImpl&) { return true; }
-    static bool isType(const WGPUSwapChainImpl&) { return true; }
     static bool isType(const WebGPU::PresentationContext&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
-SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::Texture)
-    static bool isType(const WGPUTextureImpl&) { return true; }
-    static bool isType(const WebGPU::Texture&) { return true; }
-SPECIALIZE_TYPE_TRAITS_END()
-
-SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::TextureView)
-    static bool isType(const WGPUTextureViewImpl&) { return true; }
-    static bool isType(const WebGPU::TextureView&) { return true; }
-SPECIALIZE_TYPE_TRAITS_END()
-
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::XRBinding)
-    static bool isType(const WGPUXRBindingImpl&) { return true; }
     static bool isType(const WebGPU::XRBinding&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::XRSubImage)
-    static bool isType(const WGPUXRSubImageImpl&) { return true; }
     static bool isType(const WebGPU::XRSubImage&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::XRProjectionLayer)
-    static bool isType(const WGPUXRProjectionLayerImpl&) { return true; }
     static bool isType(const WebGPU::XRProjectionLayer&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 SPECIALIZE_TYPE_TRAITS_BEGIN(WebGPU::Metal::XRView)
-    static bool isType(const WGPUXRViewImpl&) { return true; }
     static bool isType(const WebGPU::XRView&) { return true; }
 SPECIALIZE_TYPE_TRAITS_END()
 
 namespace WebGPU::Metal {
 
+// A process has only one implementation of the C++ API, so the C++ API objects that WebGPU::Metal
+// receives are WebGPU::Metal objects.
+inline BindGroupLayout& metal(WebGPU::BindGroupLayout& bindGroupLayout)
+{
+    return downcast<BindGroupLayout>(bindGroupLayout);
+}
+
+inline PipelineLayout& metal(WebGPU::PipelineLayout& pipelineLayout)
+{
+    return downcast<PipelineLayout>(pipelineLayout);
+}
+
+inline ShaderModule& metal(WebGPU::ShaderModule& shaderModule)
+{
+    return downcast<ShaderModule>(shaderModule);
+}
+
+inline Buffer& metal(WebGPU::Buffer& buffer)
+{
+    return downcast<Buffer>(buffer);
+}
+
+inline Device& metal(WebGPU::Device& device)
+{
+    return downcast<Device>(device);
+}
+
+inline ExternalTexture& metal(WebGPU::ExternalTexture& externalTexture)
+{
+    return downcast<ExternalTexture>(externalTexture);
+}
+
+inline QuerySet& metal(WebGPU::QuerySet& querySet)
+{
+    return downcast<QuerySet>(querySet);
+}
+
+inline RenderBundle& metal(WebGPU::RenderBundle& renderBundle)
+{
+    return downcast<RenderBundle>(renderBundle);
+}
+
+inline Sampler& metal(WebGPU::Sampler& sampler)
+{
+    return downcast<Sampler>(sampler);
+}
+
+inline Texture& metal(WebGPU::Texture& texture)
+{
+    return downcast<Texture>(texture);
+}
+
+inline TextureView& metal(WebGPU::TextureView& textureView)
+{
+    return downcast<TextureView>(textureView);
+}
+
+// For Swift, which cannot call the functions above: it does not see that the WebGPU::Metal classes
+// derive from the C++ API classes.
+inline Buffer& metal(const Ref<WebGPU::Buffer>& buffer)
+{
+    return metal(buffer.get());
+}
+
+inline QuerySet& metal(const Ref<WebGPU::QuerySet>& querySet)
+{
+    return metal(querySet.get());
+}
+
+inline QuerySet* metalOrNull(const RefPtr<WebGPU::QuerySet>& querySet)
+{
+    return querySet ? &metal(*querySet) : nullptr;
+}
+
+inline Texture& metal(const Ref<WebGPU::Texture>& texture)
+{
+    return metal(texture.get());
+}
+
 // FIXME: It would be cool if we didn't have to list all these overloads, but instead could do something like bridge_cast() in WTF.
 
-inline Adapter& fromAPI(WGPUAdapter adapter)
+inline Adapter& fromAPI(WGPUAdapter handle)
 {
-    return downcast<Adapter>(*adapter);
+    return downcast<Adapter>(WebGPU::fromAPI(handle));
 }
 
-inline BindGroup& fromAPI(WGPUBindGroup bindGroup)
+inline BindGroup& fromAPI(WGPUBindGroup handle)
 {
-    return downcast<BindGroup>(*bindGroup);
+    return downcast<BindGroup>(WebGPU::fromAPI(handle));
 }
 
-inline BindGroupLayout& fromAPI(WGPUBindGroupLayout bindGroupLayout)
+inline BindGroupLayout& fromAPI(WGPUBindGroupLayout handle)
 {
-    return downcast<BindGroupLayout>(*bindGroupLayout);
+    return downcast<BindGroupLayout>(WebGPU::fromAPI(handle));
 }
 
-inline Buffer& fromAPI(WGPUBuffer buffer)
+inline Buffer& fromAPI(WGPUBuffer handle)
 {
-    return downcast<Buffer>(*buffer);
+    return downcast<Buffer>(WebGPU::fromAPI(handle));
 }
 
-inline CommandBuffer& fromAPI(WGPUCommandBuffer commandBuffer)
+inline CommandBuffer& fromAPI(WGPUCommandBuffer handle)
 {
-    return downcast<CommandBuffer>(*commandBuffer);
+    return downcast<CommandBuffer>(WebGPU::fromAPI(handle));
 }
 
-inline CommandEncoder& fromAPI(WGPUCommandEncoder commandEncoder)
+inline CommandEncoder& fromAPI(WGPUCommandEncoder handle)
 {
-    return downcast<CommandEncoder>(*commandEncoder);
+    return downcast<CommandEncoder>(WebGPU::fromAPI(handle));
 }
 
-inline ComputePassEncoder& fromAPI(WGPUComputePassEncoder computePassEncoder)
+inline ComputePassEncoder& fromAPI(WGPUComputePassEncoder handle)
 {
-    return downcast<ComputePassEncoder>(*computePassEncoder);
+    return downcast<ComputePassEncoder>(WebGPU::fromAPI(handle));
 }
 
-inline ComputePipeline& fromAPI(WGPUComputePipeline computePipeline)
+inline ComputePipeline& fromAPI(WGPUComputePipeline handle)
 {
-    return downcast<ComputePipeline>(*computePipeline);
+    return downcast<ComputePipeline>(WebGPU::fromAPI(handle));
 }
 
-inline Device& fromAPI(WGPUDevice device)
+inline Device& fromAPI(WGPUDevice handle)
 {
-    return downcast<Device>(*device);
+    return downcast<Device>(WebGPU::fromAPI(handle));
 }
 
-inline ExternalTexture& fromAPI(WGPUExternalTexture texture)
+inline ExternalTexture& fromAPI(WGPUExternalTexture handle)
 {
-    return downcast<ExternalTexture>(*texture);
+    return downcast<ExternalTexture>(WebGPU::fromAPI(handle));
 }
 
-inline Instance& fromAPI(WGPUInstance instance)
+inline Instance& fromAPI(WGPUInstance handle)
 {
-    return downcast<Instance>(*instance);
+    return downcast<Instance>(WebGPU::fromAPI(handle));
 }
 
-inline PipelineLayout& fromAPI(WGPUPipelineLayout pipelineLayout)
+inline PipelineLayout& fromAPI(WGPUPipelineLayout handle)
 {
-    return downcast<PipelineLayout>(*pipelineLayout);
+    return downcast<PipelineLayout>(WebGPU::fromAPI(handle));
 }
 
-inline QuerySet& fromAPI(WGPUQuerySet querySet)
+inline QuerySet& fromAPI(WGPUQuerySet handle)
 {
-    return downcast<QuerySet>(*querySet);
+    return downcast<QuerySet>(WebGPU::fromAPI(handle));
 }
 
-inline Queue& fromAPI(WGPUQueue queue)
+inline Queue& fromAPI(WGPUQueue handle)
 {
-    return downcast<Queue>(*queue);
+    return downcast<Queue>(WebGPU::fromAPI(handle));
 }
 
-inline RenderBundle& fromAPI(WGPURenderBundle renderBundle)
+inline RenderBundle& fromAPI(WGPURenderBundle handle)
 {
-    return downcast<RenderBundle>(*renderBundle);
+    return downcast<RenderBundle>(WebGPU::fromAPI(handle));
 }
 
-inline RenderBundleEncoder& fromAPI(WGPURenderBundleEncoder renderBundleEncoder)
+inline RenderBundleEncoder& fromAPI(WGPURenderBundleEncoder handle)
 {
-    return downcast<RenderBundleEncoder>(*renderBundleEncoder);
+    return downcast<RenderBundleEncoder>(WebGPU::fromAPI(handle));
 }
 
-inline RenderPassEncoder& fromAPI(WGPURenderPassEncoder renderPassEncoder)
+inline RenderPassEncoder& fromAPI(WGPURenderPassEncoder handle)
 {
-    return downcast<RenderPassEncoder>(*renderPassEncoder);
+    return downcast<RenderPassEncoder>(WebGPU::fromAPI(handle));
 }
 
-inline RenderPipeline& fromAPI(WGPURenderPipeline renderPipeline)
+inline RenderPipeline& fromAPI(WGPURenderPipeline handle)
 {
-    return downcast<RenderPipeline>(*renderPipeline);
+    return downcast<RenderPipeline>(WebGPU::fromAPI(handle));
 }
 
-inline Sampler& fromAPI(WGPUSampler sampler)
+inline Sampler& fromAPI(WGPUSampler handle)
 {
-    return downcast<Sampler>(*sampler);
+    return downcast<Sampler>(WebGPU::fromAPI(handle));
 }
 
-inline ShaderModule& fromAPI(WGPUShaderModule shaderModule)
+inline ShaderModule& fromAPI(WGPUShaderModule handle)
 {
-    return downcast<ShaderModule>(*shaderModule);
+    return downcast<ShaderModule>(WebGPU::fromAPI(handle));
 }
 
-inline PresentationContext& fromAPI(WGPUSurface surface)
+inline PresentationContext& fromAPI(WGPUSurface handle)
 {
-    return downcast<PresentationContext>(*surface);
+    return downcast<PresentationContext>(WebGPU::fromAPI(handle));
 }
 
-inline PresentationContext& fromAPI(WGPUSwapChain swapChain)
+inline Texture& fromAPI(WGPUTexture handle)
 {
-    return downcast<PresentationContext>(*swapChain);
+    return downcast<Texture>(WebGPU::fromAPI(handle));
 }
 
-inline Texture& fromAPI(WGPUTexture texture)
+inline TextureView& fromAPI(WGPUTextureView handle)
 {
-    return downcast<Texture>(*texture);
-}
-
-inline TextureView& fromAPI(WGPUTextureView textureView)
-{
-    return downcast<TextureView>(*textureView);
-}
-
-inline XRBinding& fromAPI(WGPUXRBinding binding)
-{
-    return downcast<XRBinding>(*binding);
-}
-
-inline XRSubImage& fromAPI(WGPUXRSubImage subImage)
-{
-    return downcast<XRSubImage>(*subImage);
-}
-
-inline XRProjectionLayer& fromAPI(WGPUXRProjectionLayer layer)
-{
-    return downcast<XRProjectionLayer>(*layer);
-}
-
-inline XRView& fromAPI(WGPUXRView view)
-{
-    return downcast<XRView>(*view);
-}
-
-inline WGPUAdapter toAPI(WebGPU::Adapter& adapter)
-{
-    return &downcast<Adapter>(adapter);
-}
-
-inline WGPUBindGroup toAPI(WebGPU::BindGroup& bindGroup)
-{
-    return &downcast<BindGroup>(bindGroup);
-}
-
-inline WGPUBindGroupLayout toAPI(WebGPU::BindGroupLayout& bindGroupLayout)
-{
-    return &downcast<BindGroupLayout>(bindGroupLayout);
-}
-
-inline WGPUBuffer toAPI(WebGPU::Buffer& buffer)
-{
-    return &downcast<Buffer>(buffer);
-}
-
-inline WGPUCommandBuffer toAPI(WebGPU::CommandBuffer& commandBuffer)
-{
-    return &downcast<CommandBuffer>(commandBuffer);
-}
-
-inline WGPUCommandEncoder toAPI(WebGPU::CommandEncoder& commandEncoder)
-{
-    return &downcast<CommandEncoder>(commandEncoder);
-}
-
-inline WGPUComputePassEncoder toAPI(WebGPU::ComputePassEncoder& computePassEncoder)
-{
-    return &downcast<ComputePassEncoder>(computePassEncoder);
-}
-
-inline WGPUComputePipeline toAPI(WebGPU::ComputePipeline& computePipeline)
-{
-    return &downcast<ComputePipeline>(computePipeline);
-}
-
-inline WGPUDevice toAPI(WebGPU::Device& device)
-{
-    return &downcast<Device>(device);
-}
-
-inline WGPUExternalTexture toAPI(WebGPU::ExternalTexture& externalTexture)
-{
-    return &downcast<ExternalTexture>(externalTexture);
-}
-
-inline WGPUInstance toAPI(WebGPU::Instance& instance)
-{
-    return &downcast<Instance>(instance);
-}
-
-inline WGPUPipelineLayout toAPI(WebGPU::PipelineLayout& pipelineLayout)
-{
-    return &downcast<PipelineLayout>(pipelineLayout);
-}
-
-inline WGPUSurface toAPI(WebGPU::PresentationContext& presentationContext)
-{
-    return &downcast<PresentationContext>(presentationContext);
-}
-
-inline WGPUQuerySet toAPI(WebGPU::QuerySet& querySet)
-{
-    return &downcast<QuerySet>(querySet);
-}
-
-inline WGPUQueue toAPI(WebGPU::Queue& queue)
-{
-    return &downcast<Queue>(queue);
-}
-
-inline WGPURenderBundle toAPI(WebGPU::RenderBundle& renderBundle)
-{
-    return &downcast<RenderBundle>(renderBundle);
-}
-
-inline WGPURenderBundleEncoder toAPI(WebGPU::RenderBundleEncoder& renderBundleEncoder)
-{
-    return &downcast<RenderBundleEncoder>(renderBundleEncoder);
-}
-
-inline WGPURenderPassEncoder toAPI(WebGPU::RenderPassEncoder& renderPassEncoder)
-{
-    return &downcast<RenderPassEncoder>(renderPassEncoder);
-}
-
-inline WGPURenderPipeline toAPI(WebGPU::RenderPipeline& renderPipeline)
-{
-    return &downcast<RenderPipeline>(renderPipeline);
-}
-
-inline WGPUSampler toAPI(WebGPU::Sampler& sampler)
-{
-    return &downcast<Sampler>(sampler);
-}
-
-inline WGPUShaderModule toAPI(WebGPU::ShaderModule& shaderModule)
-{
-    return &downcast<ShaderModule>(shaderModule);
-}
-
-inline WGPUTexture toAPI(WebGPU::Texture& texture)
-{
-    return &downcast<Texture>(texture);
-}
-
-inline WGPUTextureView toAPI(WebGPU::TextureView& textureView)
-{
-    return &downcast<TextureView>(textureView);
-}
-
-inline WGPUXRBinding toAPI(WebGPU::XRBinding& xRBinding)
-{
-    return &downcast<XRBinding>(xRBinding);
-}
-
-inline WGPUXRProjectionLayer toAPI(WebGPU::XRProjectionLayer& xRProjectionLayer)
-{
-    return &downcast<XRProjectionLayer>(xRProjectionLayer);
-}
-
-inline WGPUXRSubImage toAPI(WebGPU::XRSubImage& xRSubImage)
-{
-    return &downcast<XRSubImage>(xRSubImage);
-}
-
-inline WGPUXRView toAPI(WebGPU::XRView& xRView)
-{
-    return &downcast<XRView>(xRView);
-}
-
-inline WGPUSwapChain toAPISwapChain(WebGPU::PresentationContext& presentationContext)
-{
-    return &downcast<PresentationContext>(presentationContext);
-}
-
-// Associates a chainable extension struct with its sType tag. Specialize for each struct
-// that findChainedStruct() is used with.
-template<typename T> struct ChainedStructSType;
-
-template<> struct ChainedStructSType<WGPUShaderSourceWGSL> {
-    static constexpr WGPUSType value = WGPUSType_ShaderSourceWGSL;
-};
-
-template<> struct ChainedStructSType<WGPUInstanceCocoaDescriptor> {
-    static constexpr WGPUSType value = static_cast<WGPUSType>(WGPUSTypeExtended_InstanceCocoaDescriptor);
-};
-
-template<> struct ChainedStructSType<WGPUSurfaceDescriptorCocoaCustomSurface> {
-    static constexpr WGPUSType value = static_cast<WGPUSType>(WGPUSTypeExtended_SurfaceDescriptorCocoaSurfaceBacking);
-};
-
-// Walks a descriptor's nextInChain looking for one particular extension struct. Every
-// chainable struct starts with its WGPUChainedStruct, so the match can be cast to it.
-template<typename T>
-inline const T* findChainedStruct(const WGPUChainedStruct* chain)
-{
-    static_assert(std::is_same_v<decltype(T::chain), WGPUChainedStruct>);
-    for (; chain; chain = chain->next) {
-        if (chain->sType == ChainedStructSType<T>::value)
-            return reinterpret_cast<const T*>(chain);
-    }
-    return nullptr;
-}
-
-inline String fromAPI(const char* string)
-{
-    return String::fromUTF8(string);
-}
-
-inline String fromAPI(WGPUStringView string)
-{
-    if (!string.data)
-        return { };
-    if (string.length == WGPU_STRLEN)
-        return String::fromUTF8(string.data);
-    return String::fromUTF8(unsafeMakeSpan(string.data, string.length));
+    return downcast<TextureView>(WebGPU::fromAPI(handle));
 }
 
 // Literals have static storage, so the view can borrow them freely.
@@ -527,82 +362,50 @@ inline WGPUStringView toAPI(ASCIILiteral literal)
     return { literal.characters(), literal.length() };
 }
 
-// Borrows already-encoded UTF-8 bytes, so the result only lives as long as the argument.
+// The view borrows the UTF-8 string.
 inline WGPUStringView toAPI(const UTF8CString& string LIFETIME_BOUND)
 {
-    auto bytes = byteCast<char>(string.span());
-    return { bytes.data(), bytes.size() };
+    auto characters = byteCast<char>(string.span());
+    return { characters.data(), characters.size() };
 }
 
-inline std::span<const WGPUBindGroupLayout> bindGroupLayoutsSpan(const WGPUPipelineLayoutDescriptor& descriptor)
+// A string that the caller of the C API frees, with fastFree() of its data. The *FreeMembers
+// functions free the strings of the structs they are for.
+inline WGPUStringView toAPIAllocated(const String& string)
 {
-    return unsafeMakeSpan(descriptor.bindGroupLayouts, descriptor.bindGroupLayoutCount);
+    auto utf8 = string.utf8();
+    auto source = utf8.spanIncludingNullTerminator();
+    auto* data = static_cast<char*>(fastMalloc(source.size()));
+    memcpySpan(unsafeMakeSpan(data, source.size()), source);
+    return { data, utf8.length() };
 }
 
-inline std::span<const WGPUTextureFormat> colorFormatsSpan(const WGPURenderBundleEncoderDescriptor& descriptor)
+inline void freeAllocated(WGPUStringView string)
 {
-    return unsafeMakeSpan(descriptor.colorFormats, descriptor.colorFormatCount);
+    fastFree(const_cast<char*>(string.data));
 }
 
-inline std::span<const WGPUBindGroupEntry> entriesSpan(const WGPUBindGroupDescriptor& descriptor)
-{
-    return unsafeMakeSpan(descriptor.entries, descriptor.entryCount);
-}
+// A future of the C API on an instance. complete() is called after the callback it stands for
+// has run. Without an instance, the future is WGPU_FUTURE_INIT, which nothing waits on.
+class CAPIFuture {
+public:
+    explicit CAPIFuture(RefPtr<Instance>&& instance)
+        : m_instance(WTF::move(instance))
+        , m_id(m_instance ? m_instance->createFuture() : 0)
+    {
+    }
 
-inline std::span<const WGPUBindGroupLayoutEntry> entriesSpan(const WGPUBindGroupLayoutDescriptor& descriptor)
-{
-    return unsafeMakeSpan(descriptor.entries, descriptor.entryCount);
-}
+    WGPUFuture future() const { return { m_id }; }
+    void complete() const
+    {
+        if (m_instance)
+            m_instance->completeFuture(m_id);
+    }
 
-inline std::span<const WGPUConstantEntry> constantsSpan(const WGPUComputeState& state)
-{
-    return unsafeMakeSpan(state.constants, state.constantCount);
-}
-
-inline std::span<const WGPUConstantEntry> constantsSpan(const WGPUVertexState& state)
-{
-    return unsafeMakeSpan(state.constants, state.constantCount);
-}
-
-inline std::span<const WGPUConstantEntry> constantsSpan(const WGPUFragmentState& state)
-{
-    return unsafeMakeSpan(state.constants, state.constantCount);
-}
-
-inline std::span<const WGPUShaderModuleCompilationHint> hintsSpan(const WGPUShaderModuleDescriptor& descriptor)
-{
-    return unsafeMakeSpan(descriptor.hints, descriptor.hintCount);
-}
-
-inline std::span<const WGPUTextureFormat> viewFormatsSpan(const WGPUTextureDescriptor& descriptor)
-{
-    return unsafeMakeSpan(descriptor.viewFormats, descriptor.viewFormatCount);
-}
-
-inline std::span<const WGPUVertexAttribute> attributesSpan(const WGPUVertexBufferLayout& layout)
-{
-    return unsafeMakeSpan(layout.attributes, layout.attributeCount);
-}
-
-inline std::span<const WGPUFeatureName> requiredFeaturesSpan(const WGPUDeviceDescriptor& descriptor)
-{
-    return unsafeMakeSpan(descriptor.requiredFeatures, descriptor.requiredFeatureCount);
-}
-
-inline std::span<const WGPURenderPassColorAttachment> colorAttachmentsSpan(const WGPURenderPassDescriptor& descriptor)
-{
-    return unsafeMakeSpan(descriptor.colorAttachments, descriptor.colorAttachmentCount);
-}
-
-inline std::span<const WGPUVertexBufferLayout> buffersSpan(const WGPUVertexState& state)
-{
-    return unsafeMakeSpan(state.buffers, state.bufferCount);
-}
-
-inline std::span<const WGPUColorTargetState> targetsSpan(const WGPUFragmentState& state)
-{
-    return unsafeMakeSpan(state.targets, state.targetCount);
-}
+private:
+    const RefPtr<Instance> m_instance;
+    const uint64_t m_id { 0 };
+};
 
 template<typename R, typename... Args>
 inline BlockPtr<R (Args...)> fromAPI(R (^ __strong &&block)(Args...))
@@ -610,19 +413,33 @@ inline BlockPtr<R (Args...)> fromAPI(R (^ __strong &&block)(Args...))
     return makeBlockPtr(WTF::move(block));
 }
 
+// The handle of a new reference, for the C API. The handle of an object is its WebGPU::X.
 template <typename T>
-inline T* releaseToAPI(Ref<T>&& pointer)
+inline auto releaseToAPI(Ref<T>&& pointer)
 {
-    return &pointer.leakRef();
+    return WebGPU::toAPI(pointer.leakRef());
 }
 
 template <typename T>
-inline T* releaseToAPI(RefPtr<T>&& pointer)
+inline auto releaseToAPI(RefPtr<T>&& pointer) -> decltype(WebGPU::toAPI(*pointer))
 {
     // FIXME: We shouldn't need this, because invalid objects should be created instead of returning nullptr.
     if (pointer)
-        return pointer.leakRef();
+        return WebGPU::toAPI(*pointer.leakRef());
     return nullptr;
+}
+
+// For the WebGPU::X objects that a WebGPU::Metal object creates, which are WebGPU::Metal::X objects.
+template <typename T, typename U>
+inline auto releaseToAPIAs(RefPtr<U>&& pointer)
+{
+    return releaseToAPI(WTF::move(pointer));
+}
+
+template <typename T, typename U>
+inline auto releaseToAPIAs(Ref<U>&& pointer)
+{
+    return releaseToAPI(WTF::move(pointer));
 }
 
 } // namespace WebGPU::Metal

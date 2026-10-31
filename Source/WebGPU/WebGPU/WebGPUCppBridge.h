@@ -25,79 +25,242 @@
 
 #pragma once
 
-// The WebGPU_Private module of WebGPU.framework includes every private header, so this header
-// must also compile as C and Objective-C.
-#ifdef __cplusplus
-
 #import <WebGPU/WebGPU.h>
 #import <WebGPU/WebGPUCpp.h>
-#import <WebGPU/WebGPUExt.h>
 
-// Transition bridge between the handles of the WebGPU C API and the objects of the WebGPU C++ API.
-// It lets code that has been converted to the C++ API exchange objects with code that still uses
-// the C API while WebCore and WebKit move to the C++ API. Remove it when nothing uses the C API
-// handles anymore.
+// The handles of the WebGPU C API are the objects of the WebGPU C++ API, so the conversions of a
+// C API shim do not depend on the implementation that created the objects.
 
 namespace WebGPU {
 
-WGPU_EXPORT Adapter& fromAPI(WGPUAdapter);
-WGPU_EXPORT BindGroup& fromAPI(WGPUBindGroup);
-WGPU_EXPORT BindGroupLayout& fromAPI(WGPUBindGroupLayout);
-WGPU_EXPORT Buffer& fromAPI(WGPUBuffer);
-WGPU_EXPORT CommandBuffer& fromAPI(WGPUCommandBuffer);
-WGPU_EXPORT CommandEncoder& fromAPI(WGPUCommandEncoder);
-WGPU_EXPORT ComputePassEncoder& fromAPI(WGPUComputePassEncoder);
-WGPU_EXPORT ComputePipeline& fromAPI(WGPUComputePipeline);
-WGPU_EXPORT Device& fromAPI(WGPUDevice);
-WGPU_EXPORT ExternalTexture& fromAPI(WGPUExternalTexture);
-WGPU_EXPORT Instance& fromAPI(WGPUInstance);
-WGPU_EXPORT PipelineLayout& fromAPI(WGPUPipelineLayout);
-WGPU_EXPORT PresentationContext& fromAPI(WGPUSurface);
-WGPU_EXPORT QuerySet& fromAPI(WGPUQuerySet);
-WGPU_EXPORT Queue& fromAPI(WGPUQueue);
-WGPU_EXPORT RenderBundle& fromAPI(WGPURenderBundle);
-WGPU_EXPORT RenderBundleEncoder& fromAPI(WGPURenderBundleEncoder);
-WGPU_EXPORT RenderPassEncoder& fromAPI(WGPURenderPassEncoder);
-WGPU_EXPORT RenderPipeline& fromAPI(WGPURenderPipeline);
-WGPU_EXPORT Sampler& fromAPI(WGPUSampler);
-WGPU_EXPORT ShaderModule& fromAPI(WGPUShaderModule);
-WGPU_EXPORT Texture& fromAPI(WGPUTexture);
-WGPU_EXPORT TextureView& fromAPI(WGPUTextureView);
-WGPU_EXPORT XRBinding& fromAPI(WGPUXRBinding);
-WGPU_EXPORT XRProjectionLayer& fromAPI(WGPUXRProjectionLayer);
-WGPU_EXPORT XRSubImage& fromAPI(WGPUXRSubImage);
-WGPU_EXPORT XRView& fromAPI(WGPUXRView);
-WGPU_EXPORT PresentationContext& fromAPI(WGPUSwapChain);
+inline Adapter& fromAPI(WGPUAdapter handle)
+{
+    return *reinterpret_cast<Adapter*>(handle);
+}
 
-WGPU_EXPORT WGPUAdapter toAPI(Adapter&);
-WGPU_EXPORT WGPUBindGroup toAPI(BindGroup&);
-WGPU_EXPORT WGPUBindGroupLayout toAPI(BindGroupLayout&);
-WGPU_EXPORT WGPUBuffer toAPI(Buffer&);
-WGPU_EXPORT WGPUCommandBuffer toAPI(CommandBuffer&);
-WGPU_EXPORT WGPUCommandEncoder toAPI(CommandEncoder&);
-WGPU_EXPORT WGPUComputePassEncoder toAPI(ComputePassEncoder&);
-WGPU_EXPORT WGPUComputePipeline toAPI(ComputePipeline&);
-WGPU_EXPORT WGPUDevice toAPI(Device&);
-WGPU_EXPORT WGPUExternalTexture toAPI(ExternalTexture&);
-WGPU_EXPORT WGPUInstance toAPI(Instance&);
-WGPU_EXPORT WGPUPipelineLayout toAPI(PipelineLayout&);
-WGPU_EXPORT WGPUSurface toAPI(PresentationContext&);
-WGPU_EXPORT WGPUQuerySet toAPI(QuerySet&);
-WGPU_EXPORT WGPUQueue toAPI(Queue&);
-WGPU_EXPORT WGPURenderBundle toAPI(RenderBundle&);
-WGPU_EXPORT WGPURenderBundleEncoder toAPI(RenderBundleEncoder&);
-WGPU_EXPORT WGPURenderPassEncoder toAPI(RenderPassEncoder&);
-WGPU_EXPORT WGPURenderPipeline toAPI(RenderPipeline&);
-WGPU_EXPORT WGPUSampler toAPI(Sampler&);
-WGPU_EXPORT WGPUShaderModule toAPI(ShaderModule&);
-WGPU_EXPORT WGPUTexture toAPI(Texture&);
-WGPU_EXPORT WGPUTextureView toAPI(TextureView&);
-WGPU_EXPORT WGPUXRBinding toAPI(XRBinding&);
-WGPU_EXPORT WGPUXRProjectionLayer toAPI(XRProjectionLayer&);
-WGPU_EXPORT WGPUXRSubImage toAPI(XRSubImage&);
-WGPU_EXPORT WGPUXRView toAPI(XRView&);
-WGPU_EXPORT WGPUSwapChain toAPISwapChain(PresentationContext&);
+inline WGPUAdapter toAPI(Adapter& object)
+{
+    return reinterpret_cast<WGPUAdapter>(&object);
+}
+
+inline BindGroup& fromAPI(WGPUBindGroup handle)
+{
+    return *reinterpret_cast<BindGroup*>(handle);
+}
+
+inline WGPUBindGroup toAPI(BindGroup& object)
+{
+    return reinterpret_cast<WGPUBindGroup>(&object);
+}
+
+inline BindGroupLayout& fromAPI(WGPUBindGroupLayout handle)
+{
+    return *reinterpret_cast<BindGroupLayout*>(handle);
+}
+
+inline WGPUBindGroupLayout toAPI(BindGroupLayout& object)
+{
+    return reinterpret_cast<WGPUBindGroupLayout>(&object);
+}
+
+inline Buffer& fromAPI(WGPUBuffer handle)
+{
+    return *reinterpret_cast<Buffer*>(handle);
+}
+
+inline WGPUBuffer toAPI(Buffer& object)
+{
+    return reinterpret_cast<WGPUBuffer>(&object);
+}
+
+inline CommandBuffer& fromAPI(WGPUCommandBuffer handle)
+{
+    return *reinterpret_cast<CommandBuffer*>(handle);
+}
+
+inline WGPUCommandBuffer toAPI(CommandBuffer& object)
+{
+    return reinterpret_cast<WGPUCommandBuffer>(&object);
+}
+
+inline CommandEncoder& fromAPI(WGPUCommandEncoder handle)
+{
+    return *reinterpret_cast<CommandEncoder*>(handle);
+}
+
+inline WGPUCommandEncoder toAPI(CommandEncoder& object)
+{
+    return reinterpret_cast<WGPUCommandEncoder>(&object);
+}
+
+inline ComputePassEncoder& fromAPI(WGPUComputePassEncoder handle)
+{
+    return *reinterpret_cast<ComputePassEncoder*>(handle);
+}
+
+inline WGPUComputePassEncoder toAPI(ComputePassEncoder& object)
+{
+    return reinterpret_cast<WGPUComputePassEncoder>(&object);
+}
+
+inline ComputePipeline& fromAPI(WGPUComputePipeline handle)
+{
+    return *reinterpret_cast<ComputePipeline*>(handle);
+}
+
+inline WGPUComputePipeline toAPI(ComputePipeline& object)
+{
+    return reinterpret_cast<WGPUComputePipeline>(&object);
+}
+
+inline Device& fromAPI(WGPUDevice handle)
+{
+    return *reinterpret_cast<Device*>(handle);
+}
+
+inline WGPUDevice toAPI(Device& object)
+{
+    return reinterpret_cast<WGPUDevice>(&object);
+}
+
+inline ExternalTexture& fromAPI(WGPUExternalTexture handle)
+{
+    return *reinterpret_cast<ExternalTexture*>(handle);
+}
+
+inline WGPUExternalTexture toAPI(ExternalTexture& object)
+{
+    return reinterpret_cast<WGPUExternalTexture>(&object);
+}
+
+inline Instance& fromAPI(WGPUInstance handle)
+{
+    return *reinterpret_cast<Instance*>(handle);
+}
+
+inline WGPUInstance toAPI(Instance& object)
+{
+    return reinterpret_cast<WGPUInstance>(&object);
+}
+
+inline PipelineLayout& fromAPI(WGPUPipelineLayout handle)
+{
+    return *reinterpret_cast<PipelineLayout*>(handle);
+}
+
+inline WGPUPipelineLayout toAPI(PipelineLayout& object)
+{
+    return reinterpret_cast<WGPUPipelineLayout>(&object);
+}
+
+inline PresentationContext& fromAPI(WGPUSurface handle)
+{
+    return *reinterpret_cast<PresentationContext*>(handle);
+}
+
+inline WGPUSurface toAPI(PresentationContext& object)
+{
+    return reinterpret_cast<WGPUSurface>(&object);
+}
+
+inline QuerySet& fromAPI(WGPUQuerySet handle)
+{
+    return *reinterpret_cast<QuerySet*>(handle);
+}
+
+inline WGPUQuerySet toAPI(QuerySet& object)
+{
+    return reinterpret_cast<WGPUQuerySet>(&object);
+}
+
+inline Queue& fromAPI(WGPUQueue handle)
+{
+    return *reinterpret_cast<Queue*>(handle);
+}
+
+inline WGPUQueue toAPI(Queue& object)
+{
+    return reinterpret_cast<WGPUQueue>(&object);
+}
+
+inline RenderBundle& fromAPI(WGPURenderBundle handle)
+{
+    return *reinterpret_cast<RenderBundle*>(handle);
+}
+
+inline WGPURenderBundle toAPI(RenderBundle& object)
+{
+    return reinterpret_cast<WGPURenderBundle>(&object);
+}
+
+inline RenderBundleEncoder& fromAPI(WGPURenderBundleEncoder handle)
+{
+    return *reinterpret_cast<RenderBundleEncoder*>(handle);
+}
+
+inline WGPURenderBundleEncoder toAPI(RenderBundleEncoder& object)
+{
+    return reinterpret_cast<WGPURenderBundleEncoder>(&object);
+}
+
+inline RenderPassEncoder& fromAPI(WGPURenderPassEncoder handle)
+{
+    return *reinterpret_cast<RenderPassEncoder*>(handle);
+}
+
+inline WGPURenderPassEncoder toAPI(RenderPassEncoder& object)
+{
+    return reinterpret_cast<WGPURenderPassEncoder>(&object);
+}
+
+inline RenderPipeline& fromAPI(WGPURenderPipeline handle)
+{
+    return *reinterpret_cast<RenderPipeline*>(handle);
+}
+
+inline WGPURenderPipeline toAPI(RenderPipeline& object)
+{
+    return reinterpret_cast<WGPURenderPipeline>(&object);
+}
+
+inline Sampler& fromAPI(WGPUSampler handle)
+{
+    return *reinterpret_cast<Sampler*>(handle);
+}
+
+inline WGPUSampler toAPI(Sampler& object)
+{
+    return reinterpret_cast<WGPUSampler>(&object);
+}
+
+inline ShaderModule& fromAPI(WGPUShaderModule handle)
+{
+    return *reinterpret_cast<ShaderModule*>(handle);
+}
+
+inline WGPUShaderModule toAPI(ShaderModule& object)
+{
+    return reinterpret_cast<WGPUShaderModule>(&object);
+}
+
+inline Texture& fromAPI(WGPUTexture handle)
+{
+    return *reinterpret_cast<Texture*>(handle);
+}
+
+inline WGPUTexture toAPI(Texture& object)
+{
+    return reinterpret_cast<WGPUTexture>(&object);
+}
+
+inline TextureView& fromAPI(WGPUTextureView handle)
+{
+    return *reinterpret_cast<TextureView*>(handle);
+}
+
+inline WGPUTextureView toAPI(TextureView& object)
+{
+    return reinterpret_cast<WGPUTextureView>(&object);
+}
 
 } // namespace WebGPU
-
-#endif // __cplusplus

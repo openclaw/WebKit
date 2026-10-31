@@ -33,8 +33,6 @@
 #import <wtf/TZoneMalloc.h>
 #import <wtf/Vector.h>
 
-struct WGPURenderBundleImpl {
-};
 
 @interface ResourceUsageAndRenderStage : NSObject
 - (instancetype)initWithUsage:(MTLResourceUsage)usage renderStages:(MTLRenderStages)renderStages entryUsage:(OptionSet<WebGPU::Metal::BindGroupEntryUsage>)entryUsage binding:(uint32_t)binding resource:(WebGPU::Metal::BindGroupEntryUsageData::Resource)resource;
@@ -61,12 +59,12 @@ class TextureOrTextureView;
 class TextureView;
 
 // https://gpuweb.github.io/gpuweb/#gpurenderbundle
-class RenderBundle final : public WebGPU::RenderBundle, public WGPURenderBundleImpl {
+class RenderBundle final : public WebGPU::RenderBundle {
     WTF_MAKE_TZONE_ALLOCATED(RenderBundle);
 public:
     using MinVertexCountsContainer = HashMap<uint64_t, IndexBufferAndIndexData, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>>;
     using ResourcesContainer = NSMapTable<id<MTLResource>, ResourceUsageAndRenderStage*>;
-    static Ref<RenderBundle> create(NSArray<RenderBundleICBWithResources*> *resources, Vector<WebGPU::Metal::BindableResources>&& bindableResources, RefPtr<WebGPU::Metal::RenderBundleEncoder> encoder, std::span<const WGPUTextureFormat> colorFormats, WGPUTextureFormat depthStencilFormat, uint32_t sampleCount, bool depthReadOnly, bool stencilReadOnly, uint64_t commandCount, bool makeSubmitInvalid, HashSet<RefPtr<const BindGroup>>&& bindGroups, Device& device)
+    static Ref<RenderBundle> create(NSArray<RenderBundleICBWithResources*> *resources, Vector<WebGPU::Metal::BindableResources>&& bindableResources, RefPtr<WebGPU::Metal::RenderBundleEncoder> encoder, std::span<const std::optional<WebGPU::TextureFormat>> colorFormats, std::optional<WebGPU::TextureFormat> depthStencilFormat, uint32_t sampleCount, bool depthReadOnly, bool stencilReadOnly, uint64_t commandCount, bool makeSubmitInvalid, HashSet<RefPtr<const BindGroup>>&& bindGroups, Device& device)
     {
         return adoptRef(*new RenderBundle(resources, WTF::move(bindableResources), encoder, colorFormats, depthStencilFormat, sampleCount, depthReadOnly, stencilReadOnly, commandCount, makeSubmitInvalid, WTF::move(bindGroups), device));
     }
@@ -79,7 +77,7 @@ public:
 
     void setLabel(String&&) final;
 
-    bool NODELETE isValid() const final;
+    bool LEGACY_NODELETE isValid() const final;
 
     Device& device() const { return m_device; }
     NSArray<RenderBundleICBWithResources*> *renderBundlesResources() const { return m_renderBundlesResources; }
@@ -87,24 +85,25 @@ public:
     void replayCommands(RenderPassEncoder&) const;
     void updateMinMaxDepths(float minDepth, float maxDepth);
     bool validateRenderPass(bool depthReadOnly, bool stencilReadOnly, const Vector<TextureOrTextureView>&, const std::optional<TextureOrTextureView>&) const;
-    bool NODELETE validatePipeline(const RenderPipeline*);
-    uint64_t NODELETE drawCount() const;
-    NSString* NODELETE lastError() const;
-    bool NODELETE requiresCommandReplay() const;
-    bool NODELETE makeSubmitInvalid() const;
+    bool LEGACY_NODELETE validatePipeline(const RenderPipeline*);
+    uint64_t LEGACY_NODELETE drawCount() const;
+    NSString* LEGACY_NODELETE lastError() const;
+    bool LEGACY_NODELETE requiresCommandReplay() const;
+    bool LEGACY_NODELETE makeSubmitInvalid() const;
     bool rebindSamplersIfNeeded() const;
+    void releaseDestroyedResources();
     const Vector<WebGPU::Metal::BindableResources>& resources() LIFETIME_BOUND { return m_resources; }
 
 private:
-    RenderBundle(NSArray<RenderBundleICBWithResources*> *, Vector<WebGPU::Metal::BindableResources>&&, RefPtr<RenderBundleEncoder>, std::span<const WGPUTextureFormat> colorFormats, WGPUTextureFormat depthStencilFormat, uint32_t sampleCount, bool depthReadOnly, bool stencilReadOnly, uint64_t, bool makeSubmitInvalid, HashSet<RefPtr<const BindGroup>>&&, Device&);
+    RenderBundle(NSArray<RenderBundleICBWithResources*> *, Vector<WebGPU::Metal::BindableResources>&&, RefPtr<RenderBundleEncoder>, std::span<const std::optional<WebGPU::TextureFormat>> colorFormats, std::optional<WebGPU::TextureFormat> depthStencilFormat, uint32_t sampleCount, bool depthReadOnly, bool stencilReadOnly, uint64_t, bool makeSubmitInvalid, HashSet<RefPtr<const BindGroup>>&&, Device&);
     RenderBundle(Device&, NSString*);
 
     const Ref<Device> m_device;
     RefPtr<RenderBundleEncoder> m_renderBundleEncoder;
     NSArray<RenderBundleICBWithResources*> *m_renderBundlesResources;
     Vector<WebGPU::Metal::BindableResources> m_resources;
-    const Vector<WGPUTextureFormat> m_colorFormats;
-    const WGPUTextureFormat m_depthStencilFormat { WGPUTextureFormat_Undefined };
+    const Vector<std::optional<WebGPU::TextureFormat>> m_colorFormats;
+    const std::optional<WebGPU::TextureFormat> m_depthStencilFormat;
     const uint32_t m_sampleCount { 0 };
     const bool m_depthReadOnly { false };
     const bool m_stencilReadOnly { false };

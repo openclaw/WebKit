@@ -49,6 +49,7 @@ from webkitpy.style.checkers.cpp import CppChecker
 from webkitpy.style.checkers.cmake import CMakeChecker
 from webkitpy.style.checkers.deprecated_js_test_includes import categories as DeprecatedJSTestIncludesCategories
 from webkitpy.style.checkers.deprecated_js_test_includes import DeprecatedJSTestIncludesChecker
+from webkitpy.style.checkers.eslint import ESLintChecker
 from webkitpy.style.checkers.featuredefines import FeatureDefinesChecker
 from webkitpy.style.checkers.js import JSChecker
 from webkitpy.style.checkers.jsonchecker import JSONChecker
@@ -56,6 +57,7 @@ from webkitpy.style.checkers.jsonchecker import JSONContributorsChecker
 from webkitpy.style.checkers.jsonchecker import JSONFeaturesChecker
 from webkitpy.style.checkers.jsonchecker import JSONCSSPropertiesChecker
 from webkitpy.style.checkers.jsonchecker import JSONImportExpectationsChecker
+from webkitpy.style.checkers.jsonchecker import JSONQuirkTableChecker
 from webkitpy.style.checkers.jstest import JSTestChecker
 from webkitpy.style.checkers.messagesin import MessagesInChecker
 from webkitpy.style.checkers.png import PNGChecker
@@ -385,6 +387,7 @@ _PATH_RULES_SPECIFIER = [
       os.path.join('Source', 'ThirdParty', 'openvr'),
       os.path.join('Source', 'ThirdParty', 'skia'),
       os.path.join('Source', 'ThirdParty', 'xdgmime'),
+      os.path.join('Source', 'WTF', 'wtf', 'zmij'),
       os.path.join('Tools', 'WebGPUAPIStructure')],
      ["-",
       "+pep8/W191",  # Tabs
@@ -465,7 +468,8 @@ _PATH_RULES_SPECIFIER = [
      os.path.join('Tools', 'MiniBrowser')],
      ["-runtime/wtf_make_unique",
       "-runtime/wtf_move",
-      "-runtime/wtf_to_array"]),
+      "-runtime/wtf_to_array",
+      "-safercpp/dispatch_get_main_queue"]),
 
     ([  # Ignore formatting and whitespace issues in gmock.
      os.path.join('Source', 'ThirdParty', 'gmock')],
@@ -500,13 +504,7 @@ _PATH_RULES_SPECIFIER = [
       '.any.sharedworker.html',
       '.any.sharedworker-module.html',
       '.any.worker.html',
-      '.any.worker-module.html',
-      '.any.shadowrealm-in-window.html',
-      '.any.shadowrealm-in-shadowrealm.html',
-      '.any.shadowrealm-in-dedicatedworker.html',
-      '.any.shadowrealm-in-sharedworker.html',
-      '.any.shadowrealm-in-serviceworker.html',
-      '.any.shadowrealm-in-audioworklet.html'],
+      '.any.worker-module.html'],
      ['-wpt/lint/worker_collision']),
 
     ([  # Templated test sources and their generated dummy .html counterparts.
@@ -637,7 +635,6 @@ _SKIPPED_FILES_WITH_WARNING = [
     os.path.join('Source', 'WebKit', 'WebProcess', 'InjectedBundle', 'API', 'wpe', 'webkit-web-process-extension.h'),
     os.path.join('Source', 'WebKit', 'WebProcess', 'InjectedBundle', 'API', 'wpe', 'DOM', 'webkitdom.h'),
     os.path.join('Source', 'WebGPU', 'WebGPU', 'WebGPU.h'),
-    os.path.join('Source', 'WebGPU', 'WebGPU', 'WebGPUExt.h'),
     os.path.join('Source', 'WebGPU', 'WebGPU', 'metal-cpp', 'SingleHeader', 'MakeSingleHeader.py')]
 
 # Files to skip that are more common or obvious.
@@ -693,6 +690,7 @@ def _all_categories():
     categories = categories.union(CMakeChecker.categories)
     categories = categories.union(DeprecatedJSTestIncludesCategories)
     categories = categories.union(ComputedStyleInlineIncludesCategories)
+    categories = categories.union(ESLintChecker.categories)
     categories = categories.union(JSChecker.categories)
     categories = categories.union(JSONChecker.categories)
     categories = categories.union(JSTestChecker.categories)
@@ -1040,6 +1038,8 @@ class CheckerDispatcher(object):
                 checker = JSONFeaturesChecker(file_path, handle_style_error)
             elif basename == 'CSSProperties.json':
                 checker = JSONCSSPropertiesChecker(file_path, handle_style_error)
+            elif basename == 'QuirkTable.json':
+                checker = JSONQuirkTableChecker(file_path, handle_style_error)
             elif basename == 'import-expectations.json':
                 checker = JSONImportExpectationsChecker(file_path, handle_style_error)
             else:
@@ -1373,6 +1373,8 @@ class StyleProcessor(ProcessorBase):
         SwiftAssociationChecker.check_associations(files, self._configuration, cwd, self._increment_error_count, host=host)
 
         SwiftBuildRegistrationChecker.check_registrations(files, self._configuration, cwd, self._increment_error_count, host=host)
+
+        ESLintChecker.check(files, self._configuration, cwd, self._increment_error_count, host=host)
 
         wpt_dir = os.path.join('LayoutTests', *IMPORTED_WPT_DIR.split('/'))
         wpt_paths = []

@@ -186,8 +186,12 @@ static std::pair<GRefPtr<GstCaps>, GRefPtr<GstCaps>> vpxCapsFromCodecString(cons
 {
     auto parameters = parseVPCodecParameters(codecString);
     if (!parameters)
-        return { nullptr, nullptr };
+        parameters = parseVPCodecParametersIgnoringColorFields(codecString);
 
+    if (!parameters) {
+        GST_DEBUG("Unable to parse codec string %s", codecString.utf8());
+        return { nullptr, nullptr };
+    }
     GRefPtr inputCaps = adoptGRef(gst_caps_new_any());
 
     if (parameters->codecName.startsWith("vp8"_s) || parameters->codecName.startsWith("vp08"_s))
@@ -333,7 +337,10 @@ static std::pair<GRefPtr<GstCaps>, GRefPtr<GstCaps>> av1CapsFromCodecString(cons
     auto yuvFormat = "I420"_s;
     switch (static_cast<AV1ConfigurationChromaSubsampling>(configurationRecord->chromaSubsampling)) {
     case AV1ConfigurationChromaSubsampling::Subsampling_422:
-        yuvFormat = "I422"_s;
+        if (configurationRecord->bitDepth == 8)
+            yuvFormat = "Y42B"_s;
+        else
+            yuvFormat = "I422"_s;
         chromaFormat = "4:2:2"_s;
         break;
     case AV1ConfigurationChromaSubsampling::Subsampling_444:

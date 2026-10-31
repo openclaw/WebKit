@@ -28,14 +28,18 @@
 #include "GridTypeAliases.h"
 #include "LayoutUnit.h"
 #include <optional>
+#include <wtf/Vector.h>
 
 namespace WebCore {
 
 class WritingMode;
 
+enum class LogicalBoxAxis : uint8_t;
+
 namespace Style {
 struct GridTrackSize;
 struct PreferredSize;
+enum class BaselineAlignmentPreferenceKind : bool;
 }
 
 namespace Layout {
@@ -44,6 +48,7 @@ class ElementBox;
 class GridFormattingContext;
 class IntegrationUtils;
 class PlacedGridItem;
+struct AxisConstraint;
 struct BorderBoxSize;
 struct GridItemSizingFunctions;
 struct MarginBoxSize;
@@ -53,9 +58,18 @@ struct UsedMargins {
     LayoutUnit marginEnd;
 };
 
+// https://drafts.csswg.org/css-align-3/#baseline-sharing-group
+struct BaselineSharingGroup {
+    size_t trackIndex { 0 };
+    Style::BaselineAlignmentPreferenceKind baselineAlignmentPreference { };
+    Vector<size_t> gridItemIndexes;
+};
+
 namespace GridLayoutUtils {
 
-LayoutUnit NODELETE totalGuttersSize(size_t tracksCount, LayoutUnit gapsSize);
+LayoutUnit LEGACY_NODELETE totalGuttersSize(size_t tracksCount, const BitVector& collapsedTracksList, LayoutUnit gapsSize);
+
+std::optional<LayoutUnit> gridAreaMaximumSize(size_t startLine, size_t endLine, const TrackSizingFunctionsList&, LayoutUnit gapSize, const AxisConstraint&);
 
 // https://drafts.csswg.org/css-grid-1/#track-sizes
 Style::GridTrackSize trackSizeWithPercentagesConvertedToAuto(const Style::GridTrackSize&);
@@ -65,19 +79,19 @@ UsedMargins usedMarginsForAxis(const PlacedGridItem&, const ComputedSizes&);
 LayoutUnit inlinePreferredSize(const PlacedGridItem&, LayoutUnit borderAndPadding, LayoutUnit columnsSize, const IntegrationUtils&, const UsedMargins&);
 LayoutUnit blockPreferredSize(const PlacedGridItem&, LayoutUnit borderAndPadding, LayoutUnit rowsSize, const GridFormattingContext&, LayoutUnit gridAreaInlineSize, const UsedMargins&);
 
-LayoutUnit inlineMinimumSize(const PlacedGridItem&, const TrackSizingFunctionsList&, LayoutUnit borderAndPadding, LayoutUnit columnsSize, const IntegrationUtils&);
-LayoutUnit blockMinimumSize(const PlacedGridItem&, const TrackSizingFunctionsList&, LayoutUnit borderAndPadding, LayoutUnit rowsSize, const GridFormattingContext&, LayoutUnit gridAreaInlineSize);
+LayoutUnit inlineMinimumSize(const PlacedGridItem&, const TrackSizingFunctionsList&, LayoutUnit borderAndPadding, LayoutUnit columnsSize, const IntegrationUtils&, LayoutUnit gridAreaBlockSize, const UsedMargins&);
+LayoutUnit blockMinimumSize(const PlacedGridItem&, const TrackSizingFunctionsList&, LayoutUnit borderAndPadding, LayoutUnit rowsSize, const GridFormattingContext&, LayoutUnit gridAreaInlineSize, const UsedMargins&);
 
 // The automatic (auto) minimum size. The containing block size is absent while track sizing is in
 // progress, in which case percentage-based specified size suggestions cannot resolve and there is
 // no specified size suggestion; it is present once the available space is known. The grid area's
 // maximum size is absent when the item does not span only fixed-maximum tracks, or when the caller
 // does not clamp to it.
-BorderBoxSize automaticMinimumInlineSize(const PlacedGridItem&, LayoutUnit borderAndPadding, const TrackSizingFunctionsList&, std::optional<LayoutUnit> gridAreaInlineSize, std::optional<LayoutUnit> gridAreaMaximumInlineSize, const IntegrationUtils&);
-BorderBoxSize automaticMinimumBlockSize(const PlacedGridItem&, LayoutUnit borderAndPadding, const TrackSizingFunctionsList&, std::optional<LayoutUnit> gridAreaBlockSize, std::optional<LayoutUnit> gridAreaMaximumBlockSize, const GridFormattingContext&, LayoutUnit gridAreaInlineSize);
-LayoutUnit inlineMaximumSize(const PlacedGridItem&, LayoutUnit borderAndPadding);
-LayoutUnit blockMaximumSize(const PlacedGridItem&, LayoutUnit borderAndPadding);
-LayoutUnit inlineUsedSize(const PlacedGridItem&, const TrackSizingFunctionsList&, LayoutUnit borderAndPadding, LayoutUnit gridAreaInlineSize, const IntegrationUtils&, const UsedMargins&);
+BorderBoxSize automaticMinimumInlineSize(const PlacedGridItem&, LayoutUnit borderAndPadding, const TrackSizingFunctionsList&, std::optional<LayoutUnit> gridAreaInlineSize, std::optional<LayoutUnit> gridAreaMaximumInlineSize, const IntegrationUtils&, std::optional<LayoutUnit> gridAreaBlockSize, std::optional<LayoutUnit> gridAreaMaximumBlockSize, const UsedMargins&);
+BorderBoxSize automaticMinimumBlockSize(const PlacedGridItem&, LayoutUnit borderAndPadding, const TrackSizingFunctionsList&, std::optional<LayoutUnit> gridAreaBlockSize, std::optional<LayoutUnit> gridAreaMaximumBlockSize, const GridFormattingContext&, LayoutUnit gridAreaInlineSize, std::optional<LayoutUnit> gridAreaMaximumInlineSize, const UsedMargins&);
+LayoutUnit LEGACY_NODELETE inlineMaximumSize(const PlacedGridItem&, LayoutUnit borderAndPadding);
+LayoutUnit LEGACY_NODELETE blockMaximumSize(const PlacedGridItem&, LayoutUnit borderAndPadding);
+LayoutUnit inlineUsedSize(const PlacedGridItem&, const TrackSizingFunctionsList&, LayoutUnit borderAndPadding, LayoutUnit gridAreaInlineSize, const IntegrationUtils&, LayoutUnit gridAreaBlockSize, const UsedMargins&);
 LayoutUnit blockUsedSize(const PlacedGridItem&, const TrackSizingFunctionsList&, LayoutUnit borderAndPadding, LayoutUnit gridAreaBlockSize, const GridFormattingContext&, LayoutUnit gridAreaInlineSize, const UsedMargins&);
 
 // Whether the grid item is non-replaced, has a preferred aspect ratio, and has an automatic size in
@@ -88,8 +102,8 @@ std::pair<LayoutUnit, LayoutUnit> usedSizesForAspectRatioItem(const PlacedGridIt
     LayoutUnit inlineBorderAndPadding, LayoutUnit blockBorderAndPadding, LayoutUnit gridAreaInlineSize, LayoutUnit gridAreaBlockSize, const GridFormattingContext&,
     const UsedMargins& inlineMargins, const UsedMargins& blockMargins);
 
-LayoutUnit computeGridLinePosition(size_t gridLineIndex, const TrackSizes&, LayoutUnit gap);
-LayoutUnit gridAreaDimensionSize(size_t startLine, size_t endLine, const TrackSizes&, LayoutUnit gap);
+LayoutUnit computeGridLinePosition(size_t gridLineIndex, const TrackSizes&, const BitVector& collapsedTracksList, LayoutUnit gap);
+LayoutUnit LEGACY_NODELETE gridAreaDimensionSize(size_t startLine, size_t endLine, const TrackSizes&, LayoutUnit gap);
 
 MarginBoxSize inlineAxisMinContentContribution(const PlacedGridItem&, const IntegrationUtils&);
 MarginBoxSize inlineAxisMaxContentContribution(const PlacedGridItem&, const IntegrationUtils&);
@@ -97,7 +111,10 @@ MarginBoxSize inlineAxisMaxContentContribution(const PlacedGridItem&, const Inte
 MarginBoxSize blockAxisMinContentContribution(const PlacedGridItem&, LayoutUnit gridAreaInlineSize, const GridFormattingContext&);
 MarginBoxSize blockAxisMaxContentContribution(const PlacedGridItem&, LayoutUnit gridAreaInlineSize, const GridFormattingContext&);
 
-bool preferredSizeBehavesAsAuto(const Style::PreferredSize&);
+bool LEGACY_NODELETE preferredSizeBehavesAsAuto(const Style::PreferredSize&);
+
+Vector<BaselineSharingGroup> baselineSharingGroups(const PlacedGridItems&, LogicalBoxAxis alignmentAxis);
+
 template<typename SizeType>
 bool sizeDependsOnContainingBlockSize(const SizeType& size)
 {

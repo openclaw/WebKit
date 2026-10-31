@@ -55,6 +55,7 @@
 #import "WebPageGroup.h"
 #import "WebPageMessages.h"
 #import "WebPageProxy.h"
+#import "WebPreferences.h"
 #import "WebPreferencesDefaultValues.h"
 #import "WebPreferencesKeys.h"
 #import "WebPrivacyHelpers.h"
@@ -113,6 +114,7 @@
 #endif
 
 #if PLATFORM(MAC)
+#import "LibAccessibilitySoftLink.h"
 #import "WebInspectorPreferenceObserver.h"
 #import <notify_keys.h>
 #import <pal/spi/cg/CoreGraphicsSPI.h>
@@ -156,16 +158,16 @@
 #import <pal/cocoa/MediaToolboxSoftLink.h>
 #import <pal/spi/cocoa/AccessibilitySupportSoftLink.h>
 
-#if __has_include(<WebKitAdditions/WebProcessPoolAdditions.h>)
-#import <WebKitAdditions/WebProcessPoolAdditions.h>
-#endif
-
 static NSString * const WebKitJSCJITEnabledDefaultsKey = @"WebKitJSCJITEnabledDefaultsKey";
 static NSString * const WebKitJSCFTLJITEnabledDefaultsKey = @"WebKitJSCFTLJITEnabledDefaultsKey";
 
 #if !PLATFORM(IOS_FAMILY) || PLATFORM(MACCATALYST)
 static NSString * const WebKitApplicationDidChangeAccessibilityEnhancedUserInterfaceNotification = @"NSApplicationDidChangeAccessibilityEnhancedUserInterfaceNotification";
 static CFStringRef AppleColorPreferencesChangedNotification = CFSTR("AppleColorPreferencesChangedNotification");
+#endif
+
+#if PLATFORM(MAC)
+static CFStringRef ApplePreferredContentSizeCategoryChangedNotification = CFSTR("ApplePreferredContentSizeCategoryChangedNotification");
 #endif
 
 static NSString * const WebKitSuppressMemoryPressureHandlerDefaultsKey = @"WebKitSuppressMemoryPressureHandler";
@@ -236,14 +238,14 @@ static void registerUserDefaults()
     [[NSUserDefaults standardUserDefaults] registerDefaults:registrationDictionary.get()];
 }
 
-static std::optional<bool>& NODELETE cachedLockdownModeEnabledGlobally()
+static std::optional<bool>& LEGACY_NODELETE cachedLockdownModeEnabledGlobally()
 {
     static std::optional<bool> cachedLockdownModeEnabledGlobally;
     return cachedLockdownModeEnabledGlobally;
 }
 
 #if PLATFORM(MAC)
-static NSApplication* NODELETE NSAppSingleton()
+static NSApplication* LEGACY_NODELETE NSAppSingleton()
 {
     return NSApp;
 }
@@ -316,9 +318,25 @@ void WebProcessPool::setMediaAccessibilityPreferences(WebProcessProxy& process)
 }
 #endif
 
+#if HAVE(TEXT_SCALE_FACTOR)
+static std::optional<float> preferredTextScaleFactor()
+{
+#if PLATFORM(MAC)
+    if (!islibAccessibilityLibraryAvailable() || !canLoad_libAccessibility__AXSCopyPreferredContentSizeCategoryName())
+        return std::nullopt;
+    RetainPtr contentSizeCategory = adoptCF(softLink_libAccessibility__AXSCopyPreferredContentSizeCategoryName());
+#else
+    RetainPtr contentSizeCategory = WebCore::contentSizeCategory();
+#endif
+    if (!contentSizeCategory)
+        return std::nullopt;
+    return WebCore::textScaleFactorForContentSizeCategory(contentSizeCategory);
+}
+#endif
+
 static void logProcessPoolState(const WebProcessPool& pool)
 {
-    for (Ref process : borrow(pool.processes()).get()) {
+    for (Ref process : borrow(pool.processes())) {
         WTF::TextStream processDescription;
         processDescription << process;
 
@@ -326,7 +344,7 @@ static void logProcessPoolState(const WebProcessPool& pool)
         String domainString = domain.isEmpty() ? "unknown"_s : domain.string();
 
         WTF::TextStream pageURLs;
-        auto pages = process->pages();
+        const Vector pages = process->pages();
         if (pages.isEmpty())
             pageURLs << "none";
         else {
@@ -361,17 +379,20 @@ void WebProcessPool::platformInitialize(NeedsGlobalStaticInitialization needsGlo
         installMemoryPressureHandler();
 
 #if ENABLE(UIPROCESS_PERIODIC_MEMORY_MONITOR)
-        auto monitorConfiguration = MemoryFootprintMonitor::defaultConfiguration();
-        if (auto pollInterval = m_configuration->memoryFootprintPollIntervalForTesting())
-            monitorConfiguration.pollInterval = pollInterval;
-        if (auto memoryLimit = m_configuration->memoryLimitForTesting()) {
-            monitorConfiguration.foregroundPageMemoryLimit = memoryLimit;
-            monitorConfiguration.backgroundPageMemoryLimit = memoryLimit;
-            monitorConfiguration.webProcessMemoryLimit = memoryLimit;
-        }
-
         auto& memoryMeasurementMonitor = MemoryFootprintMonitor::singleton();
-        memoryMeasurementMonitor.setConfiguration(WTF::move(monitorConfiguration));
+        auto pollInterval = m_configuration->memoryFootprintPollIntervalForTesting();
+        auto memoryLimit = m_configuration->memoryLimitForTesting();
+        if (pollInterval || memoryLimit) {
+            auto monitorConfiguration = MemoryFootprintMonitor::defaultConfiguration();
+            if (pollInterval)
+                monitorConfiguration.pollInterval = pollInterval;
+            if (memoryLimit) {
+                monitorConfiguration.foregroundPageMemoryLimit = memoryLimit;
+                monitorConfiguration.backgroundPageMemoryLimit = memoryLimit;
+                monitorConfiguration.webProcessMemoryLimit = memoryLimit;
+            }
+            memoryMeasurementMonitor.setConfigurationForTesting(WTF::move(monitorConfiguration));
+        }
         memoryMeasurementMonitor.start();
 #endif
     }
@@ -391,12 +412,6 @@ void WebProcessPool::platformInitialize(NeedsGlobalStaticInitialization needsGlo
         for (const auto& pool : WebProcessPool::allProcessPools())
             logProcessPoolState(pool.get());
     });
-
-#if ENABLE(ADVANCED_PRIVACY_PROTECTIONS)
-    PAL::registerNotifyCallback("com.apple.WebKit.restrictedDomains"_s, [] {
-        RestrictedOpenerDomainsController::singleton();
-    });
-#endif
 }
 
 void WebProcessPool::platformResolvePathsForSandboxExtensions()
@@ -507,6 +522,10 @@ ALLOW_DEPRECATED_DECLARATIONS_END
     parameters.contentSizeCategory = contentSizeCategory();
 #endif
 
+#if HAVE(TEXT_SCALE_FACTOR)
+    parameters.textScaleFactor = preferredTextScaleFactor();
+#endif
+
 #if (PLATFORM(MAC) || PLATFORM(MACCATALYST)) && !ENABLE(LAUNCHSERVICES_SANDBOX_EXTENSION_BLOCKING)
     if (auto launchServicesExtensionHandle = SandboxExtension::createHandleForMachLookup("com.apple.coreservices.launchservicesd"_s, std::nullopt))
         parameters.launchServicesExtensionHandle = WTF::move(*launchServicesExtensionHandle);
@@ -558,7 +577,7 @@ ALLOW_DEPRECATED_DECLARATIONS_END
 
     for (auto&& entry : StorageAccessPromptQuirkController::sharedSingleton().cachedListData()) {
         if (!entry.triggerPages.isEmpty()) {
-            for (auto&& page : entry.triggerPages)
+            for (auto&& page : borrow(entry.triggerPages))
                 parameters.storageAccessPromptQuirksDomains.add(RegistrableDomain { page });
             continue;
         }
@@ -698,12 +717,20 @@ void WebProcessPool::colorPreferencesDidChangeCallback(CFNotificationCenterRef, 
         return;
     pool->sendToAllProcesses(Messages::WebProcess::ColorPreferencesDidChange());
 }
+
+void WebProcessPool::preferredContentSizeCategoryDidChangeCallback(CFNotificationCenterRef, void* observer, CFStringRef, const void*, CFDictionaryRef)
+{
+    auto pool = extractWebProcessPool(observer);
+    if (!pool)
+        return;
+    pool->sendToAllProcesses(Messages::WebProcess::SetTextScaleFactor(preferredTextScaleFactor()));
+}
 #endif
 
 #if PLATFORM(MAC) || PLATFORM(MACCATALYST)
 void WebProcessPool::hardwareConsoleStateChanged()
 {
-    for (auto& process : m_processes)
+    for (auto& process : borrow(m_processes))
         process->hardwareConsoleStateChanged();
 }
 #endif
@@ -750,7 +777,7 @@ void WebProcessPool::hardwareKeyboardAvailabilityChangedCallback(CFNotificationC
 
 void WebProcessPool::hardwareKeyboardAvailabilityChanged()
 {
-    for (Ref process : borrow(this->processes()).get()) {
+    for (Ref process : borrow(this->processes())) {
         auto pages = process->mainPages();
         for (auto& page : pages)
             page->hardwareKeyboardAvailabilityChanged(cachedHardwareKeyboardState());
@@ -825,7 +852,7 @@ void WebProcessPool::registerNotificationObservers()
                     return;
                 protectedThis->setNotifyState(message, status, state);
                 String messageString(message);
-                for (auto& process : protectedThis->m_processes) {
+                for (auto& process : borrow(protectedThis->m_processes)) {
                     if (process->auditToken() && !WTF::hasEntitlement(process->auditToken().value(), "com.apple.developer.web-browser-engine.restrict.notifyd"_s))
                         continue;
                     process->send(Messages::WebProcess::PostNotification(messageString, (status == NOTIFY_STATUS_OK) ? std::optional<uint64_t>(state) : std::nullopt), 0);
@@ -854,7 +881,7 @@ void WebProcessPool::registerNotificationObservers()
                 return;
             if (!protectedThis->m_processes.isEmpty()) {
                 String messageString(message.get());
-                for (auto& process : protectedThis->m_processes)
+                for (auto& process : borrow(protectedThis->m_processes))
                     process->send(Messages::WebProcess::PostObserverNotification(messageString), 0);
             }
         }];
@@ -926,6 +953,7 @@ void WebProcessPool::registerNotificationObservers()
 #endif
 
     addCFNotificationObserver(colorPreferencesDidChangeCallback, RetainPtr { AppleColorPreferencesChangedNotification }.get(), CFNotificationCenterGetDistributedCenterSingleton());
+    addCFNotificationObserver(preferredContentSizeCategoryDidChangeCallback, RetainPtr { ApplePreferredContentSizeCategoryChangedNotification }.get());
 
     const char* messages[] = { kNotifyDSCacheInvalidation, kNotifyDSCacheInvalidationGroup, kNotifyDSCacheInvalidationHost, kNotifyDSCacheInvalidationService, kNotifyDSCacheInvalidationUser };
     m_openDirectoryNotifyTokens.reserveInitialCapacity(std::size(messages));
@@ -940,7 +968,7 @@ void WebProcessPool::registerNotificationObservers()
             if (RefPtr gpuProcess = GPUProcessProxy::singletonIfCreated())
                 gpuProcess->send(Messages::GPUProcess::OpenDirectoryCacheInvalidated(WTF::move(*handle)), 0);
 #endif
-            for (auto& process : m_processes) {
+            for (auto& process : borrow(m_processes)) {
                 if (!process->canSendMessage())
                     continue;
                 auto handle = SandboxExtension::createHandleForMachLookup("com.apple.system.opendirectoryd.libinfo"_s, std::nullopt);
@@ -974,6 +1002,11 @@ ALLOW_DEPRECATED_DECLARATIONS_END
         for (auto& process : m_processes)
             process->unblockAccessibilityServerIfNeeded();
     }] });
+#if PLATFORM(IOS) || PLATFORM(VISION)
+    lazyInitialize(m_contentSizeCategoryObserver, RetainPtr<NSObject> { [[NSNotificationCenter defaultCenter] addObserverForName:UIContentSizeCategoryDidChangeNotification object:nil queue:[NSOperationQueue currentQueue] usingBlock:^(NSNotification *) {
+        sendToAllProcesses(Messages::WebProcess::SetTextScaleFactor(preferredTextScaleFactor()));
+    }] });
+#endif
 #if ENABLE(CFPREFS_DIRECT_MODE)
     lazyInitialize(m_activationObserver, RetainPtr<NSObject> { [[NSNotificationCenter defaultCenter] addObserverForName:@"UIApplicationDidBecomeActiveNotification" object:nil queue:[NSOperationQueue currentQueue] usingBlock:^(NSNotification *notification) {
         startObservingPreferenceChanges();
@@ -1080,6 +1113,7 @@ void WebProcessPool::unregisterNotificationObservers()
     [[NSNotificationCenter defaultCenter] removeObserver:m_didEndSuppressingHighDynamicRange.get()];
 #endif
     removeCFNotificationObserver(RetainPtr { AppleColorPreferencesChangedNotification }.get(), CFNotificationCenterGetDistributedCenterSingleton());
+    removeCFNotificationObserver(RetainPtr { ApplePreferredContentSizeCategoryChangedNotification }.get());
     for (auto token : m_openDirectoryNotifyTokens)
         notify_cancel(token);
 #elif !PLATFORM(MACCATALYST)
@@ -1096,6 +1130,9 @@ ALLOW_DEPRECATED_DECLARATIONS_END
 
 #if PLATFORM(IOS_FAMILY)
     [[NSNotificationCenter defaultCenter] removeObserver:m_accessibilityEnabledObserver.get()];
+#if PLATFORM(IOS) || PLATFORM(VISION)
+    [[NSNotificationCenter defaultCenter] removeObserver:m_contentSizeCategoryObserver];
+#endif
     [[NSNotificationCenter defaultCenter] removeObserver:m_applicationLaunchObserver.get()];
     [[NSNotificationCenter defaultCenter] removeObserver:m_screenDidConnectObserver];
     [[NSNotificationCenter defaultCenter] removeObserver:m_screenDidDisconnectObserver];
@@ -1159,7 +1196,8 @@ void WebProcessPool::clearPermanentCredentialsForProtectionSpace(WebCore::Protec
     RetainPtr sharedStorage = [NSURLCredentialStorage sharedCredentialStorage];
     RetainPtr space = protectionSpace.nsSpace();
     RetainPtr credentials = [sharedStorage credentialsForProtectionSpace:space.get()];
-    for (NSString* user in credentials.get()) {
+    // FIXME: Remove the suppression once https://github.com/llvm/llvm-project/pull/230818 is deployed (rdar://189710680).
+    for (SUPPRESS_UNRETAINED_LOCAL NSString* user in credentials.get()) {
         RetainPtr<NSURLCredential> credential = credentials.get()[user];
         if (credential.get().persistence == NSURLCredentialPersistencePermanent)
             [sharedStorage removeCredential:retainPtr(credentials.get()[user]).get() forProtectionSpace:space.get()];
@@ -1190,14 +1228,14 @@ int webProcessThroughputQOS()
     return qos;
 }
 
-static WeakHashSet<LockdownModeObserver>& NODELETE lockdownModeObservers()
+static WeakHashSet<LockdownModeObserver>& LEGACY_NODELETE lockdownModeObservers()
 {
     RELEASE_ASSERT(isMainRunLoop());
     static NeverDestroyed<WeakHashSet<LockdownModeObserver>> observers;
     return observers;
 }
 
-static std::optional<bool>& NODELETE isLockdownModeEnabledGloballyForTesting()
+static std::optional<bool>& LEGACY_NODELETE isLockdownModeEnabledGloballyForTesting()
 {
     static NeverDestroyed<std::optional<bool>> enabledForTesting;
     return enabledForTesting;
@@ -1284,6 +1322,30 @@ void setLockdownModeEnabledGloballyForTesting(std::optional<bool> enabledForTest
 
     for (auto& processPool : WebProcessPool::allProcessPools())
         processPool->lockdownModeStateChanged();
+}
+
+void WebProcessPool::setHasEnhancedSecurityDefaultOptOutEntitlementForTesting(std::optional<bool> hasEntitlement)
+{
+    if (!isRunningTest(retainPtr([[NSBundle mainBundle] bundleIdentifier]).get()))
+        return;
+    m_hasEnhancedSecurityDefaultOptOutEntitlementForTesting = hasEntitlement;
+}
+
+static bool hasEnhancedSecurityDefaultOptOutEntitlement()
+{
+    static bool hasEntitlement = WTF::processHasEntitlement("com.apple.private.security.webkit.disable-enhanced-security-default"_s);
+    return hasEntitlement;
+}
+
+bool WebProcessPool::shouldEnableEnhancedSecurityByDefault(const WebPreferences& preferences) const
+{
+    bool platformDefault = preferences.enhancedSecurityEnabledByDefault();
+    bool systemAppsDefault = preferences.enhancedSecurityEnabledByDefaultForSystemApps();
+    if (!platformDefault && !systemAppsDefault)
+        return false;
+    if (m_hasEnhancedSecurityDefaultOptOutEntitlementForTesting ? *m_hasEnhancedSecurityDefaultOptOutEntitlementForTesting : hasEnhancedSecurityDefaultOptOutEntitlement())
+        return false;
+    return platformDefault || (isSystemApplicationOrRunningTest() && !isSafariOrWebApp());
 }
 
 #if PLATFORM(IOS_FAMILY)
@@ -1610,10 +1672,13 @@ void WebProcessPool::platformCompileResourceMonitorRuleList(const String& rulesT
     }).get()];
 }
 
-String WebProcessPool::platformResourceMonitorRuleListSourceForTesting()
+SUPPRESS_NODELETE String WebProcessPool::platformResourceMonitorRuleListSourceForTesting()
 {
-#if HAVE(RESOURCE_MONITOR_RULE_LIST_SOURCE_FOR_TESTING)
-    return resourceMonitorRuleListSourceForTestingCocoa();
+#if ENABLE(HEAVY_AD_UNLOADING)
+    return R"json([
+        { "action": { "type": "block" }, "trigger": { "url-filter": "googlesyndication.com" } },
+        { "action": { "type": "block" }, "trigger": { "url-filter": "\/adserver-network\/" } }
+    ])json"_s;
 #else
     return emptyString();
 #endif
@@ -1625,7 +1690,7 @@ template <typename Collection>
 static Vector<SandboxExtension::Handle> sandboxExtensionsForFonts(const Collection& fontPathURLs, std::optional<audit_token_t> auditToken)
 {
     Vector<SandboxExtension::Handle> handles;
-    for (auto& fontPathURL : fontPathURLs) {
+    for (auto& fontPathURL : borrow(fontPathURLs)) {
         std::optional<SandboxExtension::Handle> sandboxExtensionHandle;
         if (auditToken)
             sandboxExtensionHandle = SandboxExtension::createHandleForReadByAuditToken(fontPathURL.fileSystemPath(), *auditToken);
@@ -1706,7 +1771,8 @@ void WebProcessPool::registerAdditionalFonts(NSArray *fontNames)
         m_sandboxExtensionURLs = Vector<URL>();
     }
 
-    for (NSString *nsFontName : fontNames) {
+    // FIXME: Remove the suppression once https://github.com/llvm/llvm-project/pull/230818 is deployed (rdar://189710680).
+    for (SUPPRESS_UNRETAINED_LOCAL NSString *nsFontName : fontNames) {
         RetainPtr ctFont = adoptCF(CTFontCreateWithName(bridge_cast(nsFontName), 0.0, nullptr));
         RetainPtr downloaded = adoptCF(static_cast<CFBooleanRef>(CTFontCopyAttribute(ctFont.get(), kCTFontDownloadedAttribute)));
         if (downloaded == kCFBooleanFalse)
@@ -1750,7 +1816,7 @@ void WebProcessPool::registerAssetFonts(WebProcessProxy& process)
     Vector<ASCIILiteral> assetFonts = { "Canela Text"_s, "Proxima Nova"_s, "Publico Text"_s };
 
     RetainPtr<NSMutableArray> descriptions = [NSMutableArray array];
-    for (auto& fontName : assetFonts)
+    for (auto& fontName : borrow(assetFonts))
         [descriptions addObject:(__bridge id)fontDescription(fontName).get()];
 
     auto blockPtr = makeBlockPtr([assetFonts = WTF::move(assetFonts), weakProcess = WeakPtr { process }, weakThis = WeakPtr { *this }](CTFontDescriptorMatchingState state, CFDictionaryRef progressParameter) mutable {
@@ -1763,7 +1829,7 @@ void WebProcessPool::registerAssetFonts(WebProcessProxy& process)
                 return;
             if (!protectedThis->m_assetFontURLs) {
                 protectedThis->m_assetFontURLs = Vector<URL> { };
-                for (auto& fontName : assetFonts) {
+                for (auto& fontName : borrow(assetFonts)) {
                     URL fontURL = fontURLFromName(fontName);
                     RELEASE_LOG(Process, "Registering font name %s with url %s", fontName.characters(), fontURL.string().utf8());
                     protectedThis->m_assetFontURLs->append(WTF::move(fontURL));

@@ -110,8 +110,8 @@ public:
         HasMoreMessages
     };
     DispatchResult dispatchStreamMessages(size_t messageLimit);
-    void NODELETE markCurrentlyDispatchedMessageAsInvalid(ASCIILiteral error);
-    void NODELETE markCurrentlyDispatchedMessageAsInvalid(const String&);
+    void LEGACY_NODELETE markCurrentlyDispatchedMessageAsInvalid(ASCIILiteral error);
+    void LEGACY_NODELETE markCurrentlyDispatchedMessageAsInvalid(const String&);
 
     void open(Client&, StreamConnectionWorkQueue&);
     void invalidate();
@@ -145,6 +145,10 @@ private:
     bool processOutOfStreamMessage(Decoder&);
     bool dispatchStreamMessage(Decoder&, StreamMessageReceiver&);
     void dispatchDidReceiveInvalidMessage(Decoder&);
+    // If an async-reply message was not handled (no receiver, or the receiver did not take ownership
+    // of the reply handler), tell the sender to cancel its pending reply handler over the underlying
+    // connection so it is not orphaned.
+    void sendAsyncReplyCancelIfNeeded(const Decoder&);
 
     using WakeUpClient = StreamServerConnectionBuffer::WakeUpClient;
     const Ref<IPC::Connection> m_connection;

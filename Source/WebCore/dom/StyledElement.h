@@ -38,8 +38,8 @@ class MutableStyleProperties;
 class StyleProperties;
 class StylePropertyMap;
 
-enum CSSPropertyID : uint16_t;
-enum CSSValueID : uint16_t;
+enum class CSSPropertyID : uint16_t;
+enum class CSSValueID : uint16_t;
 enum class CSSUnitType : uint8_t;
 
 class StyledElement : public Element {

@@ -1088,6 +1088,9 @@ void DisplayMtl::initializeExtensions() const
     mNativeExtensions.blendFuncExtendedEXT = true;
     mNativeCaps.maxDualSourceDrawBuffers   = 1;
 
+    // GL_ANGLE_trim_memory
+    mNativeExtensions.trimMemoryANGLE = true;
+
     // GL_ANGLE_shader_pixel_local_storage.
     if (!mFeatures.disableProgrammableBlending.enabled && supportsAppleGPUFamily(1))
     {
@@ -1269,7 +1272,12 @@ void DisplayMtl::initializeFeatures()
     ANGLE_FEATURE_CONDITION((&mFeatures), emulateAlphaToCoverage,
                             isSimulator || !supportsAppleGPUFamily(1));
 
-    ANGLE_FEATURE_CONDITION((&mFeatures), writeHelperSampleMask, supportsAppleGPUFamily(1));
+    ANGLE_FEATURE_CONDITION((&mFeatures), useBarycentricCoordinatesForHelperInvocations,
+                            supportsAppleGPUFamily(1) && supportsShaderBarycentricCoordinates());
+    ANGLE_FEATURE_CONDITION((&mFeatures), writeHelperSampleMask,
+                            supportsAppleGPUFamily(1) &&
+                                !mFeatures.useBarycentricCoordinatesForHelperInvocations.enabled);
+    ANGLE_FEATURE_CONDITION((&mFeatures), purgeableBufferPool, false);
 
     ANGLE_FEATURE_CONDITION((&mFeatures), multisampleColorFormatShaderReadWorkaround, isAMD());
     // At least for Radeon 5500M. See rdar://178796612.
@@ -1307,8 +1315,6 @@ void DisplayMtl::initializeFeatures()
     ANGLE_FEATURE_CONDITION(&mFeatures, alwaysPreferStagedTextureUploads, true);
     ANGLE_FEATURE_CONDITION(&mFeatures, disableStagedInitializationOfPackedTextureFormats,
                             isIntel() || isAMD());
-
-    ANGLE_FEATURE_CONDITION((&mFeatures), generateShareableShaders, true);
 
     // http://anglebug.com/42266609: NVIDIA GPUs are unsupported due to scarcity of the hardware.
     ANGLE_FEATURE_CONDITION((&mFeatures), disableMetalOnNvidia, true);
@@ -1390,6 +1396,15 @@ bool DisplayMtl::supports32BitFloatFiltering() const
 #endif
 }
 
+bool DisplayMtl::supportsShaderBarycentricCoordinates() const
+{
+#if !TARGET_OS_WATCH
+    return [mMetalDevice supportsShaderBarycentricCoordinates];
+#else
+    return false;
+#endif
+}
+
 bool DisplayMtl::supportsBCTextureCompression() const
 {
     if (@available(macCatalyst 16.4, iOS 16.4, *))
@@ -1451,9 +1466,9 @@ bool DisplayMtl::isAMDBronzeDriver() const
         @"Radeon Pro 570",  @"Radeon Pro 570X", @"Radeon Pro 575", @"Radeon Pro 575X",
         @"Radeon Pro 580",  @"Radeon Pro 580X"};
 
-    for (size_t i = 0; i < ArraySize(kMTLBronzeDeviceNames); ++i)
+    for (NSString *deviceName : kMTLBronzeDeviceNames)
     {
-        if (ANGLE_UNSAFE_TODO([[mMetalDevice name] hasSuffix:kMTLBronzeDeviceNames[i]]))
+        if ([[mMetalDevice name] hasSuffix:deviceName])
         {
             mIsAMDBronze = true;
             break;

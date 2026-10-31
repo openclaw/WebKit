@@ -93,6 +93,7 @@
 #import <wtf/RuntimeApplicationChecks.h>
 #import <wtf/cocoa/RuntimeApplicationChecksCocoa.h>
 #import <wtf/cocoa/SpanCocoa.h>
+#import <wtf/cocoa/VectorCocoa.h>
 #import <wtf/text/TextStream.h>
 
 #if USE(QUICK_LOOK)
@@ -104,6 +105,8 @@
 #if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
 #import "VolumetricSceneContentContext.h"
 #endif
+
+#import <WebCore/MediaAccessibilitySoftLink.h>
 
 #define WEBPAGEPROXY_RELEASE_LOG(channel, fmt, ...) RELEASE_LOG(channel, "%p - [pageProxyID=%llu, webPageID=%llu, PID=%i] WebPageProxy::" fmt, this, identifier().toUInt64(), webPageIDInMainFrameProcess().toUInt64(), m_legacyMainFrameProcess->processID(), ##__VA_ARGS__)
 
@@ -705,6 +708,26 @@ void WebPageProxy::relayLiveRegionNotification(WebCore::LiveRegionAnnouncementDa
         pageClient->relayLiveRegionNotification(notificationData);
 }
 
+void WebPageProxy::didDisplayCaptions(Vector<String>&& captions)
+{
+    if (!canLoad_MediaAccessibility_MACaptionAppearanceDidDisplayCaptions())
+        return;
+
+    // The web process is untrusted, so bound how much text it can hand to assistive technology.
+    static constexpr size_t maximumCaptionCount = 16;
+    static constexpr unsigned maximumCaptionLength = 1024;
+    if (captions.size() > maximumCaptionCount)
+        captions.shrink(maximumCaptionCount);
+
+    RetainPtr strings = createNSArray(captions, [](const String& caption) {
+        return caption.left(maximumCaptionLength).createNSString();
+    });
+
+    // MediaAccessibility forwards this to UIAccessibility, which posts the notification VoiceOver uses
+    // to speak or braille captions, depending on the user's Described Media setting.
+    MACaptionAppearanceDidDisplayCaptions((__bridge CFArrayRef)strings.get());
+}
+
 void WebPageProxy::assistiveTechnologyMakeFirstResponder()
 {
     if (RefPtr pageClient = this->pageClient())
@@ -1017,6 +1040,8 @@ size_t WebPageProxy::computePagesForPrintingiOS(FrameIdentifier frameID, const P
     if (!hasRunningProcess())
         return 0;
 
+    RefPtr frame = WebFrameProxy::webFrame(frameID);
+    launchPrintProcessIfNeeded(frame.get());
     auto sendResult = sendSyncToProcessContainingFrame(frameID, Messages::WebPage::ComputePagesForPrintingiOS(frameID, printInfo), Seconds::infinity());
     auto [pageCount] = sendResult.takeReplyOr(0);
     return pageCount;
@@ -1029,8 +1054,8 @@ std::optional<IPC::Connection::AsyncReplyID> WebPageProxy::drawToPDFiOS(FrameIde
         return std::nullopt;
     }
 
-    Ref preferences = this->preferences();
-    if (!(preferences->remoteSnapshottingEnabled() && preferences->useGPUProcessForDOMRenderingEnabled())) {
+    RefPtr frame = WebFrameProxy::webFrame(frameID);
+    if (!shouldUseRemoteSnapshotting(frame.get())) {
         Ref drawing = PendingSnapshotDrawing::create();
         auto replyID = sendWithAsyncReplyToProcessContainingFrame(frameID, Messages::WebPage::DrawToPDFiOS(frameID, printInfo, pageCount), drawing->completionHandler(WTF::move(completionHandler)));
         if (replyID)
@@ -1041,7 +1066,7 @@ std::optional<IPC::Connection::AsyncReplyID> WebPageProxy::drawToPDFiOS(FrameIde
     auto snapshotIdentifier = generateRemoteSnapshotIdentifier();
     Ref gpuProcess = GPUProcessProxy::getOrCreate();
     Ref drawing = PendingSnapshotDrawing::create(snapshotIdentifier);
-    auto sinkReplyID = gpuProcess->sinkCompletedSnapshotToPDF(snapshotIdentifier, frameID, drawing->completionHandler(WTF::move(completionHandler)));
+    auto sinkReplyID = gpuProcess->sinkCompletedSnapshotToPDF(snapshotIdentifier, frameID, drawing->completionHandler(launchPrintProcessForDrawingIfNeeded(frame.get(), WTF::move(completionHandler))));
     auto replyID = sendWithAsyncReplyToProcessContainingFrame(frameID, Messages::WebPage::DrawPrintingPagesToSnapshotiOS(snapshotIdentifier, frameID, printInfo, pageCount), gpuProcess->releaseSnapshotIfRootFails(snapshotIdentifier));
     if (replyID)
         drawing->setReply<Messages::GPUProcess::SinkCompletedSnapshotToPDF>(gpuProcess.get(), sinkReplyID, *replyID);
@@ -1055,8 +1080,8 @@ std::optional<IPC::Connection::AsyncReplyID> WebPageProxy::drawToImage(FrameIden
         return std::nullopt;
     }
 
-    Ref preferences = this->preferences();
-    if (!(preferences->remoteSnapshottingEnabled() && preferences->useGPUProcessForDOMRenderingEnabled())) {
+    RefPtr frame = WebFrameProxy::webFrame(frameID);
+    if (!shouldUseRemoteSnapshotting(frame.get())) {
         Ref drawing = PendingSnapshotDrawing::create();
         auto replyID = sendWithAsyncReplyToProcessContainingFrame(frameID, Messages::WebPage::DrawToImage(frameID, printInfo), drawing->completionHandler(WTF::move(completionHandler)));
         if (replyID)
@@ -1076,7 +1101,12 @@ std::optional<IPC::Connection::AsyncReplyID> WebPageProxy::drawToImage(FrameIden
 
 void WebPageProxy::contentSizeCategoryDidChange(const String& contentSizeCategory)
 {
-    protect(legacyMainFrameProcess())->send(Messages::WebPage::ContentSizeCategoryDidChange(contentSizeCategory), webPageIDInMainFrameProcess());
+    m_contentSizeCategory = contentSizeCategory;
+    if (RefPtr provisionalPage = m_provisionalPage)
+        provisionalPage->send(Messages::WebPage::ContentSizeCategoryDidChange(contentSizeCategory));
+    forEachWebContentProcess([&](auto& process, auto pageID) {
+        process.send(Messages::WebPage::ContentSizeCategoryDidChange(contentSizeCategory), pageID);
+    });
 }
 
 void WebPageProxy::generateSyntheticEditingCommand(WebKit::SyntheticEditingCommandType command)
@@ -1207,6 +1237,23 @@ void WebPageProxy::requestDocumentEditingContext(WebKit::DocumentEditingContextR
 {
     if (!hasRunningProcess()) {
         completionHandler({ });
+        return;
+    }
+
+    // A request for a specific text input has to go to the process hosting that input, which need not be the one
+    // containing the focused frame.
+    if (request.textInputContext) {
+        auto inputPageID = request.textInputContext->webPageIdentifier;
+        RefPtr<WebProcessProxy> inputProcess;
+        forEachWebContentProcess([&](auto& process, auto pageID) {
+            if (inputPageID == pageID)
+                inputProcess = &process;
+        });
+        if (!inputProcess) {
+            completionHandler({ });
+            return;
+        }
+        inputProcess->sendWithAsyncReply(Messages::WebPage::RequestDocumentEditingContext(WTF::move(request)), WTF::move(completionHandler), *inputPageID);
         return;
     }
 
@@ -1770,6 +1817,19 @@ void WebPageProxy::requestPDFDisplayMode(PDFPluginDisplayMode mode)
     protect(legacyMainFrameProcess())->send(Messages::WebPage::RequestPDFDisplayMode(mode), webPageIDInMainFrameProcess());
 }
 
+void WebPageProxy::setInitialPDFDisplayMode(PDFPluginDisplayMode mode)
+{
+    if (internals().initialPDFDisplayMode == mode)
+        return;
+
+    internals().initialPDFDisplayMode = mode;
+
+    if (!hasRunningProcess())
+        return;
+
+    protect(legacyMainFrameProcess())->send(Messages::WebPage::SetInitialPDFDisplayMode(mode), webPageIDInMainFrameProcess());
+}
+
 #endif
 
 #if ENABLE(DRAG_SUPPORT)
@@ -1809,6 +1869,12 @@ void WebPageProxy::dismissVolumetricScene(WebCore::NodeIdentifier nodeID)
 {
     if (RefPtr portalPresentationManager = portalPresentationManagerProxy())
         portalPresentationManager->hideVolumetricScene(nodeID);
+}
+
+void WebPageProxy::updateVolumetricSceneHitSphere(WebCore::NodeIdentifier nodeID, const WebCore::FloatPoint3D& center, float radius)
+{
+    if (RefPtr portalPresentationManager = portalPresentationManagerProxy())
+        portalPresentationManager->updateVolumetricSceneHitSphere(nodeID, center, radius);
 }
 
 void WebPageProxy::volumetricSceneDidClose(WebCore::NodeIdentifier nodeID)

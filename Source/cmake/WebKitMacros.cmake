@@ -107,6 +107,8 @@ endmacro()
 
 macro(WEBKIT_COMPUTE_SOURCES _framework)
     set(_derivedSourcesPath ${${_framework}_DERIVED_SOURCES_DIR})
+    # This is a macro, so don't pick up the list files of an earlier call.
+    unset(_sourceListFileTruePaths)
 
     foreach (_sourcesListFile IN LISTS ${_framework}_UNIFIED_SOURCE_LIST_FILES)
       if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_sourcesListFile}")
@@ -141,6 +143,10 @@ macro(WEBKIT_COMPUTE_SOURCES _framework)
 
     set(gusb_args --derived-sources-path ${_derivedSourcesPath} --source-tree-path ${CMAKE_CURRENT_SOURCE_DIR})
     list(APPEND gusb_args --ignore-header-groups)
+    # Distinguishes the bundles of targets that share a derived sources directory.
+    if (DEFINED ${_framework}_UNIFIED_SOURCE_BUNDLE_PREFIX)
+        list(APPEND gusb_args --bundle-filename-prefix ${${_framework}_UNIFIED_SOURCE_BUNDLE_PREFIX})
+    endif ()
     # Windows needs a larger bundle size because that helps keep WebCore.lib's size below the 4GB maximum in debug builds.
     if (MSVC AND ${_framework} STREQUAL "WebCore" AND ${_framework}_LIBRARY_TYPE STREQUAL "STATIC")
         list(APPEND gusb_args --max-bundle-size 16)
@@ -701,6 +707,50 @@ macro(_WEBKIT_LIBRARY_LINK_FRAMEWORK _target)
     endif ()
 endmacro()
 
+# Frameworks have system install names, so an executable run from the build
+# directory loads the system copies unless DYLD_FRAMEWORK_PATH points back at
+# the build. Bake that in, relative to every directory the executable can run
+# from, including any listed in ${_target}_ADDITIONAL_RUNTIME_DIRECTORIES. An
+# explicit DYLD_FRAMEWORK_PATH in the environment is searched first.
+function(_WEBKIT_ADD_DYLD_FRAMEWORK_PATH _target)
+    if (NOT DEVELOPER_MODE)
+        return ()
+    endif ()
+    # Executables placed outside the CMAKE_LIBRARY_OUTPUT_DIRECTORY live inside
+    # WebKit's bundles, which set up their own search paths or don't have paths
+    # at all. e.g. XPC services and App extensions.
+    get_target_property(_runtime_dir ${_target} RUNTIME_OUTPUT_DIRECTORY)
+    if (NOT _runtime_dir STREQUAL CMAKE_LIBRARY_OUTPUT_DIRECTORY)
+        return ()
+    endif ()
+
+    set(_executable_dir "${_runtime_dir}")
+    get_target_property(_is_app_bundle ${_target} MACOSX_BUNDLE)
+    if (_is_app_bundle)
+        get_target_property(_output_name ${_target} OUTPUT_NAME)
+        if (NOT _output_name)
+            set(_output_name ${_target})
+        endif ()
+        string(APPEND _executable_dir "/${_output_name}.app")
+        if (WEBKIT_SDK_IS_MACOS)
+            string(APPEND _executable_dir "/Contents/MacOS")
+        endif ()
+    endif ()
+
+    set(_search_paths)
+    foreach (_dir IN ITEMS "${_executable_dir}" ${${_target}_ADDITIONAL_RUNTIME_DIRECTORIES})
+        file(RELATIVE_PATH _path "${_dir}" "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
+        # Keep the trailing slash even when _path is empty to workaround bare @executable_path bug in dyld: rdar://189970045
+        list(APPEND _search_paths "@executable_path/${_path}")
+    endforeach ()
+    list(JOIN _search_paths ":" _search_paths)
+
+    target_link_options(${_target} PRIVATE
+        "LINKER:-dyld_env,DYLD_FRAMEWORK_PATH=${_search_paths}"
+        "LINKER:-dyld_env,DYLD_LIBRARY_PATH=${_search_paths}"
+    )
+endfunction()
+
 # Produce a .dSYM bundle and strips debugging symbols for a Mach-O target after
 # linking. Needs to be called before code signing.
 function(_WEBKIT_ADD_DSYM _target)
@@ -780,6 +830,10 @@ function(_WEBKIT_ADD_CODE_SIGN _target)
         set(_extra_flags "")
     endif ()
     get_target_property(_entitlements_path ${_target} CODE_SIGN_ENTITLEMENTS)
+    if (NOT _entitlements_path AND NOT _is_framework AND DEVELOPER_MODE)
+        set(_entitlements_path "${CMAKE_BINARY_DIR}/get-task-allow.entitlements")
+        WEBKIT_WRITE_DEFAULT_DEVELOPMENT_ENTITLEMENTS(${_entitlements_path})
+    endif ()
     set(_entitlements "")
     if (_entitlements_path)
         set(_entitlements --entitlements ${_entitlements_path})
@@ -949,6 +1003,7 @@ macro(WEBKIT_EXECUTABLE _target)
     endif ()
 
     if (APPLE)
+        _WEBKIT_ADD_DYLD_FRAMEWORK_PATH(${_target})
         _WEBKIT_ADD_DSYM(${_target})
         _WEBKIT_ADD_CODE_SIGN(${_target} DEPENDS ${${_target}_CODE_SIGN_INPUTS})
     endif ()
@@ -1184,10 +1239,15 @@ function(_webkit_platform_args_clang_prefix _outvar _depfile _mt_target _wtf_inc
         -include cmakeconfig.h
         -include wtf/Platform.h
     )
-    # Custom commands don't inherit add_compile_options; mirror the SDK stubs
-    # OptionsCocoa.cmake feeds C-family compiles, which Platform.h needs too.
+    # Custom commands don't inherit add_compile_options, so mirror the SDK stubs
+    # and headers OptionsCocoa.cmake feeds C-family compiles, which Platform.h
+    # needs too.
     if (WEBKIT_GENERATED_STUBS_INCLUDE_DIR)
         list(APPEND _cmd -isystem "${WEBKIT_GENERATED_STUBS_INCLUDE_DIR}")
+    endif ()
+    if (WEBKIT_DERIVED_SDK_HEADERS_DIR)
+        list(APPEND _cmd -isystem "${WEBKIT_DERIVED_SDK_HEADERS_DIR}/usr/include"
+            -iframework "${WEBKIT_DERIVED_SDK_HEADERS_DIR}/System/Library/Frameworks")
     endif ()
     set(${_outvar} ${_cmd} PARENT_SCOPE)
 endfunction()
@@ -1668,7 +1728,9 @@ macro(WEBKIT_SETUP_SWIFT_AND_GENERATE_SWIFT_CPP_INTEROP_HEADER _target _module_n
                 "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-emit-clang-header-path ${_header_tmp_path}>")
             if (CAN_USE_EMIT_CLANG_HEADER_MIN_ACCESS)
                 list(APPEND _swift_emit_header_flags
-                    "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xfrontend -emit-clang-header-min-access -Xfrontend ${${_target}_SWIFT_EMIT_CLANG_HEADER_MIN_ACCESS}>")
+                    "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xfrontend -emit-clang-header-min-access -Xfrontend ${${_target}_SWIFT_EMIT_CLANG_HEADER_MIN_ACCESS}>"
+                    "$<$<COMPILE_LANGUAGE:Swift>:SHELL:-Xfrontend -clang-header-expose-decls=has-expose-attr-or-stdlib>"
+                )
             endif ()
             if (POLICY CMP0157)
                 # New Swift support: ${_target} is the only Swift compile, so emit here.

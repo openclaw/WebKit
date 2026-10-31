@@ -39,6 +39,7 @@
 #include "PolygonLayoutShape.h"
 #include "RasterLayoutShape.h"
 #include "RectangleLayoutShape.h"
+#include "RenderElement.h"
 #include "StyleBasicShape.h"
 #include "StyleImage.h"
 #include "StylePrimitiveNumericTypes+Evaluation.h"
@@ -51,13 +52,13 @@ static Ref<LayoutShape> createInsetShape(const FloatRoundedRect& bounds)
     return adoptRef(*new BoxLayoutShape(bounds));
 }
 
-static Ref<LayoutShape> createCircleShape(const FloatPoint& center, float radius, float borderBoxLogicalWidth)
+static Ref<LayoutShape> LEGACY_NODELETE createCircleShape(const FloatPoint& center, float radius, float borderBoxLogicalWidth)
 {
     ASSERT(radius >= 0);
     return adoptRef(*new RectangleLayoutShape(FloatRect(center.x() - radius, center.y() - radius, radius*2, radius*2), FloatSize(radius, radius), borderBoxLogicalWidth));
 }
 
-static Ref<LayoutShape> createEllipseShape(const FloatPoint& center, const FloatSize& radii, float borderBoxLogicalWidth)
+static Ref<LayoutShape> LEGACY_NODELETE createEllipseShape(const FloatPoint& center, const FloatSize& radii, float borderBoxLogicalWidth)
 {
     ASSERT(radii.width() >= 0 && radii.height() >= 0);
     return adoptRef(*new RectangleLayoutShape(FloatRect(center.x() - radii.width(), center.y() - radii.height(), radii.width()*2, radii.height()*2), radii, borderBoxLogicalWidth));
@@ -68,7 +69,7 @@ static Ref<LayoutShape> createPolygonShape(Vector<FloatPoint>&& vertices, float 
     return adoptRef(*new PolygonLayoutShape(WTF::move(vertices), borderBoxLogicalWidth));
 }
 
-static inline FloatRect NODELETE physicalRectToLogical(const FloatRect& rect, float logicalBoxHeight, WritingMode writingMode)
+static inline FloatRect LEGACY_NODELETE physicalRectToLogical(const FloatRect& rect, float logicalBoxHeight, WritingMode writingMode)
 {
     if (writingMode.isHorizontal())
         return rect;
@@ -77,7 +78,7 @@ static inline FloatRect NODELETE physicalRectToLogical(const FloatRect& rect, fl
     return rect.transposedRect();
 }
 
-static inline FloatPoint NODELETE physicalPointToLogical(const FloatPoint& point, float logicalBoxHeight, WritingMode writingMode)
+static inline FloatPoint LEGACY_NODELETE physicalPointToLogical(const FloatPoint& point, float logicalBoxHeight, WritingMode writingMode)
 {
     if (writingMode.isHorizontal())
         return point;
@@ -86,7 +87,7 @@ static inline FloatPoint NODELETE physicalPointToLogical(const FloatPoint& point
     return point.transposedPoint();
 }
 
-static inline FloatSize NODELETE physicalSizeToLogical(const FloatSize& size, WritingMode writingMode)
+static inline FloatSize LEGACY_NODELETE physicalSizeToLogical(const FloatSize& size, WritingMode writingMode)
 {
     if (writingMode.isHorizontal())
         return size;
@@ -196,22 +197,7 @@ Ref<const LayoutShape> LayoutShape::createShape(const Style::BasicShape& basicSh
     return shape;
 }
 
-Ref<const LayoutShape> LayoutShape::createRasterShape(Image* image, float threshold, const LayoutRect& logicalImageRect, const LayoutRect& logicalMarginRect, WritingMode writingMode, float logicalMargin, ConcreteObjectSize concreteObjectSize, FloatSize sourceSize)
-{
-    return createRasterShapeImpl(threshold, logicalImageRect, logicalMarginRect, writingMode, logicalMargin, [&](auto& context, const auto& physicalImageSize) {
-        if (image)
-            context.drawImage(*image, concreteObjectSize, IntRect({ }, physicalImageSize), FloatRect { { }, sourceSize });
-    });
-}
-
 Ref<const LayoutShape> LayoutShape::createRasterShape(const Style::Image& styleImage, const RenderElement& renderer, float threshold, const LayoutRect& logicalImageRect, const LayoutRect& logicalMarginRect, WritingMode writingMode, float logicalMargin, ConcreteObjectSize concreteObjectSize)
-{
-    return createRasterShapeImpl(threshold, logicalImageRect, logicalMarginRect, writingMode, logicalMargin, [&](auto& context, auto& physicalImageSize) {
-        styleImage.draw(context, renderer, concreteObjectSize, FloatRect { { }, physicalImageSize }, FloatRect { { }, concreteObjectSize.size() });
-    });
-}
-
-Ref<const LayoutShape> LayoutShape::createRasterShapeImpl(float threshold, const LayoutRect& logicalImageRect, const LayoutRect& logicalMarginRect, WritingMode writingMode, float logicalMargin, NOESCAPE auto&& rasterize)
 {
     ASSERT(logicalMarginRect.height() >= 0);
 
@@ -232,7 +218,7 @@ Ref<const LayoutShape> LayoutShape::createRasterShapeImpl(float threshold, const
     if (!imageBuffer)
         return createShape();
 
-    rasterize(imageBuffer->context(), snappedPhysicalImageSize);
+    styleImage.draw(imageBuffer->context(), renderer, concreteObjectSize, FloatRect { { }, snappedPhysicalImageSize }, FloatRect { { }, concreteObjectSize.size() }, { renderer.imageOrientation() });
 
     PixelBufferFormat format { AlphaPremultiplication::Unpremultiplied, PixelFormat::RGBA8, ColorSpace::SRGB() };
     auto pixelBuffer = imageBuffer->getPixelBuffer(format, { { }, snappedPhysicalImageSize });

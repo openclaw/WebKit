@@ -36,7 +36,7 @@ class SpatialVideoSupport extends MediaControllerSupport
         this._lastX = 0;
         this._lastY = 0;
         this._projection = "equirect360";
-        this._cameraFieldOfView = SpatialVideoSupport.DefaultCameraFieldOfView;
+        this._cameraFieldOfView = 0;
         this._maybeEnable();
     }
 
@@ -57,6 +57,8 @@ class SpatialVideoSupport extends MediaControllerSupport
         if (!host || !host.spatialVideoRenderingEnabled)
             return;
         super.enable();
+        if (this._active === false)
+            this._maybeEnable();
     }
 
     handleEvent()
@@ -109,7 +111,7 @@ class SpatialVideoSupport extends MediaControllerSupport
 
     _resolveProjection(media, host)
     {
-        const declared = ProjectionAttributeValues[media.getAttribute("x-webkit-projection")?.trim().toLowerCase()];
+        const declared = ProjectionAttributeValues[media.getAttribute("projection")?.trim().toLowerCase()];
         if (declared === "none")
             return null;
         if (declared)
@@ -130,14 +132,9 @@ class SpatialVideoSupport extends MediaControllerSupport
 
     _applyDeclaredCameraView(media)
     {
-        const fieldOfView = parseFloat(media.getAttribute("x-webkit-fieldofview"));
-        this._cameraFieldOfView = isNaN(fieldOfView) ? SpatialVideoSupport.DefaultCameraFieldOfView : clampFieldOfView(fieldOfView);
-
-        const yaw = parseFloat(media.getAttribute("x-webkit-yaw"));
-        this._yaw = isNaN(yaw) ? 0 : yaw * Math.PI / 180;
-
-        const pitch = parseFloat(media.getAttribute("x-webkit-pitch"));
-        this._pitch = isNaN(pitch) ? 0 : clampPitch(pitch * Math.PI / 180);
+        this._cameraFieldOfView = clampFieldOfView(media.defaultFieldOfView);
+        this._yaw = media.defaultYaw * Math.PI / 180;
+        this._pitch = clampPitch(media.defaultPitch * Math.PI / 180);
     }
 
     _enable()
@@ -264,22 +261,24 @@ class SpatialVideoSupport extends MediaControllerSupport
     _buildMesh(projection)
     {
         const fov = this._fovDegrees;
+        let geometry;
         if (projection === "fisheye") {
-            this._mesh = this._makeFisheye(fov || 180);
+            geometry = this._makeFisheye(fov || 180);
             this._feather = SpatialVideoSupport.FeatherFraction;
         } else if (projection === "wideFOV") {
-            this._mesh = this._makeFisheye(fov || 150);
+            geometry = this._makeFisheye(fov || 150);
             this._feather = SpatialVideoSupport.FeatherFraction;
         } else if (projection === "equirect180") {
-            this._mesh = this._makeSphere(Math.PI);
+            geometry = this._makeSphere(Math.PI);
             this._feather = SpatialVideoSupport.FeatherFraction;
         } else if (projection === "equiAngularCubemap") {
-            this._mesh = this._makeEquiAngularCubemap();
+            geometry = this._makeEquiAngularCubemap();
             this._feather = 0;
         } else {
-            this._mesh = this._makeSphere(2 * Math.PI);
+            geometry = this._makeSphere(2 * Math.PI);
             this._feather = 0;
         }
+        this._mesh = this._uploadMesh(geometry);
         this._applyMipmapLimit();
     }
 
@@ -334,7 +333,7 @@ class SpatialVideoSupport extends MediaControllerSupport
                 }
             }
         }
-        return this._uploadMesh(positions, texCoords, edges, indices);
+        return { positions, texCoords, edges, indices };
     }
 
     _makeSphere(span, radius = 10)
@@ -358,7 +357,7 @@ class SpatialVideoSupport extends MediaControllerSupport
                 indices.push(topLeft, topLeft + 1, bottomLeft, topLeft + 1, bottomLeft + 1, bottomLeft);
             }
         }
-        return this._uploadMesh(positions, texCoords, edges, indices);
+        return { positions, texCoords, edges, indices };
     }
 
     _makeFisheye(fovDegrees, radius = 10)
@@ -382,10 +381,10 @@ class SpatialVideoSupport extends MediaControllerSupport
                 indices.push(topLeft, topLeft + 1, bottomLeft, topLeft + 1, bottomLeft + 1, bottomLeft);
             }
         }
-        return this._uploadMesh(positions, texCoords, edges, indices);
+        return { positions, texCoords, edges, indices };
     }
 
-    _uploadMesh(positions, texCoords, edges, indices)
+    _uploadMesh({ positions, texCoords, edges, indices })
     {
         const gl = this._gl;
         const position = gl.createBuffer();
@@ -576,6 +575,12 @@ class SpatialVideoSupport extends MediaControllerSupport
             this._canvas.remove();
             this._canvas = null;
         }
+        this._gl = null;
+        this._program = null;
+        this._texture = null;
+        this._mesh = null;
+        this._mvpLocation = null;
+        this._featherLocation = null;
         if (media)
             media.style.visibility = "";
     }
@@ -583,7 +588,6 @@ class SpatialVideoSupport extends MediaControllerSupport
 
 SpatialVideoSupport.FeatherFraction = 0.12;
 SpatialVideoSupport.FieldOfViewScale = 1000;
-SpatialVideoSupport.DefaultCameraFieldOfView = 80;
 SpatialVideoSupport.MinimumCameraFieldOfView = 30;
 SpatialVideoSupport.MaximumCameraFieldOfView = 110;
 SpatialVideoSupport.DragTolerance = 3;

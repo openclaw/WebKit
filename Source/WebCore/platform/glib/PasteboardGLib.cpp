@@ -25,7 +25,6 @@
 #include "Color.h"
 #include "CommonAtomStrings.h"
 #include "DragData.h"
-#include "Image.h"
 #include "MIMETypeRegistry.h"
 #include "NotImplemented.h"
 #include "PasteboardStrategy.h"
@@ -175,7 +174,7 @@ void Pasteboard::writeTrustworthyWebURLsPboardType(const PasteboardURL&)
     notImplemented();
 }
 
-void Pasteboard::write(const PasteboardImage& pasteboardImage)
+void Pasteboard::write(PasteboardImage&& pasteboardImage)
 {
     if (m_selectionData) {
         m_selectionData->clearAll();
@@ -183,12 +182,12 @@ void Pasteboard::write(const PasteboardImage& pasteboardImage)
             m_selectionData->setURL(pasteboardImage.url.url, pasteboardImage.url.title);
             m_selectionData->setMarkup(pasteboardImage.url.markup);
         }
-        m_selectionData->setImage(pasteboardImage.image.get());
+        m_selectionData->setImage(WTF::move(pasteboardImage.bitmap));
     } else {
         SelectionData data;
         if (!pasteboardImage.url.markup.isEmpty())
             data.setMarkup(pasteboardImage.url.markup);
-        data.setImage(pasteboardImage.image.get());
+        data.setImage(WTF::move(pasteboardImage.bitmap));
         platformStrategies()->pasteboardStrategy()->writeToClipboard(m_name, WTF::move(data));
     }
 }
@@ -259,7 +258,7 @@ void Pasteboard::clear(const String& type)
 }
 
 #if ENABLE(DRAG_SUPPORT)
-void Pasteboard::setDragImage(DragImage, const IntPoint&)
+void Pasteboard::setDragImage(DragImage&&, const IntPoint&)
 {
 }
 #endif

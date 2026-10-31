@@ -62,6 +62,7 @@ enum class WebKit::NavigatingToAppBoundDomain : bool;
     std::optional<WebCore::ContentSecurityPolicyResponseHeaders> cspResponseHeaders;
     URL parentFrameURL;
     URL frameURL;
+    URL workerURL;
     WebCore::CrossOriginEmbedderPolicy parentCrossOriginEmbedderPolicy;
     WebCore::CrossOriginEmbedderPolicy crossOriginEmbedderPolicy;
     WebCore::DocumentIsolationPolicy documentIsolationPolicy;
@@ -108,7 +109,8 @@ enum class WebKit::NavigatingToAppBoundDomain : bool;
     bool shouldRecordFrameLoadForStorageAccess;
 
     bool isInitiatorPrefetch;
-    bool isInitiatedByDedicatedWorker;
+    bool isInitiatedByWorker;
+    bool hasUnpartitionedStorageAccess;
     bool globalPrivacyControlEnabled;
     bool shouldConsiderEnhancedSecurityForInsecureResponse;
     MonotonicTime originalNavigationStartTime;

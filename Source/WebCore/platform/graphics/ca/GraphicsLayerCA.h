@@ -52,7 +52,6 @@ class FrameProcessIndicators;
 class GraphicsLayerAnimationValue;
 class GraphicsLayerKeyframeValueList;
 class HTMLVideoElement;
-class Image;
 class NativeImage;
 class TransformState;
 
@@ -136,6 +135,7 @@ public:
 
     WEBCORE_EXPORT bool setFilters(const FilterOperations&) override;
     virtual bool filtersCanBeComposited(const FilterOperations&);
+    WEBCORE_EXPORT void setFilterSamplingOutsets(const IntOutsets&) override;
 
     WEBCORE_EXPORT bool setBackdropFilters(const FilterOperations&) override;
     WEBCORE_EXPORT void setBackdropFiltersRect(const FloatRoundedRect&) override;
@@ -193,6 +193,7 @@ public:
     WEBCORE_EXPORT void setContentsMagnificationFilter(ScalingFilter) override;
 
     bool usesContentsLayer() const override { return m_contentsLayerPurpose != ContentsLayerPurpose::None; }
+    bool hasContentsDisplayDelegate() const override { return !!m_contentsDisplayDelegate; }
     
     WEBCORE_EXPORT void setShowDebugBorder(bool) override;
     WEBCORE_EXPORT void setShowRepaintCounter(bool) override;
@@ -332,11 +333,13 @@ private:
     virtual Ref<PlatformCAAnimation> createPlatformCAAnimation(PlatformCAAnimation::AnimationType, const String& keyPath);
 
     virtual void setLayerContentsToImageBuffer(PlatformCALayer&, ImageBuffer*) { }
+    // Overridden for images whose pixels are not in this process, which have no platform image.
+    virtual void setLayerContentsToNativeImage(PlatformCALayer&, NativeImage&);
 
     PlatformCALayer* primaryLayer() const { return m_structuralLayer.get() ? m_structuralLayer.get() : m_layer.get(); }
-    PlatformCALayer* NODELETE hostLayerForSublayers() const;
-    PlatformCALayer* NODELETE layerForSuperlayer() const;
-    PlatformCALayer* NODELETE animatedLayer(AnimatedProperty) const;
+    PlatformCALayer* LEGACY_NODELETE hostLayerForSublayers() const;
+    PlatformCALayer* LEGACY_NODELETE layerForSuperlayer() const;
+    PlatformCALayer* LEGACY_NODELETE animatedLayer(AnimatedProperty) const;
 
     WEBCORE_EXPORT void setTileCoverage(TileCoverage) override;
 
@@ -344,8 +347,8 @@ private:
     static bool isReplicatedRootClone(const CloneID& cloneID) { return cloneID[0U] & 1; }
 
     using LayerMap = HashMap<CloneID, Ref<PlatformCALayer>>;
-    LayerMap* NODELETE primaryLayerClones() const;
-    LayerMap* NODELETE animatedLayerClones(AnimatedProperty) const;
+    LayerMap* LEGACY_NODELETE primaryLayerClones() const;
+    LayerMap* LEGACY_NODELETE animatedLayerClones(AnimatedProperty) const;
     static void clearClones(LayerMap&);
 
     bool createAnimationFromKeyframes(const GraphicsLayerKeyframeValueList&, const GraphicsLayerAnimation*, const String& animationName, Seconds timeOffset, bool keyframesShouldUseAnimationWideTimingFunction);
@@ -496,7 +499,7 @@ private:
 
     bool hasCloneLayers() const { return !!m_layerClones; }
     void removeCloneLayers();
-    FloatPoint NODELETE positionForCloneRootLayer() const;
+    FloatPoint LEGACY_NODELETE positionForCloneRootLayer() const;
 
     // All these "update" methods will be called inside a BEGIN_BLOCK_OBJC_EXCEPTIONS/END_BLOCK_OBJC_EXCEPTIONS block.
     void updateNames();
@@ -572,7 +575,7 @@ private:
 #endif
     };
     bool ensureStructuralLayer(StructuralLayerPurpose);
-    StructuralLayerPurpose structuralLayerPurpose() const;
+    StructuralLayerPurpose LEGACY_NODELETE structuralLayerPurpose() const;
 
     // This represents the animation of a single property. There may be multiple transform animations for
     // a single transition or keyframe animation, so index is used to distinguish these.
@@ -690,9 +693,9 @@ private:
     typedef uint64_t LayerChangeFlags;
     static ASCIILiteral layerChangeAsString(LayerChange);
     static void dumpLayerChangeFlags(TextStream&, LayerChangeFlags);
-    void NODELETE addUncommittedChanges(LayerChangeFlags);
+    void LEGACY_NODELETE addUncommittedChanges(LayerChangeFlags);
     bool hasDescendantsWithUncommittedChanges() const { return m_hasDescendantsWithUncommittedChanges; }
-    void NODELETE setHasDescendantsWithUncommittedChanges(bool);
+    void LEGACY_NODELETE setHasDescendantsWithUncommittedChanges(bool);
     enum ScheduleFlushOrNot { ScheduleFlush, DontScheduleFlush };
     void noteLayerPropertyChanged(LayerChangeFlags, ScheduleFlushOrNot = ScheduleFlush);
     void noteSublayersChanged(ScheduleFlushOrNot = ScheduleFlush);

@@ -62,7 +62,7 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(SVGGraphicsElement);
 
 // FIXME: This doesn't match SVGElement::viewportElement() as it has an extra check for
 // foreign object.
-static bool NODELETE isViewportElement(const SVGElement* element)
+static bool LEGACY_NODELETE isViewportElement(const SVGElement* element)
 {
     if (!element)
         return false;
@@ -138,7 +138,6 @@ AffineTransform SVGGraphicsElement::computeCTM(SVGElement* element, CTMScope mod
 SVGGraphicsElement::SVGGraphicsElement(const QualifiedName& tagName, Document& document, const SVGPropertyRegistry& propertyRegistry, OptionSet<TypeFlag> typeFlags)
     : SVGElement(tagName, document, propertyRegistry, typeFlags)
     , SVGTests(this)
-    , m_shouldIsolateBlending(false)
     , m_transform(SVGAnimatedTransformList::create(this))
 {
     static bool didRegistration = false;

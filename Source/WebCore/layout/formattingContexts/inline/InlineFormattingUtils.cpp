@@ -28,7 +28,6 @@
 
 #include "FloatingContext.h"
 #include "FontCascade.h"
-#include "FormattingContext.h"
 #include "InlineDisplayContent.h"
 #include "InlineLevelBoxInlines.h"
 #include "InlineLineBoxVerticalAligner.h"
@@ -356,6 +355,15 @@ InlineLayoutUnit InlineFormattingUtils::inlineItemWidth(const InlineItem& inline
     return boxGeometry.marginBoxWidth();
 }
 
+InlineLayoutUnit InlineFormattingUtils::intrinsicMarginBoxWidth(const ElementBox& box, IntrinsicWidthMode intrinsicWidthMode) const
+{
+    // The box's content is the render tree's to lay out, so it is the render tree that knows the box's width under this constraint.
+    auto& integrationUtils = formattingContext().integrationUtils();
+    auto contribution = intrinsicWidthMode == IntrinsicWidthMode::Minimum ? integrationUtils.minContentLogicalWidthContribution(box) : integrationUtils.maxContentLogicalWidthContribution(box);
+    auto& boxGeometry = formattingContext().geometryForBox(box);
+    return contribution + boxGeometry.marginStart() + boxGeometry.marginEnd();
+}
+
 static inline bool endsWithSoftWrapOpportunity(const InlineTextItem& previousInlineTextItem, const InlineTextItem& nextInlineTextItem)
 {
     ASSERT(!nextInlineTextItem.isWhitespace());
@@ -612,7 +620,7 @@ std::pair<InlineLayoutUnit, InlineLayoutUnit> InlineFormattingUtils::textEmphasi
             return { };
         }
     }
-    auto annotationSize = style->fontCascade().floatEmphasisMarkHeight(style->textEmphasisStyle().markString());
+    auto annotationSize = protect(style->fontCascade())->floatEmphasisMarkHeight(style->textEmphasisStyle().markString());
     return { hasAboveTextEmphasis ? annotationSize : 0.f, hasAboveTextEmphasis ? 0.f : annotationSize };
 }
 
@@ -636,7 +644,7 @@ LineEndingTruncationPolicy InlineFormattingUtils::lineEndingTruncationPolicy(con
     return LineEndingTruncationPolicy::NoTruncation;
 }
 
-std::optional<LineLayoutResult::InlineContentEnding> InlineFormattingUtils::inlineContentEnding(const Line::Result& lineContent)
+std::optional<LineLayoutResult::InlineContentEnding> InlineFormattingUtils::inlineContentEnding(const LineResult& lineContent)
 {
     if (!lineContent.runs.isEmpty() && lineContent.runs.last().isBlock()) {
 #if ASSERT_ENABLED
@@ -698,8 +706,8 @@ std::optional<BlockOverflowEllipsis> InlineFormattingUtils::blockEllipsisForLine
     // The ellipsis is not part of ::first-line, and it is painted with the root style too (see EllipsisBoxPainter).
     // "The ellipsis is subject to the effects of the 'hanging punctuation' property."
     // https://drafts.csswg.org/css-overflow-4/#block-ellipsis
-    auto& rootStyle = root->style();
-    auto logicalWidth = std::max(0.f, rootStyle.fontCascade().width(ellipsisText.string()));
+    CheckedRef rootStyle = root->style();
+    auto logicalWidth = std::max(0.f, protect(rootStyle->fontCascade())->width(ellipsisText.string()));
     auto hangingWidth = TextUtil::hangablePunctuationEndWidth(ellipsisText.string(), rootStyle);
     return BlockOverflowEllipsis { ellipsisText, logicalWidth - hangingWidth, hangingWidth };
 }

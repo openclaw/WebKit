@@ -59,6 +59,7 @@
 #import <pal/spi/cocoa/QuartzCoreSPI.h>
 #import <pal/spi/mac/NSEventSPI.h>
 #import <wtf/BlockObjCExceptions.h>
+#import <wtf/Borrow.h>
 
 #if HAVE(APPKIT_GESTURES_SUPPORT)
 #import <WebKitAdditions/AppKitUtilities.h>
@@ -176,6 +177,23 @@ void ViewGestureController::handleMagnificationGesture(double scale, WebEventPha
 
     if (phase == WebEventPhase::Ended || phase == WebEventPhase::Cancelled)
         endMagnificationGesture();
+}
+
+void ViewGestureController::moveMagnificationOrigin(FloatPoint origin)
+{
+    if (m_activeGestureType != ViewGestureType::Magnification || !m_visibleContentRectIsValid || m_frameHandlesMagnificationGesture)
+        return;
+
+    RefPtr page = m_webPageProxy.get();
+    if (!page)
+        return;
+
+    auto obscuredContentInsets = page->obscuredContentInsets();
+    origin.move(-obscuredContentInsets.left(), -obscuredContentInsets.top());
+
+    willBeginGesture(ViewGestureType::Magnification);
+    m_magnificationOrigin = origin;
+    applyMagnification();
 }
 
 void ViewGestureController::handleSmartMagnificationGesture(FloatPoint gestureLocationInViewCoordinates)
@@ -350,7 +368,7 @@ void ViewGestureController::trackSwipeGesture(PlatformScrollEvent event, SwipeDi
 FloatRect ViewGestureController::windowRelativeBoundsForCustomSwipeViews() const
 {
     FloatRect swipeArea;
-    for (const auto& view : m_customSwipeViews)
+    for (const auto& view : borrow(m_customSwipeViews))
         swipeArea.unite([view convertRect:[view bounds] toView:nil]);
     swipeArea.move(m_customSwipeViewsObscuredContentInsets.left(), m_customSwipeViewsObscuredContentInsets.bottom());
     swipeArea.contract({
@@ -363,13 +381,14 @@ FloatRect ViewGestureController::windowRelativeBoundsForCustomSwipeViews() const
 static RetainPtr<CALayer> leastCommonAncestorLayer(const Vector<RetainPtr<CALayer>>& layers)
 {
     Vector<Vector<RetainPtr<CALayer>>> liveLayerPathsFromRoot(layers.size());
+    Borrow borrowedLiveLayerPaths = liveLayerPathsFromRoot;
 
     size_t shortestPathLength = std::numeric_limits<size_t>::max();
 
     for (size_t layerIndex = 0; layerIndex < layers.size(); layerIndex++) {
         RetainPtr parent = [layers[layerIndex] superlayer];
         while (parent) {
-            liveLayerPathsFromRoot[layerIndex].insert(0, parent.get());
+            borrowedLiveLayerPaths[layerIndex].insert(0, parent.get());
             shortestPathLength = std::min(shortestPathLength, liveLayerPathsFromRoot[layerIndex].size());
             parent = parent.get().superlayer;
         }
@@ -478,7 +497,7 @@ void ViewGestureController::beginSwipeGesture(WebBackForwardListItem* targetItem
         });
         swipeArea.move(-obscuredContentInsets.left(), -obscuredContentInsets.bottom());
 
-        for (const auto& view : m_customSwipeViews) {
+        for (const auto& view : borrow(m_customSwipeViews)) {
             RetainPtr layer = [view layer];
             ASSERT(layer);
             m_currentSwipeLiveLayers.append(layer.get());
@@ -641,7 +660,7 @@ void ViewGestureController::handleSwipeGesture(WebBackForwardListItem* targetIte
     [m_swipeShadowLayer setTransform:CATransform3DMakeTranslation((swipingLeft ? 0 : width) + swipingLayerOffset, 0, 0)];
 
     if (swipingLeft) {
-        for (const auto& layer : m_currentSwipeLiveLayers)
+        for (const auto& layer : borrow(m_currentSwipeLiveLayers))
             [layer setTransform:CATransform3DMakeTranslation(swipingLayerOffset, 0, 0)];
     } else {
         [m_swipeLayer setTransform:CATransform3DMakeTranslation(width + swipingLayerOffset, 0, 0)];
@@ -693,7 +712,7 @@ void ViewGestureController::resetState()
         [m_swipeCancellationTracker setIsCancelled:YES];
     m_swipeCancellationTracker = nil;
 
-    for (const auto& layer : m_currentSwipeLiveLayers)
+    for (const auto& layer : borrow(m_currentSwipeLiveLayers))
         [layer setTransform:CATransform3DIdentity];
 
     [m_swipeSnapshotLayer removeFromSuperlayer];

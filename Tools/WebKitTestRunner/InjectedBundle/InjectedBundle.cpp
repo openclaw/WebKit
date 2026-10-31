@@ -105,6 +105,7 @@ void InjectedBundle::initialize(WKBundleRef bundle, WKTypeRef initializationUser
     };
     WKBundleSetClient(m_bundle.get(), &client.base);
     WKBundleSetServiceWorkerProxyCreationCallback(m_bundle.get(), WebCoreTestSupport::setupNewlyCreatedServiceWorker);
+    WebCoreTestSupport::setupWorkerInternals();
     platformInitialize(initializationUserData);
     WebCoreTestSupport::populateJITOperations();
 
@@ -162,6 +163,7 @@ InjectedBundlePage* InjectedBundle::page() const
 {
     // With site isolation, the process may contain RemotePages whose main frames are remote.
     // Prefer pages with a local main frame, as those are the actual test pages.
+    InjectedBundlePage* result = nullptr;
     for (auto& page : m_pages) {
         if (WKBundlePageIsSuspended(page->page()))
             continue;
@@ -176,8 +178,18 @@ InjectedBundlePage* InjectedBundle::page() const
         if (isPageRemote)
             continue;
 
-        return page.get();
+        if (!result) {
+            result = page.get();
+            continue;
+        }
+
+        bool isSameWebPageProxy = WKBundlePageGetWebPageProxyIdentifierForTesting(page->page()) == WKBundlePageGetWebPageProxyIdentifierForTesting(result->page());
+        bool committedMoreRecently = page->mainFrameCommitOrder() > result->mainFrameCommitOrder();
+        if (isSameWebPageProxy && committedMoreRecently)
+            result = page.get();
     }
+    if (result)
+        return result;
     return m_pages[0].get();
 }
 
@@ -317,6 +329,22 @@ void InjectedBundle::didReceiveMessageToPage(WKBundlePageRef page, WKStringRef m
 
         return;
     }
+
+#if PLATFORM(MAC)
+    if (WKStringIsEqualToUTF8CString(messageName, "AXAsyncReply")) {
+        auto messageBodyDictionary = dictionaryValue(messageBody);
+        if (m_accessibilityController)
+            m_accessibilityController->clientAccessibilityReplyReceived(uint64Value(messageBodyDictionary, "requestID"), value(messageBodyDictionary, "result"));
+        return;
+    }
+
+    if (WKStringIsEqualToUTF8CString(messageName, "AXClientNotification")) {
+        auto messageBodyDictionary = dictionaryValue(messageBody);
+        if (m_accessibilityController)
+            m_accessibilityController->clientNotificationReceived(uint64Value(messageBodyDictionary, "elementToken"), toJS(stringValue(messageBodyDictionary, "notificationName")).get(), value(messageBodyDictionary, "userInfo"));
+        return;
+    }
+#endif
 
     postPageMessage("Error", "Unknown");
 }

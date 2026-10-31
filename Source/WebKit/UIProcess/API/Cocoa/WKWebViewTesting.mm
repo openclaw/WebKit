@@ -31,6 +31,7 @@
 #import "EndowmentStateTracker.h"
 #import "GPUProcessProxy.h"
 #import "LogStream.h"
+#import "MediaPermissionPromptCustomization.h"
 #import "MediaSessionCoordinatorProxyPrivate.h"
 #import "NetworkProcessProxy.h"
 #import "PendingSnapshotDrawing.h"
@@ -57,6 +58,7 @@
 #import "_WKFrameHandleInternal.h"
 #import "_WKInspectorInternal.h"
 #import <WebCore/AXObjectTypes.h>
+#import <WebCore/AttributedString.h>
 #import <WebCore/BoxSides.h>
 #import <WebCore/Color.h>
 #import <WebCore/NowPlayingInfo.h>
@@ -68,6 +70,7 @@
 #import <wtf/RetainPtr.h>
 #import <wtf/RuntimeApplicationChecks.h>
 #import <wtf/TZoneMallocInlines.h>
+#import <wtf/cocoa/VectorCocoa.h>
 #if USE(APPLE_INTERNAL_SDK)
 #import <wtf/cocoa/Entitlements.h>
 #import <wtf/spi/darwin/XPCSPI.h>
@@ -111,6 +114,68 @@
 - (void)coordinatorStateChanged:(_WKMediaSessionCoordinatorState)state;
 @end
 #endif
+
+@implementation _WKMediaCapturePermissionPromptForTesting {
+#if ENABLE(MEDIA_STREAM)
+    RefPtr<WebKit::MediaPermissionPromptForTesting> _prompt;
+#endif
+}
+
+#if ENABLE(MEDIA_STREAM)
+- (instancetype)_initWithPrompt:(Ref<WebKit::MediaPermissionPromptForTesting>&&)prompt
+{
+    if (!(self = [super init]))
+        return nil;
+
+    _prompt = WTF::move(prompt);
+    return self;
+}
+#endif
+
+- (NSString *)title
+{
+#if ENABLE(MEDIA_STREAM)
+    return _prompt->title().createNSString().autorelease();
+#else
+    return @"";
+#endif
+}
+
+- (NSString *)informativeText
+{
+#if ENABLE(MEDIA_STREAM)
+    return nsStringNilIfNull(_prompt->informativeText()).autorelease();
+#else
+    return nil;
+#endif
+}
+
+- (NSArray<NSString *> *)buttonTitles
+{
+#if ENABLE(MEDIA_STREAM)
+    return createNSArray(_prompt->buttonTitles()).autorelease();
+#else
+    return @[ ];
+#endif
+}
+
+- (void)respondWithButtonIndex:(NSUInteger)index
+{
+#if ENABLE(MEDIA_STREAM)
+    protect(_prompt)->respond(index);
+#else
+    UNUSED_PARAM(index);
+#endif
+}
+
+- (void)dismissWithoutAnswer
+{
+#if ENABLE(MEDIA_STREAM)
+    protect(_prompt)->respond(std::nullopt);
+#endif
+}
+
+@end
 
 @implementation WKWebView (WKTesting)
 
@@ -237,7 +302,8 @@ static void dumpCALayer(TextStream& ts, CALayer *layer, bool traverse)
     if (traverse && layer.sublayers.count > 0) {
         TextStream::GroupScope scope(ts);
         ts << "sublayers"_s;
-        for (CALayer *sublayer in layer.sublayers) {
+        // FIXME: Remove the suppression once https://github.com/llvm/llvm-project/pull/230818 is deployed (rdar://189710680).
+        for (SUPPRESS_UNRETAINED_LOCAL CALayer *sublayer in layer.sublayers) {
             TextStream::GroupScope scope(ts);
             dumpCALayer(ts, sublayer, true);
         }
@@ -375,7 +441,7 @@ static void dumpCALayer(TextStream& ts, CALayer *layer, bool traverse)
 
 - (NSString *)_scrollingTreeAsText
 {
-    CheckedPtr coordinator = _page->scrollingCoordinatorProxy();
+    RefPtr coordinator = _page->scrollingCoordinatorProxy();
     if (!coordinator)
         return @"";
 
@@ -384,7 +450,7 @@ static void dumpCALayer(TextStream& ts, CALayer *layer, bool traverse)
 
 - (NSString *)_scrollingTreeIncludingNodeIDsAsText
 {
-    CheckedPtr coordinator = _page->scrollingCoordinatorProxy();
+    RefPtr coordinator = _page->scrollingCoordinatorProxy();
     if (!coordinator)
         return @"";
 
@@ -393,7 +459,7 @@ static void dumpCALayer(TextStream& ts, CALayer *layer, bool traverse)
 
 - (double)_rubberbandHyperbolicCoefficientForTesting
 {
-    if (CheckedPtr coordinator = _page->scrollingCoordinatorProxy())
+    if (RefPtr coordinator = _page->scrollingCoordinatorProxy())
         return coordinator->rubberbandHyperbolicCoefficientForTesting();
 
     return 0;
@@ -561,6 +627,25 @@ static void dumpCALayer(TextStream& ts, CALayer *layer, bool traverse)
 
     if (RefPtr pageForTesting = _page->pageForTesting())
         pageForTesting->setIndexOfGetDisplayMediaDeviceSelectedForTesting(index);
+#endif
+}
+
+- (void)_setMediaCapturePermissionPromptHandlerForTesting:(void (^)(_WKMediaCapturePermissionPromptForTesting *))handler
+{
+#if ENABLE(MEDIA_STREAM)
+    if (!_page)
+        return;
+
+    if (!handler) {
+        _page->setMediaPermissionPromptHandlerForTesting(nullptr);
+        return;
+    }
+
+    _page->setMediaPermissionPromptHandlerForTesting([handler = makeBlockPtr(handler)](Ref<WebKit::MediaPermissionPromptForTesting>&& prompt) {
+        handler(adoptNS([[_WKMediaCapturePermissionPromptForTesting alloc] _initWithPrompt:WTF::move(prompt)]).get());
+    });
+#else
+    UNUSED_PARAM(handler);
 #endif
 }
 
@@ -751,7 +836,7 @@ static void dumpCALayer(TextStream& ts, CALayer *layer, bool traverse)
 {
     RefPtr pageForTesting = _page->pageForTesting();
     if (!pageForTesting)
-        return completionHandler({ });
+        return completionHandler(nil);
 
     pageForTesting->dumpPrivateClickMeasurement([completionHandler = makeBlockPtr(completionHandler)](const String& privateClickMeasurement) {
         completionHandler(privateClickMeasurement.createNSString().get());
@@ -803,6 +888,13 @@ static void dumpCALayer(TextStream& ts, CALayer *layer, bool traverse)
 {
     _page->getRenderTreeExternalRepresentation([callback = makeBlockPtr(callback)] (const String& result) {
         callback(result.createNSString().get(), nil);
+    });
+}
+
+- (void)_getSelectionAsAttributedStringForTesting:(void (^)(NSAttributedString *))completionHandler
+{
+    _page->getSelectionAsAttributedStringForTesting([completionHandler = makeBlockPtr(completionHandler)](const WebCore::AttributedString& attributedString) {
+        completionHandler(attributedString.nsAttributedString().get());
     });
 }
 
@@ -881,7 +973,7 @@ static void dumpCALayer(TextStream& ts, CALayer *layer, bool traverse)
     });
 }
 
-- (NSData *)_drawPagesToPDFSynchronouslyForTesting:(_WKFrameHandle *)handle
+- (NSData *)_drawPagesToPDFSynchronouslyForTesting:(_WKFrameHandle *)handle pageCount:(NSUInteger)pageCount
 {
     RefPtr frame = WebKit::WebFrameProxy::webFrame(*handle->_frameHandle->frameID());
     if (!frame)
@@ -893,13 +985,26 @@ static void dumpCALayer(TextStream& ts, CALayer *layer, bool traverse)
     printInfo.availablePaperHeight = 792;
     // Outlives this call if the wait gives up.
     auto result = Box<RetainPtr<NSData>>::create();
-    auto replyID = _page->drawPagesToPDF(*frame, printInfo, 0, 1, [result](API::Data* data) {
+    auto replyID = _page->drawPagesToPDF(*frame, printInfo, 0, pageCount, [result](API::Data* data) {
         if (data)
             *result = toNSData(data->span());
     });
     if (replyID)
         WebKit::PendingSnapshotDrawing::wait(*replyID);
     return result->autorelease();
+}
+
+- (void)_printProcessIdentifierForTesting:(void(^)(pid_t))completionHandler
+{
+    auto lockdownMode = protect(_page->legacyMainFrameProcess())->lockdownMode();
+    protect(_page->configuration().processPool())->whenPrintProcessReady(lockdownMode, [completionHandler = makeBlockPtr(completionHandler)](WebKit::WebProcessProxy* process) {
+        completionHandler(process ? process->processID() : 0);
+    });
+}
+
+- (void)_setPrintProcessIdleTimeoutForTesting:(NSTimeInterval)timeout
+{
+    protect(_page->configuration().processPool())->setPrintProcessIdleTimeoutForTesting(Seconds { timeout });
 }
 
 - (void)_endPrintingForTesting:(void(^)(void))completionHandler
@@ -920,6 +1025,18 @@ static void dumpCALayer(TextStream& ts, CALayer *layer, bool traverse)
     gpuProcess->webProcessConnectionCountForTesting([completionHandler = makeBlockPtr(completionHandler)](uint64_t count) {
         completionHandler(count);
     });
+}
+
+- (void)_runDisplayListDataTestsInGPUProcessForTesting:(void(^)(NSArray<NSString *> *))completionHandler
+{
+#if ENABLE(GPU_PROCESS)
+    Ref gpuProcess = WebKit::GPUProcessProxy::getOrCreate();
+    gpuProcess->runDisplayListDataTestsForTesting([completionHandler = makeBlockPtr(completionHandler)](Vector<String>&& failures) {
+        completionHandler(createNSArray(failures).get());
+    });
+#else
+    completionHandler(@[ @"The GPU process is not enabled" ]);
+#endif
 }
 
 - (void)_setConnectedToHardwareConsoleForTesting:(BOOL)connected
@@ -1002,7 +1119,7 @@ static void dumpCALayer(TextStream& ts, CALayer *layer, bool traverse)
                 coordinatorClient->coordinatorStateChanged(state);
         }
 
-        std::optional<WebCore::ExceptionData> NODELETE result(bool success) const
+        std::optional<WebCore::ExceptionData> LEGACY_NODELETE result(bool success) const
         {
             if (!success)
                 return { WebCore::ExceptionData { WebCore::ExceptionCode::InvalidStateError, String() } };
@@ -1337,9 +1454,6 @@ static void dumpCALayer(TextStream& ts, CALayer *layer, bool traverse)
 #if ENABLE(HORIZONTAL_BANNER_VIEW_OVERLAYS)
     [_systemBackgroundColorExtensionViews.left() cancelFadeAnimation];
     [_systemBackgroundColorExtensionViews.right() cancelFadeAnimation];
-#if PLATFORM(IOS_FAMILY)
-    [_systemBackgroundColorExtensionViews.top() cancelFadeAnimation];
-#endif
 #endif
 }
 
@@ -1491,10 +1605,10 @@ static void dumpCALayer(TextStream& ts, CALayer *layer, bool traverse)
 
 - (NSString *)_animationStackForLayerWithID:(unsigned long long)layerID processID:(uint64_t)processID
 {
-    auto animationStack = [&] -> RefPtr<const WebKit::RemoteAnimationStack> {
+    auto animationStackJSON = [&] -> String {
         if (!ObjectIdentifier<WebCore::PlatformLayerIdentifierType>::isValidIdentifier(layerID)
             || !ObjectIdentifier<WebCore::ProcessIdentifierType>::isValidIdentifier(processID))
-            return nullptr;
+            return emptyString();
 
         WebCore::PlatformLayerIdentifier platformLayerID {
             ObjectIdentifier<WebCore::PlatformLayerIdentifierType>(layerID),
@@ -1502,15 +1616,13 @@ static void dumpCALayer(TextStream& ts, CALayer *layer, bool traverse)
         };
         if (RefPtr drawingAreaProxy = dynamicDowncast<WebKit::RemoteLayerTreeDrawingAreaProxy>(_page->drawingArea())) {
             if (RefPtr nodeStack = drawingAreaProxy->animationStackForNodeWithIDForTesting(platformLayerID))
-                return nodeStack;
+                return nodeStack->toJSONForTesting()->toJSONString();
         }
-        if (CheckedPtr scrollingCoordinator = _page->scrollingCoordinatorProxy())
-            return scrollingCoordinator->animationStackForNodeWithIDForTesting(platformLayerID);
-        return nullptr;
+        if (RefPtr scrollingCoordinator = _page->scrollingCoordinatorProxy())
+            return scrollingCoordinator->animationStackJSONForNodeWithIDForTesting(platformLayerID);
+        return emptyString();
     }();
-    if (animationStack)
-        return animationStack->toJSONForTesting()->toJSONString().createNSString().autorelease();
-    return @"";
+    return animationStackJSON.createNSString().autorelease();
 }
 
 - (NSString *)_progressBasedTimelinesForScrollingNodeID:(uint64_t)scrollingNodeID processID:(uint64_t)processID
@@ -1520,7 +1632,7 @@ static void dumpCALayer(TextStream& ts, CALayer *layer, bool traverse)
             || !ObjectIdentifier<WebCore::ScrollingNodeIDType>::isValidIdentifier(scrollingNodeID))
             return { };
 
-        CheckedPtr scrollingCoordinator = _page->scrollingCoordinatorProxy();
+        RefPtr scrollingCoordinator = _page->scrollingCoordinatorProxy();
         if (!scrollingCoordinator)
             return { };
 
@@ -1545,7 +1657,7 @@ static void dumpCALayer(TextStream& ts, CALayer *layer, bool traverse)
         if (!ObjectIdentifier<WebCore::ProcessIdentifierType>::isValidIdentifier(processID))
             return { };
 
-        CheckedPtr scrollingCoordinator = _page->scrollingCoordinatorProxy();
+        RefPtr scrollingCoordinator = _page->scrollingCoordinatorProxy();
         if (!scrollingCoordinator)
             return { };
 

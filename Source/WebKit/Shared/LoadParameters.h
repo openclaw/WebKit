@@ -79,7 +79,9 @@ struct LoadParameters {
     UserData userData;
     WebCore::LockHistory lockHistory { WebCore::LockHistory::No };
     WebCore::LockBackForwardList lockBackForwardList { WebCore::LockBackForwardList::No };
+    RefPtr<FrameState> currentHistoryItemForReattach;
     WebCore::NavigationHistoryBehavior navigationHistoryBehavior { WebCore::NavigationHistoryBehavior::Auto };
+    WebCore::ReplaceIfNotCompletelyLoaded replaceIfNotCompletelyLoaded { WebCore::ReplaceIfNotCompletelyLoaded::No };
     WebCore::SubstituteData::SessionHistoryVisibility sessionHistoryVisibility { WebCore::SubstituteData::SessionHistoryVisibility::Visible };
     String clientRedirectSourceForHistory;
     std::optional<WebCore::SandboxFlags> effectiveSandboxFlags;
@@ -106,6 +108,7 @@ struct LoadParameters {
     std::optional<WebCore::NavigationRequester> requester;
     std::optional<WebCore::ResourceRequest> originalRequest;
     std::optional<WebCore::RegistrableDomain> unpartitionedStorageSite;
+    std::optional<WebCore::AgentClusterAssignment> agentClusterAssignment;
 };
 
 } // namespace WebKit

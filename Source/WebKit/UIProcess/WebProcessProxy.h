@@ -34,6 +34,7 @@
 #include "MessageReceiverMap.h"
 #include "NetworkProcessProxy.h"
 #include "PageClient.h"
+#include "ProcessCrossOriginIsolation.h"
 #include "ProcessLauncher.h"
 #include "ProcessThrottler.h"
 #include "RemoteSnapshotIdentifier.h"
@@ -114,6 +115,7 @@ class PageConfiguration;
 }
 
 namespace WebCore {
+class ColorSpace;
 class DeferrableOneShotTimer;
 class ResourceRequest;
 struct CryptoKeyData;
@@ -215,7 +217,7 @@ public:
         Shared
     };
 
-    static Ref<WebProcessProxy> create(WebProcessPool&, WebsiteDataStore*, LockdownMode, EnhancedSecurity, IsPrewarmed, WebCore::CrossOriginMode = WebCore::CrossOriginMode::Shared, ShouldLaunchProcess = ShouldLaunchProcess::Yes);
+    static Ref<WebProcessProxy> create(WebProcessPool&, WebsiteDataStore*, LockdownMode, EnhancedSecurity, IsPrewarmed, ProcessCrossOriginIsolation = ProcessCrossOriginIsolation::None, ShouldLaunchProcess = ShouldLaunchProcess::Yes);
 
     static Ref<WebProcessProxy> createForRemoteWorkers(RemoteWorkerType, WebProcessPool&, WebCore::Site&&, WebsiteDataStore&, WebCore::CrossOriginMode, LockdownMode, EnhancedSecurity);
 
@@ -224,6 +226,8 @@ public:
     static void forWebPagesWithOrigin(PAL::SessionID, const WebCore::SecurityOriginData&, NOESCAPE const Function<void(WebPageProxy&)>&);
     void addAllowedFirstPartyForCookies(const WebCore::RegistrableDomain&, LoadedWebArchive);
     const std::pair<LoadedWebArchive, HashSet<WebCore::RegistrableDomain>>& allowedFirstPartiesForCookiesData() const { return m_allowedFirstPartiesForCookies; }
+    bool hasCommittedWebArchive() const { return m_hasCommittedWebArchive; }
+    void setHasCommittedWebArchive() { m_hasCommittedWebArchive = true; }
 
     void initializeWebProcess(WebProcessCreationParameters&&);
 
@@ -254,6 +258,12 @@ public:
     void addSharedProcessDomain(const WebCore::RegistrableDomain&);
     const HashSet<WebCore::RegistrableDomain>& sharedProcessDomains() const LIFETIME_BOUND { return m_sharedProcessDomains; }
 
+    // The only registrable domains this process's cookie IPC may name: those of every site it has hosted frames
+    // for under site isolation, kept after the frames go away because their unload handlers can still use cookies.
+    // std::nullopt means any, before the process is used for site isolation or once it hosts unrecorded sites.
+    std::optional<HashSet<WebCore::RegistrableDomain>> hostedDomains() const;
+    void setMayHostAnySite();
+
     IsolatedProcessType isolatedProcessType() const { return m_isolatedProcessType; }
     void setIsolatedProcessType(IsolatedProcessType, std::optional<WebCore::Site> mainFrameSite);
     const std::optional<WebCore::Site>& mainFrameSite() const LIFETIME_BOUND { return m_mainFrameSite; }
@@ -266,14 +276,15 @@ public:
     void disableRemoteWorkers(OptionSet<RemoteWorkerType>);
 
     WebsiteDataStore* websiteDataStore() const { ASSERT(m_websiteDataStore); return m_websiteDataStore.get(); }
+    bool hasWebsiteDataStore() const { return !!m_websiteDataStore; }
     void setWebsiteDataStore(WebsiteDataStore&);
     
-    PAL::SessionID NODELETE sessionID() const;
+    PAL::SessionID LEGACY_NODELETE sessionID() const;
 
     static unsigned runningProcessCount();
     static bool isNearingProcessCountLimit();
     static bool hasReachedProcessCountLimit();
-    static void NODELETE setProcessCountLimit(unsigned);
+    static void LEGACY_NODELETE setProcessCountLimit(unsigned);
 
     static void reclaimProcessesIfNeeded();
     static void scheduleReclaimProcessesIfNeeded();
@@ -281,9 +292,9 @@ public:
     static RefPtr<WebProcessProxy> processForIdentifier(WebCore::ProcessIdentifier);
     static Ref<WebProcessProxy> fromConnection(const IPC::Connection&);
     static Vector<Ref<WebProcessProxy>> allProcesses();
-    static WebPageProxy* NODELETE webPage(WebPageProxyIdentifier);
-    static WebPageProxy* NODELETE webPage(WebCore::PageIdentifier);
-    static WebPageProxy* NODELETE audioCapturingWebPage();
+    static WebPageProxy* LEGACY_NODELETE webPage(WebPageProxyIdentifier);
+    static WebPageProxy* LEGACY_NODELETE webPage(WebCore::PageIdentifier);
+    static WebPageProxy* LEGACY_NODELETE audioCapturingWebPage();
 #if ENABLE(WEBXR)
     static WebPageProxy* webPageWithActiveXRSession();
 #endif
@@ -330,12 +341,17 @@ public:
     bool isRunningWorkers() const { return m_sharedWorkerInformation || m_serviceWorkerInformation; }
     std::optional<WebPageProxyIdentifier> remoteWorkerPageProxyID(RemoteWorkerType) const;
 
-    bool NODELETE isDummyProcessProxy() const;
+    bool LEGACY_NODELETE isDummyProcessProxy() const;
+
+    bool isPrintProcess() const { return m_isPrintProcess; }
+    void setIsPrintProcess() { m_isPrintProcess = true; }
 
     void didCreateWebPageInProcess(WebCore::PageIdentifier);
 
     bool hasCommittedClientOrigin(const WebCore::ClientOrigin&) const;
     void didCommitLoadClientOrigin(WebCore::ClientOrigin&&);
+    bool hasCommittedStorageClientOrigin(const WebCore::ClientOrigin&) const;
+    void didCommitStorageClientOrigin(WebCore::ClientOrigin&&);
     void didBecomeRemoteWorkerHostForSite(const WebCore::Site&);
 
     void addVisitedLinkStoreUser(VisitedLinkStore&, WebPageProxyIdentifier);
@@ -347,7 +363,7 @@ public:
 
     void consumeIfNotVerifiablyFromUIProcess(WebCore::PageIdentifier, API::UserInitiatedAction&, std::optional<WTF::UUID>);
 
-    bool NODELETE isResponsive() const;
+    bool LEGACY_NODELETE isResponsive() const;
 
     VisibleWebPageToken visiblePageToken() const;
 
@@ -445,6 +461,10 @@ public:
     const MachSendRight& taskNamePort() const { return m_taskNamePort; }
 #endif
 
+#if PLATFORM(IOS_FAMILY) && ENABLE(UIPROCESS_PERIODIC_MEMORY_MONITOR)
+    void didComputeAvailableMemory(uint64_t availableMemory);
+#endif
+
 #if HAVE(DISPLAY_LINK)
     DisplayLink::Client& displayLinkClient() LIFETIME_BOUND { return m_displayLinkClient; }
     std::optional<unsigned> nominalFramesPerSecondForDisplay(WebCore::PlatformDisplayID);
@@ -523,8 +543,8 @@ public:
     void unregisterRemoteWorkerClientProcess(RemoteWorkerType, WebProcessProxy&);
     void updateRemoteWorkerProcessAssertion(RemoteWorkerType);
     bool hasServiceWorkerPageProxy(WebPageProxyIdentifier pageProxyID) { return m_serviceWorkerInformation && m_serviceWorkerInformation->remoteWorkerPageProxyID == pageProxyID; }
-    bool NODELETE hasServiceWorkerForegroundActivityForTesting() const;
-    bool NODELETE hasServiceWorkerBackgroundActivityForTesting() const;
+    bool LEGACY_NODELETE hasServiceWorkerForegroundActivityForTesting() const;
+    bool LEGACY_NODELETE hasServiceWorkerBackgroundActivityForTesting() const;
     void startServiceWorkerBackgroundProcessing();
     void endServiceWorkerBackgroundProcessing();
     void setThrottleStateForTesting(ProcessThrottleState);
@@ -567,6 +587,7 @@ public:
 
 #if ENABLE(MEDIA_STREAM)
     static void muteCaptureInPagesExcept(WebCore::PageIdentifier);
+    static void muteCaptureInPagesExcept(const WebProcessProxy&, WebCore::PageIdentifier);
     SpeechRecognitionRemoteRealtimeMediaSourceManager& ensureSpeechRecognitionRemoteRealtimeMediaSourceManager() LIFETIME_BOUND;
     SpeechRecognitionRemoteRealtimeMediaSourceManager* speechRecognitionRemoteRealtimeMediaSourceManager() const LIFETIME_BOUND { return m_speechRecognitionRemoteRealtimeMediaSourceManager.get(); }
 #endif
@@ -592,9 +613,12 @@ public:
 
     void setAppBadgeFromWorker(IPC::Untrusted<WebCore::SecurityOriginData>&&, std::optional<uint64_t> badge);
 
-    WebCore::CrossOriginMode crossOriginMode() const { return m_crossOriginMode; }
+    ProcessCrossOriginIsolation crossOriginIsolation() const { return m_crossOriginIsolation; }
+    WebCore::CrossOriginMode crossOriginMode() const { return toCrossOriginMode(m_crossOriginIsolation); }
+    bool isDocumentIsolationPolicyProcess() const { return m_crossOriginIsolation == ProcessCrossOriginIsolation::DocumentIsolationPolicy; }
     LockdownMode lockdownMode() const { return m_lockdownMode; }
     EnhancedSecurity enhancedSecurity() const { return m_enhancedSecurity; }
+    bool matchesLockdownModeAndEnhancedSecurity(LockdownMode lockdownMode, EnhancedSecurity enhancedSecurity) const { return m_lockdownMode == lockdownMode && enhancedSecurityStatesAreConsistent(m_enhancedSecurity, enhancedSecurity); }
 
 #if PLATFORM(COCOA)
     std::optional<audit_token_t> auditToken() const;
@@ -609,15 +633,15 @@ public:
     void hardwareConsoleStateChanged();
 #endif
 
-    const WeakHashSet<WebProcessProxy>* NODELETE serviceWorkerClientProcesses() const LIFETIME_BOUND;
-    const WeakHashSet<WebProcessProxy>* NODELETE sharedWorkerClientProcesses() const LIFETIME_BOUND;
+    const WeakHashSet<WebProcessProxy>* LEGACY_NODELETE serviceWorkerClientProcesses() const LIFETIME_BOUND;
+    const WeakHashSet<WebProcessProxy>* LEGACY_NODELETE sharedWorkerClientProcesses() const LIFETIME_BOUND;
 
     static void permissionChanged(WebCore::PermissionName, const WebCore::SecurityOriginData&);
     void processPermissionChanged(WebCore::PermissionName, const WebCore::SecurityOriginData&);
 
     Logger& logger();
 
-    void NODELETE resetState();
+    void LEGACY_NODELETE resetState();
 
     ProcessThrottleState throttleStateForStatistics() const { return m_throttleStateForStatistics; }
     Seconds totalForegroundTime() const;
@@ -655,10 +679,10 @@ public:
 #if ENABLE(WEBASSEMBLY_DEBUGGER) && ENABLE(REMOTE_INSPECTOR)
     void createWasmDebuggerTarget();
     void destroyWasmDebuggerTarget();
-    void NODELETE connectWasmDebuggerTarget(bool isAutomaticConnection, bool immediatelyPause);
-    void NODELETE disconnectWasmDebuggerTarget();
+    void LEGACY_NODELETE connectWasmDebuggerTarget(bool isAutomaticConnection, bool immediatelyPause);
+    void LEGACY_NODELETE disconnectWasmDebuggerTarget();
     void dispatchWasmDebuggerMessage(const String& message);
-    void NODELETE setWasmDebuggerTargetIndicating(bool);
+    void LEGACY_NODELETE setWasmDebuggerTargetIndicating(bool);
 
     void sendWasmDebuggerResponse(const String& response);
     void updateWasmDebuggerTarget();
@@ -681,8 +705,11 @@ public:
     void setIneligbleForWebProcessCache() { m_isEligibleForWebProcessCache = false; }
     bool isEligibleForWebProcessCache() const { return m_isEligibleForWebProcessCache; }
 
-    void setCOOPCacheOrigin(const WebCore::SecurityOriginData& origin) { m_coopCacheOrigin = origin; }
+    void setCOOPCacheOrigin(const WebCore::SecurityOriginData&);
     const std::optional<WebCore::SecurityOriginData>& coopCacheOrigin() const LIFETIME_BOUND { return m_coopCacheOrigin; }
+
+    void markCOOPCacheOriginAsUnconfirmed();
+    bool isCOOPCacheOriginUnconfirmed() const { return m_isCOOPCacheOriginUnconfirmed; }
 
     void incrementFrameProcessCount() { ++m_frameProcessCount; }
     void decrementFrameProcessCount();
@@ -699,9 +726,10 @@ public:
 private:
     Type type() const final { return Type::WebContent; }
 
-    WebProcessProxy(WebProcessPool&, WebsiteDataStore*, IsPrewarmed, WebCore::CrossOriginMode, LockdownMode, EnhancedSecurity);
+    WebProcessProxy(WebProcessPool&, WebsiteDataStore*, IsPrewarmed, ProcessCrossOriginIsolation, LockdownMode, EnhancedSecurity);
 
     void updateSiteForMainFrameNavigation(const URL&);
+    void sendHostedDomainsToNetworkProcess();
 
     // AuxiliaryProcessProxy
     ASCIILiteral processName() const final { return "WebContent"_s; }
@@ -720,7 +748,6 @@ private:
     void didFinishLaunching(ProcessLauncher*, IPC::Connection::Identifier&&) override;
     bool shouldConfigureJSCForTesting() const final;
     bool isJITEnabled() const final;
-    bool shouldEnableSharedArrayBuffer() const final { return m_crossOriginMode == WebCore::CrossOriginMode::Isolated; }
     bool shouldEnableLockdownMode() const final { return m_lockdownMode == LockdownMode::Enabled; }
     bool shouldEnableEnhancedSecurity() const final { return isEnhancedSecurityEnabledForState(m_enhancedSecurity); }
     bool shouldDisableJITCage() const final;
@@ -735,8 +762,8 @@ private:
     void wrapCryptoKey(Vector<uint8_t>&&, CompletionHandler<void(std::optional<Vector<uint8_t>>&&)>&&);
 
     using WebProcessProxyMap = HashMap<WebCore::ProcessIdentifier, CheckedRef<WebProcessProxy>>;
-    static WebProcessProxyMap& NODELETE allProcessMap();
-    static WebPageProxyMap& NODELETE globalPageMap();
+    static WebProcessProxyMap& LEGACY_NODELETE allProcessMap();
+    static WebPageProxyMap& LEGACY_NODELETE globalPageMap();
     static Vector<Ref<WebPageProxy>> globalPages();
 
     void initializePreferencesForGPUAndNetworkProcesses(const WebPageProxy&);
@@ -750,7 +777,7 @@ private:
     static void registerNotifyObservers();
 #endif
 
-    ProcessTerminationReason NODELETE terminationReason() const;
+    ProcessTerminationReason LEGACY_NODELETE terminationReason() const;
 
     // IPC message handlers.
     void didDestroyUserGestureToken(WebCore::PageIdentifier, WebCore::UserGestureTokenIdentifier);
@@ -764,6 +791,13 @@ private:
     void createGPUProcessConnection(GPUProcessConnectionIdentifier, IPC::Connection::Handle&&);
     void gpuProcessConnectionDidBecomeUnresponsive(GPUProcessConnectionIdentifier);
     void drawFrameToSnapshot(WebCore::FrameIdentifier, const WebCore::IntRect&, RemoteSnapshotIdentifier, WebCore::RenderingMode);
+#endif
+
+#if HAVE(IOSURFACE)
+    // Handled here rather than by the page, so that they are answered even once it is gone.
+    void completeDisplayOnlyImage(WebCore::PageIdentifier, RemoteSnapshotIdentifier, WebCore::FrameIdentifier rootFrameIdentifier, float scale, const WebCore::ColorSpace&, CompletionHandler<void(bool)>&&);
+    void releaseDisplayOnlyImage(WebCore::PageIdentifier, RemoteSnapshotIdentifier);
+    RefPtr<WebPageProxy> pageHostedAs(WebCore::PageIdentifier);
 #endif
 
 #if ENABLE(MODEL_PROCESS)
@@ -822,7 +856,7 @@ private:
 #endif
 
 #if PLATFORM(COCOA)
-    bool NODELETE messageSourceIsValidWebContentProcess();
+    bool LEGACY_NODELETE messageSourceIsValidWebContentProcess();
 #endif
 
     bool shouldTakeNearSuspendedAssertion() const;
@@ -888,7 +922,8 @@ private:
     uint64_t m_frameProcessCount { 0 };
 
     HashSet<WebCore::ClientOrigin> m_committedClientOrigins; // Only grows because WebProcess can navigate back to an old origin in a history item.
-    HashSet<WebCore::Site> m_remoteWorkerSites; // Only grows so that messages sent by a remote worker that is going away remain valid.
+    HashSet<WebCore::ClientOrigin> m_committedStorageClientOrigins; // Storage keys of frames with unpartitioned storage access. Only grows, like m_committedClientOrigins.
+    HashSet<WebCore::RegistrableDomain> m_remoteWorkerDomains; // Only grows so that messages sent by a remote worker that is going away remain valid.
 
     // A single page can register with a store more than once for the same process, e.g. when a
     // ProvisionalPageProxy and a RemotePageProxy for the same page live in the same process, so
@@ -913,10 +948,15 @@ private:
     HashSet<WebCore::Site> m_committedSites;
     std::optional<WebCore::Site> m_sharedProcessMainFrameSite;
     HashSet<WebCore::RegistrableDomain> m_sharedProcessDomains;
+    // Only moves forward. m_site cannot stand in for it: m_site is also set for processes that are not site-isolated
+    // and for remote-worker processes, and it can move to MultipleSites.
+    enum class HostedSiteTracking : uint8_t { NotStarted, Recorded, AnySite };
+    HostedSiteTracking m_hostedSiteTracking { HostedSiteTracking::NotStarted };
     std::pair<LoadedWebArchive, HashSet<WebCore::RegistrableDomain>> m_allowedFirstPartiesForCookies { LoadedWebArchive::No, { } };
     bool m_isInProcessCache { false };
     bool m_isEligibleForWebProcessCache { true };
     std::optional<WebCore::SecurityOriginData> m_coopCacheOrigin;
+    bool m_isCOOPCacheOriginUnconfirmed { false };
     bool m_isShuttingDown { false };
     bool m_isRunningProcess { false };
 
@@ -933,10 +973,12 @@ private:
 
     bool m_hasCommittedAnyProvisionalLoads { false };
     bool m_hasCommittedAnyMeaningfulProvisionalLoads { false }; // True if the process has committed a provisional load to a URL that was not about:*.
+    bool m_hasCommittedWebArchive { false };
     bool m_isPrewarmed;
+    bool m_isPrintProcess { false };
     LockdownMode m_lockdownMode { LockdownMode::Disabled };
     EnhancedSecurity m_enhancedSecurity { EnhancedSecurity::Disabled };
-    WebCore::CrossOriginMode m_crossOriginMode { WebCore::CrossOriginMode::Shared };
+    const ProcessCrossOriginIsolation m_crossOriginIsolation;
 #if PLATFORM(COCOA)
     bool m_hasNetworkExtensionSandboxAccess { false };
     bool m_sentFontdMachExtensionHandles { false };

@@ -55,7 +55,7 @@ public:
     ShadowBlur(const FloatSize& radius, const FloatSize& offset, const Color&, bool shadowsIgnoreTransforms = false);
     ShadowBlur(const GraphicsDropShadow&, bool shadowsIgnoreTransforms = false);
 
-    void NODELETE setShadowValues(const FloatSize&, const FloatSize& , const Color&, bool ignoreTransforms = false);
+    void setShadowValues(const FloatSize&, const FloatSize& , const Color&, bool ignoreTransforms = false);
 
     void setShadowsIgnoreTransforms(bool ignoreTransforms) { m_shadowsIgnoreTransforms = ignoreTransforms; }
     bool shadowsIgnoreTransforms() const { return m_shadowsIgnoreTransforms; }
@@ -77,12 +77,12 @@ public:
 
     void blurLayerImage(std::span<uint8_t>, const IntSize&, int stride);
 
-    void NODELETE clear();
+    void clear();
 
     ShadowType type() const { return m_type; }
 
 private:
-    void NODELETE updateShadowBlurValues();
+    void LEGACY_NODELETE updateShadowBlurValues();
 
     void drawShadowBuffer(GraphicsContext&, ImageBuffer&, const FloatPoint&, const FloatSize&);
 
@@ -101,7 +101,7 @@ private:
     };
 
     std::optional<ShadowBlur::LayerImageProperties> calculateLayerBoundingRect(const AffineTransform&, const FloatRect& layerArea, const IntRect& clipRect);
-    IntSize templateSize(const IntSize& blurredEdgeSize, const CornerRadii&) const;
+    IntSize LEGACY_NODELETE templateSize(const IntSize& blurredEdgeSize, const CornerRadii&) const;
 
     void blurShadowBuffer(ImageBuffer& layerImage, const IntSize& templateSize);
     void blurAndColorShadowBuffer(ImageBuffer& layerImage, const IntSize& templateSize);

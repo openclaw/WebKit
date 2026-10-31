@@ -202,14 +202,42 @@ inline void ComputedStyleBase::setUsedPositionOptionIndex(std::optional<size_t> 
     SET_NESTED(m_nonInheritedData, rareData, usedPositionOptionIndex, index);
 }
 
+inline void ComputedStyleBase::setOverrideBlendMode(std::optional<BlendMode> mode)
+{
+    if (compareEqual(mode, m_nonInheritedData->rareData->overrideBlendMode))
+        return;
+
+    if (mode)
+        SET(m_inheritedRareData, isInSubtreeWithBlendMode, *mode != BlendMode::Normal);
+    else
+        SET(m_inheritedRareData, isInSubtreeWithBlendMode, static_cast<BlendMode>(m_nonInheritedData->rareData->blendMode) != BlendMode::Normal);
+
+    m_nonInheritedData.access().rareData.access().overrideBlendMode = WTF::move(mode);
+}
+
 inline void ComputedStyleBase::setDisplayMaintainingOriginalDisplay(Display display)
 {
     m_nonInheritedFlags.display = display.toRaw();
 }
 
+inline void ComputedStyleBase::setOverrideColor(std::optional<WebCore::Color> color)
+{
+    SET(m_inheritedRareData, overrideColor, WTF::move(color));
+}
+
+inline void ComputedStyleBase::setOverrideVisitedLinkColor(std::optional<WebCore::Color> color)
+{
+    SET(m_inheritedRareData, overrideVisitedLinkColor, WTF::move(color));
+}
+
 inline void ComputedStyleBase::setUsedAppearance(StyleAppearance a)
 {
     SET_NESTED(m_nonInheritedData, miscData, usedAppearance, static_cast<unsigned>(a));
+}
+
+inline void ComputedStyleBase::setOverrideBackgroundColor(std::optional<Color>&& color)
+{
+    SET_NESTED(m_nonInheritedData, rareData, overrideBackgroundColor, WTF::move(color));
 }
 
 inline void ComputedStyleBase::setUsedUserSelect(UserSelect userSelect)
@@ -263,7 +291,7 @@ inline void ComputedStyleBase::setPseudoElementIdentifier(std::optional<PseudoEl
 
 inline void ComputedStyleBase::setUseSVGZoomRulesForLength(bool value)
 {
-    SET_NESTED(m_nonInheritedData, rareData, useSVGZoomRulesForLength, value);
+    m_nonInheritedFlags.useSVGZoomRulesForLength = value;
 }
 
 inline bool ComputedStyleBase::setUsedZoom(float zoomLevel)
@@ -335,6 +363,7 @@ inline void ComputedStyleBase::setMaskBorder(MaskBorder&& image)
 inline void ComputedStyleBase::setBorderImage(BorderImage&& image)
 {
     SET_DOUBLY_NESTED(m_nonInheritedData, surroundData, border.borderImage, borderImage, WTF::move(image));
+    updateHasZeroEffectiveBorderWidths();
 }
 
 inline void ComputedStyleBase::setPerspectiveOrigin(PerspectiveOrigin&& origin)
@@ -360,6 +389,7 @@ inline void ComputedStyleBase::setMarginBox(MarginBox&& box)
 inline void ComputedStyleBase::setPaddingBox(PaddingBox&& box)
 {
     SET_NESTED(m_nonInheritedData, surroundData, padding, WTF::move(box));
+    updateHasZeroPadding();
 }
 
 inline void ComputedStyleBase::setBorderRadius(BorderRadiusValue&& size)
@@ -373,21 +403,25 @@ inline void ComputedStyleBase::setBorderRadius(BorderRadiusValue&& size)
 void ComputedStyleBase::setBorderTop(BorderValue&& value)
 {
     SET_NESTED(m_nonInheritedData, surroundData, border.edges.top(), WTF::move(value));
+    updateHasZeroEffectiveBorderWidths();
 }
 
 void ComputedStyleBase::setBorderRight(BorderValue&& value)
 {
     SET_NESTED(m_nonInheritedData, surroundData, border.edges.right(), WTF::move(value));
+    updateHasZeroEffectiveBorderWidths();
 }
 
 void ComputedStyleBase::setBorderBottom(BorderValue&& value)
 {
     SET_NESTED(m_nonInheritedData, surroundData, border.edges.bottom(), WTF::move(value));
+    updateHasZeroEffectiveBorderWidths();
 }
 
 void ComputedStyleBase::setBorderLeft(BorderValue&& value)
 {
     SET_NESTED(m_nonInheritedData, surroundData, border.edges.left(), WTF::move(value));
+    updateHasZeroEffectiveBorderWidths();
 }
 
 // MARK: - Properties/descriptors that are not yet generated

@@ -43,6 +43,7 @@
 #import <WebCore/ContainerNodeInlines.h>
 #import <WebCore/DocumentPage.h>
 #import <WebCore/DocumentView.h>
+#import <WebCore/DragController.h>
 #import <WebCore/DragImage.h>
 #import <WebCore/FloatQuad.h>
 #import <WebCore/FocusController.h>
@@ -64,6 +65,7 @@
 #import <WebCore/NodeRenderStyle.h>
 #import <WebCore/Page.h>
 #import <WebCore/Range.h>
+#import <WebCore/RenderElementInlines.h>
 #import <WebCore/RenderImage.h>
 #import <WebCore/RenderObjectStyle.h>
 #import <WebCore/RenderView.h>
@@ -449,20 +451,12 @@ id<DOMEventTarget> kit(WebCore::EventTarget* target)
     if (!renderer)
         return zeroQuad();
 
-    CheckedRef style = renderer->style();
-
-    auto zoom = style->usedZoomForLength();
-    auto deviceScaleFactor = style->deviceScaleFactor();
-
-    auto borderTop = WebCore::Style::evaluate<float>(style->usedBorderTopWidth(), zoom, deviceScaleFactor);
-    auto borderRight = WebCore::Style::evaluate<float>(style->usedBorderRightWidth(), zoom, deviceScaleFactor);
-    auto borderBottom = WebCore::Style::evaluate<float>(style->usedBorderBottomWidth(), zoom, deviceScaleFactor);
-    auto borderLeft = WebCore::Style::evaluate<float>(style->usedBorderLeftWidth(), zoom, deviceScaleFactor);
+    auto borderWidths = renderer->usedStyle().borderWidths<float>();
 
     WebCore::IntRect boundingBox = renderer->absoluteBoundingBoxRect(true /* use transforms*/);
-    boundingBox.move(borderLeft, borderTop);
-    boundingBox.setWidth(boundingBox.width() - borderLeft - borderRight);
-    boundingBox.setHeight(boundingBox.height() - borderBottom - borderTop);
+    boundingBox.move(borderWidths.left(), borderWidths.top());
+    boundingBox.setWidth(boundingBox.width() - borderWidths.left() - borderWidths.right());
+    boundingBox.setHeight(boundingBox.height() - borderWidths.bottom() - borderWidths.top());
 
     // FIXME: This function advertises returning a quad, but it actually returns a bounding box (so there is no rotation, for instance).
     return wkQuadFromFloatQuad(WebCore::FloatQuad(boundingBox));
@@ -508,7 +502,7 @@ id<DOMEventTarget> kit(WebCore::EventTarget* target)
     RefPtr frame = node->document().frame();
     if (!frame)
         return nil;
-    return createDragImageForNode(*frame, node).autorelease();
+    return WebCore::DragController::dragImageForNode(*frame, node).takePlatformImage().autorelease();
 }
 
 #endif
@@ -556,7 +550,7 @@ id<DOMEventTarget> kit(WebCore::EventTarget* target)
 
     if (textIndicator) {
         if (RefPtr image = textIndicator->contentImage()) {
-            auto contentImage = image->nativeImage()->platformImage();
+            auto contentImage = image->platformImage();
             *cgImage = contentImage.autorelease();
         }
     }
@@ -608,7 +602,7 @@ id<DOMEventTarget> kit(WebCore::EventTarget* target)
     if (!frame)
         return nil;
 
-    auto renderedImage = createDragImageForRange(*frame, range, forceBlackText);
+    auto renderedImage = WebCore::DragController::dragImageForRange(*frame, range, forceBlackText).takePlatformImage();
 
 #if PLATFORM(MAC)
     // iOS uses CGImageRef for drag images, which doesn't support separate logical/physical sizes.
@@ -644,13 +638,13 @@ id<DOMEventTarget> kit(WebCore::EventTarget* target)
 
 - (NSImage *)image
 {
-    CheckedPtr renderer = protect(core(self))->renderer();
-    if (!is<WebCore::RenderImage>(renderer))
+    CheckedPtr renderImage = dynamicDowncast<WebCore::RenderImage>(protect(core(self))->renderer());
+    if (!renderImage)
         return nil;
-    RefPtr cachedImage = downcast<WebCore::RenderImage>(*renderer).cachedImage();
+    RefPtr cachedImage = renderImage->cachedImage();
     if (!cachedImage || cachedImage->errorOccurred())
         return nil;
-    return protect(cachedImage->image())->adapter().nsImage();
+    return protect(cachedImage->image())->adapter().nsImage(renderImage->concreteObjectSizeForElementImage());
 }
 
 #endif
@@ -672,13 +666,13 @@ id<DOMEventTarget> kit(WebCore::EventTarget* target)
 - (NSData *)_imageTIFFRepresentation
 {
     // FIXME: Could we move this function to WebCore::Element and autogenerate?
-    CheckedPtr renderer = protect(core(self))->renderer();
-    if (!is<WebCore::RenderImage>(renderer))
+    CheckedPtr renderImage = dynamicDowncast<WebCore::RenderImage>(protect(core(self))->renderer());
+    if (!renderImage)
         return nil;
-    RefPtr cachedImage = downcast<WebCore::RenderImage>(*renderer).cachedImage();
+    RefPtr cachedImage = renderImage->cachedImage();
     if (!cachedImage || cachedImage->errorOccurred())
         return nil;
-    return (__bridge NSData *)protect(cachedImage->image())->adapter().tiffRepresentation();
+    return (__bridge NSData *)protect(cachedImage->image())->adapter().tiffRepresentation(renderImage->concreteObjectSizeForElementImage());
 }
 
 #endif

@@ -89,11 +89,11 @@ protected:
     WEBCORE_EXPORT void displayDidRefresh(const DisplayUpdate&);
 
 private:
-    bool NODELETE firedAndReachedMaxUnscheduledFireCount() WTF_REQUIRES_LOCK(m_lock);
+    bool LEGACY_NODELETE firedAndReachedMaxUnscheduledFireCount() WTF_REQUIRES_LOCK(m_lock);
 
     virtual void adjustPreferredFramesPerSecond(FramesPerSecond) { }
 
-    std::optional<FramesPerSecond> maximumClientPreferredFramesPerSecond() const;
+    std::optional<FramesPerSecond> LEGACY_NODELETE maximumClientPreferredFramesPerSecond() const;
     void computeMaxPreferredFramesPerSecond();
 
     HashSet<CheckedPtr<DisplayRefreshMonitorClient>> m_clients;

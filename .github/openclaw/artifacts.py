@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 
-BASE = '3d3257150c40a1aabdc5f8b48d5b33d0413674cb'
+BASE = 'e66916298091dd12469076fd854e135b03fb16ff'
 HISTORY_FLOOR = '5718a6ec579b98362ea7276a426deedcc6281ef5'
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = json.loads((ROOT / '.github/openclaw/variants.json').read_text())
@@ -63,6 +63,17 @@ def source():
             'patch_sha256': hashlib.sha256(patch).hexdigest()})
     return {'source': sha, 'base': BASE, 'history_floor': HISTORY_FLOOR, 'patches': patches}
 
+def write_build_defines(artifact, lane, sha):
+    # Lane-only flags affect public class layouts; carry upstream's header contract.
+    with (artifact / 'include/cmakeconfig.h').open('a') as f:
+        f.write('\n#define BUN_WEBKIT_VERSION "' + sha + '"\n')
+        f.write('#define BUN_WEBKIT_ENABLE_AOT ' + str(lane['aot']) + '\n')
+        f.write('#if !defined(ENABLE_AOT)\n#define ENABLE_AOT ' + str(lane['aot']) + '\n#endif\n')
+        for define in lane['defines'].split():
+            name, value = define.split('=', 1)
+            f.write('#if !defined(' + name + ')\n#define ' + name + ' ' + value + '\n#endif\n')
+
+
 def lane_definitions():
     return json.loads(capture('node', '.github/scripts/lanes.mjs', '--json'))
 
@@ -106,8 +117,7 @@ def build(label, destination):
     build_command = json.loads(capture('node', '.github/scripts/lanes.mjs', 'build', label, '--output', str(artifact), '--base-image', base_tag, '--dry-run'))
     build_command[-1:-1] = ['--metadata-file', str(provenance/'artifact-build.json')]
     run(*build_command)
-    with (artifact/'include/cmakeconfig.h').open('a') as f:
-        f.write('\n#define BUN_WEBKIT_VERSION "'+sha+'"\n')
+    write_build_defines(artifact, lane, sha)
     write(artifact/'package.json', {'name':label,'version':'0.0.1-'+sha,'os':[lane['package_os']],'cpu':[lane['package_cpu']],'repository':'https://github.com/openclaw/WebKit'})
     for path in (artifact/'lib').glob('*.so*'):
         if path.is_file() or path.is_symlink():

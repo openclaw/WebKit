@@ -29,11 +29,14 @@
 
 #if ENABLE(B3_JIT)
 
+#include "AirBlockEntryClobberSpecial.h"
 #include "AirBlockInsertionSet.h"
 #include "AirCCallSpecial.h"
 #include "AirCCallingConvention.h"
 #include "AirCode.h"
 #include "AirEmitShuffle.h"
+#include "AirExtendedForms.h"
+#include "AirFixSpillsAfterTerminals.h"
 #include "AirHelpers.h"
 #include "AirInsertionSet.h"
 #include "AirInstInlines.h"
@@ -44,9 +47,11 @@
 #include "B3CCallValue.h"
 #include "B3CheckSpecial.h"
 #include "B3Commutativity.h"
+#include "B3CompareChains.h"
 #include "B3Dominators.h"
 #include "B3ExtractValue.h"
 #include "B3FenceValue.h"
+#include "B3ImmediateForms.h"
 #include "B3MemoryValueInlines.h"
 #include "B3PatchpointSpecial.h"
 #include "B3PatchpointValue.h"
@@ -66,6 +71,7 @@
 #include <wtf/IndexSet.h>
 #include <wtf/Scope.h>
 #include <wtf/StdLibExtras.h>
+#include <wtf/TZoneMallocInlines.h>
 
 // On Windows, there's macros for these which interfere with the opcodes. The
 // undefs have to follow every #include: <windows.h> defines them, so anything
@@ -125,7 +131,6 @@ public:
         , m_phiToTmp(procedure.values().size())
         , m_blockToBlock(procedure.size())
         , m_useCounts(procedure)
-        , m_phiChildren(procedure)
         , m_dominators(procedure.dominators())
         , m_procedure(procedure)
         , m_code(procedure.code())
@@ -176,12 +181,21 @@ public:
                     ensureTupleTmps(value, m_tupleValueToTmps);
                 break;
             }
+            case ArgumentReg: {
+                Reg reg = value->as<ArgumentRegValue>()->argumentReg();
+                if (m_procedure.policy().addressing.namesPinnedRegistersDirectly && reg.isGPR() && m_code.isPinned(reg) && reg != Reg(MacroAssembler::framePointerRegister))
+                    m_valueToTmp[value] = Tmp(reg);
+                break;
+            }
             default:
                 break;
             }
         }
 
         RELEASE_ASSERT(m_procedure.variables().isEmpty());
+
+        if (m_procedure.policy().selection.extendsInstructionSelection)
+            findPhisKeptZeroExtended();
 
         // Figure out which blocks are not rare.
         m_fastWorklist.push(m_procedure[0]);
@@ -196,7 +210,7 @@ public:
 
         // Lower defs before uses on a global level. This is a good heuristic to lock down a
         // hoisted address expression before we duplicate it back into the loop.
-        for (B3::BasicBlock* block : m_procedure.blocksInPreOrder()) {
+        for (B3::BasicBlock* block : m_procedure.cachedBlocksInPreOrder()) {
             m_block = block;
 
             m_isRare = !m_fastWorklist.saw(block);
@@ -217,18 +231,20 @@ public:
                 m_value = block->at(i);
                 if (m_locked.contains(m_value))
                     continue;
-                m_insts.append(Vector<Inst>());
+                m_insts.beginGroup();
                 if (B3LowerToAirInternal::verbose)
                     dataLog("Lowering ", deepDump(m_procedure, m_value), ":\n");
                 lower();
                 if (B3LowerToAirInternal::verbose) {
-                    for (Inst& inst : m_insts.last())
+                    for (Inst& inst : m_insts.last().mutableSpan().subspan(m_insts.starts.last()))
                         dataLog("    ", inst, "\n");
                 }
             }
 
             finishAppendingInstructions(m_blockToBlock[block]);
         }
+
+        insertBlockEntryClobbers();
 
         m_blockInsertionSet.execute();
 
@@ -239,7 +255,48 @@ public:
     }
 
 private:
-    bool NODELETE shouldCopyPropagate(Value* value)
+    void insertBlockEntryClobbers()
+    {
+        if (!m_procedure.hasEverAdded(Patchpoint))
+            return;
+        IndexMap<B3::BasicBlock*, RegisterSet> clobbersAtEntry(m_procedure.size());
+        bool hasClobbers = false;
+        for (B3::BasicBlock* block : m_procedure) {
+            auto* patchpoint = block->last()->as<PatchpointValue>();
+            if (!patchpoint || !patchpoint->numberOfSuccessorClobbers())
+                continue;
+            for (unsigned i = 0; i < block->numSuccessors(); ++i) {
+                RegisterSet clobbers = patchpoint->lateClobberedOnSuccessor(i);
+                if (clobbers.isEmpty())
+                    continue;
+                clobbersAtEntry[block->successorBlock(i)].merge(clobbers);
+                hasClobbers = true;
+            }
+        }
+        if (!hasClobbers)
+            return;
+        Air::InsertionSet insertionSet(m_code);
+        Vector<std::pair<RegisterSet, Air::Special*>, 2> specials;
+        auto specialFor = [&](const RegisterSet& clobbers) {
+            for (auto& [registers, special] : specials) {
+                if (registers == clobbers)
+                    return special;
+            }
+            Air::Special* special = m_code.addSpecial(makeUnique<Air::BlockEntryClobberSpecial>(clobbers));
+            specials.append({ clobbers, special });
+            return special;
+        };
+        for (B3::BasicBlock* block : m_procedure) {
+            if (clobbersAtEntry[block].isEmpty())
+                continue;
+            Inst inst(Air::Patch, block->at(0), Arg::special(specialFor(clobbersAtEntry[block])));
+            inst.fillForms();
+            insertionSet.insertInst(0, WTF::move(inst));
+            insertionSet.execute(m_blockToBlock[block]);
+        }
+    }
+
+    bool LEGACY_NODELETE shouldCopyPropagate(Value* value)
     {
         switch (value->opcode()) {
         case Trunc:
@@ -260,6 +317,14 @@ private:
         }
     }
 
+    template<typename... Arguments>
+    bool isValidForm(Air::Opcode opcode, Arguments... kinds) const
+    {
+        if (!m_procedure.policy().selection.extendsInstructionSelection && Air::isExtendedForm(opcode, kinds...))
+            return false;
+        return Air::isValidForm(m_code.targetFeatures(), opcode, kinds...);
+    }
+
     class ArgPromise {
         WTF_MAKE_NONCOPYABLE(ArgPromise);
     public:
@@ -271,13 +336,14 @@ private:
         {
         }
         
-        void NODELETE swap(ArgPromise& other)
+        void LEGACY_NODELETE swap(ArgPromise& other)
         {
             std::swap(m_arg, other.m_arg);
             std::swap(m_value, other.m_value);
             std::swap(m_wasConsumed, other.m_wasConsumed);
             std::swap(m_wasWrapped, other.m_wasWrapped);
             std::swap(m_traps, other.m_traps);
+            std::swap(m_trapOrigin, other.m_trapOrigin);
         }
         
         ArgPromise(ArgPromise&& other)
@@ -285,7 +351,7 @@ private:
             swap(other);
         }
         
-        ArgPromise& NODELETE operator=(ArgPromise&& other)
+        ArgPromise& LEGACY_NODELETE operator=(ArgPromise&& other)
         {
             swap(other);
             return *this;
@@ -297,12 +363,17 @@ private:
                 RELEASE_ASSERT(m_wasWrapped);
         }
         
-        void NODELETE setTraps(bool value)
+        void LEGACY_NODELETE setTraps(bool value)
         {
             m_traps = value;
         }
 
-        static ArgPromise NODELETE tmp(Value* value)
+        void setTrapOrigin(Value* value)
+        {
+            m_trapOrigin = value;
+        }
+
+        static ArgPromise LEGACY_NODELETE tmp(Value* value)
         {
             ArgPromise result;
             result.m_value = value;
@@ -311,14 +382,14 @@ private:
 
         explicit operator bool() const { return m_arg || m_value; }
 
-        Arg::Kind NODELETE kind() const
+        Arg::Kind LEGACY_NODELETE kind() const
         {
             if (!m_arg && m_value)
                 return Arg::Tmp;
             return m_arg.kind();
         }
 
-        const Arg& NODELETE peek() const
+        const Arg& LEGACY_NODELETE peek() const
         {
             return m_arg;
         }
@@ -338,6 +409,8 @@ private:
         {
             Inst result(std::forward<Args>(args)...);
             result.kind.effects |= m_traps;
+            if (m_trapOrigin)
+                result.origin = m_trapOrigin;
             m_wasWrapped = true;
             return result;
         }
@@ -353,6 +426,7 @@ private:
         bool m_wasConsumed { false };
         bool m_wasWrapped { false };
         bool m_traps { false };
+        Value* m_trapOrigin { nullptr };
     };
 
     // Consider using tmpPromise() in cases where you aren't sure that you want to pin the value yet.
@@ -451,12 +525,12 @@ private:
         return tmp;
     }
 
-    ArgPromise NODELETE tmpPromise(Value* value)
+    ArgPromise LEGACY_NODELETE tmpPromise(Value* value)
     {
         return ArgPromise::tmp(value);
     }
 
-    Tmp NODELETE tmpForType(Type type)
+    Tmp LEGACY_NODELETE tmpForType(Type type)
     {
         return m_code.newTmp(bankForType(type));
     }
@@ -478,7 +552,7 @@ private:
         RELEASE_ASSERT_NOT_REACHED();
     }
 
-    bool NODELETE canBeInternal(Value* value)
+    bool LEGACY_NODELETE canBeInternal(Value* value)
     {
         // If one of the internal things has already been computed, then we don't want to cause
         // it to be recomputed again.
@@ -505,6 +579,218 @@ private:
             m_locked.add(value);
     }
 
+    Tmp tmpForLowWord(Value* extension)
+    {
+        Value* operand = extension->child(0);
+        bool extensionFoldsOperand = operand->opcode() == Load && canBeInternal(operand);
+        if (m_procedure.policy().selection.extendsInstructionSelection && extensionFoldsOperand && !canBeInternal(extension))
+            return tmp(extension);
+        return tmp(operand);
+    }
+
+    bool tryAppendBranchOnInt32Overflow()
+    {
+        if (!m_procedure.policy().selection.extendsInstructionSelection)
+            return false;
+        Value* comparison = m_value->child(0);
+        if (comparison->opcode() != Equal && comparison->opcode() != NotEqual)
+            return false;
+        for (unsigned i = 0; i < 2; ++i) {
+            Value* extended = comparison->child(i);
+            Value* exact = comparison->child(1 - i);
+            if (extended->opcode() != SExt32 || extended->child(0)->opcode() != Trunc || extended->child(0)->child(0) != exact)
+                continue;
+            if ((exact->opcode() != Add && exact->opcode() != Sub && exact->opcode() != Mul) || exact->type() != Int64)
+                continue;
+            Value* low = extended->child(0);
+            Value* left = exact->child(0);
+            Value* right = exact->child(1);
+            bool rightIsConstant = right->hasInt64() && right->asInt64() == static_cast<int32_t>(right->asInt64()) && isSelectedAsImmediate(exact, right);
+            if (left->opcode() != SExt32 || (right->opcode() != SExt32 && !rightIsConstant))
+                continue;
+            if (extended->owner != m_block || low->owner != m_block || exact->owner != m_block)
+                continue;
+            if (!canBeInternal(extended) || m_useCounts.numUses(exact) != 2 || m_valueToTmp[exact] || m_locked.contains(exact) || m_locked.contains(low) || m_locked.contains(extended))
+                continue;
+            bool hasOtherUserInBlock = false;
+            for (Value* value : *m_block) {
+                if (value == extended)
+                    continue;
+                for (Value* child : value->children())
+                    hasOtherUserInBlock |= child == low;
+            }
+            if (hasOtherUserInBlock)
+                continue;
+
+            auto commitLowWord = [&] (Value* extension) {
+                if (canBeInternal(extension))
+                    commitInternal(extension);
+                return tmpForLowWord(extension);
+            };
+            Tmp result = tmp(low);
+            Tmp leftWord = commitLowWord(left);
+            Arg rightWord = rightIsConstant ? Arg::imm(right->asInt64()) : Arg(commitLowWord(right));
+            Arg overflow = Arg::resCond(MacroAssembler::Overflow);
+            Air::Opcode opcode = exact->opcode() == Add ? Air::BranchAdd32 : exact->opcode() == Sub ? Air::BranchSub32 : Air::BranchMul32;
+            if (!rightIsConstant && isValidForm(opcode, Arg::ResCond, Arg::Tmp, Arg::Tmp, Arg::Tmp))
+                append(opcode, overflow, leftWord, rightWord, result);
+            else {
+                append(Air::Move32, leftWord, result);
+                append(opcode, overflow, rightWord, result);
+            }
+            commitInternal(comparison);
+            commitInternal(extended);
+            commitInternal(low);
+            commitInternal(exact);
+            if (comparison->opcode() == Equal) {
+                auto& successors = m_blockToBlock[m_block]->successors();
+                std::swap(successors[0], successors[1]);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    bool tryAppendBranchOnInt32OverflowInMemory()
+    {
+        if (!isX86() || !m_procedure.policy().selection.extendsInstructionSelection)
+            return false;
+        Value* comparison = m_value->child(0);
+        if (comparison->opcode() != Equal && comparison->opcode() != NotEqual)
+            return false;
+        for (unsigned i = 0; i < 2; ++i) {
+            Value* extended = comparison->child(i);
+            Value* exact = comparison->child(1 - i);
+            if (extended->opcode() != SExt32 || extended->child(0)->opcode() != Trunc || extended->child(0)->child(0) != exact)
+                continue;
+            if ((exact->opcode() != Add && exact->opcode() != Sub) || exact->type() != Int64)
+                continue;
+            Value* low = extended->child(0);
+            Value* left = exact->child(0);
+            Value* right = exact->child(1);
+            bool rightIsConstant = right->hasInt64() && right->asInt64() == static_cast<int32_t>(right->asInt64()) && isSelectedAsImmediate(exact, right);
+            if (left->opcode() != SExt32 || (right->opcode() != SExt32 && !rightIsConstant))
+                continue;
+            auto* load = left->child(0)->as<MemoryValue>();
+            if (!load || load->opcode() != Load || load->hasFence() || load->traps() || load->owner != m_block)
+                continue;
+
+            MemoryValue* store = nullptr;
+            bool canMoveAccesses = false;
+            for (unsigned index = m_index; index--;) {
+                Value* value = m_block->at(index);
+                if (value == load) {
+                    canMoveAccesses = true;
+                    break;
+                }
+                auto* memory = value->as<MemoryValue>();
+                if (!store && memory && memory->opcode() == Store && memory->child(0) == low) {
+                    store = memory;
+                    continue;
+                }
+                Effects effects = value->effects();
+                if (effects.writes || effects.fence || effects.exitsSideways || effects.reads.overlaps(load->range()))
+                    break;
+            }
+            if (!canMoveAccesses || !store || store->hasFence() || store->traps() || store->lastChild() != load->lastChild() || store->offset() != load->offset())
+                continue;
+
+            if (!canBeInternal(extended) || !canBeInternal(left) || !canBeInternal(load) || m_locked.contains(store))
+                continue;
+            if (m_useCounts.numUses(exact) != 2 || m_valueToTmp[exact] || m_locked.contains(exact) || m_useCounts.numUses(low) != 2 || m_valueToTmp[low] || m_locked.contains(low))
+                continue;
+            if (extended->owner != m_block || low->owner != m_block || exact->owner != m_block || left->owner != m_block)
+                continue;
+
+            Air::Opcode opcode = exact->opcode() == Add ? Air::BranchAdd32 : Air::BranchSub32;
+            Arg address = addr(store);
+            if (!isValidForm(opcode, Arg::ResCond, rightIsConstant ? Arg::Imm : Arg::Tmp, address.kind()))
+                continue;
+
+            Arg rightWord = Arg::imm(0);
+            if (rightIsConstant)
+                rightWord = Arg::imm(right->asInt64());
+            else {
+                if (canBeInternal(right))
+                    commitInternal(right);
+                rightWord = tmpForLowWord(right);
+            }
+            append(opcode, Arg::resCond(MacroAssembler::Overflow), rightWord, address);
+            commitInternal(comparison);
+            commitInternal(extended);
+            commitInternal(low);
+            commitInternal(exact);
+            commitInternal(left);
+            commitInternal(load);
+            commitInternal(store);
+            if (comparison->opcode() == Equal) {
+                auto& successors = m_blockToBlock[m_block]->successors();
+                std::swap(successors[0], successors[1]);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    // A word in memory is added to or subtracted from, and the branch asks whether that carried or borrowed.
+    bool tryAppendBranchOnCarryInMemory()
+    {
+        if (!isX86() || !m_procedure.policy().selection.extendsInstructionSelection)
+            return false;
+        Value* comparison = m_value->child(0);
+        if (comparison->opcode() != Below || comparison->child(1)->type() != Int32)
+            return false;
+        Value* compared = comparison->child(0);
+        Value* amount = comparison->child(1);
+        bool adds = compared->opcode() == Add;
+        auto* load = (adds ? compared->child(0) : compared)->as<MemoryValue>();
+        if (!load || load->opcode() != Load || load->hasFence() || load->traps() || load->owner != m_block)
+            return false;
+        auto isChangedWord = [&] (Value* value) {
+            if (value->opcode() != (adds ? Add : Sub) || value->child(0) != load || value->owner != m_block || (adds && value != compared))
+                return false;
+            return value->child(1) == amount || (amount->hasInt32() && value->child(1)->isInt32(amount->asInt32()));
+        };
+
+        MemoryValue* store = nullptr;
+        bool canMoveAccesses = false;
+        for (unsigned index = m_index; index--;) {
+            Value* value = m_block->at(index);
+            if (value == load) {
+                canMoveAccesses = true;
+                break;
+            }
+            auto* memory = value->as<MemoryValue>();
+            if (!store && memory && memory->opcode() == Store && isChangedWord(memory->child(0))) {
+                store = memory;
+                continue;
+            }
+            Effects effects = value->effects();
+            if (effects.writes || effects.fence || effects.exitsSideways || effects.reads.overlaps(load->range()))
+                break;
+        }
+        if (!canMoveAccesses || !store || store->hasFence() || store->traps() || store->lastChild() != load->lastChild() || store->offset() != load->offset())
+            return false;
+        Value* changedWord = store->child(0);
+        auto isUsedOnlyHere = [&] (Value* value, unsigned numberOfUses) {
+            return m_useCounts.numUses(value) == numberOfUses && !m_valueToTmp[value] && !m_locked.contains(value);
+        };
+        if (m_locked.contains(store) || !isUsedOnlyHere(changedWord, adds ? 2 : 1) || !isUsedOnlyHere(load, adds ? 1 : 2))
+            return false;
+
+        Air::Opcode opcode = adds ? Air::BranchAdd32 : Air::BranchSub32;
+        Arg address = addr(store);
+        bool amountIsConstant = amount->hasInt32() && isSelectedAsImmediate(comparison, amount);
+        if (!isValidForm(opcode, Arg::ResCond, amountIsConstant ? Arg::Imm : Arg::Tmp, address.kind()))
+            return false;
+        append(opcode, Arg::resCond(MacroAssembler::Carry), amountIsConstant ? Arg::imm(amount->asInt32()) : Arg(tmp(amount)), address);
+        commitInternal(comparison);
+        commitInternal(changedWord);
+        commitInternal(load);
+        commitInternal(store);
+        return true;
+    }
+
     bool crossesInterference(Value* value)
     {
         // If it's in a foreign block, then be conservative. We could handle this if we were
@@ -513,14 +799,39 @@ private:
         // across. But, it's not clear how useful this would be.
         if (value->owner != m_value->owner)
             return true;
+        if (m_procedure.policy().validation.overlooksWritesBetweenLoadsAndTheirUsers) [[unlikely]]
+            return false;
 
+        if (m_blockWithNextInterference == m_block) {
+            bool result = m_nextInterference[value] < m_index;
+            if (shouldValidateIRAtEachPhase(m_procedure)) [[unlikely]]
+                RELEASE_ASSERT(result == findsInterferenceBefore(value));
+            return result;
+        }
+
+        if (m_blockWithInterferenceSearches != m_block) {
+            m_blockWithInterferenceSearches = m_block;
+            m_valuesVisitedByInterferenceSearches = 0;
+        }
+        bool result = findsInterferenceBefore(value);
+        if (m_valuesVisitedByInterferenceSearches / 16 > m_block->size())
+            computeNextInterference();
+        return result;
+    }
+
+    bool findsInterferenceBefore(Value* value)
+    {
         Effects effects = value->effects();
+        const HeapRange& heapInFrontOfWhichLoadsStay = m_procedure.heapThatLoadsStayInFrontOf();
+        bool staysInFront = heapInFrontOfWhichLoadsStay && effects.reads;
 
         for (unsigned i = m_index; i--;) {
             Value* otherValue = m_block->at(i);
             if (otherValue == value)
                 return false;
-            if (effects.interferes(otherValue->effects()))
+            ++m_valuesVisitedByInterferenceSearches;
+            Effects otherEffects = otherValue->effects();
+            if (effects.interferes(otherEffects) || (staysInFront && otherEffects.writes.overlaps(heapInFrontOfWhichLoadsStay)))
                 return true;
         }
 
@@ -528,7 +839,162 @@ private:
         return true;
     }
 
-    bool NODELETE isMergeableValue(Value* v, B3::Opcode b3Opcode)
+    // Maps ranges of leaves to the lowest index added for any range that overlaps them.
+    class LowestOverlappingIndex {
+    public:
+        static constexpr unsigned none = UINT_MAX;
+
+        explicit LowestOverlappingIndex(unsigned numberOfLeaves)
+            : m_numberOfLeaves(roundUpToPowerOfTwo(std::max(numberOfLeaves, 1u)))
+            , m_coversNode(FillWith { }, 2 * m_numberOfLeaves, none)
+            , m_touchesNode(FillWith { }, 2 * m_numberOfLeaves, none)
+        {
+        }
+
+        void add(unsigned begin, unsigned end, unsigned index)
+        {
+            if (begin >= end)
+                return;
+            forEachAncestor(begin, end, [&](unsigned node) {
+                m_touchesNode[node] = std::min(m_touchesNode[node], index);
+            });
+            forEachCoveredNode(begin, end, [&](unsigned node) {
+                m_coversNode[node] = std::min(m_coversNode[node], index);
+                m_touchesNode[node] = std::min(m_touchesNode[node], index);
+            });
+        }
+
+        unsigned find(unsigned begin, unsigned end) const
+        {
+            unsigned result = none;
+            if (begin >= end)
+                return result;
+            forEachAncestor(begin, end, [&](unsigned node) {
+                result = std::min(result, m_coversNode[node]);
+            });
+            forEachCoveredNode(begin, end, [&](unsigned node) {
+                result = std::min(result, m_touchesNode[node]);
+            });
+            return result;
+        }
+
+    private:
+        template<typename Func>
+        void forEachAncestor(unsigned begin, unsigned end, const Func& func) const
+        {
+            for (unsigned node = begin + m_numberOfLeaves; node; node >>= 1)
+                func(node);
+            for (unsigned node = end - 1 + m_numberOfLeaves; node; node >>= 1)
+                func(node);
+        }
+
+        template<typename Func>
+        void forEachCoveredNode(unsigned begin, unsigned end, const Func& func) const
+        {
+            for (unsigned left = begin + m_numberOfLeaves, right = end + m_numberOfLeaves; left < right; left >>= 1, right >>= 1) {
+                if (left & 1)
+                    func(left++);
+                if (right & 1)
+                    func(--right);
+            }
+        }
+
+        unsigned m_numberOfLeaves;
+        Vector<unsigned> m_coversNode;
+        Vector<unsigned> m_touchesNode;
+    };
+
+    // For each value of m_block: the index of the first later value whose effects interfere with its own.
+    void computeNextInterference()
+    {
+        constexpr unsigned none = LowestOverlappingIndex::none;
+        unsigned size = m_block->size();
+        Vector<Effects> effectsAtIndex(size, [&](size_t index) { return m_block->at(index)->effects(); });
+
+        Vector<unsigned> boundaries;
+        for (const Effects& effects : effectsAtIndex) {
+            for (const HeapSet* set : { &effects.reads, &effects.writes }) {
+                for (const HeapRange& range : set->ranges()) {
+                    boundaries.append(range.begin());
+                    boundaries.append(range.end());
+                }
+            }
+        }
+        std::ranges::sort(boundaries);
+        boundaries.shrink(std::ranges::unique(boundaries).begin() - boundaries.begin());
+        auto leafAt = [&](unsigned boundary) -> unsigned {
+            return std::ranges::lower_bound(boundaries, boundary) - boundaries.begin();
+        };
+
+        LowestOverlappingIndex reads(boundaries.size());
+        LowestOverlappingIndex writes(boundaries.size());
+        auto addTo = [&](LowestOverlappingIndex& indexes, const HeapSet& set, unsigned index) {
+            for (const HeapRange& range : set.ranges())
+                indexes.add(leafAt(range.begin()), leafAt(range.end()), index);
+        };
+        auto findIn = [&](const LowestOverlappingIndex& indexes, const HeapSet& set) {
+            unsigned result = none;
+            for (const HeapRange& range : set.ranges())
+                result = std::min(result, indexes.find(leafAt(range.begin()), leafAt(range.end())));
+            return result;
+        };
+
+        unsigned nextTerminal = none;
+        unsigned nextExitsSideways = none;
+        unsigned nextControlDependent = none;
+        unsigned nextWritesLocalState = none;
+        unsigned nextReadsLocalState = none;
+        unsigned nextWritesPinned = none;
+        unsigned nextReadsPinned = none;
+        unsigned nextFence = none;
+        unsigned nextWrites = none;
+        unsigned nextWriteThatLoadsStayInFrontOf = none;
+        const HeapRange& heapInFrontOfWhichLoadsStay = m_procedure.heapThatLoadsStayInFrontOf();
+
+        m_nextInterference.resize(m_procedure.values().size());
+        for (unsigned index = size; index--;) {
+            const Effects& effects = effectsAtIndex[index];
+            bool isOrderedWithExits = effects.controlDependent || effects.writes || effects.writesPinned;
+
+            unsigned next = none;
+            auto considerIf = [&](bool applies, unsigned other) {
+                if (applies)
+                    next = std::min(next, other);
+            };
+            considerIf(effects.terminal, std::min({ nextTerminal, nextControlDependent, nextWritesLocalState, nextWrites, nextWritesPinned }));
+            considerIf(effects.terminal || effects.writesLocalState || isOrderedWithExits, nextTerminal);
+            considerIf(effects.exitsSideways, std::min({ nextControlDependent, nextWrites, nextWritesPinned }));
+            considerIf(isOrderedWithExits, nextExitsSideways);
+            considerIf(effects.writesLocalState, std::min(nextWritesLocalState, nextReadsLocalState));
+            considerIf(effects.readsLocalState, nextWritesLocalState);
+            considerIf(effects.writesPinned, std::min(nextWritesPinned, nextReadsPinned));
+            considerIf(effects.readsPinned, nextWritesPinned);
+            considerIf(effects.fence, nextFence);
+            considerIf(!!effects.reads, nextWriteThatLoadsStayInFrontOf);
+            next = std::min({ next, findIn(writes, effects.writes), findIn(reads, effects.writes), findIn(writes, effects.reads) });
+            m_nextInterference[m_block->at(index)] = next;
+
+            auto noteIf = [&](bool applies, unsigned& nearest) {
+                if (applies)
+                    nearest = index;
+            };
+            noteIf(effects.terminal, nextTerminal);
+            noteIf(effects.exitsSideways, nextExitsSideways);
+            noteIf(effects.controlDependent, nextControlDependent);
+            noteIf(effects.writesLocalState, nextWritesLocalState);
+            noteIf(effects.readsLocalState, nextReadsLocalState);
+            noteIf(effects.writesPinned, nextWritesPinned);
+            noteIf(effects.readsPinned, nextReadsPinned);
+            noteIf(effects.fence, nextFence);
+            noteIf(!!effects.writes, nextWrites);
+            noteIf(heapInFrontOfWhichLoadsStay && effects.writes.overlaps(heapInFrontOfWhichLoadsStay), nextWriteThatLoadsStayInFrontOf);
+            addTo(reads, effects.reads, index);
+            addTo(writes, effects.writes, index);
+        }
+        m_blockWithNextInterference = m_block;
+    }
+
+    bool LEGACY_NODELETE isMergeableValue(Value* v, B3::Opcode b3Opcode)
     { 
         if (v->opcode() != b3Opcode)
             return false;
@@ -544,15 +1010,15 @@ private:
         // Maybe, the ideal approach is to introduce a decorator (Index@EXT) to the Air operand 
         // to provide an extension opportunity for the specific form under the Air opcode.
         if (isMergeableValue(index, ZExt32))
-            return Arg::index(base, tmp(index->child(0)), scale, offset, MacroAssembler::Extend::ZExt32);
+            return Arg::index(base, tmpForLowWord(index), scale, offset, MacroAssembler::Extend::ZExt32);
         if (isMergeableValue(index, SExt32))
-            return Arg::index(base, tmp(index->child(0)), scale, offset, MacroAssembler::Extend::SExt32);
+            return Arg::index(base, tmpForLowWord(index), scale, offset, MacroAssembler::Extend::SExt32);
 #endif
         return Arg::index(base, tmp(index), scale, offset);
     }
 
     template<IsLegalOffset Int>
-    std::optional<unsigned> NODELETE scaleForShl(Value* shl, Int offset, std::optional<Width> width = std::nullopt)
+    std::optional<unsigned> LEGACY_NODELETE scaleForShl(Value* shl, Int offset, std::optional<Width> width = std::nullopt)
     {
         if (shl->opcode() != Shl)
             return std::nullopt;
@@ -586,6 +1052,9 @@ private:
             return Arg::addr(tmp(address), offset);
         };
         
+        if (address->opcode() == SlotBase && m_procedure.policy().selection.extendsInstructionSelection)
+            return Arg::stack(address->as<SlotBaseValue>()->slot(), offset);
+
         static constexpr unsigned lotsOfUses = 10; // This is arbitrary and we should tune it eventually.
 
         // Only match if the address value isn't used in some large number of places.
@@ -686,6 +1155,10 @@ private:
         }
 
         Arg result = effectiveAddr(value->lastChild(), offset, width);
+        // Whoever handles the trap finds what was dereferenced in one register: the base, or the index beside a pinned base.
+        bool namesDereferencedValue = !result.isIndex() || (result.base().isReg() && m_code.isPinned(result.base().reg()));
+        if (value->traps() && m_procedure.policy().selection.attributesTrapsToAccesses && !namesDereferencedValue)
+            result = Arg::addr(tmp(value->lastChild()), offset);
         RELEASE_ASSERT(result.isValidForm(Air::Move, width));
 
         return result;
@@ -705,6 +1178,20 @@ private:
         return trappingInst(value->traps(), std::forward<Args>(args)...);
     }
     
+    Arg addressOfPinnedConstant(Value* value)
+    {
+        if (!m_procedure.policy().addressing.findPinnedConstant)
+            return Arg();
+        auto* load = value->as<MemoryValue>();
+        if (!load || load->opcode() != Load || load->readsMutability() != Mutability::Immutable || load->controlDependent() || load->traps() || load->hasFence())
+            return Arg();
+        Tmp base = m_valueToTmp[load->lastChild()];
+        if (!base.isReg() || !m_code.isPinned(base.reg()))
+            return Arg();
+        Arg address = Arg::addr(base, load->offset());
+        return address.isValidForm(Air::Move, load->accessWidth()) ? address : Arg();
+    }
+
     ArgPromise loadPromiseAnyOpcode(Value* loadValue, AddrRequestMode mode = AddrRequestMode::NoRestriction)
     {
         RELEASE_ASSERT(loadValue->as<MemoryValue>());
@@ -717,11 +1204,17 @@ private:
         // fences. So, any load motion we introduce here would not be observable.
         if (!isX86() && loadValue->as<MemoryValue>()->hasFence())
             return Arg();
+        bool attributesTrap = loadValue->traps() && m_procedure.policy().selection.attributesTrapsToAccesses;
+        bool patchKeepsCheckAsOrigin = m_value->opcode() == Check;
+        if (attributesTrap && patchKeepsCheckAsOrigin)
+            return Arg();
         Arg loadAddr = addr(loadValue, mode);
         RELEASE_ASSERT(loadAddr);
         ArgPromise result(loadAddr, loadValue);
         if (loadValue->traps())
             result.setTraps(true);
+        if (attributesTrap)
+            result.setTrapOrigin(loadValue);
         return result;
     }
 
@@ -761,7 +1254,7 @@ private:
         return Arg();
     }
 
-    Arg NODELETE bitImm64(Value* value)
+    Arg LEGACY_NODELETE bitImm64(Value* value)
     {
         if (value->hasInt()) {
             int64_t intValue = value->asInt();
@@ -781,7 +1274,7 @@ private:
         return Arg();
     }
 
-    Arg NODELETE fpImm64(Value* value)
+    Arg LEGACY_NODELETE fpImm64(Value* value)
     {
         if (value->hasInt()) {
             int64_t intValue = value->asInt();
@@ -791,7 +1284,7 @@ private:
         return Arg();
     }
 
-    Arg NODELETE fpImm128(Value* value)
+    Arg LEGACY_NODELETE fpImm128(Value* value)
     {
         if (value->hasV128()) {
             auto v128Value = value->asV128();
@@ -801,7 +1294,7 @@ private:
         return Arg();
     }
 
-    Arg NODELETE zeroReg()
+    Arg LEGACY_NODELETE zeroReg()
     {
         return Arg::zeroReg();
     }
@@ -840,6 +1333,79 @@ private:
             func(tmps[i], tuple[i], i);
     }
 
+    // Whether the upper half of the Tmp may hold something. What an instruction of 32 bits computes has zeros there.
+    bool mayHaveUpperHalf(Value* value) const
+    {
+        switch (value->opcode()) {
+        case Phi:
+            return !m_phisKeptZeroExtended.contains(value);
+        case Identity:
+        case Opaque:
+            return mayHaveUpperHalf(value->child(0));
+        case Trunc:
+        case ArgumentReg:
+        case Patchpoint:
+        case B3::CCall:
+        case Extract:
+        case Select:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    // The counter of a loop is widened for every address that it is part of. That is a copy on every turn unless every value that the Phi is handed is known to have zeros in its
+    // upper half: then the register allocator gives both one register. So such a Phi is handed its values by moves of 32 bits. A move from a value that has zeros there anyway is no
+    // instruction in the end. One from a value that was cut off 64 bits is, and there is one on each way in, so the Phi must be widened more than twice as often as it is handed such values.
+    void findPhisKeptZeroExtended()
+    {
+        struct Candidate {
+            Value* phi { nullptr };
+            double frequencyOfExtensions { 0 };
+        };
+        Vector<Candidate, 8> candidates;
+        Vector<std::pair<UpsilonValue*, double>, 16> upsilons;
+        IndexMap<Value*, unsigned> candidateOfPhi(m_procedure.values().size());
+        for (B3::BasicBlock* block : m_procedure) {
+            for (Value* value : *block) {
+                if (value->opcode() != ZExt32 || value->child(0)->opcode() != Phi)
+                    continue;
+                unsigned& index = candidateOfPhi[value->child(0)];
+                if (!index) {
+                    candidates.append({ value->child(0), 0 });
+                    index = candidates.size();
+                }
+                candidates[index - 1].frequencyOfExtensions += block->frequency();
+            }
+        }
+        if (candidates.isEmpty())
+            return;
+        for (B3::BasicBlock* block : m_procedure) {
+            for (Value* value : *block) {
+                auto* upsilon = value->as<UpsilonValue>();
+                if (upsilon && candidateOfPhi[upsilon->phi()])
+                    upsilons.append({ upsilon, block->frequency() });
+            }
+        }
+        // A Phi that is kept so hands zeros on to the next.
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (const Candidate& candidate : candidates) {
+                if (m_phisKeptZeroExtended.contains(candidate.phi))
+                    continue;
+                double frequencyOfMoves = 0;
+                for (auto [upsilon, frequency] : upsilons) {
+                    if (upsilon->phi() == candidate.phi && upsilon->child(0) != candidate.phi && mayHaveUpperHalf(upsilon->child(0)))
+                        frequencyOfMoves += frequency;
+                }
+                if (candidate.frequencyOfExtensions > 2 * frequencyOfMoves) {
+                    m_phisKeptZeroExtended.add(candidate.phi);
+                    changed = true;
+                }
+            }
+        }
+    }
+
     void moveToTmp(Air::Opcode opcode, Air::Arg source, Air::Tmp dest)
     {
         switch (opcode) {
@@ -871,7 +1437,7 @@ private:
     }
 
     // By convention, we use Oops to mean "I don't know".
-    Air::Opcode NODELETE tryOpcodeForType(
+    Air::Opcode LEGACY_NODELETE tryOpcodeForType(
         Air::Opcode opcode32, Air::Opcode opcode64, Air::Opcode opcodeDouble, Air::Opcode opcodeFloat, Type type)
     {
         Air::Opcode opcode;
@@ -896,12 +1462,12 @@ private:
         return opcode;
     }
 
-    Air::Opcode NODELETE tryOpcodeForType(Air::Opcode opcode32, Air::Opcode opcode64, Type type)
+    Air::Opcode LEGACY_NODELETE tryOpcodeForType(Air::Opcode opcode32, Air::Opcode opcode64, Type type)
     {
         return tryOpcodeForType(opcode32, opcode64, Air::Oops, Air::Oops, type);
     }
 
-    Air::Opcode NODELETE opcodeForType(
+    Air::Opcode LEGACY_NODELETE opcodeForType(
         Air::Opcode opcode32, Air::Opcode opcode64, Air::Opcode opcodeDouble, Air::Opcode opcodeFloat, Type type)
     {
         Air::Opcode opcode = tryOpcodeForType(opcode32, opcode64, opcodeDouble, opcodeFloat, type);
@@ -909,7 +1475,7 @@ private:
         return opcode;
     }
 
-    Air::Opcode NODELETE opcodeForType(Air::Opcode opcode32, Air::Opcode opcode64, Type type)
+    Air::Opcode LEGACY_NODELETE opcodeForType(Air::Opcode opcode32, Air::Opcode opcode64, Type type)
     {
         return tryOpcodeForType(opcode32, opcode64, Air::Oops, Air::Oops, type);
     }
@@ -942,7 +1508,7 @@ private:
         append(opcode, result);
     }
 
-    Air::Opcode NODELETE opcodeBasedOnShiftKind(B3::Opcode b3Opcode, 
+    Air::Opcode LEGACY_NODELETE opcodeBasedOnShiftKind(B3::Opcode b3Opcode, 
         Air::Opcode shl32, Air::Opcode shl64, 
         Air::Opcode sshr32, Air::Opcode sshr64, 
         Air::Opcode zshr32, Air::Opcode zshr64)
@@ -978,8 +1544,15 @@ private:
         
         // We recognize when a child is a Phi that has this value as one of its children. We're very
         // conservative about this; for example we don't even consider transitive Phi children.
-        bool leftIsPhiWithThis = m_phiChildren[left].transitivelyUses(m_value);
-        bool rightIsPhiWithThis = m_phiChildren[right].transitivelyUses(m_value);
+        auto isPhiWithThis = [&] (Value* value) {
+            if (value->opcode() != Phi)
+                return false;
+            if (!m_phiChildren)
+                m_phiChildren.emplace(m_procedure);
+            return (*m_phiChildren)[value].transitivelyUses(m_value);
+        };
+        bool leftIsPhiWithThis = isPhiWithThis(left);
+        bool rightIsPhiWithThis = isPhiWithThis(right);
 
         if (leftIsPhiWithThis != rightIsPhiWithThis)
             return rightIsPhiWithThis;
@@ -1280,7 +1853,7 @@ private:
         return Inst(move, m_value, tmp(value), dest);
     }
     
-    Air::Opcode NODELETE storeOpcode(Width width, Bank bank)
+    Air::Opcode LEGACY_NODELETE storeOpcode(Width width, Bank bank)
     {
         using namespace Air;
         switch (width) {
@@ -1307,7 +1880,7 @@ private:
             }
             break;
         case Width128:
-            RELEASE_ASSERT(Options::useWasmSIMD());
+            RELEASE_ASSERT(m_procedure.policy().upstream.allowsSIMD);
             RELEASE_ASSERT(bank == FP);
             return MoveVector;
         }
@@ -1343,7 +1916,7 @@ private:
     }
 
     template<Air::Opcode i8, Air::Opcode i16, Air::Opcode i32, Air::Opcode i64, Air::Opcode f32, Air::Opcode f64>
-    constexpr Air::Opcode NODELETE simdOpcode(SIMDLane lane)
+    constexpr Air::Opcode LEGACY_NODELETE simdOpcode(SIMDLane lane)
     {
         if (scalarTypeIsFloatingPoint(lane)) {
             switch (elementByteSize(lane)) {
@@ -1369,7 +1942,7 @@ private:
     }
 
     template<Air::Opcode unsignedI8, Air::Opcode signedI8, Air::Opcode unsignedI16, Air::Opcode signedI16, Air::Opcode i32, Air::Opcode i64, Air::Opcode f32, Air::Opcode f64>
-    constexpr Air::Opcode NODELETE simdOpcode(SIMDLane lane, SIMDSignMode signMode)
+    constexpr Air::Opcode LEGACY_NODELETE simdOpcode(SIMDLane lane, SIMDSignMode signMode)
     {
         if (scalarTypeIsFloatingPoint(lane)) {
             switch (elementByteSize(lane)) {
@@ -1691,7 +2264,7 @@ private:
     template<typename... Arguments>
     void append(Air::Kind kind, Arguments&&... arguments)
     {
-        m_insts.last().append(Inst(kind, m_value, std::forward<Arguments>(arguments)...));
+        m_insts.last().constructAndAppend(kind, m_value, std::forward<Arguments>(arguments)...);
     }
     
     template<typename... Arguments>
@@ -1709,15 +2282,29 @@ private:
         m_insts.last().append(inst);
     }
     
+    void appendPatch(StackmapValue* stackmap, Vector<Arg, 8>&& args)
+    {
+        Inst inst(Air::Patch, stackmap, WTF::move(args));
+        inst.fillForms();
+        stackmap->freezeConstraints();
+        m_insts.last().append(WTF::move(inst));
+    }
+
     void finishAppendingInstructions(Air::BasicBlock* target)
     {
         // Now append the instructions. m_insts contains them in reverse order, so we process
         // it in reverse.
-        for (unsigned i = m_insts.size(); i--;) {
-            for (Inst& inst : m_insts[i])
-                target->appendInst(WTF::move(inst));
+        Air::BasicBlock::InstList& list = target->insts();
+        list.reserveCapacity(list.size() + m_insts.insts.size());
+        unsigned end = m_insts.insts.size();
+        for (unsigned i = m_insts.starts.size(); i--;) {
+            unsigned start = m_insts.starts[i];
+            for (unsigned index = start; index < end; ++index)
+                list.unsafeAppendWithoutCapacityCheck(WTF::move(m_insts.insts[index]));
+            end = start;
         }
-        m_insts.shrink(0);
+        m_insts.insts.shrink(0);
+        m_insts.starts.shrink(0);
     }
     
     Air::BasicBlock* newBlock()
@@ -1740,7 +2327,7 @@ private:
         nextBlock->successors() = block->successors();
         block->successors().clear();
         
-        m_insts.append(Vector<Inst>());
+        m_insts.beginGroup();
     }
     
     template<typename T, typename... Arguments>
@@ -1974,6 +2561,12 @@ private:
             inverted = !inverted;
         }
 
+        // ZExt32(x) and SExt32(x) are zero exactly when x is.
+        if (m_procedure.policy().selection.extendsInstructionSelection && (value->opcode() == ZExt32 || value->opcode() == SExt32) && value != m_value && canCommitInternal && canBeInternal(value)) {
+            commitInternal(value);
+            value = value->child(0);
+        }
+
         auto createRelCond = [&] (
             MacroAssembler::RelationalCondition relationalCondition,
             MacroAssembler::DoubleCondition doubleCondition) {
@@ -1996,6 +2589,8 @@ private:
 
                 auto tryCompareLoadImm = [&] (
                     Width width, B3::Opcode loadOpcode, Arg::Signedness signedness) -> Inst {
+                    if (left->opcode() != loadOpcode)
+                        return Inst();
                     if (rightImm && rightImm.isRepresentableAs(width, signedness)) {
                         if (Inst result = tryCompare(width, loadPromise(left, loadOpcode), rightImm)) {
                             commitInternal(left);
@@ -2045,14 +2640,18 @@ private:
                     // Now handle compares that involve a load. It's not obvious that it's better to
                     // handle this before the immediate cases or not. Probably doesn't matter.
 
-                    if (Inst result = tryCompare(width, loadPromise(left), tmpPromise(right))) {
-                        commitInternal(left);
-                        return result;
+                    if (left->opcode() == Load) {
+                        if (Inst result = tryCompare(width, loadPromise(left), tmpPromise(right))) {
+                            commitInternal(left);
+                            return result;
+                        }
                     }
                 
-                    if (Inst result = tryCompare(width, tmpPromise(left), loadPromise(right))) {
-                        commitInternal(right);
-                        return result;
+                    if (right->opcode() == Load) {
+                        if (Inst result = tryCompare(width, tmpPromise(left), loadPromise(right))) {
+                            commitInternal(right);
+                            return result;
+                        }
                     }
                 }
 
@@ -2153,7 +2752,7 @@ private:
                 }
                 
                 auto tryTestLoadImm = [&] (Width width, Arg::Signedness signedness, B3::Opcode loadOpcode) -> Inst {
-                    if (!hasRightConst)
+                    if (!hasRightConst || left->opcode() != loadOpcode)
                         return Inst();
                     // Signed loads will create high bits, so if the immediate has high bits
                     // then we cannot proceed. Consider BitAnd(Load8S(ptr), 0x101). This cannot
@@ -2214,14 +2813,18 @@ private:
                     // Now handle test's that involve a load.
                     
                     Width width = value->child(0)->resultWidth();
-                    if (Inst result = tryTest(width, loadPromise(left), tmpPromise(right))) {
-                        commitInternal(left);
-                        return result;
+                    if (left->opcode() == Load) {
+                        if (Inst result = tryTest(width, loadPromise(left), tmpPromise(right))) {
+                            commitInternal(left);
+                            return result;
+                        }
                     }
                     
-                    if (Inst result = tryTest(width, tmpPromise(left), loadPromise(right))) {
-                        commitInternal(right);
-                        return result;
+                    if (right->opcode() == Load) {
+                        if (Inst result = tryTest(width, tmpPromise(left), loadPromise(right))) {
+                            commitInternal(right);
+                            return result;
+                        }
                     }
                 }
 
@@ -2252,6 +2855,14 @@ private:
                 return Inst();
             }
         };
+
+        bool isShared = value != m_value && !(canCommitInternal && canBeInternal(value));
+        if (isShared && value->opcode() == BitAnd && !m_locked.contains(value->child(0))) {
+            if (Arg mask = addressOfPinnedConstant(value->child(1))) {
+                if (Inst result = tryTest(width, tmpPromise(value->child(0)), mask))
+                    return result;
+            }
+        }
 
         if (FusionResult fusionResult = prepareToFuse(value)) {
             if (Inst result = attemptFused()) {
@@ -2303,13 +2914,9 @@ private:
         return test(width, resCond, leftPromise, rightPromise);
     }
 
-#if CPU(ARM64)
     // ARM64 conditional compare (ccmp) optimization.
     // Converts chains of comparisons like (a == b && c == d) into ccmp instruction sequences.
     // This reduces branches and can improve performance by avoiding branch mispredictions.
-
-    static constexpr unsigned maxCompareChainSize = 4;
-#endif
 
     class CompareChainNode {
         WTF_MAKE_TZONE_ALLOCATED(CompareChainNode);
@@ -2319,14 +2926,14 @@ private:
 
         CompareChainNode() = default;
 
-        bool NODELETE isComparison() const { return type == COMPARE; }
-        bool NODELETE isLogicOp() const { return type == AND || type == OR; }
-        bool NODELETE isLegalFirstCombine() const
+        bool LEGACY_NODELETE isComparison() const { return type == COMPARE; }
+        bool LEGACY_NODELETE isLogicOp() const { return type == AND || type == OR; }
+        bool LEGACY_NODELETE isLegalFirstCombine() const
         {
             return left->isComparison() && right->isComparison();
         }
 
-        void NODELETE setCondition(MacroAssembler::RelationalCondition cond) {
+        void LEGACY_NODELETE setCondition(MacroAssembler::RelationalCondition cond) {
           ASSERT(isLogicOp());
           relCond = cond;
           if (requiresNegation) {
@@ -2335,7 +2942,7 @@ private:
           }
         }
 
-        void NODELETE markRequiresNegation()
+        void LEGACY_NODELETE markRequiresNegation()
         {
             if (isComparison()) {
                 // Immediately negate the condition for leaf nodes
@@ -2365,7 +2972,7 @@ private:
 
     class CompareSequence {
     public:
-        void NODELETE setInitialCompare(Air::Opcode opcode, Value* left, Value* right)
+        void LEGACY_NODELETE setInitialCompare(Air::Opcode opcode, Value* left, Value* right)
         {
             m_initialLeft = left;
             m_initialRight = right;
@@ -2373,22 +2980,22 @@ private:
             m_hasInitialCompare = true;
         }
 
-        bool NODELETE hasInitialCompare() const { return m_hasInitialCompare; }
-        Value* NODELETE initialLeft() const { return m_initialLeft; }
-        Value* NODELETE initialRight() const { return m_initialRight; }
-        Air::Opcode NODELETE initialOpcode() const { return m_initialOpcode; }
+        bool LEGACY_NODELETE hasInitialCompare() const { return m_hasInitialCompare; }
+        Value* LEGACY_NODELETE initialLeft() const { return m_initialLeft; }
+        Value* LEGACY_NODELETE initialRight() const { return m_initialRight; }
+        Air::Opcode LEGACY_NODELETE initialOpcode() const { return m_initialOpcode; }
 
         void addConditionalCompare(Air::Opcode opcode, MacroAssembler::RelationalCondition ccmpCondition, MacroAssembler::RelationalCondition defaultFlags, Value* left, Value* right)
         {
             m_conditionalCompares.append({ ccmpCondition, defaultFlags, left, right, opcode });
         }
 
-        const Vector<ConditionalCompare, 16>& NODELETE conditionalCompares() const
+        const Vector<ConditionalCompare, 16>& LEGACY_NODELETE conditionalCompares() const
         {
             return m_conditionalCompares;
         }
 
-        size_t NODELETE size() const { return m_conditionalCompares.size(); }
+        size_t LEGACY_NODELETE size() const { return m_conditionalCompares.size(); }
 
     private:
         Value* m_initialLeft { nullptr };
@@ -2400,7 +3007,7 @@ private:
 
 #if CPU(ARM64)
 
-    static bool NODELETE isComparisonOpcode(B3::Opcode opcode)
+    static bool LEGACY_NODELETE isComparisonOpcode(B3::Opcode opcode)
     {
         switch (opcode) {
         case Equal:
@@ -2419,7 +3026,7 @@ private:
         }
     }
 
-    static MacroAssembler::RelationalCondition NODELETE relationalConditionForOpcode(B3::Opcode opcode)
+    static MacroAssembler::RelationalCondition LEGACY_NODELETE relationalConditionForOpcode(B3::Opcode opcode)
     {
         switch (opcode) {
         case Equal:
@@ -2462,7 +3069,7 @@ private:
     //     └─────────────────┴─────┴─────┴─────┴─────┘
     // B3 LessThan maps to Below (ConditionLO = C==0) not LessThan (ConditionLT = N!=V)
     // B3 LessEqual maps to BelowOrEqual (ConditionLS = C==0 || Z==1) not LessThanOrEqual (ConditionLE = N!=V || Z==1)
-    static MacroAssembler::RelationalCondition NODELETE floatRelationalConditionForOpcode(B3::Opcode opcode)
+    static MacroAssembler::RelationalCondition LEGACY_NODELETE floatRelationalConditionForOpcode(B3::Opcode opcode)
     {
         switch (opcode) {
         case Equal:
@@ -2483,7 +3090,7 @@ private:
         }
     }
 
-    static Air::Opcode NODELETE compareOnFlagsOpcodeForType(B3::Type type)
+    static Air::Opcode LEGACY_NODELETE compareOnFlagsOpcodeForType(B3::Type type)
     {
         switch (type.kind()) {
         case Float:
@@ -2500,7 +3107,7 @@ private:
         }
     }
 
-    static Air::Opcode NODELETE compareConditionallyOnFlagsOpcodeForType(B3::Type type)
+    static Air::Opcode LEGACY_NODELETE compareConditionallyOnFlagsOpcodeForType(B3::Type type)
     {
         switch (type.kind()) {
         case Float:
@@ -2757,7 +3364,7 @@ private:
 
     // Check if an immediate can be encoded in a ccmp instruction.
     // ccmp supports 5-bit immediates (0-31 for ccmp, -31 to -1 for ccmn).
-    static bool NODELETE isValidConditionalCompareImmediate(int64_t value)
+    static bool LEGACY_NODELETE isValidConditionalCompareImmediate(int64_t value)
     {
         return -31 <= value && value <= 31;
     }
@@ -2765,7 +3372,7 @@ private:
     // Calculate the NZCV default flags for a condition.
     // This is what the flags will be set to if the ccmp predicate is false.
     // Strategy: set the MINIMUM flags needed to make the condition evaluate to true.
-    static unsigned NODELETE nzcvForCondition(MacroAssembler::RelationalCondition cond)
+    static unsigned LEGACY_NODELETE nzcvForCondition(MacroAssembler::RelationalCondition cond)
     {
         // NZCV bits: N=8, Z=4, C=2, V=1
         enum Flag : unsigned {
@@ -2818,6 +3425,9 @@ private:
         if (!canBeInternal(condition))
             return false;
 
+        if (m_procedure.policy().selection.extendsInstructionSelection && !isSelectedAsCompareChain(m_procedure, condition, [&] (Value* value) { return canBeInternal(value); }))
+            return false;
+
         dataLogLnIf(B3LowerToAirInternal::verbose, "Attempting ccmp optimization for branch");
 
         SegmentedVector<CompareChainNode> nodes;
@@ -2829,7 +3439,7 @@ private:
             return false;
         }
 
-        if (logicalNodes.size() > maxCompareChainSize) {
+        if (logicalNodes.size() > Limits::maxCompareChainSize) {
             dataLogLnIf(B3LowerToAirInternal::verbose, "  Failed: logicalNodes.size() exceeds max after increment ", logicalNodes.size());
             return false;
         }
@@ -2886,6 +3496,141 @@ private:
         dataLogLnIf(B3LowerToAirInternal::verbose, "  ccmp optimization successful!");
         return true;
     }
+
+    // A BitOr tree of BitXor leaves is zero exactly when every leaf's operands are equal, so it can be
+    // tested as cmp + ccmp chain instead of materializing the eor/orr tree.
+    bool collectXorOrChain(Value* value, Vector<Value*, 8>& leaves, Vector<Value*, 16>& internals)
+    {
+        // Each of the at most maxCompareChainSize + 1 leaves can carry a ZExt32, so this bounds both the
+        // node count and the recursion depth on long left-deep BitOr chains.
+        static constexpr unsigned maxNodes = 3 * (Limits::maxCompareChainSize + 1);
+        if (internals.size() >= maxNodes)
+            return false;
+        if (!value->type().isInt() || !canBeInternal(value))
+            return false;
+        internals.append(value);
+        switch (value->opcode()) {
+        case BitXor:
+            if (leaves.size() > Limits::maxCompareChainSize)
+                return false;
+            leaves.append(value);
+            return true;
+        case ZExt32:
+            return collectXorOrChain(value->child(0), leaves, internals);
+        case BitOr:
+            return collectXorOrChain(value->child(0), leaves, internals) && collectXorOrChain(value->child(1), leaves, internals);
+        default:
+            return false;
+        }
+    }
+
+    // On success, the flags satisfy Equal if value is zero and NotEqual otherwise.
+    bool tryAppendXorOrChainCompare(Value* value)
+    {
+        if (value->opcode() != BitOr)
+            return false;
+
+        Vector<Value*, 8> leaves;
+        Vector<Value*, 16> internals;
+        if (!collectXorOrChain(value, leaves, internals))
+            return false;
+
+        auto operands = [](Value* leaf) -> std::pair<Value*, Value*> {
+            if (leaf->child(0)->hasInt() && !leaf->child(1)->hasInt())
+                return { leaf->child(1), leaf->child(0) };
+            return { leaf->child(0), leaf->child(1) };
+        };
+
+        // cmp takes a much wider immediate than ccmp, so start with a constant only cmp can encode.
+        auto needsCompareImmediate = [&](Value* leaf) {
+            Value* right = operands(leaf).second;
+            return imm(right) && !isValidConditionalCompareImmediate(right->asInt());
+        };
+        if (!needsCompareImmediate(leaves[0])) {
+            for (unsigned i = 1; i < leaves.size(); ++i) {
+                if (needsCompareImmediate(leaves[i])) {
+                    std::swap(leaves[0], leaves[i]);
+                    break;
+                }
+            }
+        }
+
+        auto compareImmediate = [&](unsigned index) -> Arg {
+            Value* right = operands(leaves[index]).second;
+            Type type = leaves[index]->type();
+            if (!index) {
+                if (Arg rightImm = imm(right); rightImm && isValidForm(compareOnFlagsOpcodeForType(type), Arg::Tmp, Arg::Imm))
+                    return rightImm;
+                return { };
+            }
+            if (right->hasInt() && isValidConditionalCompareImmediate(right->asInt()) && isValidForm(compareConditionallyOnFlagsOpcodeForType(type), Arg::Tmp, Arg::Imm, Arg::Imm, Arg::RelCond))
+                return imm(right);
+            return { };
+        };
+
+        // The cmp/ccmp chain saves one instruction per leaf over eor/orr + tst, but eor also encodes
+        // bitmask immediates, which cmp and ccmp would have to materialize into a register first.
+        unsigned extraMaterializations = 0;
+        for (unsigned i = 0; i < leaves.size(); ++i) {
+            Value* right = operands(leaves[i]).second;
+            if (!right->hasInt() || compareImmediate(i))
+                continue;
+            bool is32Bit = leaves[i]->type() == Int32;
+            uint64_t bits = is32Bit ? static_cast<uint32_t>(right->asInt()) : static_cast<uint64_t>(right->asInt());
+            if (!(is32Bit ? Arg::isValidBitImmForm(right->asInt()) : Arg::isValidBitImm64Form(right->asInt())))
+                continue;
+            unsigned halfwords = is32Bit ? 2 : 4;
+            unsigned zeroHalfwords = 0;
+            unsigned onesHalfwords = 0;
+            for (unsigned j = 0; j < halfwords; ++j) {
+                uint16_t halfword = static_cast<uint16_t>(bits >> (16 * j));
+                zeroHalfwords += !halfword;
+                onesHalfwords += halfword == 0xffff;
+            }
+            extraMaterializations += std::max(1u, halfwords - std::max(zeroHalfwords, onesHalfwords));
+        }
+        if (extraMaterializations >= leaves.size())
+            return false;
+
+        for (Value* internal : internals)
+            commitInternal(internal);
+
+        auto [firstLeft, firstRight] = operands(leaves[0]);
+        if (Arg rightImm = compareImmediate(0))
+            append(compareOnFlagsOpcodeForType(leaves[0]->type()), tmp(firstLeft), rightImm);
+        else
+            append(compareOnFlagsOpcodeForType(leaves[0]->type()), tmp(firstLeft), tmp(firstRight));
+
+        Arg mismatchFlags = imm(nzcvForCondition(MacroAssembler::NotEqual));
+        for (unsigned i = 1; i < leaves.size(); ++i) {
+            auto [left, right] = operands(leaves[i]);
+            Air::Opcode ccmpOpcode = compareConditionallyOnFlagsOpcodeForType(leaves[i]->type());
+            if (Arg rightImm = compareImmediate(i))
+                append(ccmpOpcode, tmp(left), rightImm, mismatchFlags, Arg::relCond(MacroAssembler::Equal));
+            else
+                append(ccmpOpcode, tmp(left), tmp(right), mismatchFlags, Arg::relCond(MacroAssembler::Equal));
+        }
+        return true;
+    }
+
+    bool tryEmitXorOrChainBranch(Value* branchValue)
+    {
+        Value* condition = branchValue->child(0);
+        MacroAssembler::RelationalCondition branchCondition = MacroAssembler::NotEqual;
+        Value* comparison = nullptr;
+        if ((condition->opcode() == Equal || condition->opcode() == NotEqual) && condition->child(1)->isInt(0)) {
+            if (condition->opcode() == Equal)
+                branchCondition = MacroAssembler::Equal;
+            comparison = condition;
+            condition = condition->child(0);
+        }
+
+        if (!tryAppendXorOrChainCompare(condition))
+            return false;
+        commitInternal(comparison);
+        append(Air::BranchOnFlags, Arg::relCond(branchCondition));
+        return true;
+    }
 #endif // CPU(ARM64)
 
     Inst createBranch(Value* value, bool inverted = false)
@@ -2905,6 +3650,13 @@ private:
                     }
                     return Inst();
                 case Width16:
+#if CPU(X86_64)
+                    if (m_procedure.policy().selection.extendsInstructionSelection && isValidForm(Branch16, Arg::RelCond, left.kind(), right.kind())) {
+                        return left.inst(right.inst(
+                            Branch16, m_value, relCond,
+                            left.consume(*this), right.consume(*this)));
+                    }
+#endif
                     return Inst();
                 case Width32:
                     if (isValidForm(Branch32, Arg::RelCond, left.kind(), right.kind())) {
@@ -3082,22 +3834,26 @@ private:
         Air::Opcode moveConditionallyDoubleWithZero;
         Air::Opcode moveConditionallyFloatWithZero;
     };
-    Inst createSelect(const MoveConditionallyConfig& config)
+    Inst createSelect(const MoveConditionallyConfig& config, Value* thenValue = nullptr, Value* elseValue = nullptr, bool inverted = false)
     {
         using namespace Air;
+        if (!thenValue) {
+            thenValue = m_value->child(1);
+            elseValue = m_value->child(2);
+        }
         auto createSelectInstruction = [&] (Air::Opcode opcode, const Arg& condition, ArgPromise& left, ArgPromise& right) -> Inst {
-            if (m_value->child(2)->isInt(0)) {
+            if (elseValue->isInt(0)) {
                 if (isValidForm(opcode, condition.kind(), left.kind(), right.kind(), Arg::Tmp, Arg::ZeroReg, Arg::Tmp)) {
                     Tmp result = tmp(m_value);
-                    Tmp thenCase = tmp(m_value->child(1));
+                    Tmp thenCase = tmp(thenValue);
                     return left.inst(right.inst(opcode, m_value, condition, left.consume(*this), right.consume(*this), thenCase, zeroReg(), result));
                 }
             }
 
             if (isValidForm(opcode, condition.kind(), left.kind(), right.kind(), Arg::Tmp, Arg::Tmp, Arg::Tmp)) {
                 Tmp result = tmp(m_value);
-                Tmp thenCase = tmp(m_value->child(1));
-                Tmp elseCase = tmp(m_value->child(2));
+                Tmp thenCase = tmp(thenValue);
+                Tmp elseCase = tmp(elseValue);
                 return left.inst(right.inst(
                     opcode, m_value, condition,
                     left.consume(*this), right.consume(*this), thenCase, elseCase, result));
@@ -3105,8 +3861,8 @@ private:
 
             if (isValidForm(opcode, condition.kind(), left.kind(), right.kind(), Arg::Tmp, Arg::Tmp)) {
                 Tmp result = tmp(m_value);
-                Tmp source = tmp(m_value->child(1));
-                append(relaxedMoveForType(m_value->type()), tmp(m_value->child(2)), result);
+                Tmp source = tmp(thenValue);
+                append(relaxedMoveForType(m_value->type()), tmp(elseValue), result);
                 return left.inst(right.inst(
                     opcode, m_value, condition,
                     left.consume(*this), right.consume(*this), source, result));
@@ -3162,14 +3918,14 @@ private:
                 Air::Opcode opcode = config.moveConditionallyDoubleWithZero;
                 if (isValidForm(opcode, doubleCond.kind(), left.kind(), Arg::Tmp, Arg::Tmp, Arg::Tmp)) {
                     Tmp result = tmp(m_value);
-                    Tmp thenCase = tmp(m_value->child(1));
-                    Tmp elseCase = tmp(m_value->child(2));
+                    Tmp thenCase = tmp(thenValue);
+                    Tmp elseCase = tmp(elseValue);
                     return left.inst(opcode, m_value, doubleCond, left.consume(*this), thenCase, elseCase, result);
                 }
                 if (isValidForm(opcode, doubleCond.kind(), left.kind(), Arg::Tmp, Arg::Tmp)) {
                     Tmp result = tmp(m_value);
-                    Tmp source = tmp(m_value->child(1));
-                    append(relaxedMoveForType(m_value->type()), tmp(m_value->child(2)), result);
+                    Tmp source = tmp(thenValue);
+                    append(relaxedMoveForType(m_value->type()), tmp(elseValue), result);
                     return left.inst(opcode, m_value, doubleCond, left.consume(*this), source, result);
                 }
                 return Inst();
@@ -3178,19 +3934,75 @@ private:
                 Air::Opcode opcode = config.moveConditionallyFloatWithZero;
                 if (isValidForm(opcode, doubleCond.kind(), left.kind(), Arg::Tmp, Arg::Tmp, Arg::Tmp)) {
                     Tmp result = tmp(m_value);
-                    Tmp thenCase = tmp(m_value->child(1));
-                    Tmp elseCase = tmp(m_value->child(2));
+                    Tmp thenCase = tmp(thenValue);
+                    Tmp elseCase = tmp(elseValue);
                     return left.inst(opcode, m_value, doubleCond, left.consume(*this), thenCase, elseCase, result);
                 }
                 if (isValidForm(opcode, doubleCond.kind(), left.kind(), Arg::Tmp, Arg::Tmp)) {
                     Tmp result = tmp(m_value);
-                    Tmp source = tmp(m_value->child(1));
-                    append(relaxedMoveForType(m_value->type()), tmp(m_value->child(2)), result);
+                    Tmp source = tmp(thenValue);
+                    append(relaxedMoveForType(m_value->type()), tmp(elseValue), result);
                     return left.inst(opcode, m_value, doubleCond, left.consume(*this), source, result);
                 }
                 return Inst();
             },
-            false);
+            inverted);
+    }
+
+    bool tryAppendSelectAsMinOrMax()
+    {
+        if (!isX86() || !m_procedure.policy().selection.extendsInstructionSelection || !m_value->type().isFloat())
+            return false;
+        Value* condition = m_value->child(0);
+        if (condition->opcode() != LessThan && condition->opcode() != GreaterThan)
+            return false;
+        Value* first = m_value->child(1);
+        Value* second = m_value->child(2);
+        auto isSameValue = [](Value* a, Value* b) {
+            return a == b || (a->isConstant() && a->key() == b->key());
+        };
+        bool isMin = condition->opcode() == LessThan;
+        if (isSameValue(condition->child(0), second) && isSameValue(condition->child(1), first))
+            isMin = !isMin;
+        else if (!isSameValue(condition->child(0), first) || !isSameValue(condition->child(1), second))
+            return false;
+        if (canBeInternal(condition))
+            commitInternal(condition);
+        if (isMin)
+            appendBinOp<Air::Oops, Air::Oops, Air::MinOrSecondDouble, Air::MinOrSecondFloat>(first, second);
+        else
+            appendBinOp<Air::Oops, Air::Oops, Air::MaxOrSecondDouble, Air::MaxOrSecondFloat>(first, second);
+        return true;
+    }
+
+    bool tryAppendSelectOfIncrementedValue()
+    {
+        if (!isARM64() || !m_procedure.policy().selection.extendsInstructionSelection || !m_value->type().isInt())
+            return false;
+        Value* condition = m_value->child(0);
+        if (condition->numChildren() && condition->child(0)->type().isFloat())
+            return false;
+        for (unsigned incrementedIndex : { 1u, 2u }) {
+            Value* incremented = m_value->child(incrementedIndex);
+            if (incremented->opcode() != Add || !incremented->child(1)->isInt(1) || !canBeInternal(incremented))
+                continue;
+            MoveConditionallyConfig config;
+            config.moveConditionally32 = Air::MoveConditionallyIncremented32;
+            config.moveConditionally64 = Air::MoveConditionallyIncremented64;
+            config.moveConditionallyTest32 = Air::MoveConditionallyIncrementedTest32;
+            config.moveConditionallyTest64 = Air::MoveConditionallyIncrementedTest64;
+            config.moveConditionallyDouble = Air::Oops;
+            config.moveConditionallyFloat = Air::Oops;
+            config.moveConditionallyDoubleWithZero = Air::Oops;
+            config.moveConditionallyFloatWithZero = Air::Oops;
+            Inst inst = createSelect(config, incremented->child(0), m_value->child(3 - incrementedIndex), incrementedIndex == 2);
+            if (!inst)
+                return false;
+            commitInternal(incremented);
+            m_insts.last().append(WTF::move(inst));
+            return true;
+        }
+        return false;
     }
     
     bool tryAppendLea()
@@ -3383,12 +4195,12 @@ private:
         append(Move, m_edx, tmp(m_value));
     }
     
-    Air::Opcode NODELETE loadLinkOpcode(Width width, bool fence)
+    Air::Opcode LEGACY_NODELETE loadLinkOpcode(Width width, bool fence)
     {
         return fence ? OPCODE_FOR_WIDTH(LoadLinkAcq, width) : OPCODE_FOR_WIDTH(LoadLink, width);
     }
     
-    Air::Opcode NODELETE storeCondOpcode(Width width, bool fence)
+    Air::Opcode LEGACY_NODELETE storeCondOpcode(Width width, bool fence)
     {
         return fence ? OPCODE_FOR_WIDTH(StoreCondRel, width) : OPCODE_FOR_WIDTH(StoreCond, width);
     }
@@ -3462,7 +4274,7 @@ private:
             return;
         }
 
-        if (isARM64_LSE()) {
+        if (m_procedure.policy().supportsAtomicMemoryOperations()) {
             if (isBranch) {
                 switch (width) {
                 case Width8:
@@ -3877,7 +4689,7 @@ private:
 
                     Air::Opcode newAirOpcode = tryNewAirOpcode();
                     if (isValidForm(newAirOpcode, Arg::Tmp, Arg::Tmp, Arg::Tmp, Arg::Tmp)) {
-                        append(newAirOpcode, tmp(multiplyLeft->child(0)), tmp(multiplyRight->child(0)), tmp(right), tmp(m_value));
+                        append(newAirOpcode, tmpForLowWord(multiplyLeft), tmpForLowWord(multiplyRight), tmp(right), tmp(m_value));
                         commitInternal(left);
                         return true;
                     }
@@ -3965,7 +4777,7 @@ private:
 
                 Air::Opcode newAirOpcode = tryNewAirOpcode();
                 if (isValidForm(newAirOpcode, Arg::Tmp, Arg::Tmp, Arg::Tmp, Arg::Tmp)) {
-                    append(newAirOpcode, tmp(multiplyLeft->child(0)), tmp(multiplyRight->child(0)), tmp(left), tmp(m_value));
+                    append(newAirOpcode, tmpForLowWord(multiplyLeft), tmpForLowWord(multiplyRight), tmp(left), tmp(m_value));
                     commitInternal(right);
                     return true;
                 }
@@ -4016,7 +4828,7 @@ private:
 
                 Air::Opcode newAirOpcode = tryNewAirOpcode();
                 if (isValidForm(newAirOpcode, Arg::Tmp, Arg::Tmp, Arg::Tmp)) {
-                    append(newAirOpcode, tmp(multiplyLeft->child(0)), tmp(multiplyRight->child(0)), tmp(m_value));
+                    append(newAirOpcode, tmpForLowWord(multiplyLeft), tmpForLowWord(multiplyRight), tmp(m_value));
                     commitInternal(m_value->child(0));
                     return true;
                 }
@@ -4056,7 +4868,7 @@ private:
 
                 Air::Opcode opcode = tryAirOpcode();
                 if (isValidForm(opcode, Arg::Tmp, Arg::Tmp, Arg::Tmp)) {
-                    append(opcode, tmp(left->child(0)), tmp(right->child(0)), tmp(m_value));
+                    append(opcode, tmpForLowWord(left), tmpForLowWord(right), tmp(m_value));
                     return true;
                 }
                 return false;
@@ -4213,6 +5025,10 @@ private:
             }
 
             if (right->isInt64(0xffffffff) || right->isInt32(0xffffffff)) {
+                if (ArgPromise address = loadPromise(left); address.peek() && !address.peek().isValidForm(Move32, Width32)) {
+                    append(Move32, tmp(left), tmp(m_value));
+                    return;
+                }
                 appendUnOp<Move32, Move32>(left);
                 return;
             }
@@ -4822,6 +5638,16 @@ private:
             return;
         }
 
+        case PopCount: {
+            Air::Opcode opcode = opcodeForType(CountPopulation32, CountPopulation64, m_value->type());
+            if (isValidForm(opcode, Arg::Tmp, Arg::Tmp, Arg::Tmp)) {
+                append(opcode, tmp(m_value->child(0)), tmp(m_value), m_code.newTmp(FP));
+                return;
+            }
+            appendUnOp<CountPopulation32, CountPopulation64>(m_value->child(0));
+            return;
+        }
+
         case Abs: {
             RELEASE_ASSERT_WITH_MESSAGE(!isX86(), "Abs is not supported natively on x86. It must be replaced before generation.");
             appendUnOp<Air::Oops, Air::Oops, AbsDouble, AbsFloat>(m_value->child(0));
@@ -4867,7 +5693,7 @@ private:
                 if (!isValidForm(opcode, Arg::PreIndex, Arg::Tmp) || !m_index)
                     return false;
                 Value* address = m_block->at(m_index - 1);
-                if (address->opcode() != Add || address->type() != Int64 || m_locked.contains(address))
+                if (address->opcode() != Add || address->type() != Int64 || m_locked.contains(address) || address == value)
                     return false;
 
                 Value* base1 = address->child(0);
@@ -5011,7 +5837,7 @@ private:
             return;
         }
 
-        case MemoryCopy:
+        case MemoryMove:
         case MemoryFill: {
             // They should be lowered already.
             RELEASE_ASSERT_NOT_REACHED();
@@ -5182,7 +6008,7 @@ private:
                     append(VectorExtractLaneInt64, Arg::imm(1), v, upper);
                     append(Rshift64, m_ecx, lower);
                     append(Rshift64, m_ecx, upper);
-                    append(VectorReplaceLaneInt64, Arg::imm(0), lower, result);
+                    append(VectorSplatInt64, lower, result);
                     append(VectorReplaceLaneInt64, Arg::imm(1), upper, result);
                     return;
                 }
@@ -5411,33 +6237,27 @@ private:
             return;
         case B3::VectorOr: {
 #if CPU(ARM64)
-            // Try to match XAR (XOR-and-rotate-right) pattern for i64x2.
-            // Pattern: VectorOr(VectorShl(x, constK), VectorShr(x, constK))
-            // or VectorOr(VectorAdd(x, x), VectorShr(x, constK)) after strength reduction.
-            // When x = VectorXor(a, b), emit XAR(a, b, rotateRight).
-            if (isARM64_SHA3()) {
+            // Match XAR (XOR-and-rotate-right) for i64x2: VectorOr of a left shift and an unsigned
+            // right shift of the same x = VectorXor(a, b), with constant amounts summing to 64,
+            // becomes XAR(a, b, rotateRight). Strength reduction turns a left shift by 1 into
+            // VectorAdd(x, x), so that counts as a left shift too.
+            if (m_procedure.policy().supportsSHA3()) {
                 Value* left = m_value->child(0);
                 Value* right = m_value->child(1);
 
                 auto tryMatchXAR = [&]() -> bool {
-                    // Each child of VectorOr should be either:
-                    // - VectorShl:i64x2(x, constK) — a left shift by constant
-                    // - VectorShr:i64x2(x, constK) — a right shift by constant
-                    // - VectorAdd:i64x2(x, x) — equivalent to shl-by-1 (from strength reduction)
-                    // We need one left-shift and one right-shift on the same value x,
-                    // with shift amounts summing to 64.
-
                     struct ShiftInfo {
                         Value* shiftedValue { nullptr };
                         int8_t amount { 0 }; // positive = left shift, negative = right shift
                     };
 
                     auto extractShift = [&](Value* v) -> std::optional<ShiftInfo> {
+                        // Vector shifts use the shift amount modulo the lane width.
                         if (v->opcode() == B3::VectorShl && v->as<SIMDValue>()->simdLane() == SIMDLane::i64x2 && v->child(1)->hasInt32())
-                            return ShiftInfo { v->child(0), static_cast<int8_t>(v->child(1)->asInt32()) };
+                            return ShiftInfo { v->child(0), static_cast<int8_t>(v->child(1)->asInt32() & 63) };
 
-                        if (v->opcode() == B3::VectorShr && v->as<SIMDValue>()->simdLane() == SIMDLane::i64x2 && v->child(1)->hasInt32())
-                            return ShiftInfo { v->child(0), static_cast<int8_t>(-v->child(1)->asInt32()) };
+                        if (v->opcode() == B3::VectorShr && v->as<SIMDValue>()->simdLane() == SIMDLane::i64x2 && v->as<SIMDValue>()->signMode() == SIMDSignMode::Unsigned && v->child(1)->hasInt32())
+                            return ShiftInfo { v->child(0), static_cast<int8_t>(-(v->child(1)->asInt32() & 63)) };
 
                         // We lowered left-shift by 1 to VectorAdd(x, x)
                         if (v->opcode() == B3::VectorAdd && v->as<SIMDValue>()->simdLane() == SIMDLane::i64x2
@@ -5509,9 +6329,9 @@ private:
         }
         case B3::VectorXor: {
 #if CPU(ARM64)
-            // VectorXor(VectorXor(a, b), c) → EOR3(a, b, c)
-            // VectorXor(a, VectorXor(b, c)) → EOR3(b, c, a)
-            if (isARM64_SHA3()) {
+            // VectorXor(VectorXor(a, b), c) -> EOR3(a, b, c)
+            // VectorXor(a, VectorXor(b, c)) -> EOR3(b, c, a)
+            if (m_procedure.policy().supportsSHA3()) {
                 for (unsigned childIdx = 0; childIdx < 2; ++childIdx) {
                     Value* inner = m_value->child(childIdx);
                     Value* other = m_value->child(1 - childIdx);
@@ -5840,6 +6660,8 @@ private:
         }
 
         case ArgumentReg: {
+            if (m_valueToTmp[m_value].isReg())
+                return;
             m_prologue.append(Inst(
                 moveForType(m_value->type()), m_value,
                 Tmp(m_value->as<ArgumentRegValue>()->argumentReg()),
@@ -5942,7 +6764,14 @@ private:
                 appendCAS(m_value->child(0), m_value->opcode() == NotEqual);
                 return;
             }
-                
+
+#if CPU(ARM64)
+            if (m_value->child(1)->isInt(0) && tryAppendXorOrChainCompare(m_value->child(0))) {
+                append(Air::SetOnFlags, Arg::relCond(m_value->opcode() == Equal ? MacroAssembler::Equal : MacroAssembler::NotEqual), tmp(m_value));
+                return;
+            }
+#endif
+
             m_insts.last().append(createCompare(m_value));
             return;
         }
@@ -5980,6 +6809,11 @@ private:
                 ifTrueBlock->setSuccessors(doneBlock);
                 return;
             }
+
+            if (tryAppendSelectOfIncrementedValue())
+                return;
+            if (tryAppendSelectAsMinOrMax())
+                return;
 
             MoveConditionallyConfig config;
             if (m_value->type().isInt()) {
@@ -6190,7 +7024,7 @@ private:
             Vector<Arg, 8> args;
             args.append(Arg::special(m_patchpointSpecial));
 
-            Vector<Inst> after;
+            Vector<Inst, 2> after;
             auto generateResultOperand = [&] (Type type, ValueRep rep, Tmp tmp) {
                 switch (rep.kind()) {
                 case ValueRep::WarmAny:
@@ -6236,8 +7070,8 @@ private:
             for (unsigned i = patchpointValue->numFPScratchRegisters; i--;)
                 args.append(m_code.newTmp(FP));
 
-            m_insts.last().append(Inst(Patch, patchpointValue, WTF::move(args)));
-            m_insts.last().appendVector(after);
+            appendPatch(patchpointValue, WTF::move(args));
+            m_insts.last().appendVector(WTF::move(after));
             return;
         }
 
@@ -6275,7 +7109,7 @@ private:
 
                 fillStackmap(args, checkValue, 2);
 
-                m_insts.last().append(Inst(Patch, checkValue, WTF::move(args)));
+                appendPatch(checkValue, WTF::move(args));
                 return;
             }
 
@@ -6364,7 +7198,7 @@ private:
 
             fillStackmap(args, checkValue, 2);
 
-            m_insts.last().append(Inst(Patch, checkValue, WTF::move(args)));
+            appendPatch(checkValue, WTF::move(args));
             return;
         }
 
@@ -6382,7 +7216,7 @@ private:
 
             fillStackmap(args, checkValue, 1);
 
-            m_insts.last().append(Inst(Patch, checkValue, WTF::move(args)));
+            appendPatch(checkValue, WTF::move(args));
             return;
         }
 
@@ -6435,7 +7269,12 @@ private:
             Value* value = m_value->child(0);
             Value* phi = m_value->as<UpsilonValue>()->phi();
             if (value->type().isNumeric()) {
-                moveToTmp(relaxedMoveForType(value->type()), immOrTmpOrZeroReg(value), m_phiToTmp[phi]);
+                Arg source = immOrTmpOrZeroReg(value);
+                if (source.isTmp() && m_phisKeptZeroExtended.contains(phi) && mayHaveUpperHalf(value)) {
+                    append(Move32, source, m_phiToTmp[phi]);
+                    return;
+                }
+                moveToTmp(relaxedMoveForType(value->type()), source, m_phiToTmp[phi]);
                 return;
             }
 
@@ -6475,8 +7314,16 @@ private:
 
         case Branch: {
             if (canBeInternal(m_value->child(0))) {
+                if (tryAppendBranchOnInt32OverflowInMemory())
+                    return;
+                if (tryAppendBranchOnCarryInMemory())
+                    return;
+                if (tryAppendBranchOnInt32Overflow())
+                    return;
 #if CPU(ARM64)
                 if (tryEmitConditionalCompareChain(m_value))
+                    return;
+                if (tryEmitXorOrChainBranch(m_value))
                     return;
 #endif
 
@@ -6705,7 +7552,7 @@ private:
             if (appendVoidAtomic(OPCODE_FOR_WIDTH(AtomicAnd, atomic->accessWidth())))
                 return;
 
-            if (isARM64_LSE()) {
+            if (m_procedure.policy().supportsAtomicMemoryOperations()) {
                 Arg address = addr(atomic);
                 Air::Opcode opcode = OPCODE_FOR_WIDTH(AtomicXchgClear, atomic->accessWidth());
                 if (isValidForm(opcode, Arg::Tmp, address.kind(), Arg::Tmp)) {
@@ -6782,22 +7629,35 @@ private:
     IndexSet<Value*> m_locked; // These are values that will have no Tmp in Air.
     IndexMap<Value*, Tmp> m_valueToTmp; // These are values that must have a Tmp in Air. We say that a Value* with a non-null Tmp is "pinned".
     IndexMap<Value*, Tmp> m_phiToTmp; // Each Phi gets its own Tmp.
+    IndexSet<Value*> m_phisKeptZeroExtended;
     UncheckedKeyHashMap<Value*, Vector<Tmp>> m_tupleValueToTmps; // This is the same as m_valueToTmp for Values that are Tuples.
     UncheckedKeyHashMap<Value*, Vector<Tmp>> m_tuplePhiToTmps; // This is the same as m_phiToTmp for Phis that are Tuples.
     IndexMap<B3::BasicBlock*, Air::BasicBlock*> m_blockToBlock;
 
     UseCounts m_useCounts;
-    PhiChildren m_phiChildren;
+    std::optional<PhiChildren> m_phiChildren;
     BlockWorklist m_fastWorklist;
     Dominators& m_dominators;
 
-    Vector<Vector<Inst, 4>> m_insts;
+    struct InstGroups {
+        void beginGroup() { starts.append(insts.size()); }
+        Vector<Inst>& last() LIFETIME_BOUND { return insts; }
+
+        Vector<Inst> insts;
+        Vector<unsigned> starts;
+    };
+    InstGroups m_insts;
     Vector<Inst> m_prologue;
     
     B3::BasicBlock* m_block;
     bool m_isRare;
     unsigned m_index;
     Value* m_value;
+
+    B3::BasicBlock* m_blockWithInterferenceSearches { nullptr };
+    size_t m_valuesVisitedByInterferenceSearches { 0 };
+    B3::BasicBlock* m_blockWithNextInterference { nullptr };
+    IndexMap<Value*, unsigned> m_nextInterference;
 
     PatchpointSpecial* m_patchpointSpecial { nullptr };
     UncheckedKeyHashMap<CheckSpecial::Key, CheckSpecial*> m_checkSpecials;
@@ -6821,6 +7681,7 @@ void lowerToAir(Procedure& procedure)
     PhaseScope phaseScope(procedure, "lowerToAir"_s);
     LowerToAir lowerToAir(procedure);
     lowerToAir.run();
+    Air::fixSpillsAfterTerminals(procedure.code());
 }
 
 } } // namespace JSC::B3

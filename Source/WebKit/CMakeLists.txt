@@ -1,5 +1,13 @@
 set_property(DIRECTORY . PROPERTY FOLDER "WebKit")
 
+# Build the IPC and platform layer as a subtarget. TestIPC links against it
+# directly instead of WebKit, which enables WebKit to keep c++ implementation
+# details out of the exported symbol table. In Xcode, this is built as
+# `libWebKitPlatform.a`.
+if (APPLE)
+    set(WebKit_USE_PLATFORM_SUBTARGET ON)
+endif ()
+
 set(WebKit_PRIVATE_INCLUDE_DIRECTORIES
     "${CMAKE_BINARY_DIR}"
     "${PAL_FRAMEWORK_HEADERS_DIR}"
@@ -137,9 +145,19 @@ set(PROTOCOL_GENERATOR_SCRIPTS_DIR "${JAVASCRIPTCORE_DIR}/inspector/scripts")
 
 list(APPEND WebKit_UNIFIED_SOURCE_LIST_FILES
     "Sources.txt"
-
-    "Platform/Sources.txt"
 )
+
+if (WebKit_USE_PLATFORM_SUBTARGET)
+    set(WebKitPlatform_DERIVED_SOURCES_DIR ${WebKit_DERIVED_SOURCES_DIR})
+    set(WebKitPlatform_UNIFIED_SOURCE_BUNDLE_PREFIX Platform)
+    list(APPEND WebKitPlatform_UNIFIED_SOURCE_LIST_FILES
+        "Platform/Sources.txt"
+    )
+else ()
+    list(APPEND WebKit_UNIFIED_SOURCE_LIST_FILES
+        "Platform/Sources.txt"
+    )
+endif ()
 
 set(WebKit_BINDINGS_IN_FILES
     WebProcess/Extensions/Interfaces/WebExtensionAPIAction
@@ -164,8 +182,6 @@ set(WebKit_BINDINGS_IN_FILES
     WebProcess/Extensions/Interfaces/WebExtensionAPIScripting
     WebProcess/Extensions/Interfaces/WebExtensionAPISidePanel
     WebProcess/Extensions/Interfaces/WebExtensionAPISidebarAction
-    WebProcess/Extensions/Interfaces/WebExtensionAPIStorage
-    WebProcess/Extensions/Interfaces/WebExtensionAPIStorageArea
     WebProcess/Extensions/Interfaces/WebExtensionAPITabs
     WebProcess/Extensions/Interfaces/WebExtensionAPIWebNavigation
     WebProcess/Extensions/Interfaces/WebExtensionAPIWebNavigationEvent
@@ -179,6 +195,8 @@ set(WebKit_CPP_BINDINGS_IN_FILES
     WebProcess/Extensions/Interfaces/WebExtensionAPIAlarms
     WebProcess/Extensions/Interfaces/WebExtensionAPINamespace
     WebProcess/Extensions/Interfaces/WebExtensionAPIRuntime
+    WebProcess/Extensions/Interfaces/WebExtensionAPIStorage
+    WebProcess/Extensions/Interfaces/WebExtensionAPIStorageArea
     WebProcess/Extensions/Interfaces/WebExtensionAPITest
     WebProcess/Extensions/Interfaces/WebExtensionAPIWebPageNamespace
     WebProcess/Extensions/Interfaces/WebExtensionAPIWebPageRuntime
@@ -480,6 +498,7 @@ set(WebKit_SERIALIZATION_IN_FILES
     Shared/BackgroundFetchState.serialization.in
     Shared/CacheModel.serialization.in
     Shared/CallbackID.serialization.in
+    Shared/ContentInversion.serialization.in
     Shared/ContentWorldData.serialization.in
     Shared/ContextMenuContextData.serialization.in
     Shared/CoordinateSystem.serialization.in
@@ -514,6 +533,7 @@ set(WebKit_SERIALIZATION_IN_FILES
     Shared/ModelProcessConnectionParameters.serialization.in
     Shared/MonotonicObjectIdentifier.serialization.in
     Shared/NavigationActionData.serialization.in
+    Shared/NavigationResponseProcessSwap.serialization.in
     Shared/NetworkProcessConnectionParameters.serialization.in
     Shared/NodeHitTestResult.serialization.in
     Shared/PDFAccessibilityDisplayModeState.serialization.in
@@ -663,12 +683,10 @@ set(WebKit_SERIALIZATION_IN_FILES
     Shared/WebGPU/WebGPUImageCopyTexture.serialization.in
     Shared/WebGPU/WebGPUImageCopyTextureTagged.serialization.in
     Shared/WebGPU/WebGPUImageDataLayout.serialization.in
-    Shared/WebGPU/WebGPUInternalError.serialization.in
     Shared/WebGPU/WebGPUMultisampleState.serialization.in
     Shared/WebGPU/WebGPUObjectDescriptorBase.serialization.in
     Shared/WebGPU/WebGPUOrigin2D.serialization.in
     Shared/WebGPU/WebGPUOrigin3D.serialization.in
-    Shared/WebGPU/WebGPUOutOfMemoryError.serialization.in
     Shared/WebGPU/WebGPUPipelineDescriptorBase.serialization.in
     Shared/WebGPU/WebGPUPipelineLayoutDescriptor.serialization.in
     Shared/WebGPU/WebGPUPresentationContextDescriptor.serialization.in
@@ -690,12 +708,10 @@ set(WebKit_SERIALIZATION_IN_FILES
     Shared/WebGPU/WebGPUShaderModuleDescriptor.serialization.in
     Shared/WebGPU/WebGPUStencilFaceState.serialization.in
     Shared/WebGPU/WebGPUStorageTextureBindingLayout.serialization.in
-    Shared/WebGPU/WebGPUSupportedFeatures.serialization.in
     Shared/WebGPU/WebGPUSupportedLimits.serialization.in
     Shared/WebGPU/WebGPUTextureBindingLayout.serialization.in
     Shared/WebGPU/WebGPUTextureDescriptor.serialization.in
     Shared/WebGPU/WebGPUTextureViewDescriptor.serialization.in
-    Shared/WebGPU/WebGPUValidationError.serialization.in
     Shared/WebGPU/WebGPUVertexAttribute.serialization.in
     Shared/WebGPU/WebGPUVertexBufferLayout.serialization.in
     Shared/WebGPU/WebGPUVertexState.serialization.in
@@ -709,6 +725,7 @@ set(WebKit_SERIALIZATION_IN_FILES
     Shared/XR/PlatformXR.serialization.in
     Shared/XR/XRSystem.serialization.in
 
+    Shared/graphics/DisplayListData.serialization.in
     Shared/graphics/RemoteImageBufferSetConfiguration.serialization.in
 
     UIProcess/Extensions/WebExtension.serialization.in
@@ -744,7 +761,9 @@ set(WebKit_SERIALIZATION_IN_FILES
 )
 
 set(WebCore_GENERATED_SERIALIZATION_IN_FILES
+    CSSValueKeywords.serialization.in
     HTTPHeaderNames.serialization.in
+    QuirkBehaviorID.serialization.in
 )
 
 set(WebCore_SERIALIZATION_IN_FILES
@@ -923,7 +942,7 @@ if (NOT USE_FRAMEWORK_BUNDLES)
 endif ()
 
 if (NOT APPLE AND SWIFT_REQUIRED)
-    # Export-macro stubs, NODELETE=, WK_SUPPORTS_SWIFT_OBJCXX_INTEROP and the
+    # Export-macro stubs, LEGACY_NODELETE=, WK_SUPPORTS_SWIFT_OBJCXX_INTEROP and the
     # full ENABLE/HAVE/USE config-var set now come from
     # _WEBKIT_COMPUTE_SWIFT_SHARED_CLANG_FLAGS in WebKitMacros.cmake. Only
     # Linux-specific importer flags remain here.
@@ -1007,6 +1026,11 @@ if (SWIFT_REQUIRED)
     # should match the rest of WebKit and use -Onone, but it negatively impacts build time
     webkit_target_add_swift_options(WebKit
         "$<$<AND:$<COMPILE_LANGUAGE:Swift>,$<CONFIG:Debug>>:-O>")
+    # Every frontend job imports most of WebCore's C++ declarations, at a cost
+    # of seconds of CPU time and gigabytes of memory, before compiling anything.
+    # One batch per core repeats that work for each core and competes with the
+    # C++ compiles for memory, so use fewer, larger batches.
+    webkit_target_add_swift_options(WebKit "-driver-batch-count 4")
 endif ()
 
 if (WebKit_PUBLIC_FRAMEWORK_HEADERS)
@@ -1203,9 +1227,13 @@ list(APPEND WebKit_DERIVED_SOURCES
     ${WebKit_DERIVED_SOURCES_DIR}/GeneratedSerializersUIProcess.${WebKit_GENERATED_SERIALIZERS_SUFFIX}
     ${WebKit_DERIVED_SOURCES_DIR}/GeneratedSerializersCommon.${WebKit_GENERATED_SERIALIZERS_SUFFIX}
     ${WebKit_DERIVED_SOURCES_DIR}/SerializedTypeInfo.${WebKit_GENERATED_SERIALIZERS_SUFFIX}
-    ${WebKit_DERIVED_SOURCES_DIR}/WebKitPlatformGeneratedSerializers.${WebKit_GENERATED_SERIALIZERS_SUFFIX}
     ${WebKit_DERIVED_SOURCES_DIR}/JSWebExtensionAPIUnified.cpp
 )
+if (WebKit_USE_PLATFORM_SUBTARGET)
+    list(APPEND WebKitPlatform_SOURCES ${WebKit_DERIVED_SOURCES_DIR}/WebKitPlatformGeneratedSerializers.${WebKit_GENERATED_SERIALIZERS_SUFFIX})
+else ()
+    list(APPEND WebKit_DERIVED_SOURCES ${WebKit_DERIVED_SOURCES_DIR}/WebKitPlatformGeneratedSerializers.${WebKit_GENERATED_SERIALIZERS_SUFFIX})
+endif ()
 
 set(_serializers_stage_dir ${WebKit_DERIVED_SOURCES_DIR}/.serializers-stage)
 set(_serializers_outputs
@@ -1319,6 +1347,7 @@ set(WebKit_WEBDRIVER_BIDI_PROTOCOL_GENERATOR_INPUTS
     ${WEBKIT_DIR}/UIProcess/Automation/protocol/BidiBrowser.json
     ${WEBKIT_DIR}/UIProcess/Automation/protocol/BidiBrowsingContext.json
     ${WEBKIT_DIR}/UIProcess/Automation/protocol/BidiDigitalCredentials.json
+    ${WEBKIT_DIR}/UIProcess/Automation/protocol/BidiInput.json
     ${WEBKIT_DIR}/UIProcess/Automation/protocol/BidiLog.json
     ${WEBKIT_DIR}/UIProcess/Automation/protocol/BidiPermissions.json
     ${WEBKIT_DIR}/UIProcess/Automation/protocol/BidiScript.json
@@ -1461,6 +1490,7 @@ if (ENABLE_BACK_FORWARD_LIST_SWIFT)
         PROPERTIES GENERATED TRUE)
     list(APPEND WebKit_SOURCES
         ${WebKit_DERIVED_SOURCES_DIR}/WebBackForwardListMessageReceiver.swift
+        ${WEBKIT_DIR}/Platform/Logging.swift
         ${WEBKIT_DIR}/Shared/API/APIArray.swift
         ${WEBKIT_DIR}/UIProcess/StdlibExtras.swift
         ${WEBKIT_DIR}/UIProcess/WebBackForwardList.swift
@@ -1485,6 +1515,7 @@ if (SWIFT_REQUIRED)
         ${WebKit_DERIVED_SOURCES_DIR}/IPCTesterReceiverMessageReceiver.swift
         PROPERTIES GENERATED TRUE)
     list(APPEND WebKit_SOURCES
+        ${WEBKIT_DIR}/Shared/Concurrency+Extras.swift
         ${WEBKIT_DIR}/Shared/Foundation+Extras.swift
         ${WEBKIT_DIR}/Shared/IPCTesterReceiver.swift
         ${WEBKIT_DIR}/Shared/RunJavaScriptResult.swift
@@ -1499,6 +1530,9 @@ list(APPEND WebKit_SOURCES ${WebKit_DERIVED_SOURCES})
 WEBKIT_COMPUTE_SOURCES(WebKit)
 if (DEFINED WebKit_SWIFT_INTEROP_SOURCES)
     list(REMOVE_ITEM WebKit_SOURCES ${WebKit_SWIFT_INTEROP_SOURCES})
+endif ()
+if (WebKit_USE_PLATFORM_SUBTARGET)
+    WEBKIT_COMPUTE_SOURCES(WebKitPlatform)
 endif ()
 
 WEBKIT_DEFINE_SUBTARGET_WITH_PREFIX(WebKit WebKitUIProcess
@@ -1557,6 +1591,20 @@ if (WebKit_ARC_SOURCES)
     target_compile_options(WebKitARC PRIVATE -fobjc-arc)
     WEBKIT_ADD_PREFIX_HEADER(WebKitARC WebKitPrefix.h PREFIX_NO_CODEGEN PREFIX_LANGUAGES OBJCXX)
     target_sources(WebKit PRIVATE $<TARGET_OBJECTS:WebKitARC>)
+endif ()
+
+if (WebKit_USE_PLATFORM_SUBTARGET)
+    WEBKIT_DEFINE_SUBTARGET(WebKitPlatform WebKit ${WebKitPlatform_SOURCES})
+    # PREFIX_NO_CODEGEN needed for TestIPC: it does not link against full
+    # WebKit, so it doesn't get the PCH object.
+    WEBKIT_ADD_PREFIX_HEADER(WebKitPlatform WebKitPrefix.h PREFIX_NO_CODEGEN PREFIX_LANGUAGES CXX OBJCXX)
+    target_sources(WebKit PRIVATE $<TARGET_OBJECTS:WebKitPlatform>)
+    if (WebKitPlatform_ARC_SOURCES)
+        WEBKIT_DEFINE_SUBTARGET(WebKitPlatformARC WebKit ${WebKitPlatform_ARC_SOURCES})
+        target_compile_options(WebKitPlatformARC PRIVATE -fobjc-arc)
+        WEBKIT_ADD_PREFIX_HEADER(WebKitPlatformARC WebKitPrefix.h PREFIX_NO_CODEGEN PREFIX_LANGUAGES OBJCXX)
+        target_sources(WebKit PRIVATE $<TARGET_OBJECTS:WebKitPlatformARC>)
+    endif ()
 endif ()
 
 if (WEBKIT_SDK_IS_MACOS OR WEBKIT_SDK_IS_IOS_FAMILY)

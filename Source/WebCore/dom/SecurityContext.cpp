@@ -53,7 +53,7 @@ void SecurityContext::setSecurityOriginPolicy(RefPtr<SecurityOriginPolicy>&& sec
         securityOriginDidChange();
 }
 
-ContentSecurityPolicy* SecurityContext::contentSecurityPolicy()
+SUPPRESS_NODELETE ContentSecurityPolicy* SecurityContext::contentSecurityPolicy()
 {
     if (!m_contentSecurityPolicy && m_hasEmptyContentSecurityPolicy)
         m_contentSecurityPolicy = makeEmptyContentSecurityPolicy();
@@ -89,7 +89,7 @@ bool SecurityContext::isSecureTransitionTo(const URL& url) const
     if (!haveInitializedSecurityOrigin())
         return true;
 
-    return securityOriginPolicy()->origin().isSameOriginDomain(SecurityOrigin::create(url).get());
+    return protect(securityOriginPolicy()->origin())->isSameOriginDomain(SecurityOrigin::create(url).get());
 }
 
 void SecurityContext::enforceSandboxFlags(SandboxFlags flags, SandboxFlagsSource source)

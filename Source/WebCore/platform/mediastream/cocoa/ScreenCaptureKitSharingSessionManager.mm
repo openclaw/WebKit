@@ -238,7 +238,7 @@ void ScreenCaptureKitSharingSessionManager::contentSharingPickerUpdatedFilterFor
     RELEASE_LOG(WebRTC, "ScreenCaptureKitSharingSessionManager::contentSharingPickerUpdatedFilterForStream");
 
     auto index = m_activeSources.findIf([stream](auto activeSource) {
-        return activeSource && [stream isEqual:activeSource->stream()];
+        return activeSource && [stream isEqual:protect(activeSource->stream())];
     });
     if (index == notFound) {
         if (stream) {
@@ -249,7 +249,7 @@ void ScreenCaptureKitSharingSessionManager::contentSharingPickerUpdatedFilterFor
         return;
     }
 
-    auto activeSource = m_activeSources[index];
+    RefPtr activeSource = m_activeSources[index];
     if (!activeSource->observer()) {
         RELEASE_LOG_ERROR(WebRTC, "ScreenCaptureKitSharingSessionManager::contentFilterWasUpdated - null session observer!");
         m_activeSources.removeAt(index);

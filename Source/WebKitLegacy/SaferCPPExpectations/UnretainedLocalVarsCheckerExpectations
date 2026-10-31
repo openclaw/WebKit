@@ -1,1 +1,4 @@
-[ macOS ] mac/WebView/WebHTMLView.mm
+[ iOS ] ios/Misc/WebNSStringExtrasIOS.m
+[ iOS ] mac/WebInspector/WebNodeHighlightView.mm
+[ iOS ] mac/WebView/WebDelegateImplementationCaching.mm
+[ iOS ] mac/WebView/WebFrame.mm

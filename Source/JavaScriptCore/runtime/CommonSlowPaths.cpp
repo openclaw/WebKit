@@ -289,7 +289,8 @@ JSC_DEFINE_COMMON_SLOW_PATH(slow_path_to_this)
     auto bytecode = pc->as<OpToThis>();
     auto& metadata = bytecode.metadata(codeBlock);
     JSValue v1 = GET(bytecode.m_srcDst).jsValue();
-    if (v1.isCell()) {
+    auto value = v1.toThis(globalObject, bytecode.m_ecmaMode);
+    if (v1.isObject() && value == v1) {
         StructureID myStructureID = v1.asCell()->structureID();
         StructureID otherStructureID = metadata.m_cachedStructureID;
         if (myStructureID != otherStructureID) {
@@ -308,7 +309,6 @@ JSC_DEFINE_COMMON_SLOW_PATH(slow_path_to_this)
     // different object that still has the same structure on the fast path since it'll produce
     // the same SpeculatedType. Therefore, we don't need to worry about value profiling on the
     // fast path.
-    auto value = v1.toThis(globalObject, bytecode.m_ecmaMode);
     RETURN_WITH_PROFILING_CUSTOM(bytecode.m_srcDst, value, PROFILE_VALUE(value));
 }
 
@@ -399,17 +399,13 @@ JSC_DEFINE_COMMON_SLOW_PATH(slow_path_to_string)
 }
 
 #if ENABLE(JIT)
-static void NODELETE updateArithProfileForUnaryArithOp(UnaryArithProfile& profile, JSValue result, JSValue operand)
+static void LEGACY_NODELETE updateArithProfileForUnaryArithOp(UnaryArithProfile& profile, JSValue result, JSValue operand)
 {
     profile.observeArg(operand);
     ASSERT(result.isNumber() || result.isBigInt());
 
     if (result.isHeapBigInt())
         profile.setObservedHeapBigInt();
-#if USE(BIGINT32)
-    else if (result.isBigInt32())
-        profile.setObservedBigInt32();
-#endif
     else {
         ASSERT(result.isNumber());
         if (!result.isInt32()) {
@@ -441,16 +437,6 @@ JSC_DEFINE_COMMON_SLOW_PATH(slow_path_negate)
     CHECK_EXCEPTION();
 
     auto& profile = codeBlock->unlinkedCodeBlock()->unaryArithProfile(bytecode.m_profileIndex);
-
-#if USE(BIGINT32)
-    if (primValue.isBigInt32()) {
-        JSValue result = JSBigInt::unaryMinus(globalObject, primValue.bigInt32AsInt32());
-        CHECK_EXCEPTION();
-        RETURN_WITH_PROFILING(result, {
-            updateArithProfileForUnaryArithOp(profile, result, operand);
-        });
-    }
-#endif
 
     if (primValue.isHeapBigInt()) {
         JSValue result = JSBigInt::unaryMinus(globalObject, primValue.asHeapBigInt());
@@ -489,10 +475,6 @@ static void updateArithProfileForBinaryArithOp(JSGlobalObject*, CodeBlock* codeB
         }
     } else if (result.isHeapBigInt())
         profile.setObservedHeapBigInt();
-#if USE(BIGINT32)
-    else if (result.isBigInt32())
-        profile.setObservedBigInt32();
-#endif
     else 
         profile.setObservedNonNumeric();
 }

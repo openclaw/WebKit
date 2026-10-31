@@ -110,7 +110,9 @@ static NSString * const WebSubframeArchivesKey = @"WebSubframeArchives";
 
 @end
 
-@implementation WebArchive
+@implementation WebArchive {
+    RetainPtr<WebArchivePrivate> _private;
+}
 
 - (instancetype)init
 {
@@ -119,7 +121,7 @@ static NSString * const WebSubframeArchivesKey = @"WebSubframeArchives";
     self = [super init];
     if (!self)
         return nil;
-    _private = [[WebArchivePrivate alloc] init];
+    _private = adoptNS([[WebArchivePrivate alloc] init]);
     return self;
 }
 
@@ -143,7 +145,7 @@ static BOOL isArrayOfClass(id object, Class elementClass)
     if (!self)
         return nil;
 
-    _private = [[WebArchivePrivate alloc] init];
+    _private = adoptNS([[WebArchivePrivate alloc] init]);
 
     _private->cachedMainResource = mainResource;
     if (!_private->cachedMainResource) {
@@ -166,11 +168,13 @@ static BOOL isArrayOfClass(id object, Class elementClass)
     }
 
     Vector<Ref<WebCore::ArchiveResource>> coreResources;
-    for (WebResource *subresource in subresources)
+    // FIXME: Remove the suppression once https://github.com/llvm/llvm-project/pull/230818 is deployed (rdar://189710680).
+    for (SUPPRESS_UNRETAINED_LOCAL WebResource *subresource in subresources)
         coreResources.append(protect([subresource _coreResource].get()));
 
     Vector<Ref<WebCore::LegacyWebArchive>> coreArchives;
-    for (WebArchive *subframeArchive in subframeArchives)
+    // FIXME: Remove the suppression once https://github.com/llvm/llvm-project/pull/230818 is deployed (rdar://189710680).
+    for (SUPPRESS_UNRETAINED_LOCAL WebArchive *subframeArchive in subframeArchives)
         coreArchives.append(protect(*[protect(subframeArchive->_private) coreArchive]));
 
     [protect(_private) setCoreArchive:WebCore::LegacyWebArchive::create([mainResource _coreResource].get(), WTF::move(coreResources), WTF::move(coreArchives), std::nullopt)];
@@ -189,7 +193,7 @@ static BOOL isArrayOfClass(id object, Class elementClass)
     CFAbsoluteTime start = CFAbsoluteTimeGetCurrent();
 #endif
 
-    _private = [[WebArchivePrivate alloc] init];
+    _private = adoptNS([[WebArchivePrivate alloc] init]);
     auto coreArchive = WebCore::LegacyWebArchive::create(WebCore::SharedBuffer::create(data));
     if (!coreArchive) {
         [self release];
@@ -236,13 +240,6 @@ static BOOL isArrayOfClass(id object, Class elementClass)
     [encoder encodeObject:[self mainResource] forKey:WebMainResourceKey];
     [encoder encodeObject:[self subresources] forKey:WebSubresourcesKey];
     [encoder encodeObject:[self subframeArchives] forKey:WebSubframeArchivesKey];    
-}
-
-- (void)dealloc
-{
-    // Retaining the member just to release it would be pointless.
-    SUPPRESS_UNRETAINED_ARG [_private release];
-    [super dealloc];
 }
 
 - (id)copyWithZone:(NSZone *)zone
@@ -344,7 +341,7 @@ static BOOL isArrayOfClass(id object, Class elementClass)
     if (!self)
         return nil;
     
-    _private = [[WebArchivePrivate alloc] initWithCoreArchive:WTF::move(coreLegacyWebArchive)];
+    _private = adoptNS([[WebArchivePrivate alloc] initWithCoreArchive:WTF::move(coreLegacyWebArchive)]);
     if (!_private) {
         [self release];
         return nil;

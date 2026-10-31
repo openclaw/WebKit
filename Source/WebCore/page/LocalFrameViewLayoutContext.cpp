@@ -33,7 +33,6 @@
 #include "FrameInlines.h"
 #include "InspectorInstrumentation.h"
 #include "LayoutBoxGeometry.h"
-#include "LayoutContext.h"
 #include "LayoutDisallowedScope.h"
 #include "LayoutIntegrationInlineContent.h"
 #include "LayoutIntegrationLineLayout.h"
@@ -88,7 +87,7 @@ public :
                 if (renderer.needsLayout())
                     return true;
                 if (auto* renderBlockFlow = dynamicDowncast<RenderBlockFlow>(renderer); renderBlockFlow && renderBlockFlow->inlineLayout())
-                    return renderBlockFlow->inlineLayout()->hasDetachedContent();
+                    return renderBlockFlow->inlineLayout()->hasTruncatedDisplayContent();
                 return false;
             };
 
@@ -179,7 +178,7 @@ void LocalFrameViewLayoutContext::layout(bool canDeferUpdateLayerPositions)
         return;
 
     Style::DocumentScope::LayoutDependencyUpdateContext layoutDependencyUpdateContext;
-    while (document() && document()->styleScope().invalidateForLayoutDependencies(layoutDependencyUpdateContext)) {
+    while (document() && protect(document()->styleScope())->invalidateForLayoutDependencies(layoutDependencyUpdateContext)) {
         protect(document())->updateStyleIfNeeded();
 
         if (!needsLayout())
@@ -201,7 +200,7 @@ void LocalFrameViewLayoutContext::interleavedLayout()
     performLayout(false);
 
     Style::DocumentScope::LayoutDependencyUpdateContext layoutDependencyUpdateContext;
-    document()->styleScope().invalidateForLayoutDependencies(layoutDependencyUpdateContext);
+    protect(document()->styleScope())->invalidateForLayoutDependencies(layoutDependencyUpdateContext);
 }
 
 void LocalFrameViewLayoutContext::performLayout(bool canDeferUpdateLayerPositions)
@@ -268,12 +267,12 @@ void LocalFrameViewLayoutContext::performLayout(bool canDeferUpdateLayerPosition
         TraceScope tracingScope(RenderTreeLayoutStart, RenderTreeLayoutEnd);
         SetForScope layoutPhase(m_layoutPhase, LayoutPhase::InRenderTreeLayout);
         ScriptDisallowedScope::InMainThread scriptDisallowedScope;
-        SubtreeLayoutStateMaintainer subtreeLayoutStateMaintainer(subtreeLayoutRoot());
-        RenderView::RepaintRegionAccumulator repaintRegionAccumulator(renderView());
+        SubtreeLayoutStateMaintainer subtreeLayoutStateMaintainer(protect(subtreeLayoutRoot()));
+        RenderView::RepaintRegionAccumulator repaintRegionAccumulator(protect(renderView()));
 #ifndef NDEBUG
         RenderTreeNeedsLayoutChecker checker(*renderView());
 #endif
-        layoutRoot->layout();
+        protect(layoutRoot)->layout();
         {
             CheckedPtr renderView = this->renderView();
             auto state = renderView ? renderView->textAutosizingState() : RenderView::TextAutosizingState::Normal;
@@ -298,7 +297,7 @@ void LocalFrameViewLayoutContext::performLayout(bool canDeferUpdateLayerPosition
                 break;
             }
         }
-        layoutRoot->absoluteQuads(layoutAreas);
+        protect(layoutRoot)->absoluteQuads(layoutAreas);
 
         clearSubtreeLayoutRoot();
         ASSERT(m_percentHeightIgnoreList.isEmptyIgnoringNullReferences());
@@ -332,7 +331,7 @@ void LocalFrameViewLayoutContext::performLayout(bool canDeferUpdateLayerPosition
         protect(view())->didLayout(layoutRoot, canDeferUpdateLayerPositions);
         runOrScheduleAsynchronousTasks(canDeferUpdateLayerPositions);
     }
-    InspectorInstrumentation::didLayout(frame, *layoutRoot, layoutAreas);
+    InspectorInstrumentation::didLayout(frame, *protect(layoutRoot), layoutAreas);
     DebugPageOverlays::didLayout(frame);
 }
 
@@ -608,9 +607,9 @@ void LocalFrameViewLayoutContext::flushPendingSVGTransformAttributeUpdatesIfNeed
             addResult.iterator->value.second.unite(rect);
     }
     // Map each parent-space union to its repaint container, once per parent.
-    for (auto& [parent, containerAndRect] : unionByParent) {
-        CheckedPtr container = containerAndRect.first;
-        addToContainer(container, protect(parent)->computeRectForRepaint(containerAndRect.second, container));
+    for (auto& entry : unionByParent) {
+        CheckedPtr container = entry.value.first;
+        addToContainer(container, protect(entry.key)->computeRectForRepaint(entry.value.second, container));
     }
 
     // Slow path: exact per-renderer mapping for the cases the fast path skipped.
@@ -624,8 +623,8 @@ void LocalFrameViewLayoutContext::flushPendingSVGTransformAttributeUpdatesIfNeed
         addToContainer(repaintContainer.get(), rect);
     }
 
-    for (auto& [container, unionRect] : unionByContainer)
-        protect(container)->repaintUsingContainer(SingleThreadWeakPtr<const RenderLayerModelObject> { container }, unionRect);
+    for (auto& entry : unionByContainer)
+        protect(entry.key)->repaintUsingContainer(SingleThreadWeakPtr<const RenderLayerModelObject> { entry.key }, entry.value);
 
     if (!anyWorkDone)
         return;
@@ -863,11 +862,12 @@ bool LocalFrameViewLayoutContext::canPerformLayout() const
 void LocalFrameViewLayoutContext::applyTextSizingIfNeeded(RenderElement& layoutRoot)
 {
     ASSERT(document());
-    if (protect(document())->quirks().shouldIgnoreTextAutoSizing())
+    Ref document = *this->document();
+    if (document->quirks().shouldIgnoreTextAutoSizing())
         return;
     Ref settings = layoutRoot.settings();
     bool idempotentMode = settings->textAutosizingUsesIdempotentMode();
-    if (!settings->textAutosizingEnabled() || idempotentMode || protect(renderView())->printing())
+    if (!document->textAutosizingEnabled() || idempotentMode || protect(renderView())->printing())
         return;
     auto minimumZoomFontSize = settings->minimumZoomFontSize();
     if (!idempotentMode && !minimumZoomFontSize)

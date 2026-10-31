@@ -42,6 +42,7 @@
 #include <WebCore/IntRect.h>
 #include <WebCore/MIMETypeRegistry.h>
 #include <WebCore/ScreenOrientationType.h>
+#include <wtf/Borrow.h>
 #include <wtf/CallbackAggregator.h>
 #include <wtf/CoroutineUtilities.h>
 #include <wtf/FileHandle.h>
@@ -129,7 +130,7 @@ void WebFullScreenManagerProxy::didEnterFullScreen(CompletionHandler<void(bool)>
 void WebFullScreenManagerProxy::callCloseCompletionHandlers()
 {
     auto closeMediaCallbacks = WTF::move(m_closeCompletionHandlers);
-    for (auto& callback : closeMediaCallbacks)
+    for (auto& callback : borrow(closeMediaCallbacks))
         callback();
 }
 
@@ -201,7 +202,7 @@ void WebFullScreenManagerProxy::detachFromClient()
     m_client = nullptr;
 }
 
-// FIXME: This should be detected as NODELETE (rdar://182377452).
+// FIXME: This should be detected as LEGACY_NODELETE (rdar://182377452).
 SUPPRESS_NODELETE void WebFullScreenManagerProxy::attachToNewClient(WebFullScreenManagerProxyClient& client)
 {
     m_client = &client;
@@ -436,8 +437,8 @@ std::optional<std::pair<IntRect, IntRect>> WebFullScreenManagerProxy::convertFro
     if (!client)
         return std::nullopt;
     return { {
-        IntRect(client->convertMainFrameCoordinatesInFullscreenPlaceholderViewToScreen(*page, IntRect(rectsInMainFrameCoordinates.first))),
-        IntRect(page->syncRootViewToScreen(IntRect(rectsInMainFrameCoordinates.second)))
+        client->convertMainFrameCoordinatesInFullscreenPlaceholderViewToScreen(*page, rectsInMainFrameCoordinates.first),
+        page->syncRootViewToScreen(rectsInMainFrameCoordinates.second)
     } };
 }
 

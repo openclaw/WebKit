@@ -34,8 +34,9 @@ namespace WebGPU::Metal {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(TextureView);
 
-TextureView::TextureView(id<MTLTexture> texture, const WGPUTextureViewDescriptor& descriptor, const std::optional<WGPUExtent3D>& renderExtent, Texture& parentTexture, Device& device)
+TextureView::TextureView(id<MTLTexture> texture, id<MTLTexture> sampledTexture, const ResolvedTextureViewDescriptor& descriptor, const std::optional<WebGPU::Extent3D>& renderExtent, Texture& parentTexture, Device& device)
     : m_texture(texture)
+    , m_sampledTexture(sampledTexture)
     , m_format(descriptor.format)
     , m_dimension(descriptor.dimension)
     , m_baseMipLevel(descriptor.baseMipLevel)
@@ -44,6 +45,7 @@ TextureView::TextureView(id<MTLTexture> texture, const WGPUTextureViewDescriptor
     , m_arrayLayerCount(descriptor.arrayLayerCount)
     , m_aspect(descriptor.aspect)
     , m_usage(descriptor.usage)
+    , m_hasSwizzle(!descriptor.swizzle.isIdentity())
     , m_renderExtent(renderExtent)
     , m_device(device)
     , m_parentTexture(parentTexture)
@@ -61,6 +63,7 @@ TextureView::~TextureView() = default;
 void TextureView::setLabel(String&& label)
 {
     m_texture.label = label.createNSString().get();
+    m_sampledTexture.label = m_texture.label;
 }
 
 id<MTLTexture> TextureView::parentTexture() const
@@ -104,7 +107,7 @@ uint32_t TextureView::depthOrArrayLayers() const
     return m_parentTexture->physicalMiplevelSpecificTextureExtent(baseMipLevel()).depthOrArrayLayers;
 }
 
-WGPUTextureUsage TextureView::usage() const
+OptionSet<WebGPU::TextureUsage> TextureView::usage() const
 {
     // The descriptor's usage was resolved to the parent texture's usage when the view was created
     // if the view did not narrow it, so this is the set of usages the view itself allows.
@@ -116,19 +119,27 @@ id<MTLTexture> TextureView::texture() const
     return isDestroyed() ? parentTexture() : m_texture;
 }
 
+id<MTLTexture> TextureView::sampledTexture() const
+{
+    if (isDestroyed())
+        return parentTexture();
+
+    return m_sampledTexture ? m_sampledTexture : m_texture;
+}
+
 uint32_t TextureView::sampleCount() const
 {
     return m_parentTexture->sampleCount();
 }
 
-WGPUTextureFormat TextureView::parentFormat() const
+WebGPU::TextureFormat TextureView::parentFormat() const
 {
     return m_parentTexture->format();
 }
 
-WGPUTextureFormat TextureView::format() const
+WebGPU::TextureFormat TextureView::format() const
 {
-    return m_format;
+    return m_format.value_or(WebGPU::TextureFormat::Rgba8unorm);
 }
 
 uint32_t TextureView::parentMipLevelCount() const
@@ -146,7 +157,7 @@ uint32_t TextureView::baseMipLevel() const
     return m_baseMipLevel;
 }
 
-WGPUTextureAspect TextureView::aspect() const
+WebGPU::TextureAspect TextureView::aspect() const
 {
     return m_aspect;
 }
@@ -161,9 +172,9 @@ uint32_t TextureView::baseArrayLayer() const
     return m_baseArrayLayer;
 }
 
-WGPUTextureViewDimension TextureView::dimension() const
+WebGPU::TextureViewDimension TextureView::dimension() const
 {
-    return m_dimension;
+    return m_dimension.value_or(WebGPU::TextureViewDimension::_2d);
 }
 
 bool TextureView::isDestroyed() const
@@ -179,6 +190,7 @@ bool TextureView::isValid() const
 void TextureView::destroy()
 {
     m_texture = protect(m_device)->placeholderTexture(format());
+    m_sampledTexture = nil;
     if (!m_parentTexture->isCanvasBacking())
         m_device->makeSubmitInvalidClearingEncoders(m_commandEncoders);
 
@@ -202,7 +214,7 @@ id<MTLRasterizationRateMap> TextureView::rasterizationMapForSlice(uint32_t slice
 
 #pragma mark WGPU Stubs
 
-void NODELETE wgpuTextureViewAddRef(WGPUTextureView textureView)
+void LEGACY_NODELETE wgpuTextureViewAddRef(WGPUTextureView textureView)
 {
     WebGPU::Metal::fromAPI(textureView).ref();
 }

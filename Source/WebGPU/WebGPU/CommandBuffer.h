@@ -30,14 +30,14 @@
 #import <atomic>
 #import <wtf/FastMalloc.h>
 #import <wtf/Ref.h>
+#import <wtf/RetainPtr.h>
 #import <wtf/SwiftBridging.h>
 #import <wtf/TZoneMalloc.h>
 #import <wtf/ThreadSafeWeakPtr.h>
+#import <wtf/Vector.h>
 #import <wtf/WeakPtr.h>
 #import <wtf/threads/BinarySemaphore.h>
 
-struct WGPUCommandBufferImpl {
-};
 
 namespace WebGPU::Metal {
 
@@ -45,7 +45,7 @@ class CommandEncoder;
 class Device;
 
 // https://gpuweb.github.io/gpuweb/#gpucommandbuffer
-class CommandBuffer final : public WebGPU::CommandBuffer, public WGPUCommandBufferImpl {
+class CommandBuffer final : public WebGPU::CommandBuffer {
     WTF_MAKE_TZONE_ALLOCATED(CommandBuffer);
 public:
     static Ref<CommandBuffer> create(id<MTLCommandBuffer> commandBuffer, Device& device, id<MTLSharedEvent> sharedEvent, uint64_t sharedEventSignalValue, Vector<Function<bool(CommandBuffer&, CommandEncoder&)>>&& onCommitHandlers, CommandEncoder& commandEncoder)
@@ -65,13 +65,19 @@ public:
 
     id<MTLCommandBuffer> commandBuffer() const { return m_commandBuffer; }
 
+    // A single MTLCommandBuffer can only hold so many MTLRenderCommandEncoders before IOGPU runs out
+    // of memory for it, so CommandEncoder rolls over to a fresh MTLCommandBuffer and hands the filled
+    // ones here. The queue commits them, in order, immediately before commandBuffer().
+    void setPriorCommandBuffers(Vector<RetainPtr<id<MTLCommandBuffer>>>&&);
+    Vector<RetainPtr<id<MTLCommandBuffer>>> takePriorCommandBuffers();
+
     Device& device() const { return m_device; }
     void makeInvalid(NSString*);
     void makeInvalidDueToCommit(NSString*);
     void setBufferMapCount(int bufferMapCount) { m_bufferMapCount = bufferMapCount; }
     int bufferMapCount() const { return m_bufferMapCount; }
 
-    NSString* NODELETE lastError() const;
+    NSString* LEGACY_NODELETE lastError() const;
     bool waitForCompletion();
     bool preCommitHandler();
     void postCommitHandler();
@@ -83,9 +89,11 @@ private:
     CommandBuffer(id<MTLCommandBuffer>, Device&, id<MTLSharedEvent>, uint64_t sharedEventSignalValue, Vector<Function<bool(CommandBuffer&, CommandEncoder&)>>&&, CommandEncoder&);
     CommandBuffer(Device&);
     void retainTimestampsForOneUpdateLoop();
+    void releasePriorCommandBuffers();
 
     id<MTLCommandBuffer> m_commandBuffer { nil };
     id<MTLCommandBuffer> m_cachedCommandBuffer { nil };
+    Vector<RetainPtr<id<MTLCommandBuffer>>> m_priorCommandBuffers;
     int m_bufferMapCount { 0 };
 
     const Ref<Device> m_device;

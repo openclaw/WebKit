@@ -188,8 +188,9 @@ CSSKeyframeRule* CSSKeyframesRule::item(unsigned index) const
         return nullptr;
     ASSERT(m_childRuleCSSOMWrappers.size() == m_keyframesRule->keyframes().size());
     auto& rule = m_childRuleCSSOMWrappers[index];
-    if (!rule)
+    if (!rule) {
         rule = adoptRef(*new CSSKeyframeRule(m_keyframesRule->keyframes()[index], const_cast<CSSKeyframesRule*>(this)));
+    }
     return rule.get(); 
 }
 

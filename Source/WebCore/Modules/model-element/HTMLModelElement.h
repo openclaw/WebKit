@@ -43,6 +43,7 @@
 #include <WebCore/ModelPlayerClient.h>
 #include <WebCore/PlatformLayer.h>
 #include <WebCore/PlatformLayerIdentifier.h>
+#include <WebCore/PortalInteractionGesture.h>
 #include <WebCore/SharedBuffer.h>
 #include <WebCore/VisibilityChangeClient.h>
 #include <wtf/UniqueRef.h>
@@ -127,7 +128,7 @@ public:
     using ReadyPromise = DOMPromiseProxyWithResolveCallback<IDLInterface<HTMLModelElement>>;
     ReadyPromise& ready() { return m_readyPromise.get(); }
 
-    WEBCORE_EXPORT RefPtr<Model> NODELETE model() const;
+    WEBCORE_EXPORT RefPtr<Model> LEGACY_NODELETE model() const;
 
 #if ENABLE(MODEL_ELEMENT_ENTITY_TRANSFORM)
     const DOMMatrixReadOnly& entityTransform() const;
@@ -178,10 +179,10 @@ public:
     void exitImmersivePresentation(CompletionHandler<void()>&&);
 #endif
 
-    WEBCORE_EXPORT bool supportsDragging() const;
+    WEBCORE_EXPORT bool LEGACY_NODELETE supportsDragging() const;
     bool isDraggableIgnoringAttributes() const final;
 
-    WEBCORE_EXPORT bool NODELETE isInteractive() const;
+    WEBCORE_EXPORT bool LEGACY_NODELETE isInteractive() const;
 
 #if ENABLE(MODEL_ELEMENT_ANIMATIONS_CONTROL)
     double playbackRate() const { return m_playbackRate; }
@@ -222,14 +223,15 @@ public:
 
 #if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
     RefPtr<ModelPlayer> liveModelPlayer() const;
+    void exitVolumetricPresentation();
     bool isPresentedInVolumetricScene() const { return m_presentationMode == ModelPresentationMode::Volumetric; }
 #endif
 
     void paintCurrentFrameInContext(GraphicsContext&, const FloatRect&);
 
-    size_t NODELETE memoryCost() const;
+    size_t LEGACY_NODELETE memoryCost() const;
 #if ENABLE(RESOURCE_USAGE)
-    size_t NODELETE externalMemoryCost() const;
+    size_t LEGACY_NODELETE externalMemoryCost() const;
 #endif
 
     bool isIntersectingViewport() const { return m_isIntersectingViewport; }
@@ -255,26 +257,26 @@ private:
     void modelDidChange();
     void createModelPlayer();
     void deleteModelPlayer();
-    void deletePendingModelPlayer();
+    void LEGACY_NODELETE deletePendingModelPlayer();
     void unloadModelPlayer(bool onSuspend);
     void reloadModelPlayer();
     void updatePlayerVisibility();
     void startLoadModelTimer();
     void loadModelTimerFired();
 
-    HTMLModelElement& NODELETE readyPromiseResolve();
+    HTMLModelElement& LEGACY_NODELETE readyPromiseResolve();
 
     CachedResourceRequest createResourceRequest(const URL&, FetchOptions::Destination);
 
     // ActiveDOMObject.
-    bool NODELETE virtualHasPendingActivity() const final;
+    bool LEGACY_NODELETE virtualHasPendingActivity() const final;
     void resume() final;
     void suspend(ReasonForSuspension) final;
     void stop() final;
 
     // DOM overrides.
     void didMoveToNewDocument(Document& oldDocument, Document& newDocument) final;
-    bool NODELETE isURLAttribute(const Attribute&) const final;
+    bool LEGACY_NODELETE isURLAttribute(const Attribute&) const final;
     void attributeChanged(const QualifiedName&, const AtomString& oldValue, const AtomString& newValue, AttributeModificationReason) final;
 
     // StyledElement
@@ -283,7 +285,8 @@ private:
 
     // Rendering overrides.
     RenderPtr<RenderElement> createElementRenderer(Style::ComputedStyle&&, const RenderTreePosition&) final;
-    bool isReplaced(const Style::ComputedStyle* = nullptr) const final { return true; }
+    bool isReplaced(const Style::ComputedStyle* = nullptr) const final;
+    bool LEGACY_NODELETE rendersFallbackContent() const;
     bool rendererIsNeeded(const Style::ComputedStyle&) final;
     void didAttachRenderers() final;
     void willDetachRenderers() final;
@@ -320,13 +323,9 @@ private:
     void removingSteps(RemovalType, ContainerNode& oldParentOfRemovedTree) override;
 
     void defaultEventHandler(Event&) final;
-    void dragDidStart(WebCore::MouseRelatedEvent&);
-    void dragDidChange(WebCore::MouseRelatedEvent&);
-    void dragDidEnd(WebCore::MouseRelatedEvent&);
 
     void logInteractionDiagnostic();
 
-    LayoutPoint flippedLocationInElementForMouseEvent(WebCore::MouseRelatedEvent&);
 #if USE(SYSTEM_PREVIEW)
     bool isPointInSystemPreviewBadge(const FloatPoint&) const;
 #endif
@@ -342,7 +341,7 @@ private:
     void updateSpatialPortalController();
 #endif
 
-    ModelPlayer* effectiveModelPlayer() const;
+    ModelPlayer* LEGACY_NODELETE effectiveModelPlayer() const;
 
     void reportExtraMemoryCost();
 
@@ -379,7 +378,7 @@ private:
     void modelResourceFinished();
     void sourceRequestResource();
     bool shouldDeferLoading() const;
-    bool NODELETE isModelDeferred() const;
+    bool LEGACY_NODELETE isModelDeferred() const;
     bool hasLiveModelPlayer() const;
     bool isModelLoading() const;
     bool isModelLoaded() const;
@@ -403,10 +402,11 @@ private:
 #if ENABLE(TOUCH_EVENTS)
     const RefPtr<HTMLModelElementEventListener> m_eventListener;
 #endif
+    PortalInteractionGesture m_interactionGesture;
     bool m_dataComplete { false };
-    bool m_isDragging { false };
     bool m_shouldCreateModelPlayerUponRendererAttachment { false };
     bool m_isIntersectingViewport { false };
+    bool m_hasFallbackContentQuirk { false };
 #if ENABLE(MODEL_PROCESS)
     bool m_didIncrementModelElementCount { false };
 #endif
@@ -462,7 +462,7 @@ private:
     bool m_suppressEDR { false };
 #endif
 
-    void NODELETE triggerModelPlayerCreationCallbacksIfNeeded(ExceptionOr<RefPtr<ModelPlayer>>&&);
+    void LEGACY_NODELETE triggerModelPlayerCreationCallbacksIfNeeded(ExceptionOr<RefPtr<ModelPlayer>>&&);
 };
 
 } // namespace WebCore

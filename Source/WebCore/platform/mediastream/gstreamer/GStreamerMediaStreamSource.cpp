@@ -397,7 +397,7 @@ public:
             m_videoRotation = videoRotation;
             m_videoMirrored = videoMirrored;
 
-            auto orientation = makeString(videoMirrored ? "flip-"_s : ""_s, "rotate-"_s, m_videoRotation);
+            auto orientation = webkitGstImageOrientationTag(m_videoRotation, videoMirrored);
             GST_DEBUG_OBJECT(m_src.get(), "Setting orientation tag: %s", orientation.utf8());
             GRefPtr tags = adoptGRef(gst_tag_list_make_writable(gst_stream_get_tags(m_stream.get())));
             gst_tag_list_add(tags.get(), GST_TAG_MERGE_REPLACE, GST_TAG_IMAGE_ORIENTATION, orientation.utf8().legacyCStringPointer(), nullptr);
@@ -624,7 +624,7 @@ private:
             m_silentBuffer = adoptGRef(gst_buffer_new_and_alloc(128 * GST_AUDIO_INFO_BPF(&info)));
             {
                 GstMappedBuffer map(m_silentBuffer.get(), GST_MAP_WRITE);
-                webkitGstAudioFormatFillSilence(info.finfo, map.data(), map.size());
+                gst_audio_format_info_fill_silence(info.finfo, map.data(), map.size());
             }
             gst_buffer_add_audio_meta(m_silentBuffer.get(), &info, 128, nullptr);
         }

@@ -148,11 +148,11 @@ void HTMLOptionElement::updateUserAgentShadowTree()
 
     labelContainer->setTextContent(String { labelValue });
     if (m_ownerSelect && !labelValue.isNull()) {
-        labelContainer->setInlineStyleProperty(CSSPropertyDisplay, CSSValueInline);
-        slot->setInlineStyleProperty(CSSPropertyDisplay, CSSValueNone);
+        labelContainer->setInlineStyleProperty(CSSPropertyID::Display, CSSValueID::Inline);
+        slot->setInlineStyleProperty(CSSPropertyID::Display, CSSValueID::None);
     } else {
-        labelContainer->setInlineStyleProperty(CSSPropertyDisplay, CSSValueNone);
-        slot->setInlineStyleProperty(CSSPropertyDisplay, CSSValueContents);
+        labelContainer->setInlineStyleProperty(CSSPropertyID::Display, CSSValueID::None);
+        slot->setInlineStyleProperty(CSSPropertyID::Display, CSSValueID::Contents);
     }
 }
 
@@ -160,9 +160,11 @@ auto HTMLOptionElement::insertionSteps(InsertionType insertionType, ContainerNod
 {
     auto result = HTMLElement::insertionSteps(insertionType, parentOfInsertedTree);
 
-    if (document().settings().htmlEnhancedSelectParsingEnabled() && !m_ownerSelect) {
+    RefPtr<HTMLSelectElement> newOwnerSelect;
+    if (!m_ownerSelect) {
         if (RefPtr select = HTMLSelectElement::findOwnerSelect(parentNode(), HTMLSelectElement::ExcludeOptGroup::No)) {
             m_ownerSelect = select.get();
+            newOwnerSelect = select;
             select->setRecalcListItems();
             // If this non-selected option is the first non-disabled option in a
             // single-select that has no explicitly selected option, select it by
@@ -181,8 +183,11 @@ auto HTMLOptionElement::insertionSteps(InsertionType insertionType, ContainerNod
             select->invalidateButtonText();
         if (m_shadowTreeNeedsUpdate)
             protect(document())->addElementWithPendingUserAgentShadowTreeUpdate(*this);
-        if (m_ownerSelect)
+        if (newOwnerSelect) {
+            if (!newOwnerSelect->multiple())
+                newOwnerSelect->queueSelectedContentUpdate(*this);
             result = NeedsPostConnectionSteps::Yes;
+        }
     }
 
     return result;
@@ -197,13 +202,18 @@ void HTMLOptionElement::postConnectionSteps()
     if (select->multiple()) {
         // The select clones its options once it finishes parsing them.
         if (select->isFinishedParsingChildren())
-            select->queueSelectedContentUpdate();
+            select->queueSelectedContentUpdate(*this);
         return;
     }
 
-    bool isSelected = select->isFinishedParsingChildren() ? selected() : selectedWithoutUpdate();
-    if (isSelected)
-        select->updateSelectedContent(this);
+    if (!select->isFinishedParsingChildren()) {
+        if (selectedWithoutUpdate())
+            select->updateSelectedContent(this);
+        return;
+    }
+
+    if (select->hasPendingSelectedContentUpdate())
+        select->updateSelectedContent();
 }
 
 void HTMLOptionElement::removingSteps(RemovalType removalType, ContainerNode& oldParentOfRemovedTree)
@@ -213,7 +223,7 @@ void HTMLOptionElement::removingSteps(RemovalType removalType, ContainerNode& ol
     if (removalType.disconnectedFromDocument && m_shadowTreeNeedsUpdate)
         protect(document())->removeElementWithPendingUserAgentShadowTreeUpdate(*this);
 
-    if (!document().settings().htmlEnhancedSelectParsingEnabled() || !m_ownerSelect)
+    if (!m_ownerSelect)
         return;
 
     if (auto* select = HTMLSelectElement::findOwnerSelect(parentNode(), HTMLSelectElement::ExcludeOptGroup::No)) {
@@ -224,8 +234,7 @@ void HTMLOptionElement::removingSteps(RemovalType removalType, ContainerNode& ol
     if (RefPtr select = std::exchange(m_ownerSelect, nullptr).get()) {
         select->setRecalcListItems();
         select->invalidateButtonText();
-        if (m_isSelected || select->multiple())
-            select->queueSelectedContentUpdate();
+        select->queueSelectedContentUpdate(*this);
         invalidateShadowTree();
     }
 }
@@ -234,9 +243,6 @@ void HTMLOptionElement::movingSteps(MovingType movingType, ContainerNode& oldPar
 {
     HTMLElement::movingSteps(movingType, oldParent);
 
-    if (!document().settings().htmlEnhancedSelectParsingEnabled())
-        return;
-
     RefPtr oldSelect = m_ownerSelect;
     RefPtr newSelect = HTMLSelectElement::findOwnerSelect(parentNode(), HTMLSelectElement::ExcludeOptGroup::No);
     if (oldSelect == newSelect) {
@@ -244,7 +250,7 @@ void HTMLOptionElement::movingSteps(MovingType movingType, ContainerNode& oldPar
             newSelect->setRecalcListItems();
             newSelect->invalidateButtonText();
             if (newSelect->multiple() && oldParent.isInclusiveDescendantOf(*newSelect))
-                newSelect->queueSelectedContentUpdate();
+                newSelect->queueSelectedContentUpdate(*this);
         }
         return;
     }
@@ -254,15 +260,13 @@ void HTMLOptionElement::movingSteps(MovingType movingType, ContainerNode& oldPar
     if (oldSelect) {
         oldSelect->setRecalcListItems();
         oldSelect->invalidateButtonText();
-        if (m_isSelected || oldSelect->multiple())
-            oldSelect->queueSelectedContentUpdate();
+        oldSelect->queueSelectedContentUpdate(*this);
     }
 
     if (newSelect) {
         newSelect->setRecalcListItems();
         newSelect->invalidateButtonText();
-        if (m_isSelected || newSelect->multiple())
-            newSelect->queueSelectedContentUpdate();
+        newSelect->queueSelectedContentUpdate(*this);
     }
 
     invalidateShadowTree();
@@ -275,8 +279,6 @@ void HTMLOptionElement::finishParsingChildren()
 
     if (document().settings().mutationEventsEnabled())
         return;
-
-    ASSERT(document().settings().htmlEnhancedSelectParsingEnabled());
 
     if (m_disabled)
         return;
@@ -345,10 +347,8 @@ bool HTMLOptionElement::accessKeyAction(bool)
     if (isActuallyDisabled())
         return false;
 
-    if (select->usesBaseAppearancePicker())
-        select->pickOrToggleOption(*this);
-    else
-        select->accessKeySetSelectedIndex(index());
+    select->pickOrToggleOption(*this);
+    select->scrollToSelection();
     return true;
 }
 
@@ -522,6 +522,18 @@ void HTMLOptionElement::setSelected(bool selected)
         select->optionSelectionStateChanged(*this, selected);
 }
 
+void HTMLOptionElement::setSelectedByUser(bool selected)
+{
+    RefPtr select = ownerSelectElement();
+    if (!select || this->selected() == selected || isActuallyDisabled())
+        return;
+
+    if (!selected && !select->multiple())
+        return;
+
+    select->pickOrToggleOption(*this);
+}
+
 bool HTMLOptionElement::selectedForBindings() const
 {
     return selected();
@@ -536,8 +548,10 @@ void HTMLOptionElement::setSelectedForBindings(bool selected)
     // The spec says dirtiness becomes true unconditionally. However, for web
     // compatibility, don't set dirtiness if the option is owned by a select
     // element and selectedness did not actually change.
-    if (ownerSelectElement() && wasSelected == m_isSelected)
+    if (RefPtr select = ownerSelectElement(); select && wasSelected == m_isSelected) {
+        select->updateSelectedContentIfEnabled();
         return;
+    }
 
     m_isDirty = true;
 }
@@ -557,18 +571,10 @@ void HTMLOptionElement::setSelectedState(bool selected, AllowStyleInvalidation a
         cache->onSelectedOptionChanged(*this);
 }
 
-void HTMLOptionElement::childrenChanged(const ChildChange& change)
+void HTMLOptionElement::descendantsChanged()
 {
-    Vector<Ref<HTMLDataListElement>> ancestors;
-    for (Ref dataList : ancestorsOfType<HTMLDataListElement>(*this))
-        ancestors.append(WTF::move(dataList));
-    for (auto& dataList : ancestors)
-        dataList->optionElementChildrenChanged();
-    if (change.source != ChildChange::Source::Clone) {
-        if (RefPtr select = ownerSelectElement())
-            select->optionElementChildrenChanged();
-    }
-    HTMLElement::childrenChanged(change);
+    if (RefPtr select = ownerSelectElement())
+        select->optionElementChildrenChanged();
 }
 
 void HTMLOptionElement::willResetComputedStyle()
@@ -581,16 +587,7 @@ void HTMLOptionElement::willResetComputedStyle()
 
 HTMLSelectElement* HTMLOptionElement::ownerSelectElement() const
 {
-    if (document().settings().htmlEnhancedSelectParsingEnabled())
-        return m_ownerSelect.get();
-
-    if (auto* parent = parentElement()) {
-        if (auto* select = dynamicDowncast<HTMLSelectElement>(*parent))
-            return select;
-        if (auto* optGroup = dynamicDowncast<HTMLOptGroupElement>(*parent))
-            return optGroup->ownerSelectElement();
-    }
-    return nullptr;
+    return m_ownerSelect.get();
 }
 
 // https://html.spec.whatwg.org/#option-base-appearance
@@ -626,12 +623,6 @@ String HTMLOptionElement::displayLabel() const
 
 String HTMLOptionElement::textIndentedToRespectGroupLabel() const
 {
-    if (!document().settings().htmlEnhancedSelectParsingEnabled()) {
-        if (is<HTMLOptGroupElement>(parentNode()))
-            return makeString("    "_s, displayLabel());
-        return displayLabel();
-    }
-
     for (Ref ancestor : ancestorsOfType<HTMLElement>(*this)) {
         if (is<HTMLOptGroupElement>(ancestor))
             return makeString("    "_s, displayLabel());
@@ -646,11 +637,6 @@ bool HTMLOptionElement::isDisabledFormControl() const
 {
     if (ownElementDisabled())
         return true;
-
-    if (!document().settings().htmlEnhancedSelectParsingEnabled()) {
-        RefPtr parentOptGroup = dynamicDowncast<HTMLOptGroupElement>(parentNode());
-        return parentOptGroup && parentOptGroup->isDisabledFormControl();
-    }
 
     for (Ref ancestor : ancestorsOfType<HTMLElement>(*this)) {
         if (RefPtr optGroup = dynamicDowncast<HTMLOptGroupElement>(ancestor))
@@ -671,7 +657,6 @@ bool HTMLOptionElement::isActuallyDisabled() const
 
 void HTMLOptionElement::cloneIntoSelectedContent(HTMLSelectedContentElement& selectedContent)
 {
-    ASSERT(document().settings().htmlEnhancedSelectParsingEnabled());
     ASSERT(document().settings().htmlEnhancedSelectEnabled());
     ASSERT(!selectedContent.document().settings().mutationEventsEnabled());
 

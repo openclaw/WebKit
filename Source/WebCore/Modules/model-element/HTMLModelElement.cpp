@@ -39,6 +39,7 @@
 #include "DiagnosticLoggingClient.h"
 #include "DocumentEventLoop.h"
 #include "DocumentPage.h"
+#include "DocumentQuirks.h"
 #include "DocumentResourceLoader.h"
 #include "DocumentView.h"
 #include "ElementChildIteratorInlines.h"
@@ -80,6 +81,7 @@
 #include "Page.h"
 #include "PlaceholderModelPlayer.h"
 #include "PlatformScreen.h"
+#include "Quirks.h"
 #include "RenderBoxInlines.h"
 #include "RenderLayer.h"
 #include "RenderLayerBacking.h"
@@ -109,10 +111,6 @@
 #include "Chrome.h"
 #include "ChromeClient.h"
 #include "ElementVolumetricScene.h"
-#endif
-
-#if ENABLE(TOUCH_EVENTS) && (ENABLE(GPU_PROCESS_MODEL) || ENABLE(MODEL_PROCESS))
-#include <WebCore/TouchEvent.h>
 #endif
 
 #if ENABLE(SPATIAL_PORTAL)
@@ -177,6 +175,8 @@ HTMLModelElement::HTMLModelElement(const QualifiedName& tagName, Document& docum
     }))
 #endif
 {
+    m_hasFallbackContentQuirk = document.quirks().shouldRenderModelElementFallbackContentQuirk();
+
 #if HAVE(SUPPORT_HDR_DISPLAY) && ENABLE(PIXEL_FORMAT_RGBA16F)
     if (RefPtr screenPropertiesChangedObserver = m_screenPropertiesChangedObserver)
         document.addScreenPropertiesChangedObserver(*screenPropertiesChangedObserver);
@@ -242,7 +242,7 @@ RefPtr<Model> HTMLModelElement::model() const
     return m_model;
 }
 
-static bool isSupportedModelType(const AtomString& type)
+static bool LEGACY_NODELETE isSupportedModelType(const AtomString& type)
 {
     return type.isEmpty() || MIMETypeRegistry::isSupportedModelMIMEType(type);
 }
@@ -305,6 +305,7 @@ void HTMLModelElement::setSourceURL(const URL& url)
     if (url == m_sourceURL)
         return;
 
+    bool rendersFallbackContentBefore = rendersFallbackContent();
     m_sourceURL = url;
 
     m_data.reset();
@@ -339,6 +340,9 @@ void HTMLModelElement::setSourceURL(const URL& url)
 
     m_readyPromise = makeUniqueRef<ReadyPromise>(*this, &HTMLModelElement::readyPromiseResolve);
     m_shouldCreateModelPlayerUponRendererAttachment = false;
+
+    if (rendersFallbackContent() != rendersFallbackContentBefore)
+        invalidateStyleAndRenderersForSubtree();
 
 #if ENABLE(SPATIAL_PORTAL)
     if (CheckedPtr controller = findPortalController())
@@ -411,6 +415,7 @@ void HTMLModelElement::didMoveToNewDocument(Document& oldDocument, Document& new
 {
     ActiveDOMObject::didMoveToNewDocument(newDocument);
     HTMLElement::didMoveToNewDocument(oldDocument, newDocument);
+    m_hasFallbackContentQuirk = newDocument.quirks().shouldRenderModelElementFallbackContentQuirk();
     sourcesChanged();
 }
 
@@ -423,11 +428,24 @@ RenderPtr<RenderElement> HTMLModelElement::createElementRenderer(Style::Computed
         return nullptr;
 #endif
 
+    if (rendersFallbackContent())
+        return HTMLElement::createElementRenderer(WTF::move(style), position);
+
     if (RefPtr page = document().page()) {
         if (RefPtr provider = page->modelPlayerProvider(); provider && !provider->isAvailable())
             return HTMLElement::createElementRenderer(WTF::move(style), position);
     }
     return createRenderer<RenderModel>(*this, WTF::move(style));
+}
+
+bool HTMLModelElement::isReplaced(const Style::ComputedStyle*) const
+{
+    return !rendersFallbackContent();
+}
+
+bool HTMLModelElement::rendersFallbackContent() const
+{
+    return m_hasFallbackContentQuirk && m_sourceURL.isEmpty();
 }
 
 bool HTMLModelElement::rendererIsNeeded(const Style::ComputedStyle& style)
@@ -1096,8 +1114,8 @@ void HTMLModelElement::startLoadModelTimer()
     Ref document = this->document();
     Seconds delay = document->page() && document->page()->shouldDisableModelLoadDelaysForTesting() ? 0_s : reloadModelDelay;
     m_loadModelTimer = protect(document->eventLoop())->scheduleTask(delay, TaskSource::ModelElement, [weakThis = WeakPtr { *this }] {
-        if (weakThis)
-            weakThis->loadModelTimerFired();
+        if (RefPtr protectedThis = weakThis)
+            protectedThis->loadModelTimerFired();
     });
 }
 
@@ -1375,57 +1393,18 @@ void HTMLModelElement::defaultEventHandler(Event& event)
     if (!modelPlayer || !modelPlayer->supportsMouseInteraction())
         return;
 
-    auto type = event.type();
-    bool isMouseEvent = type == eventNames().mousedownEvent || type == eventNames().mousemoveEvent || type == eventNames().mouseupEvent;
-
-#if ENABLE(TOUCH_EVENTS) && (ENABLE(GPU_PROCESS_MODEL) || ENABLE(MODEL_PROCESS))
-    bool isTouchEvent = type == eventNames().touchstartEvent || type == eventNames().touchmoveEvent || type == eventNames().touchendEvent || type == eventNames().touchcancelEvent;
-
-    if (isTouchEvent) {
-        auto& touchEvent = downcast<TouchEvent>(event);
-
+    auto phase = m_interactionGesture.handleEvent(*this, *modelPlayer, event, [&](FloatPoint location) {
 #if USE(SYSTEM_PREVIEW)
-        if (type == eventNames().touchstartEvent && !m_isDragging && isPointInSystemPreviewBadge(FloatPoint(touchEvent.offsetX(), touchEvent.offsetY())))
-            return;
+        if (isPointInSystemPreviewBadge(location))
+            return false;
+#else
+        UNUSED_PARAM(location);
 #endif
+        return isInteractive();
+    });
 
-        if (type == eventNames().touchstartEvent && !m_isDragging && !event.defaultPrevented() && isInteractive())
-            dragDidStart(touchEvent);
-        else if (type == eventNames().touchmoveEvent && m_isDragging)
-            dragDidChange(touchEvent);
-        else if ((type == eventNames().touchendEvent || type == eventNames().touchcancelEvent) && m_isDragging)
-            dragDidEnd(touchEvent);
-        return;
-    }
-#endif
-
-    if (!isMouseEvent)
-        return;
-
-    auto& mouseEvent = downcast<MouseEvent>(event);
-
-    if (mouseEvent.button() != MouseButton::Left)
-        return;
-
-#if USE(SYSTEM_PREVIEW)
-    if (type == eventNames().mousedownEvent && !m_isDragging && isPointInSystemPreviewBadge(FloatPoint(mouseEvent.offsetX(), mouseEvent.offsetY())))
-        return;
-#endif
-
-    if (type == eventNames().mousedownEvent && !m_isDragging && !event.defaultPrevented() && isInteractive())
-        dragDidStart(mouseEvent);
-    else if (type == eventNames().mousemoveEvent && m_isDragging)
-        dragDidChange(mouseEvent);
-    else if (type == eventNames().mouseupEvent && m_isDragging)
-        dragDidEnd(mouseEvent);
-}
-
-LayoutPoint HTMLModelElement::flippedLocationInElementForMouseEvent(WebCore::MouseRelatedEvent& event)
-{
-    LayoutUnit flippedY { event.offsetY() };
-    if (CheckedPtr renderModel = dynamicDowncast<RenderModel>(renderer()))
-        flippedY = renderModel->paddingBoxHeight() - flippedY;
-    return { LayoutUnit(event.offsetX()), flippedY };
+    if (phase == PortalInteractionGesture::Phase::Began)
+        logInteractionDiagnostic();
 }
 
 #if USE(SYSTEM_PREVIEW)
@@ -1479,50 +1458,6 @@ void HTMLModelElement::logInteractionDiagnostic()
     DiagnosticLoggingClient::ValueDictionary dictionary;
     dictionary.set("type"_s, modelType);
     protect(page->diagnosticLoggingClient())->logDiagnosticMessageWithValueDictionary("ModelElementInteraction"_s, "Safari"_s, dictionary, ShouldSample::No);
-}
-
-void HTMLModelElement::dragDidStart(WebCore::MouseRelatedEvent& event)
-{
-    ASSERT(!m_isDragging);
-
-    RefPtr frame = document().frame();
-    if (!frame)
-        return;
-
-    frame->eventHandler().setCapturingMouseEventsElement(this);
-    event.setDefaultHandled();
-    m_isDragging = true;
-
-    logInteractionDiagnostic();
-
-    if (RefPtr modelPlayer = m_modelPlayer)
-        modelPlayer->handleMouseDown(flippedLocationInElementForMouseEvent(event), event.timeStamp());
-}
-
-void HTMLModelElement::dragDidChange(WebCore::MouseRelatedEvent& event)
-{
-    ASSERT(m_isDragging);
-
-    event.setDefaultHandled();
-
-    if (RefPtr modelPlayer = m_modelPlayer)
-        modelPlayer->handleMouseMove(flippedLocationInElementForMouseEvent(event), event.timeStamp());
-}
-
-void HTMLModelElement::dragDidEnd(WebCore::MouseRelatedEvent& event)
-{
-    ASSERT(m_isDragging);
-
-    RefPtr frame = document().frame();
-    if (!frame)
-        return;
-
-    frame->eventHandler().setCapturingMouseEventsElement(nullptr);
-    event.setDefaultHandled();
-    m_isDragging = false;
-
-    if (RefPtr modelPlayer = m_modelPlayer)
-        modelPlayer->handleMouseUp(flippedLocationInElementForMouseEvent(event), event.timeStamp());
 }
 
 std::optional<PlatformLayerIdentifier> HTMLModelElement::layerID() const
@@ -2270,10 +2205,10 @@ bool HTMLModelElement::modelContainerSizeIsEmpty() const
 void HTMLModelElement::collectPresentationalHintsForAttribute(const QualifiedName& name, const AtomString& value, MutableStyleProperties& style)
 {
     if (name == widthAttr) {
-        addHTMLLengthToStyle(style, CSSPropertyWidth, value);
+        addHTMLLengthToStyle(style, CSSPropertyID::Width, value);
         applyAspectRatioFromWidthAndHeightAttributesToStyle(value, attributeWithoutSynchronization(heightAttr), style);
     } else if (name == heightAttr) {
-        addHTMLLengthToStyle(style, CSSPropertyHeight, value);
+        addHTMLLengthToStyle(style, CSSPropertyID::Height, value);
         applyAspectRatioFromWidthAndHeightAttributesToStyle(attributeWithoutSynchronization(widthAttr), value, style);
     } else
         HTMLElement::collectPresentationalHintsForAttribute(name, value, style);
@@ -2437,6 +2372,12 @@ RefPtr<ModelPlayer> HTMLModelElement::liveModelPlayer() const
     if (!modelPlayer || modelPlayer->isPlaceholder())
         return nullptr;
     return modelPlayer;
+}
+
+void HTMLModelElement::exitVolumetricPresentation()
+{
+    if (RefPtr modelPlayer = m_modelPlayer)
+        modelPlayer->exitVolumetricPresentation();
 }
 #endif
 

@@ -141,6 +141,16 @@ void PageConfiguration::setOpenedMainFrameName(const WTF::String& name)
     m_data.openedMainFrameName = name;
 }
 
+const WebCore::RegistrableDomain& PageConfiguration::openedByScriptDomain() const
+{
+    return m_data.openedByScriptDomain;
+}
+
+void PageConfiguration::setOpenedByScriptDomain(WebCore::RegistrableDomain&& domain)
+{
+    m_data.openedByScriptDomain = WTF::move(domain);
+}
+
 auto PageConfiguration::openerInfo() const -> const std::optional<OpenerInfo>&
 {
     return *m_data.openerInfo;
@@ -361,6 +371,11 @@ bool PageConfiguration::isEnhancedSecurityEnabled() const
     if (auto* policies = m_data.defaultWebsitePolicies.getIfExists())
         return policies->isEnhancedSecurityEnabled();
     return false;
+}
+
+bool PageConfiguration::isEnhancedSecurityEnabledByDefault(bool isLockdownModeActive) const
+{
+    return !isLockdownModeActive && protect(processPool())->shouldEnableEnhancedSecurityByDefault(protect(preferences()).get());
 }
 
 void PageConfiguration::setAllowPostingLegacySynchronousMessages(bool allow)

@@ -58,6 +58,22 @@ typedef NSVisualEffectView _WKPlatformVisualEffectView;
 @class _WKNowPlayingMetadata;
 @protocol _WKMediaSessionCoordinator;
 
+// What WebKit's capture permission prompt would show.
+WK_CLASS_AVAILABLE(macos(WK_MAC_TBA), ios(WK_IOS_TBA))
+@interface _WKMediaCapturePermissionPromptForTesting : NSObject
+
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+
+@property (nonatomic, readonly, copy) NSString *title;
+@property (nonatomic, readonly, copy, nullable) NSString *informativeText;
+@property (nonatomic, readonly, copy) NSArray<NSString *> *buttonTitles;
+
+- (void)respondWithButtonIndex:(NSUInteger)index;
+- (void)dismissWithoutAnswer;
+
+@end
+
 @interface WKWebView (WKTesting)
 
 @property (nonatomic, readonly) NSString *_caLayerTreeAsText;
@@ -105,6 +121,8 @@ typedef NSVisualEffectView _WKPlatformVisualEffectView;
 - (void)_setIndexOfGetDisplayMediaDeviceSelectedForTesting:(nullable NSNumber *)index;
 - (void)_setSystemCanPromptForGetDisplayMediaForTesting:(BOOL)canPrompt;
 
+- (void)_setMediaCapturePermissionPromptHandlerForTesting:(nullable void (^)(_WKMediaCapturePermissionPromptForTesting *prompt))handler WK_API_AVAILABLE(macos(WK_MAC_TBA), ios(WK_IOS_TBA));
+
 - (BOOL)_beginBackSwipeForTesting;
 - (BOOL)_completeBackSwipeForTesting;
 - (void)_resetNavigationGestureStateForTesting;
@@ -127,6 +145,7 @@ typedef NSVisualEffectView _WKPlatformVisualEffectView;
 - (_WKPlatformVisualEffectView *)_screenTimeBlurredSnapshot;
 
 - (void)_getRenderTreeAsStringWithCompletionHandler:(NS_SWIFT_UI_ACTOR void (^)(NSString * NS_NULLABLE_RESULT, NSError * _Nullable error))completionHandler WK_API_AVAILABLE(macos(26.4), ios(26.4), visionos(26.4));
+- (void)_getSelectionAsAttributedStringForTesting:(void (^)(NSAttributedString * _Nullable))completionHandler;
 
 @property (nonatomic, setter=_setScrollingUpdatesDisabledForTesting:) BOOL _scrollingUpdatesDisabledForTesting;
 @property (nonatomic, readonly) NSString *_scrollingTreeAsText;
@@ -179,6 +198,7 @@ typedef NSVisualEffectView _WKPlatformVisualEffectView;
 
 - (void)_createMediaSessionCoordinatorForTesting:(id <_WKMediaSessionCoordinator>)privateCoordinator completionHandler:(void(^)(BOOL))completionHandler;
 - (void)_gpuToWebProcessConnectionCountForTesting:(void(^)(NSUInteger))completionHandler WK_API_AVAILABLE(macos(13.0), ios(16.0));
+- (void)_runDisplayListDataTestsInGPUProcessForTesting:(void(^)(NSArray<NSString *> *failures))completionHandler WK_API_AVAILABLE(macos(WK_MAC_TBA), ios(WK_IOS_TBA));
 
 - (void)_isLayerTreeFrozenForTesting:(void (^)(BOOL frozen))completionHandler WK_API_AVAILABLE(macos(13.0), ios(16.0));
 
@@ -190,7 +210,10 @@ typedef NSVisualEffectView _WKPlatformVisualEffectView;
 - (void)_computePagesForPrinting:(_WKFrameHandle *)handle completionHandler:(void(^)(void))completionHandler WK_API_AVAILABLE(macos(13.0), ios(16.0));
 - (void)_endPrintingForTesting:(void(^)(void))completionHandler;
 // Blocks the main thread until the pages have been drawn, as UIKit printing does. Needs printing to have begun.
-- (NSData *)_drawPagesToPDFSynchronouslyForTesting:(_WKFrameHandle *)handle;
+- (NSData *)_drawPagesToPDFSynchronouslyForTesting:(_WKFrameHandle *)handle pageCount:(NSUInteger)pageCount;
+// Waits for the print process with this web view's Lockdown Mode to be ready. Reports 0 if there is no such process.
+- (void)_printProcessIdentifierForTesting:(void(^)(pid_t))completionHandler;
+- (void)_setPrintProcessIdleTimeoutForTesting:(NSTimeInterval)timeout;
 
 - (void)_setConnectedToHardwareConsoleForTesting:(BOOL)connected;
 

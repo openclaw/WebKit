@@ -10,6 +10,8 @@ https://www.365scores.com/
     ShouldSilenceWindowResizeEventsDuringApplicationSnapshotting
 https://actesting.org/
     ShouldEnableLegacyGetUserMediaQuirk
+https://www.affirm.com/
+    (none)
 https://www.airindiaexpress.com/
     NeedsAirIndiaExpressLayeringQuirk
 https://www.amazon.com/
@@ -31,6 +33,14 @@ https://as.com/
     (none)
 https://www.att.com/
     ShouldUseLegacySelectPopoverDismissalBehaviorInDataActivationQuirk
+https://www.baidu.com/
+    (none)
+https://baidu.com/
+    (none)
+https://tieba.baidu.com/
+    (none)
+https://www.notbaidu.com/
+    (none)
 https://www.bbc.co.uk/
     ReturnNullPictureInPictureElementDuringFullscreenChangeQuirk
 https://www.bbc.com/
@@ -52,10 +62,14 @@ https://www.capitalgroup.com/
     ShouldDelayReloadWhenRegisteringServiceWorker
 https://www.cbssports.com/
     ShouldSynthesizeTouchEventsAfterNonSyntheticClickQuirk
+https://chatgpt.com/
+    ShouldUseLayoutViewportForClientRectsQuirk
 https://www.cnn.com/
     NeedsCNNCaptionQuirk
     NeedsFullscreenObjectFitQuirk
     ShouldDisableThreadedAnimationsQuirk
+https://configurator.audi.com/
+    ShouldRenderModelElementFallbackContentQuirk
 https://www.digitaltrends.com/
     (none)
 https://discord.com/
@@ -202,10 +216,10 @@ https://www.iheart.com/
     NeedsScriptToEvaluateBeforeRunningScriptFromURLQuirk
 https://www.imdb.com/
     NeedsChromeMediaControlsPseudoElementQuirk
+    NeedsWebKitMediaTextTrackDisplayQuirk
     NeedsZeroMaxTouchPointsQuirk
 https://www.instagram.com/
     NeedsInstagramResizingReelsQuirk
-    ShouldDisableElementFullscreenQuirk
     ShouldSendFakeTouchForceChangeEvent
 https://invideo.io/
     NeedsScriptToEvaluateBeforeRunningScriptFromURLQuirk
@@ -314,9 +328,10 @@ https://open.spotify.com/
     ShouldAvoidStartingSelectionOnMouseDownOverPointerCursor
     ShouldBlockAudiblePlaybackWhileAudioIsPlaying
     ShouldDeferIntersectionObserversDuringResize
+    ShouldFlipScreenDimensionsQuirk
     ShouldLimitHLSPlaybackRate
 https://www.spotify.com/
-    (none)
+    ShouldFlipScreenDimensionsQuirk
 https://ceac.state.gov/
     NeedsScriptToEvaluateBeforeRunningScriptFromURLQuirk
 https://sub.ceac.state.gov/
@@ -328,8 +343,11 @@ https://www.theguardian.com/
 https://www.thesaurus.com/
     NeedsAnchorToBeMouseFocusableQuirk
     NeedsScriptToEvaluateBeforeRunningScriptFromURLQuirk
+https://www.thetimes.com/
+    (none)
 https://www.tiktok.com/
     NeedsChromeCompatibilityUserAgentQuirk
+    NeedsTikTokCaptchaSliderTouchActionQuirk
     NeedsTikTokCommentsOverflowingContentQuirk
     NeedsTikTokVideoOverflowingContentQuirk
     NeedsUserAgentStringOverrideQuirk

@@ -1984,6 +1984,34 @@ TEST(WTF_Vector, MapCustomReturnType)
     EXPECT_FLOAT_EQ(output[1], 2.0f);
 }
 
+TEST(WTF_Vector, MapStaticWithInlineCapacity)
+{
+    Vector<int> input { 1, 2 };
+    auto output = Vector<float, 2>::map(input, [](int value) {
+        return static_cast<float>(value);
+    });
+
+    static_assert(std::is_same_v<decltype(output), Vector<float, 2>>);
+    ASSERT_EQ(output.size(), input.size());
+    EXPECT_EQ(output.capacity(), 2U);
+    EXPECT_FLOAT_EQ(output[0], 1.0f);
+    EXPECT_FLOAT_EQ(output[1], 2.0f);
+}
+
+TEST(WTF_Vector, MapStaticFromSpan)
+{
+    std::array<int, 3> input { 1, 2, 3 };
+    auto output = Vector<MoveOnly, 4>::map(std::span { input }, [](int value) {
+        return MoveOnly(2 * value);
+    });
+
+    ASSERT_EQ(output.size(), 3U);
+    EXPECT_EQ(output.capacity(), 4U);
+    EXPECT_EQ(output[0].value(), 2U);
+    EXPECT_EQ(output[1].value(), 4U);
+    EXPECT_EQ(output[2].value(), 6U);
+}
+
 TEST(WTF_Vector, MoveConstructor)
 {
     {
@@ -2413,6 +2441,55 @@ TEST(WTF_Vector, fromRangeConstructorEmptyRange)
 
     EXPECT_TRUE(wtfVec.isEmpty());
     EXPECT_EQ(0U, wtfVec.size());
+}
+
+TEST(WTF_Vector, AppendSizedRange)
+{
+    Vector<int> wtfVec = { 1, 2 };
+    std::array<int, 3> array = { 3, 4, 5 };
+    wtfVec.appendRange(array);
+
+    EXPECT_EQ(5U, wtfVec.size());
+    EXPECT_EQ(1, wtfVec[0]);
+    EXPECT_EQ(2, wtfVec[1]);
+    EXPECT_EQ(3, wtfVec[2]);
+    EXPECT_EQ(4, wtfVec[3]);
+    EXPECT_EQ(5, wtfVec[4]);
+}
+
+TEST(WTF_Vector, AppendSizedRangeEmpty)
+{
+    Vector<int> wtfVec = { 1, 2 };
+    wtfVec.appendRange(std::views::empty<int>);
+
+    EXPECT_EQ(2U, wtfVec.size());
+    EXPECT_EQ(1, wtfVec[0]);
+    EXPECT_EQ(2, wtfVec[1]);
+}
+
+TEST(WTF_Vector, AppendSizedRangeMovesFromRvalue)
+{
+    Vector<String> wtfVec = { "a"_s };
+    Vector<String> other = { "b"_s, "c"_s };
+    wtfVec.appendRange(WTF::move(other));
+
+    EXPECT_EQ(3U, wtfVec.size());
+    EXPECT_EQ("a"_s, wtfVec[0]);
+    EXPECT_EQ("b"_s, wtfVec[1]);
+    EXPECT_EQ("c"_s, wtfVec[2]);
+    SUPPRESS_USE_AFTER_MOVE EXPECT_TRUE(other[0].isNull());
+    SUPPRESS_USE_AFTER_MOVE EXPECT_TRUE(other[1].isNull());
+}
+
+TEST(WTF_Vector, AppendSizedRangeCopiesFromLvalue)
+{
+    Vector<String> wtfVec = { "a"_s };
+    Vector<String> other = { "b"_s, "c"_s };
+    wtfVec.appendRange(other);
+
+    EXPECT_EQ(3U, wtfVec.size());
+    EXPECT_EQ("b"_s, other[0]);
+    EXPECT_EQ("c"_s, other[1]);
 }
 
 TEST(WTF_Vector, fromRangeStrings)

@@ -324,15 +324,7 @@ bool MediaPlayerPrivateGStreamerMSE::doSeek(const SeekTarget& target, float rate
         if (player && !hasVideo() && m_audioSink) {
             gboolean audioSinkPerformsAsyncStateChanges = true;
 
-            GRefPtr<GstElement> sink = m_audioSink;
-            while (GST_IS_BIN(sink.get())) {
-                GUniquePtr<GstIterator> iter(gst_bin_iterate_sinks(GST_BIN_CAST(sink.get())));
-                GValue value = G_VALUE_INIT;
-                auto result = gst_iterator_next(iter.get(), &value);
-                ASSERT_UNUSED(result, result == GST_ITERATOR_OK);
-                sink = GST_ELEMENT(g_value_get_object(&value));
-                g_value_unset(&value);
-            }
+            auto sink = gstElementFindInnermostSink(m_audioSink.get());
             if (gstObjectHasProperty(sink.get(), "async"))
                 g_object_get(sink.get(), "async", &audioSinkPerformsAsyncStateChanges, nullptr);
             if (!audioSinkPerformsAsyncStateChanges) {
@@ -462,12 +454,9 @@ void MediaPlayerPrivateGStreamerMSE::didEnd()
 
 const PlatformTimeRanges& MediaPlayerPrivateGStreamerMSE::buffered() const
 {
-    if (!m_source)
-        return PlatformTimeRanges::emptyRanges();
-
-    // When a MediaSource object is in use, the HTMLMediaElement retrieves the buffered ranges
-    // directly from it rather than from the MediaPlayer / MediaPlayerPrivate.
-    ASSERT_NOT_REACHED();
+    // While a MediaSource is attached, the HTMLMediaElement retrieves the buffered ranges directly
+    // from it rather than from the MediaPlayer. This can still be reached after the MediaSource has
+    // been detached (for example after a fatal media error) and before the player is destroyed.
     return PlatformTimeRanges::emptyRanges();
 }
 

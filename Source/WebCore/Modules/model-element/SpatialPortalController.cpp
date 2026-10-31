@@ -83,20 +83,27 @@ namespace WebCore {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(SpatialPortalController);
 
-#if ENABLE(TOUCH_EVENTS)
+#if ENABLE(GPU_PROCESS_MODEL) || ENABLE(TOUCH_EVENTS)
 class SpatialPortalEventListener final : public EventListener {
 public:
-    static Ref<SpatialPortalEventListener> create()
+    static Ref<SpatialPortalEventListener> create(SpatialPortalController& controller)
     {
-        return adoptRef(*new SpatialPortalEventListener());
+        return adoptRef(*new SpatialPortalEventListener(controller));
     }
 
-    void handleEvent(ScriptExecutionContext&, Event&) override { }
+    void handleEvent(ScriptExecutionContext&, Event& event) override
+    {
+        if (CheckedPtr controller = m_controller)
+            controller->handleGestureEvent(event);
+    }
 
 private:
-    explicit SpatialPortalEventListener()
+    explicit SpatialPortalEventListener(SpatialPortalController& controller)
         : EventListener(EventListener::CPPEventListenerType)
+        , m_controller(controller)
     { }
+
+    const WeakPtr<SpatialPortalController> m_controller;
 };
 #endif
 
@@ -222,7 +229,7 @@ private:
     {
     }
 
-    bool NODELETE hasCallback() const final { return true; }
+    bool LEGACY_NODELETE hasCallback() const final { return true; }
 
     CallbackResult<void> invoke(IntersectionObserver&, const Vector<Ref<IntersectionObserverEntry>>& entries, IntersectionObserver&) final
     {
@@ -493,6 +500,12 @@ RefPtr<ModelPlayer> SpatialPortalController::liveModelPlayer() const
         return nullptr;
     return modelPlayer;
 }
+
+void SpatialPortalController::exitVolumetricPresentation()
+{
+    if (RefPtr modelPlayer = m_modelPlayer)
+        modelPlayer->exitVolumetricPresentation();
+}
 #endif
 
 ModelPlayer* SpatialPortalController::ensureModelPlayer()
@@ -528,8 +541,7 @@ ModelPlayer* SpatialPortalController::ensureModelPlayer()
 #endif
 
 #if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
-    if (m_presentationMode == ModelPresentationMode::Volumetric)
-        page->chrome().client().reconnectVolumetricSceneForElement(*element);
+    m_needsVolumetricSceneReconnection = m_presentationMode == ModelPresentationMode::Volumetric;
 #endif
 
     return m_modelPlayer.get();
@@ -572,10 +584,10 @@ void SpatialPortalController::setPortalAction(PortalActionKind kind)
 
     m_portalAction = kind;
 
+    updateGestureHandling();
+
     if (RefPtr player = m_modelPlayer)
         player->setPortalAction(m_portalAction);
-
-    updateGestureHandling();
 }
 
 #if ENABLE(MODEL_ELEMENT_ENVIRONMENT_MAP)
@@ -724,20 +736,33 @@ void SpatialPortalController::updateGestureHandling()
 
     m_handlesGesture = shouldHandleGesture;
 
-#if ENABLE(TOUCH_EVENTS)
+    if (!shouldHandleGesture)
+        cancelGesture();
+
+#if ENABLE(GPU_PROCESS_MODEL) || ENABLE(TOUCH_EVENTS)
     if (RefPtr element = m_portalElement.get()) {
         if (!m_eventListener)
-            lazyInitialize(m_eventListener, SpatialPortalEventListener::create());
+            lazyInitialize(m_eventListener, SpatialPortalEventListener::create(*this));
 
-        if (shouldHandleGesture) {
-            element->addEventListener(eventNames().touchstartEvent, *m_eventListener, { });
-            element->addEventListener(eventNames().touchmoveEvent, *m_eventListener, { });
-            element->addEventListener(eventNames().touchendEvent, *m_eventListener, { });
-        } else {
-            element->removeEventListener(eventNames().touchstartEvent, *m_eventListener, { });
-            element->removeEventListener(eventNames().touchmoveEvent, *m_eventListener, { });
-            element->removeEventListener(eventNames().touchendEvent, *m_eventListener, { });
-        }
+        auto updateListener = [&](const AtomString& eventName) {
+            if (shouldHandleGesture)
+                element->addEventListener(eventName, *m_eventListener, { });
+            else
+                element->removeEventListener(eventName, *m_eventListener, { });
+        };
+
+        auto& names = eventNames();
+#if ENABLE(GPU_PROCESS_MODEL)
+        updateListener(names.mousedownEvent);
+        updateListener(names.mousemoveEvent);
+        updateListener(names.mouseupEvent);
+#endif
+#if ENABLE(TOUCH_EVENTS)
+        updateListener(names.touchstartEvent);
+        updateListener(names.touchmoveEvent);
+        updateListener(names.touchendEvent);
+        updateListener(names.touchcancelEvent);
+#endif
     }
 #endif
 
@@ -749,6 +774,22 @@ void SpatialPortalController::updateGestureHandling()
             page->decrementModelElementCount();
     }
 #endif
+}
+
+void SpatialPortalController::handleGestureEvent(Event& event)
+{
+    RefPtr element = m_portalElement;
+    RefPtr player = m_modelPlayer;
+    if (!element || !player || !player->supportsMouseInteraction())
+        return;
+
+    m_interactionGesture.handleEvent(*element, *player, event);
+}
+
+void SpatialPortalController::cancelGesture()
+{
+    RefPtr player = m_modelPlayer;
+    m_interactionGesture.cancel(player.get());
 }
 
 #if ENABLE(MODEL_ELEMENT_STAGE_MODE_INTERACTION)
@@ -803,6 +844,7 @@ void SpatialPortalController::endStageModeInteraction()
 void SpatialPortalController::deleteModelPlayer()
 {
     if (m_modelPlayer) {
+        cancelGesture();
         if (RefPtr provider = m_modelPlayerProvider.get())
             provider->deleteModelPlayer(*m_modelPlayer);
         m_modelPlayer = nullptr;
@@ -817,6 +859,9 @@ void SpatialPortalController::deleteModelPlayer()
 
     m_lastPushedContentSize = std::nullopt;
     m_resolvedPortalTransform = std::nullopt;
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    m_needsVolumetricSceneReconnection = false;
+#endif
 }
 
 void SpatialPortalController::unloadChildModel(NodeIdentifier nodeID)
@@ -938,7 +983,7 @@ void SpatialPortalController::sizeMayHaveChanged()
     player->sizeDidChange(size);
 }
 
-void SpatialPortalController::modelDidFinishLoading(ModelPlayer&, NodeIdentifier nodeID)
+void SpatialPortalController::modelDidFinishLoading(ModelPlayer& player, NodeIdentifier nodeID)
 {
     RefPtr child = hostedModelElement(nodeID);
     if (!child)
@@ -947,6 +992,26 @@ void SpatialPortalController::modelDidFinishLoading(ModelPlayer&, NodeIdentifier
     child->didFinishLoadingInsidePortal();
 
     reconfigurePortalLayer();
+
+#if ENABLE(CONNECTED_VOLUMETRIC_SCENE)
+    if (&player != m_modelPlayer)
+        return;
+
+    if (!std::exchange(m_needsVolumetricSceneReconnection, false))
+        return;
+
+    if (m_presentationMode != ModelPresentationMode::Volumetric)
+        return;
+
+    RefPtr element = m_portalElement.get();
+    if (!element)
+        return;
+
+    if (RefPtr page = element->document().page())
+        page->chrome().client().reconnectVolumetricSceneForElement(*element);
+#else
+    UNUSED_PARAM(player);
+#endif
 }
 
 void SpatialPortalController::modelDidFailLoading(ModelPlayer&, NodeIdentifier nodeID, const ResourceError& error)

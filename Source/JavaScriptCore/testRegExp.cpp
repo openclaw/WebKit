@@ -79,7 +79,7 @@ void StopWatch::stop()
     m_stopTime = MonotonicTime::now();
 }
 
-long NODELETE StopWatch::getElapsedMS()
+long LEGACY_NODELETE StopWatch::getElapsedMS()
 {
     return (m_stopTime - m_startTime).millisecondsAs<long>();
 }
@@ -455,6 +455,10 @@ static bool runFromFiles(GlobalObject* globalObject, const Vector<String>& files
         printf("%u tests run, %u failures\n", tests, failures);
     else
         printf("%u tests passed\n", tests);
+#if USE(BUN_JSC_ADDITIONS)
+    if (failures)
+        success = false;
+#endif
 
 #if ENABLE(REGEXP_TRACING)
     vm.dumpRegExpTrace();

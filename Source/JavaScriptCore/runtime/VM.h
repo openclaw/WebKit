@@ -30,6 +30,10 @@
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
+#if ENABLE(AOT)
+#include <JavaScriptCore/AOTVMState.h>
+#endif
+#include <JavaScriptCore/ArrayConventions.h>
 #include <JavaScriptCore/ConcurrentJSLock.h>
 #include <JavaScriptCore/DFGDoesGCCheck.h>
 #include <JavaScriptCore/ExceptionEventLocation.h>
@@ -43,6 +47,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 #include <JavaScriptCore/KeyAtomStringCache.h>
 #include <JavaScriptCore/NativeFunction.h>
 #include <JavaScriptCore/NumericStrings.h>
+#include <JavaScriptCore/PropertyRun.h>
 #include <JavaScriptCore/SmallStrings.h>
 #include <JavaScriptCore/StringReplaceCache.h>
 #include <JavaScriptCore/StrongForward.h>
@@ -124,6 +129,7 @@ class HeapAnalyzer;
 class HeapProfiler;
 class IntlCache;
 enum Intrinsic : uint8_t;
+class JSCellButterfly;
 class JSDestructibleObjectHeapCellType;
 class JSGlobalObject;
 class JSSentinel;
@@ -311,9 +317,10 @@ public:
     bool isEntered() const { return !!entryScope; }
 
     inline CallFrame* topJSCallFrame() const;
+    JS_EXPORT_PRIVATE JSGlobalObject* topFrameGlobalObject();
 
     // Global object in which execution began.
-    JS_EXPORT_PRIVATE JSGlobalObject* NODELETE deprecatedVMEntryGlobalObject(JSGlobalObject*) const;
+    JS_EXPORT_PRIVATE JSGlobalObject* LEGACY_NODELETE deprecatedVMEntryGlobalObject(JSGlobalObject*) const;
 
     WeakRandom& random() LIFETIME_BOUND { return m_random; }
     WeakRandom& heapRandom() LIFETIME_BOUND { return m_heapRandom; }
@@ -327,8 +334,12 @@ public:
     {
         m_hasTerminationRequest = false;
         clearEntryScopeService(ConcurrentEntryScopeService::ResetTerminationRequest);
+#if ENABLE(AOT)
+        if (hasCompiledCode())
+            traps().didClearTerminationRequest();
+#endif
     }
-    void NODELETE setHasTerminationRequest();
+    void LEGACY_NODELETE setHasTerminationRequest();
 
     bool executionForbidden() const { return m_executionForbidden; }
     void setExecutionForbidden() { m_executionForbidden = true; }
@@ -496,7 +507,29 @@ public:
 
 #if ENABLE(JIT)
     std::unique_ptr<JITSizeStatistics> jitSizeStatistics;
+#elif ENABLE(AOT)
+    void* m_inPlaceOfJITSizeStatistics { nullptr };
 #endif
+#if ENABLE(AOT)
+    using AOTState = AOT::VMState;
+    AOTState& aotState() LIFETIME_BOUND { return m_aotState; }
+    bool hasCompiledCode() const { return m_aotState.hasCompiledCode; }
+    bool runsOnlyStaticCode() const { return Options::disallowNonStaticCode() && (hasCompiledCode() || !Options::disallowNonStaticCodeOnlyBesideCompiledCode()); }
+    static constexpr ptrdiff_t offsetOfAOTState() { return OBJECT_OFFSETOF(VM, m_aotState); }
+    AOTState m_aotState;
+#else
+    static constexpr bool hasCompiledCode() { return false; }
+    static bool runsOnlyStaticCode() { return Options::disallowNonStaticCode(); }
+#endif
+    ArrayStoragePolicy arrayStoragePolicy() const { return hasCompiledCode() || Options::keepDenseArraysDense() ? ArrayStoragePolicy::KeepsDenseArraysDense : ArrayStoragePolicy::UsesArrayStorageForSpeed; }
+    PropertyRunTable propertyRuns;
+#if ENABLE(AOT)
+    bool mayHaveUncacheableTransitions() const { return m_mayHaveUncacheableTransitions; }
+#else
+    static constexpr bool mayHaveUncacheableTransitions() { return false; }
+#endif
+    void setMayHaveUncacheableTransitions() { m_mayHaveUncacheableTransitions = true; }
+    bool m_mayHaveUncacheableTransitions { false };
     
     ALWAYS_INLINE CompleteSubspace& primitiveGigacageAuxiliarySpace() { return heap.primitiveGigacageAuxiliarySpace; }
     ALWAYS_INLINE CompleteSubspace& typedArrayAuxiliarySpace()
@@ -546,6 +579,7 @@ public:
 
     VMType vmType;
     bool m_mightBeExecutingTaintedCode { false };
+    bool m_mightHavePrevalentDomainTaintedCode { false };
 #if USE(BUN_JSC_ADDITIONS)
     bool m_asyncContextTrackingEnabled { false };
 #endif
@@ -623,6 +657,7 @@ public:
     WriteBarrier<NativeExecutable> m_promiseAllSettledSlowRejectFunctionExecutable;
     WriteBarrier<NativeExecutable> m_promiseAnyRejectFunctionExecutable;
     WriteBarrier<NativeExecutable> m_promiseAnySlowRejectFunctionExecutable;
+    WriteBarrier<NativeExecutable> m_proxyRevokeExecutable;
 
     WriteBarrier<JSCell> m_orderedHashTableDeletedValue;
     WriteBarrier<JSCell> m_orderedHashTableSentinel;
@@ -646,6 +681,10 @@ public:
 
     Weak<NativeExecutable> m_fastRemoteFunctionExecutable;
     Weak<NativeExecutable> m_slowRemoteFunctionExecutable;
+    // getHostFunction() without the JIT. With it JITThunks remembers them.
+    class HostFunctionExecutables;
+    std::unique_ptr<HostFunctionExecutables> m_hostFunctionExecutables;
+    unsigned m_numberOfRealmsInitialized { 0 };
 
     const Ref<DeferredWorkTimer> deferredWorkTimer;
 
@@ -672,6 +711,7 @@ public:
     AtomStringImpl** ensureCachedBytecodeThreeCharacterAtoms();
     Vector<unsigned> stringSplitIndice;
     StringReplaceCache stringReplaceCache;
+    UncheckedKeyHashMap<JSCellButterfly*, JSString*> immutableButterflyToStringCache;
 
     bool mightBeExecutingTaintedCode() const { return m_mightBeExecutingTaintedCode; }
 #if USE(BUN_JSC_ADDITIONS)
@@ -683,6 +723,9 @@ public:
 #endif
     bool* addressOfMightBeExecutingTaintedCode() LIFETIME_BOUND { return &m_mightBeExecutingTaintedCode; }
     void setMightBeExecutingTaintedCode(bool value = true) { m_mightBeExecutingTaintedCode = value; }
+
+    bool mightHavePrevalentDomainTaintedCode() const { return m_mightHavePrevalentDomainTaintedCode; }
+    void setMightHavePrevalentDomainTaintedCode() { m_mightHavePrevalentDomainTaintedCode = true; }
 
     AtomStringTable* atomStringTable() const { return m_atomStringTable; }
     WTF::SymbolRegistry& symbolRegistry() { return m_symbolRegistry.get(); }
@@ -707,6 +750,7 @@ public:
     {
         return m_orderedHashTableSentinel.get();
     }
+    static constexpr ptrdiff_t offsetOfOrderedHashTableDeletedValue() { return OBJECT_OFFSETOF(VM, m_orderedHashTableDeletedValue); }
 
     Structure* sentinelStructure() { return m_sentinelStructure.get(); }
     JSSentinel* fastArrayValuesSentinel() { return m_fastArrayValuesSentinel.get(); }
@@ -738,6 +782,7 @@ public:
     inline NativeExecutable* promiseAllSettledSlowRejectFunctionExecutable();
     inline NativeExecutable* promiseAnyRejectFunctionExecutable();
     inline NativeExecutable* promiseAnySlowRejectFunctionExecutable();
+    inline NativeExecutable* proxyRevokeExecutable();
 
     WeakGCMap<WTF::SymbolImpl*, Symbol, PtrHash<WTF::SymbolImpl*>> symbolImplToSymbolMap;
     WeakGCMap<StringImpl*, JSString, PtrHash<StringImpl*>> atomStringToJSStringMap;
@@ -780,7 +825,11 @@ public:
     static JS_EXPORT_PRIVATE bool canUseAssembler();
     static bool isInMiniMode()
     {
-        return !Options::useJIT() || Options::forceMiniVMMode();
+#if ENABLE(JIT) || !ENABLE(AOT)
+        return (!Options::useJIT() && !Options::runsCompiledImage()) || Options::forceMiniVMMode();
+#else
+        return Options::forceMiniVMMode();
+#endif
     }
 
     static bool useUnlinkedCodeBlockJettisoning()
@@ -791,7 +840,7 @@ public:
     static void computeCanUseJIT();
 
     SourceProviderCache* addSourceProviderCache(SourceProvider*);
-    void clearSourceProviderCaches();
+    void pruneUnusedSourceProviderCaches();
 
     typedef UncheckedKeyHashMap<RefPtr<SourceProvider>, RefPtr<SourceProviderCache>> SourceProviderCacheMap;
     SourceProviderCacheMap sourceProviderCacheMap;
@@ -800,9 +849,13 @@ public:
     MacroAssemblerCodeRef<JITThunkPtrTag> getCTIStub(ThunkGenerator);
     MacroAssemblerCodeRef<JITThunkPtrTag> getCTIStub(CommonJITThunkID);
     std::unique_ptr<SharedJITStubSet> m_sharedJITStubs;
+#elif ENABLE(AOT)
+    void* m_inPlaceOfJITStubs[2] { };
 #endif
 #if ENABLE(FTL_JIT)
     std::unique_ptr<FTL::Thunks> ftlThunks;
+#elif ENABLE(AOT)
+    void* m_inPlaceOfFTLThunks { nullptr };
 #endif
 
     NativeExecutable* getHostFunction(NativeFunction, ImplementationVisibility, NativeFunction constructor, unsigned length, const String& name);
@@ -916,7 +969,7 @@ public:
     }
 
     void* lastStackTop() { return m_lastStackTop; }
-    void NODELETE setLastStackTop(const Thread&);
+    void LEGACY_NODELETE setLastStackTop(const Thread&);
     
 #if ENABLE(C_LOOP)
     ALWAYS_INLINE CLoopStack& cloopStack() { return traps().cloopStack(); }
@@ -1014,7 +1067,8 @@ public:
         Change,
         Prototype,
     };
-    JS_EXPORT_PRIVATE void invalidateStructureChainIntegrity(StructureChainIntegrityEvent);
+    JS_EXPORT_PRIVATE void invalidateStructureChainIntegrity(StructureChainIntegrityEvent, JSObject* changed, UniquedStringImpl* uid = nullptr);
+    void invalidateStructureChainIntegrity(StructureChainIntegrityEvent, JSObject* changed, std::span<UniquedStringImpl* const> uids);
 
 #if ENABLE(REGEXP_TRACING)
     using RTTraceList = ListHashSet<RegExp*>;
@@ -1158,7 +1212,7 @@ public:
         DrainMicrotaskDelayScope& operator=(const DrainMicrotaskDelayScope&);
 
     private:
-        void NODELETE increment();
+        void LEGACY_NODELETE increment();
         void decrement();
 
         RefPtr<VM> m_vm;
@@ -1172,7 +1226,17 @@ public:
 #if USE(BUN_JSC_ADDITIONS)
     void drainMicrotasksForGlobalObject(JSGlobalObject* globalObject);
 #endif
-    void setOnEachMicrotaskTick(WTF::Function<void(VM&)>&& func) { m_onEachMicrotaskTick = WTF::move(func); }
+    void setOnEachMicrotaskTick(WTF::Function<void(VM&)>&& func)
+    {
+        m_onEachMicrotaskTick = WTF::move(func);
+#if USE(BUN_JSC_ADDITIONS)
+        updateHostObservesMicrotaskBoundaries();
+#endif
+    }
+#if USE(BUN_JSC_ADDITIONS)
+    JS_EXPORT_PRIVATE void updateHostObservesMicrotaskBoundaries();
+    bool hostObservesMicrotaskBoundaries() const { return m_hostObservesMicrotaskBoundaries; }
+#endif
     void callOnEachMicrotaskTick()
     {
         if (m_onEachMicrotaskTick)
@@ -1196,7 +1260,13 @@ public:
     void setShouldBuildPCToCodeOriginMapping() { m_shouldBuildPCToCodeOriginMapping = true; }
     bool shouldBuilderPCToCodeOriginMapping() const { return m_shouldBuildPCToCodeOriginMapping; }
 
-    BytecodeIntrinsicRegistry& bytecodeIntrinsicRegistry() { return *m_bytecodeIntrinsicRegistry; }
+    BytecodeIntrinsicRegistry& bytecodeIntrinsicRegistry()
+    {
+        if (!m_bytecodeIntrinsicRegistry) [[unlikely]]
+            createBytecodeIntrinsicRegistry();
+        return *m_bytecodeIntrinsicRegistry;
+    }
+    bool hasBytecodeIntrinsicRegistry() const { return !!m_bytecodeIntrinsicRegistry; }
     
     ShadowChicken* shadowChicken() { return m_shadowChicken.getIfExists(); }
     ShadowChicken& ensureShadowChicken() { return m_shadowChicken.get(*this); }
@@ -1273,7 +1343,7 @@ public:
 
     WTF::RunLoop& runLoop() const { return m_runLoop; }
 
-    static void NODELETE setCrashOnVMCreation(bool);
+    static void LEGACY_NODELETE setCrashOnVMCreation(bool);
 
     void addLoopHintExecutionCounter(const JSInstruction*);
     uintptr_t* getLoopHintExecutionCounter(const JSInstruction*);
@@ -1302,8 +1372,8 @@ public:
     void reconcileWeakReferencesAtGCEnd();
     DECLARE_VISIT_AGGREGATE;
 
-    void NODELETE addDebugger(Debugger&);
-    void NODELETE removeDebugger(Debugger&);
+    void LEGACY_NODELETE addDebugger(Debugger&);
+    void LEGACY_NODELETE removeDebugger(Debugger&);
     template<typename Func>
     void forEachDebugger(NOESCAPE const Func&);
 
@@ -1314,7 +1384,7 @@ public:
 
     int64_t numberOfActiveJITPlans() const { return m_numberOfActiveJITPlans.load(std::memory_order_relaxed); }
 
-    Ref<Waiter> NODELETE syncWaiter();
+    Ref<Waiter> LEGACY_NODELETE syncWaiter();
 
     void notifyDebuggerHookInjected() { m_isDebuggerHookInjected = true; }
     bool isDebuggerHookInjected() const { return m_isDebuggerHookInjected; }
@@ -1322,7 +1392,7 @@ public:
 
 #if ENABLE(WEBASSEMBLY_DEBUGGER)
     Wasm::DebugState* debugStateIfExists() { return m_debugState.get(); }
-    JS_EXPORT_PRIVATE Wasm::DebugState* NODELETE debugState();
+    JS_EXPORT_PRIVATE Wasm::DebugState* LEGACY_NODELETE debugState();
 #endif
 
 private:
@@ -1346,6 +1416,7 @@ private:
     NativeExecutable* promiseAllSettledSlowRejectFunctionExecutableSlow();
     NativeExecutable* promiseAnyRejectFunctionExecutableSlow();
     NativeExecutable* promiseAnySlowRejectFunctionExecutableSlow();
+    NativeExecutable* proxyRevokeExecutableSlow();
 
     void updateStackLimits();
 
@@ -1459,6 +1530,7 @@ private:
 #endif
     std::unique_ptr<FuzzerAgent> m_fuzzerAgent;
     LazyUniqueRef<VM, ShadowChicken> m_shadowChicken;
+    void createBytecodeIntrinsicRegistry();
     std::unique_ptr<BytecodeIntrinsicRegistry> m_bytecodeIntrinsicRegistry;
     uint64_t m_drainMicrotaskDelayScopeCount { 0 };
 
@@ -1467,6 +1539,7 @@ private:
 
     WTF::Function<void(VM&)> m_onEachMicrotaskTick;
 #if USE(BUN_JSC_ADDITIONS)
+    bool m_hostObservesMicrotaskBoundaries { false };
     ErrorInfoFunction m_onComputeErrorInfo;
     ErrorInfoFunctionJSValue m_onComputeErrorInfoJSValue;
     StackTraceAppenderFunction m_onAppendStackTrace;
@@ -1502,6 +1575,32 @@ public:
         SynchronousModuleQueue* prev { nullptr };
     };
     SynchronousModuleQueue* m_synchronousModuleQueue { nullptr };
+#if ENABLE(AOT)
+    // While the innermost queue is this one, reactions go to the microtask queue. It stays in the chain, where the collector finds it.
+    SynchronousModuleQueue* m_synchronousModuleQueueSetAside { nullptr };
+#endif
+    // The queue that reactions are diverted to.
+    SynchronousModuleQueue* synchronousModuleQueue() const
+    {
+        if (!m_synchronousModuleQueue) [[likely]]
+            return nullptr;
+#if ENABLE(AOT)
+        if (m_synchronousModuleQueue == m_synchronousModuleQueueSetAside) [[unlikely]]
+            return nullptr;
+#endif
+        return m_synchronousModuleQueue;
+    }
+
+    class SynchronousModuleQueueScope {
+        WTF_MAKE_NONCOPYABLE(SynchronousModuleQueueScope);
+    public:
+        JS_EXPORT_PRIVATE explicit SynchronousModuleQueueScope(VM&);
+        JS_EXPORT_PRIVATE ~SynchronousModuleQueueScope();
+
+    private:
+        VM& m_vm;
+        SynchronousModuleQueue m_queue;
+    };
 private:
 #endif
 

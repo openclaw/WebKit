@@ -54,11 +54,12 @@ private:
 
     bool canHaveChildren() const final { return false; }
     void paint(PaintInfo&, const LayoutPoint&) final { }
+    void imageChanged(WrappedImagePtr, const IntRect*) final { }
 
     PositionWithAffinity positionForPoint(const LayoutPoint&, HitTestSource, const RenderFragmentContainer*) final;
     int caretMinOffset() const final;
-    int NODELETE caretMaxOffset() const final;
-    bool NODELETE canBeSelectionLeaf() const final;
+    int LEGACY_NODELETE caretMaxOffset() const final;
+    bool LEGACY_NODELETE canBeSelectionLeaf() const final;
 
     LayoutUnit marginTop() const final { return 0; }
     LayoutUnit marginBottom() const final { return 0; }
@@ -73,7 +74,7 @@ private:
     LayoutRect visualOverflowRect() const final { return linesBoundingBox(); }
     RepaintRects localRectsForRepaint(RepaintOutlineBounds) const final { return { }; }
 
-    void NODELETE updateFromStyle() final;
+    void LEGACY_NODELETE updateFromStyle() final;
     bool requiresLayer() const final { return false; }
 };
 

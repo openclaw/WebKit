@@ -68,10 +68,15 @@ public:
     // We have an extra size class for size zero.
     static constexpr size_t numSizeClasses = largeCutoff / sizeStep + 1;
     
-    static constexpr HeapVersion nullVersion = 0; // The version of freshly allocated blocks.
-    static constexpr HeapVersion initialVersion = 2; // The version that the heap starts out with. Set to make sure that nextVersion(nullVersion) != initialVersion.
+    // Versions identify which collection a block's bits belong to. A heap's versions start
+    // at initialVersion and wrap back to it, never reaching nullVersion, so a block at
+    // nullVersion (new, or reset at a wrap) never looks current. initialVersion is
+    // nextVersion(nullVersion), so a block a wrap resets is one version behind the
+    // version the wrap moves to, and its kept marks still record the survivors.
+    static constexpr HeapVersion nullVersion = 0;
+    static constexpr HeapVersion initialVersion = 1;
     
-    static HeapVersion nextVersion(HeapVersion version)
+    static constexpr HeapVersion nextVersion(HeapVersion version)
     {
         version++;
         if (version == nullVersion)
@@ -79,7 +84,7 @@ public:
         return version;
     }
     
-    static size_t sizeClassToIndex(size_t size)
+    static constexpr size_t sizeClassToIndex(size_t size)
     {
         return (size + sizeStep - 1) / sizeStep;
     }
@@ -100,6 +105,7 @@ public:
     void freeMemory();
 
     static size_t optimalSizeFor(size_t);
+    JS_EXPORT_PRIVATE static Vector<size_t> sizeClassesFor(double progression);
     
     void prepareForAllocation();
 
@@ -132,13 +138,14 @@ public:
 
     void didAddBlock(MarkedBlock::Handle*);
     void didConsumeFreeList(MarkedBlock::Handle*);
-    void NODELETE didAllocateInBlock(MarkedBlock::Handle*);
+    void LEGACY_NODELETE didAllocateInBlock(MarkedBlock::Handle*);
 
     // FIXME: rdar://139998916
     MarkedBlock::Handle* findMarkedBlockHandleDebug(MarkedBlock*);
 
     void beginMarking();
     void endMarking();
+    void adoptMarkingVersion(HeapVersion);
     void snapshotUnswept();
     void clearNewlyAllocated();
     void sweepBlocks();
@@ -146,7 +153,7 @@ public:
     void assertNoUnswept();
     size_t objectCount();
     size_t size();
-    size_t NODELETE capacity();
+    size_t LEGACY_NODELETE capacity();
 
     HeapVersion markingVersion() const { return m_markingVersion; }
     HeapVersion newlyAllocatedVersion() const { return m_newlyAllocatedVersion; }
@@ -196,7 +203,7 @@ private:
 
     template<typename Functor> inline void forEachDirectory(NOESCAPE const Functor&);
     
-    void NODELETE addActiveWeakSet(WeakSet*);
+    void LEGACY_NODELETE addActiveWeakSet(WeakSet*);
 
     Vector<Subspace*> m_subspaces;
 
@@ -210,9 +217,9 @@ private:
     PreciseAllocation** m_preciseAllocationsForThisCollectionEnd { nullptr };
 
     size_t m_capacity { 0 };
-    HeapVersion m_markingVersion { initialVersion };
-    HeapVersion m_newlyAllocatedVersion { initialVersion };
-    HeapVersion m_edenVersion { initialVersion };
+    HeapVersion m_markingVersion;
+    HeapVersion m_newlyAllocatedVersion;
+    HeapVersion m_edenVersion;
     bool m_isIterating { false };
     bool m_isMarking { false };
     bool m_conservativeScanIsPrepared { false };

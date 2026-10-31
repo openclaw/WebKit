@@ -71,13 +71,18 @@ const MQ::MediaQueryList& MediaList::mediaQueries() const
 
 void MediaList::setMediaQueries(MQ::MediaQueryList&& queries)
 {
+    if (m_detachedMediaQueries) {
+        m_detachedMediaQueries = WTF::move(queries);
+        return;
+    }
+
     if (RefPtr parentStyleSheet = m_parentStyleSheet.get()) {
         parentStyleSheet->setMediaQueries(WTF::move(queries));
         parentStyleSheet->didMutate();
         return;
     }
 
-    CSSStyleSheet::RuleMutationScope mutationScope(m_parentRule.get());
+    CSSStyleSheet::RuleMutationScope mutationScope(protect(m_parentRule));
     if (RefPtr rule = dynamicDowncast<CSSImportRule>(m_parentRule.get()))
         rule->setMediaQueries(WTF::move(queries));
     if (RefPtr rule = dynamicDowncast<CSSMediaRule>(m_parentRule.get()))

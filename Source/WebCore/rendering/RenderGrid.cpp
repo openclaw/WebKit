@@ -359,16 +359,26 @@ Vector<RenderBox*> RenderGrid::computeAspectRatioDependentAndBaselineItems(Rende
 {
     Vector<RenderBox*> dependentGridItems;
 
-    auto computeOrthogonalAndDependentItems = [&](RenderBox* gridItem) {
+    cacheBaselineAlignedGridItems(*this, m_trackSizingAlgorithm, { AlignmentContextTypes::Columns, AlignmentContextTypes::Rows }, [&](RenderBox* gridItem) {
         // For a grid item that has an aspect-ratio and block-constraints such as the relative logical height,
         // when the grid width is auto, we may need get the real grid width before laying out the item.
         if (GridLayoutFunctions::isAspectRatioBlockSizeDependentGridItem(*gridItem) && (style().logicalWidth().isAuto() || style().logicalWidth().isMinContent() || style().logicalWidth().isMaxContent())) {
-            dependentGridItems.append(gridItem);
-            gridLayoutState.setHasAspectRatioBlockSizeDependentItem();
+            if (gridItem->parent() == this) {
+                dependentGridItems.append(gridItem);
+                gridLayoutState.setHasAspectRatioBlockSizeDependentItem();
+                return;
+            }
+            // The traversal descends into subgrids, whose items are placed in the subgrid's grid and get
+            // their grid area from the subgrid's own layout. When the subgrid inherits its rows from this
+            // grid, the item's inline size still depends on this grid's row sizes, so its min-content
+            // contribution has to be recomputed in the second column pass like a direct child's.
+            CheckedRef parentGrid = downcast<RenderGrid>(*gridItem->parent());
+            if (parentGrid->isSubgridOf(GridLayoutFunctions::flowAwareDirectionForGridItem(*this, parentGrid, Style::GridTrackSizingDirection::Rows), *this)) {
+                gridLayoutState.setHasAspectRatioBlockSizeDependentItem();
+                gridLayoutState.setLayoutRequirementForGridItem(*gridItem, ItemLayoutRequirement::MinContentContributionForSecondColumnPass);
+            }
         }
-    };
-
-    cacheBaselineAlignedGridItems(*this, m_trackSizingAlgorithm, { AlignmentContextTypes::Columns, AlignmentContextTypes::Rows }, computeOrthogonalAndDependentItems, !isSubgridRows());
+    }, !isSubgridRows());
     return dependentGridItems;
 }
 
@@ -423,7 +433,7 @@ void RenderGrid::layoutBlock(RelayoutChildren relayoutChildren, LayoutUnit)
     repainter.repaintAfterLayout();
 }
 
-static void clearGridItemOverridingSizesBeforeLayout(RenderGrid& renderGrid)
+static void clearGridItemOverridingSizesBeforeLayout(RenderGrid& renderGrid, RenderGridLayoutState& gridLayoutState)
 {
     // Grid's layout logic controls the grid item's override content size, hence we need to
     // clear any override set previously, so it doesn't interfere in current layout
@@ -431,10 +441,26 @@ static void clearGridItemOverridingSizesBeforeLayout(RenderGrid& renderGrid)
     for (auto& gridItem : childrenOfType<RenderBox>(renderGrid)) {
         if (gridItem.isOutOfFlowPositioned() || gridItem.isLegend())
             continue;
+        if (gridItem.overridingBorderBoxLogicalHeight())
+            gridLayoutState.setLayoutRequirementForGridItem(gridItem, ItemLayoutRequirement::NeedsLayoutForIntrinsicLogicalHeight);
         gridItem.clearOverridingSize();
     }
 }
 
+
+bool RenderGrid::intrinsicLogicalWidthsDependOnLogicalHeight() const
+{
+    // With auto-fill or auto-fit rows, the height decides how many rows a column-flow grid has, and so how many
+    // columns its items flow into.
+    if (!style().gridAutoFlow().isColumn() || style().gridTemplateRows().autoRepeatSizes.isEmpty())
+        return false;
+    return hasRelativeLogicalHeight() || ((isFlexItem() || isGridItem()) && hasStretchedLogicalHeight());
+}
+
+bool RenderGrid::shouldInvalidateContentWidths() const
+{
+    return RenderBlock::shouldInvalidateContentWidths() || intrinsicLogicalWidthsDependOnLogicalHeight();
+}
 
 bool RenderGrid::hasDefiniteLogicalHeight() const
 {
@@ -460,7 +486,7 @@ void RenderGrid::layoutGrid(RelayoutChildren relayoutChildren)
         RenderGridLayoutState gridLayoutState;
 
         updateIntrinsicLogicalHeightsForRowSizingFirstPassCacheAvailability();
-        clearGridItemOverridingSizesBeforeLayout(*this);
+        clearGridItemOverridingSizesBeforeLayout(*this, gridLayoutState);
         computeLayoutRequirementsForItemsBeforeLayout(gridLayoutState);
 
         preparePaginationBeforeBlockLayout(relayoutChildren);
@@ -639,7 +665,7 @@ void RenderGrid::layoutGridLanes(RelayoutChildren relayoutChildren)
         LayoutStateMaintainer statePusher(*this, locationOffset(), isTransformed() || hasReflection() || writingMode().isBlockFlipped());
         RenderGridLayoutState gridLayoutState;
 
-        clearGridItemOverridingSizesBeforeLayout(*this);
+        clearGridItemOverridingSizesBeforeLayout(*this, gridLayoutState);
 
         // We are committed to a full grid lanes layout; invalidate the resolved track list now so that a
         // stale read asserts if we fail to repopulate it below (see updateResolvedTrackListsAfterLayout).
@@ -1601,13 +1627,13 @@ void RenderGrid::setResolvedTrackSizes(Vector<LayoutUnit>&& columnSizes, Vector<
     m_resolvedTrackList.isValid = true;
 }
 
-static const StyleContentAlignmentData& NODELETE contentAlignmentNormalBehaviorGrid()
+static const StyleContentAlignmentData& LEGACY_NODELETE contentAlignmentNormalBehaviorGrid()
 {
     static const StyleContentAlignmentData normalBehavior = {ContentPosition::Normal, ContentDistribution::Stretch};
     return normalBehavior;
 }
 
-static bool NODELETE overrideSizeChanged(const RenderBox& gridItem, Style::GridTrackSizingDirection direction, std::optional<LayoutUnit> width, std::optional<LayoutUnit> height)
+static bool LEGACY_NODELETE overrideSizeChanged(const RenderBox& gridItem, Style::GridTrackSizingDirection direction, std::optional<LayoutUnit> width, std::optional<LayoutUnit> height)
 {
     if (direction == Style::GridTrackSizingDirection::Columns) {
         if (auto gridAreaContentLogicalWidth = gridItem.gridAreaContentLogicalWidth())
@@ -1619,7 +1645,7 @@ static bool NODELETE overrideSizeChanged(const RenderBox& gridItem, Style::GridT
     return true;
 }
 
-static bool NODELETE hasRelativeBlockAxisSize(const RenderGrid& grid, const RenderBox& gridItem)
+static bool LEGACY_NODELETE hasRelativeBlockAxisSize(const RenderGrid& grid, const RenderBox& gridItem)
 {
     return GridLayoutFunctions::isOrthogonalGridItem(grid, gridItem) ? gridItem.hasRelativeLogicalWidth() || gridItem.style().logicalWidth().isAuto() : gridItem.hasRelativeLogicalHeight();
 }
@@ -1762,7 +1788,7 @@ LayoutUnit RenderGrid::gridAreaBreadthForGridItemIncludingAlignmentOffsets(const
     // We need the cached value when available because Content Distribution alignment properties
     // may have some influence in the final grid area breadth.
     const auto& tracks = m_trackSizingAlgorithm.tracks(direction);
-    const auto& span = currentGrid().gridItemSpan(gridItem, direction);
+    const auto& span = gridSpanForGridItem(gridItem, direction);
     const auto& positions = this->positions(direction);
 
     auto initialTrackPosition = positions[span.startLine()];
@@ -1835,7 +1861,7 @@ void RenderGrid::populateGridPositionsForDirection(const GridTrackSizingAlgorith
     }
 }
 
-static LayoutUnit computeOverflowAlignmentOffset(OverflowAlignment overflow, LayoutUnit trackSize, LayoutUnit gridItemSize)
+static LayoutUnit LEGACY_NODELETE computeOverflowAlignmentOffset(OverflowAlignment overflow, LayoutUnit trackSize, LayoutUnit gridItemSize)
 {
     LayoutUnit offset = trackSize - gridItemSize;
     switch (overflow) {
@@ -1997,7 +2023,7 @@ std::optional<LayoutUnit> RenderGrid::firstLineBaseline() const
         // mode root. This would also fix some cases where the grid is orthogonal to its container.
         auto gridWritingMode = style().writingMode();
         auto dominantBaseline = BaselineAlignment::dominantBaseline(gridWritingMode);
-        auto direction = isHorizontalWritingMode() ? LineDirection::Horizontal : LineDirection::Vertical;
+        auto direction = isHorizontalWritingMode() ? BoxAxis::Horizontal : BoxAxis::Vertical;
         baseline = BaselineAlignment::synthesizedBaseline(*baselineGridItem, dominantBaseline, gridWritingMode, direction, BaselineSynthesisEdge::BorderBox);
     }
     return logicalTopForChild(*baselineGridItem) + *baseline;
@@ -2017,7 +2043,7 @@ std::optional<LayoutUnit> RenderGrid::lastLineBaseline() const
         baseline = baselineGridItem->lastLineBaseline();
 
     if (!baseline) {
-        auto direction = isHorizontalWritingMode() ? LineDirection::Horizontal : LineDirection::Vertical;
+        auto direction = isHorizontalWritingMode() ? BoxAxis::Horizontal : BoxAxis::Vertical;
         auto gridWritingMode = style().writingMode();
         auto dominantBaseline = BaselineAlignment::dominantBaseline(gridWritingMode);
         baseline = BaselineAlignment::synthesizedBaseline(*baselineGridItem, dominantBaseline, gridWritingMode, direction, BaselineSynthesisEdge::BorderBox);
@@ -2383,7 +2409,7 @@ std::pair<LayoutUnit, LayoutUnit> RenderGrid::gridAreaPositionForInFlowGridItem(
     return { start, end };
 }
 
-std::pair<OverflowAlignment, ContentPosition> static NODELETE resolveContentDistributionFallback(ContentDistribution distribution)
+std::pair<OverflowAlignment, ContentPosition> static LEGACY_NODELETE resolveContentDistributionFallback(ContentDistribution distribution)
 {
     switch (distribution) {
     case ContentDistribution::SpaceBetween:

@@ -100,14 +100,17 @@ public:
     void drawGlyphs(WebCore::RenderingResourceIdentifier fontIdentifier, IPC::ArrayReferenceTuple<WebCore::GlyphBufferGlyph, WebCore::FloatSize>, WebCore::FloatPoint localAnchor, WebCore::FontSmoothingMode);
     void drawDisplayList(RemoteDisplayListIdentifier);
     void drawFilteredImageBuffer(std::optional<WebCore::RenderingResourceIdentifier> sourceImageIdentifier, const WebCore::FloatRect& sourceImageRect, Ref<WebCore::Filter>&&);
-    virtual void drawImageBuffer(WebCore::RenderingResourceIdentifier imageBufferIdentifier, const WebCore::FloatRect& destinationRect, const WebCore::FloatRect& srcRect, WebCore::ImagePaintingOptions);
-    void drawNativeImage(WebCore::RenderingResourceIdentifier imageIdentifier, const WebCore::FloatRect& destRect, const WebCore::FloatRect& srcRect, WebCore::ImagePaintingOptions);
+    virtual void drawImageBuffer(WebCore::RenderingResourceIdentifier imageBufferIdentifier, const WebCore::FloatRect& destinationRect, const WebCore::FloatRect& srcRect, WebCore::ImageDrawingOptions);
+    void drawNativeImage(WebCore::RenderingResourceIdentifier imageIdentifier, const WebCore::FloatRect& destRect, const WebCore::FloatRect& srcRect, WebCore::ImageDrawingOptions);
+#if USE(SYSTEM_PREVIEW)
+    void drawBadgeSystemImage(std::optional<WebCore::RenderingResourceIdentifier> imageIdentifier, const WebCore::FloatRect& destinationRect);
+#endif
     void drawSystemImage(Ref<WebCore::SystemImage>&&, const WebCore::FloatRect&);
 #if PLATFORM(COCOA) && ENABLE(VIDEO)
-    void drawVideoFrame(SharedVideoFrame&&, const WebCore::FloatRect& destination, WebCore::ShouldDiscardAlpha, WebCore::ImagePaintingOptions);
+    void drawVideoFrame(SharedVideoFrame&&, const WebCore::FloatRect& destination, WebCore::ShouldDiscardAlpha, WebCore::ImageDrawingOptions);
 #endif
-    void drawPatternNativeImage(WebCore::RenderingResourceIdentifier imageIdentifier, const WebCore::FloatRect& destRect, const WebCore::FloatRect& tileRect, const WebCore::AffineTransform&, const WebCore::FloatPoint&, const WebCore::FloatSize& spacing, WebCore::ImagePaintingOptions);
-    void drawPatternImageBuffer(WebCore::RenderingResourceIdentifier imageIdentifier, const WebCore::FloatRect& destRect, const WebCore::FloatRect& tileRect, const WebCore::AffineTransform&, const WebCore::FloatPoint&, const WebCore::FloatSize& spacing, WebCore::ImagePaintingOptions);
+    void drawPatternNativeImage(WebCore::RenderingResourceIdentifier imageIdentifier, const WebCore::FloatRect& destRect, const WebCore::FloatRect& tileRect, const WebCore::AffineTransform&, const WebCore::FloatPoint&, const WebCore::FloatSize& spacing, WebCore::ImageDrawingOptions);
+    void drawPatternImageBuffer(WebCore::RenderingResourceIdentifier imageIdentifier, const WebCore::FloatRect& destRect, const WebCore::FloatRect& tileRect, const WebCore::AffineTransform&, const WebCore::FloatPoint&, const WebCore::FloatSize& spacing, WebCore::ImageDrawingOptions);
     void beginTransparencyLayer(float opacity);
     void beginTransparencyLayerWithCompositeMode(WebCore::CompositeMode);
     void endTransparencyLayer();
@@ -152,7 +155,10 @@ public:
     void applyFillPattern();
 #endif
     void applyDeviceScaleFactor(float);
-    std::optional<WebKit::SharedPreferencesForWebProcess> NODELETE sharedPreferencesForWebProcess() const;
+    std::optional<WebKit::SharedPreferencesForWebProcess> LEGACY_NODELETE sharedPreferencesForWebProcess() const;
+#if HAVE(IOSURFACE)
+    bool useIOSurfaceWebKitBehavior() const;
+#endif
 
     void beginPage(const WebCore::FloatRect&);
     void endPage();
@@ -166,7 +172,7 @@ protected:
 
     void drawFilteredImageBufferInternal(std::optional<WebCore::RenderingResourceIdentifier> sourceImageIdentifier, const WebCore::FloatRect& sourceImageRect, WebCore::Filter&, WebCore::FilterResults&);
 
-    RemoteResourceCache& NODELETE resourceCache() const;
+    RemoteResourceCache& LEGACY_NODELETE resourceCache() const;
     WebCore::GraphicsContext& context() LIFETIME_BOUND { return m_context; }
     RefPtr<WebCore::ImageBuffer> imageBuffer(WebCore::RenderingResourceIdentifier) const;
     std::optional<WebCore::SourceImage> sourceImage(WebCore::RenderingResourceIdentifier) const;

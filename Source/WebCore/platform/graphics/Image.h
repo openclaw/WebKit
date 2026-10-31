@@ -31,8 +31,8 @@
 #include <WebCore/DecodingOptions.h>
 #include <WebCore/FloatRect.h>
 #include <WebCore/ImageAdapter.h>
+#include <WebCore/ImageDrawingOptions.h>
 #include <WebCore/ImageOrientation.h>
-#include <WebCore/ImagePaintingOptions.h>
 #include <WebCore/ImageTypes.h>
 #include <WebCore/NaturalDimensions.h>
 #include <wtf/ForbidHeapAllocation.h>
@@ -45,8 +45,6 @@ namespace WebCore {
 
 class AffineTransform;
 class Document;
-class FloatPoint;
-class FloatSize;
 class FragmentedSharedBuffer;
 class GraphicsContext;
 class ImageDrawingExtras;
@@ -61,7 +59,6 @@ class ImageObserver;
 
 class Image : public RefCountedAndCanMakeWeakPtr<Image> {
     friend class CachedSubimage;
-    friend class GraphicsContext;
 public:
     virtual ~Image();
     
@@ -70,12 +67,12 @@ public:
     WEBCORE_EXPORT static bool supportsType(const String&);
 
     virtual bool isBitmapImage() const { return false; }
-    virtual bool NODELETE isSVGImage() const { return false; }
+    virtual bool LEGACY_NODELETE isSVGImage() const { return false; }
     virtual bool isPDFDocumentImage() const { return false; }
 
     virtual void subresourcesAreFinished(Document*, CompletionHandler<void()>&&);
 
-    bool NODELETE drawsSVGImage() const { return isSVGImage(); }
+    bool LEGACY_NODELETE drawsSVGImage() const { return isSVGImage(); }
 
     virtual unsigned frameCount() const { return 1; }
 
@@ -89,11 +86,8 @@ public:
     virtual bool renderingTaintsOrigin() const { return false; }
 
     WEBCORE_EXPORT static Image& nullImage();
-    bool isNull() const { return size().isEmpty(); }
 
-    virtual bool hasRelativeWidth() const { return false; }
-    virtual bool hasRelativeHeight() const { return false; }
-    virtual void computeIntrinsicDimensions(float& intrinsicWidth, float& intrinsicHeight, FloatSize& intrinsicRatio);
+    virtual bool hasSomethingToDraw() const = 0;
 
     virtual FloatSize size(ImageOrientation = ImageOrientation::Orientation::FromImage) const = 0;
     virtual bool hasDensityCorrectedSize() const { return false; }
@@ -111,6 +105,8 @@ public:
             orientation = ImageOrientation::Orientation::None;
         return unorientedNaturalDimensions().oriented(orientation);
     }
+
+    virtual bool usesConcreteObjectSizeAsViewport() const { return false; }
 
 public:
     WEBCORE_EXPORT EncodedDataStatus setData(RefPtr<FragmentedSharedBuffer>&& data, bool allDataReceived);
@@ -139,15 +135,15 @@ public:
     virtual void stopAnimation() {}
     virtual void resetAnimation() {}
     virtual bool isAnimating() const { return false; }
-    WEBCORE_EXPORT bool NODELETE animationPending() const;
+    WEBCORE_EXPORT bool LEGACY_NODELETE animationPending() const;
     std::optional<bool> allowsAnimation() const { return m_allowsAnimation; }
     void setAllowsAnimation(std::optional<bool> allowsAnimation) { m_allowsAnimation = allowsAnimation; }
     static bool systemAllowsAnimationControls() { return gSystemAllowsAnimationControls; }
-    WEBCORE_EXPORT static void NODELETE setSystemAllowsAnimationControls(bool allowsControls);
+    WEBCORE_EXPORT static void LEGACY_NODELETE setSystemAllowsAnimationControls(bool allowsControls);
 
     // Typically the CachedImage that owns us.
-    RefPtr<ImageObserver> NODELETE imageObserver() const;
-    void NODELETE setImageObserver(RefPtr<ImageObserver>&&);
+    RefPtr<ImageObserver> LEGACY_NODELETE imageObserver() const;
+    void LEGACY_NODELETE setImageObserver(RefPtr<ImageObserver>&&);
 
     WEBCORE_EXPORT ImageAdapter& adapter();
     void invalidateAdapter();
@@ -158,12 +154,16 @@ public:
 
     enum TileRule { StretchTile, RoundTile, SpaceTile, RepeatTile };
 
+    WEBCORE_EXPORT ImageDrawResult draw(GraphicsContext&, ConcreteObjectSize, FloatPoint destination = { }, ImageDrawingOptions = { ImageOrientation::Orientation::FromImage }, const ImageDrawingExtras* = nullptr);
+    WEBCORE_EXPORT ImageDrawResult draw(GraphicsContext&, ConcreteObjectSize, const FloatRect& destination, ImageDrawingOptions = { ImageOrientation::Orientation::FromImage }, const ImageDrawingExtras* = nullptr);
+    WEBCORE_EXPORT ImageDrawResult draw(GraphicsContext&, ConcreteObjectSize, const FloatRect& destination, const FloatRect& source, ImageDrawingOptions = { ImageOrientation::Orientation::FromImage }, const ImageDrawingExtras* = nullptr);
+
     virtual RefPtr<NativeImage> nativeImage(ConcreteObjectSize, const ColorSpace& = ColorSpace::SRGB(), const ImageDrawingExtras* = nullptr);
     virtual RefPtr<NativeImage> nativeImageAtIndex(unsigned, ConcreteObjectSize, const ImageDrawingExtras* = nullptr);
     virtual RefPtr<NativeImage> currentNativeImage(ConcreteObjectSize, const ImageDrawingExtras* = nullptr);
     virtual RefPtr<NativeImage> currentPreTransformedNativeImage(ConcreteObjectSize, ImageOrientation = ImageOrientation::Orientation::FromImage, const ImageDrawingExtras* = nullptr);
 
-    virtual void drawPattern(GraphicsContext&, ConcreteObjectSize, const FloatRect& destRect, const FloatRect& srcRect, const AffineTransform& patternTransform, const FloatPoint& phase, const FloatSize& spacing, ImagePaintingOptions = { }, const ImageDrawingExtras* = nullptr);
+    virtual void drawPattern(GraphicsContext&, ConcreteObjectSize, const FloatRect& destRect, const FloatRect& srcRect, const AffineTransform& patternTransform, const FloatPoint& phase, const FloatSize& spacing, ImageDrawingOptions = { }, const ImageDrawingExtras* = nullptr);
 
 #if ASSERT_ENABLED
     virtual bool hasSolidColor() { return false; }
@@ -194,7 +194,7 @@ protected:
 
     virtual bool shouldDrawFromCachedSubimage(GraphicsContext&) const { return false; }
     virtual bool mustDrawFromCachedSubimage(GraphicsContext&) const { return false; }
-    virtual ImageDrawResult draw(GraphicsContext&, ConcreteObjectSize, const FloatRect& dstRect, const FloatRect& srcRect, ImagePaintingOptions = { }, const ImageDrawingExtras* = nullptr) = 0;
+    virtual ImageDrawResult drawImage(GraphicsContext&, ConcreteObjectSize, const FloatRect& destination, const FloatRect& source, ImageDrawingOptions, const ImageDrawingExtras*) = 0;
 
     virtual bool canReplaceData() const { return false; }
     virtual void dataReplaced() { }

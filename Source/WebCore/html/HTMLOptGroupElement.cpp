@@ -102,9 +102,9 @@ void HTMLOptGroupElement::updateUserAgentShadowTree()
         labelContainer->setTextContent(WTF::move(label));
 
     if (showLabel)
-        labelContainer->removeInlineStyleProperty(CSSPropertyDisplay);
+        labelContainer->removeInlineStyleProperty(CSSPropertyID::Display);
     else
-        labelContainer->setInlineStyleProperty(CSSPropertyDisplay, CSSValueNone);
+        labelContainer->setInlineStyleProperty(CSSPropertyID::Display, CSSValueID::None);
 }
 
 void HTMLOptGroupElement::didAddUserAgentShadowRoot(ShadowRoot& root)
@@ -124,9 +124,6 @@ void HTMLOptGroupElement::didAddUserAgentShadowRoot(ShadowRoot& root)
 auto HTMLOptGroupElement::insertionSteps(InsertionType insertionType, ContainerNode& parentOfInsertedTree) -> NeedsPostConnectionSteps
 {
     auto result = HTMLElement::insertionSteps(insertionType, parentOfInsertedTree);
-
-    if (!document().settings().htmlEnhancedSelectParsingEnabled())
-        return result;
 
     if (insertionType.connectedToDocument && m_shadowTreeNeedsUpdate)
         protect(document())->addElementWithPendingUserAgentShadowTreeUpdate(*this);
@@ -149,7 +146,7 @@ void HTMLOptGroupElement::removingSteps(RemovalType removalType, ContainerNode& 
     if (removalType.disconnectedFromDocument && m_shadowTreeNeedsUpdate)
         protect(document())->removeElementWithPendingUserAgentShadowTreeUpdate(*this);
 
-    if (!document().settings().htmlEnhancedSelectParsingEnabled() || !m_ownerSelect)
+    if (!m_ownerSelect)
         return;
 
     if (auto* select = HTMLSelectElement::findOwnerSelect(parentNode(), HTMLSelectElement::ExcludeOptGroup::Yes)) {
@@ -161,6 +158,28 @@ void HTMLOptGroupElement::removingSteps(RemovalType removalType, ContainerNode& 
         select->setRecalcListItems();
         invalidateShadowTree();
     }
+}
+
+void HTMLOptGroupElement::movingSteps(MovingType movingType, ContainerNode& oldParent)
+{
+    HTMLElement::movingSteps(movingType, oldParent);
+
+    RefPtr oldSelect = m_ownerSelect;
+    RefPtr newSelect = HTMLSelectElement::findOwnerSelect(parentNode(), HTMLSelectElement::ExcludeOptGroup::Yes);
+    if (oldSelect == newSelect) {
+        if (newSelect)
+            newSelect->setRecalcListItems();
+        return;
+    }
+
+    m_ownerSelect = newSelect.get();
+
+    if (oldSelect)
+        oldSelect->setRecalcListItems();
+    if (newSelect)
+        newSelect->setRecalcListItems();
+
+    invalidateShadowTree();
 }
 
 bool HTMLOptGroupElement::isDisabledFormControl() const
@@ -179,7 +198,7 @@ bool HTMLOptGroupElement::isActuallyDisabled() const
 bool HTMLOptGroupElement::isFocusable() const
 {
     RefPtr select = ownerSelectElement();
-    if (select && select->isDropdownBox())
+    if (select && select->isDropdownBox() && !select->usesBaseAppearancePicker())
         return false;
     return HTMLElement::isFocusable();
 }
@@ -192,23 +211,12 @@ const AtomString& HTMLOptGroupElement::formControlType() const
 
 void HTMLOptGroupElement::childrenChanged(const ChildChange& change)
 {
-    if (document().settings().htmlEnhancedSelectParsingEnabled()) {
-        if (change.affectsElements != ChildChange::AffectsElements::No)
-            invalidateShadowTree();
-        HTMLElement::childrenChanged(change);
-        return;
+    if (change.affectsElements != ChildChange::AffectsElements::No) {
+        if (RefPtr legend = legendElement(); m_legendElement != legend) {
+            m_legendElement = legend;
+            legendElementChanged();
+        }
     }
-
-    bool isRelevant = change.affectsElements == ChildChange::AffectsElements::Yes;
-    RefPtr select = isRelevant ? ownerSelectElement() : nullptr;
-    if (!isRelevant || !select) {
-        HTMLElement::childrenChanged(change);
-        return;
-    }
-
-    auto selectOptionIfNecessaryScope = select->optionToSelectFromChildChangeScope(change, this);
-
-    recalcSelectOptions();
     HTMLElement::childrenChanged(change);
 }
 
@@ -225,6 +233,12 @@ void HTMLOptGroupElement::attributeChanged(const QualifiedName& name, const Atom
 
     if (name == labelAttr)
         invalidateShadowTree();
+}
+
+void HTMLOptGroupElement::legendElementChanged()
+{
+    recalcSelectOptions();
+    invalidateShadowTree();
 }
 
 void HTMLOptGroupElement::parseDisabledAttribute(const AtomString& value)
@@ -273,11 +287,17 @@ String HTMLOptGroupElement::groupLabelText() const
     return protect(document())->displayStringModifiedByEncoding(attributeWithoutSynchronization(labelAttr)).simplifyWhiteSpace(deprecatedIsSpaceOrNewline);
 }
 
+HTMLOptGroupElement* HTMLOptGroupElement::optGroupForLabel(const Element& element)
+{
+    if (auto* optGroup = dynamicDowncast<HTMLOptGroupElement>(element.shadowHost()); optGroup && optGroup->m_labelContainer == &element)
+        return optGroup;
+    if (auto* optGroup = dynamicDowncast<HTMLOptGroupElement>(element.parentElement()); optGroup && optGroup->legendElement() == &element)
+        return optGroup;
+    return nullptr;
+}
+
 HTMLSelectElement* HTMLOptGroupElement::ownerSelectElement() const
 {
-    if (!document().settings().htmlEnhancedSelectParsingEnabled())
-        return dynamicDowncast<HTMLSelectElement>(parentNode());
-
     return m_ownerSelect.get();
 }
 

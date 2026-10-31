@@ -92,6 +92,27 @@ void testSelectTest()
     CHECK_EQ(invoke<intptr_t>(*code, 0, 642462, 32533), 32533);
 }
 
+void testSelectTestHighBits()
+{
+    Procedure proc;
+    BasicBlock* root = proc.addBlock();
+    auto arguments = cCallArgumentValues<int64_t, int64_t, int64_t>(proc, root);
+
+    PatchpointValue* patchpoint = root->appendNew<PatchpointValue>(proc, Void, Origin());
+    patchpoint->clobberLate(RegisterSet(GPRInfo::argumentGPR0));
+    patchpoint->setGenerator([](CCallHelpers&, const StackmapGenerationParams&) { });
+
+    Value* select = root->appendNew<Value>(proc, Select, Origin(), arguments[0], arguments[1], arguments[2]);
+    root->clearSuccessors();
+    root->appendNew<Value>(proc, Return, Origin(), select);
+
+    auto code = compileProc(proc);
+    CHECK_EQ(invoke<int64_t>(*code, 42, 1, 2), 1);
+    CHECK_EQ(invoke<int64_t>(*code, 0x100000000ll, 1, 2), 1);
+    CHECK_EQ(invoke<int64_t>(*code, 0xffffffff00000000ull, 1, 2), 1);
+    CHECK_EQ(invoke<int64_t>(*code, 0, 1, 2), 2);
+}
+
 void testSelectCompareDouble()
 {
     Procedure proc;
@@ -1127,7 +1148,7 @@ void testCheckSelectWithUpsilonBeforeCheck()
     CHECK_EQ(invoke<intptr_t>(*code, false), 666);
 }
 
-double NODELETE b3Pow(double x, int y)
+double LEGACY_NODELETE b3Pow(double x, int y)
 {
     if (y < 0 || y > 1000)
         return pow(x, y);
@@ -2642,7 +2663,14 @@ void testTerminalPatchpointThatNeedsToBeSpilled()
 void testTerminalPatchpointThatNeedsToBeSpilled2()
 {
     // This is a unit test for how FTL's heap allocation fast paths behave.
-    Procedure proc;
+
+    // Tail duplication will break the critical edge we're trying to test because it
+    // will clone the slowPath block for both edges to it!
+    Policy policy = Policy::fromProcessOptions();
+    policy.upstream.maxTailDuplicationBlockSize = 0;
+    policy.upstream.maxTailDuplicationBlockSuccessors = 0;
+
+    Procedure proc(policy);
 
     // FIXME: Air O0/O1 allocator can't handle such programs. We rely on WasmAirIRGenerator
     // to not use any such constructs where the register allocator is cornered in such
@@ -2718,21 +2746,10 @@ void testTerminalPatchpointThatNeedsToBeSpilled2()
 
     slowPath->appendNew<Value>(proc, Return, Origin(), arg);
 
-    auto original1 = Options::maxB3TailDupBlockSize();
-    auto original2 = Options::maxB3TailDupBlockSuccessors();
-
-    // Tail duplication will break the critical edge we're trying to test because it
-    // will clone the slowPath block for both edges to it!
-    Options::maxB3TailDupBlockSize() = 0;
-    Options::maxB3TailDupBlockSuccessors() = 0;
-
     auto code = compileProc(proc);
     CHECK_EQ(invoke<int>(*code, 1), 1);
     CHECK_EQ(invoke<int>(*code, 0), 0);
     CHECK_EQ(invoke<int>(*code, 42), 666);
-
-    Options::maxB3TailDupBlockSize() = original1;
-    Options::maxB3TailDupBlockSuccessors() = original2;
 }
 
 void testPatchpointTerminalReturnValue(bool successIsRare)
@@ -2806,6 +2823,32 @@ void testPatchpointTerminalReturnValue(bool successIsRare)
     CHECK_EQ(invoke<int>(*code, 42), 73);
     CHECK_EQ(invoke<int>(*code, 43), 666);
     CHECK_EQ(invoke<int>(*code, -1), 666);
+}
+
+void testPrologueGeneratorLatePath()
+{
+    Procedure proc;
+    BasicBlock* root = proc.addBlock();
+    root->appendNew<Value>(proc, Return, Origin(), root->appendNew<Const32Value>(proc, Origin(), 1));
+
+    Ref<Air::PrologueGenerator> defaultPrologue = proc.code().prologueGeneratorForEntrypoint(0);
+    proc.code().setPrologueForEntrypoint(0, createSharedTask<Air::PrologueGeneratorFunction>(
+        [=](CCallHelpers& jit, Air::Code& code, Air::GenerationContext& context) {
+            defaultPrologue->run(jit, code, context);
+            AllowMacroScratchRegisterUsage allowScratch(jit);
+            auto slowPath = jit.branch32(CCallHelpers::Equal, GPRInfo::argumentGPR0, CCallHelpers::TrustedImm32(42));
+            context.addLatePath(Origin(), [=](CCallHelpers& jit) {
+                slowPath.link(&jit);
+                jit.move(CCallHelpers::TrustedImm32(666), GPRInfo::returnValueGPR);
+                // Callee saves were stored but not modified, so there is nothing to restore.
+                jit.emitFunctionEpilogue();
+                jit.ret();
+            });
+        }));
+
+    auto code = compileProc(proc);
+    CHECK_EQ(invoke<int>(*code, 0), 1);
+    CHECK_EQ(invoke<int>(*code, 42), 666);
 }
 
 void testMemoryFence()

@@ -52,6 +52,7 @@ class ColorSpace;
 class HTMLCanvasElement;
 class HTMLImageElement;
 class HTMLVideoElement;
+class Image;
 class ImageBitmapImageObserver;
 class ImageData;
 class ImageBuffer;
@@ -140,13 +141,15 @@ public:
     static RefPtr<ImageBuffer> createImageBuffer(ScriptExecutionContext&, const FloatSize&, RenderingMode, ColorSpace, float resolutionScale = 1, DrawsHDRContent = DrawsHDRContent::No, std::optional<PixelFormat> = std::nullopt);
     static RefPtr<ImageBuffer> createImageBuffer(ScriptExecutionContext&, const FloatSize&, ColorSpace, float resolutionScale = 1);
 
+    static RefPtr<ImageBuffer> unpremultipliedImageBuffer(ScriptExecutionContext&, Image&, const IntRect& sourceRectangle, const FloatSize& outputSize, const ImageBitmapOptions&, DrawsHDRContent);
+
     static RefPtr<ImageBitmap> create(ScriptExecutionContext&, const IntSize&, ColorSpace);
     static RefPtr<ImageBitmap> create(ScriptExecutionContext&, DetachedImageBitmap);
     static Ref<ImageBitmap> create(Ref<ImageBuffer>, bool originClean, bool premultiplyAlpha = false, bool forciblyPremultiplyAlpha = false, AlphaPremultiplication bufferAlphaFormat = AlphaPremultiplication::Premultiplied);
 
     ~ImageBitmap();
 
-    ImageBuffer* NODELETE buffer() const;
+    ImageBuffer* LEGACY_NODELETE buffer() const;
 
     RefPtr<ImageBuffer> takeImageBuffer();
 
@@ -164,7 +167,7 @@ public:
     bool isDetached() const { return !m_bitmap; }
     void close();
 
-    size_t NODELETE memoryCost() const;
+    size_t LEGACY_NODELETE memoryCost() const;
 private:
     friend class ImageBitmapImageObserver;
     friend class PendingImageBitmap;

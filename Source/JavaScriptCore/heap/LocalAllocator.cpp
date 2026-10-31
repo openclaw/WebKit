@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2019 Apple Inc. All rights reserved.
+ * Copyright (C) 2018-2019, 2026 Apple Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -28,14 +28,22 @@
 
 #include "AlignedMemoryAllocator.h"
 #include "AllocatingScope.h"
+#include "CompleteSubspace.h"
 #include "FreeListInlines.h"
 #include "GCDeferralContext.h"
 #include "HeapProfiler.h"
 #include "LocalAllocatorInlines.h"
+#include "MarkedBlockCage.h"
 #include "MarkedBlockInlines.h"
+#include "MarkedSpaceInlines.h"
 #include "Options.h"
 #include "ResourceExhaustion.h"
+#include "StructureAlignedMemoryAllocator.h"
 #include "SuperSampler.h"
+
+#if ENABLE(AOT)
+#include "AOTAllocationCounts.h"
+#endif
 
 namespace JSC {
 
@@ -101,7 +109,11 @@ void LocalAllocator::stopAllocating(MarkedBlock::Handle::StopAllocatingMode mode
         ASSERT(m_freeList.allocationWillFail());
         return;
     }
-    
+
+#if ENABLE(AOT)
+    if (AOT::AllocationCounts::isEnabled()) [[unlikely]]
+        AOT::AllocationCounts::willStopAllocating(m_directory->markedSpace().heap().vm(), *this);
+#endif
     m_currentBlock->stopAllocating(m_freeList, mode);
     m_lastActiveBlock = m_currentBlock;
     m_currentBlock = nullptr;
@@ -191,7 +203,12 @@ void* LocalAllocator::allocateSlowCaseWithoutSampling(JSC::Heap& heap, size_t ce
 #if USE(BUN_JSC_ADDITIONS)
     heap.didAllocateArrayBufferAuxiliaryMemory(m_directory->subspace(), m_freeList.originalSize());
 #endif
-    
+
+#if ENABLE(AOT)
+    if (AOT::AllocationCounts::isEnabled()) [[unlikely]]
+        AOT::AllocationCounts::willRefill(heap.vm(), *this);
+#endif
+
     didConsumeFreeList();
 
 #if USE(BUN_JSC_ADDITIONS)
@@ -206,6 +223,13 @@ void* LocalAllocator::allocateSlowCaseWithoutSampling(JSC::Heap& heap, size_t ce
     }
 #endif
     
+#if USE(BUN_JSC_ADDITIONS)
+    if (Options::runsCompiledImage() && m_directory->m_blocks.isEmpty() && !m_directory->m_subspace->isIsoSubspace()) {
+        if (void* result = static_cast<CompleteSubspace*>(m_directory->m_subspace)->tryAllocateInLargerCell(heap, *m_directory, deferralContext))
+            return result;
+    }
+#endif
+
     AllocatingScope helpingHeap(heap);
 
     heap.collectIfNecessaryOrDefer(deferralContext);
@@ -235,10 +259,31 @@ void* LocalAllocator::allocateSlowCaseWithoutSampling(JSC::Heap& heap, size_t ce
     ASSERT_WITH_MESSAGE(cellSize == m_directory->cellSize(), "non-preciseOnly allocations should match allocator's the size class");
     MarkedBlock::Handle* block = m_directory->tryAllocateBlock(heap);
     if (!block) [[unlikely]] {
-        RELEASE_ASSERT_RESOURCE_AVAILABLE(failureMode != AllocationFailureMode::Assert, MemoryExhaustion, "Crash intentionally because memory is exhausted.");
-        return nullptr;
+        if (MarkedBlockCage::isRequired() && heap.cage().allocationsAreInfallible())
+            failureMode = AllocationFailureMode::Assert;
+        if (heap.tryCollectForExhaustedCage(deferralContext, subspace->alignedMemoryAllocator())) {
+            if (m_currentBlock)
+                return allocate(heap, cellSize, deferralContext, failureMode);
+            result = tryAllocateWithoutCollecting(cellSize);
+            if (result)
+                return result;
+            block = m_directory->tryAllocateBlock(heap);
+        }
+        if (!block && failureMode == AllocationFailureMode::Assert) {
+            // Another thread may take what this one lets go of.
+            while (!block && heap.tryUseReserveOfExhaustedCage(m_directory->subspace()->alignedMemoryAllocator()))
+                block = m_directory->tryAllocateBlock(heap);
+        }
+        if (!block) {
+            if (failureMode == AllocationFailureMode::Assert)
+                MarkedBlockCage::logExhaustion(m_directory->subspace()->alignedMemoryAllocator() == heap.structureAllocator.get() ? MarkedBlockCage::ExhaustedHeap::Structures : MarkedBlockCage::ExhaustedHeap::Cells);
+            RELEASE_ASSERT_RESOURCE_AVAILABLE(failureMode != AllocationFailureMode::Assert, MemoryExhaustion, "Crash intentionally because memory is exhausted.");
+            return nullptr;
+        }
     }
     m_directory->addBlock(block);
+    if (MarkedBlockCage::isRequired())
+        heap.cage().keepReserveOnceHalfFull();
     result = allocateIn(block, cellSize);
     ASSERT(result);
     return result;
@@ -316,19 +361,17 @@ void* LocalAllocator::tryAllocateIn(MarkedBlock::Handle* block, size_t cellSize)
 {
     ASSERT(block);
     ASSERT(!block->isFreeListed());
-    m_directory->assertIsMutatorOrMutatorIsStopped();
-    ASSERT(m_directory->isInUse(block));
     
     block->sweep(&m_freeList);
     
     // It's possible to stumble on a completely full block. Marking tries to retire these, but
     // that algorithm is racy and may forget to do it sometimes.
+    // Sweeping to a free list discards the newlyAllocated bits, so the allocated bit has to
+    // record that every cell in this block is live.
     if (m_freeList.allocationWillFail()) {
         ASSERT(block->isFreeListed());
-        block->unsweepWithNoNewlyAllocated();
+        block->didConsumeFreeList();
         ASSERT(!block->isFreeListed());
-        ASSERT(!m_directory->isEmpty(block));
-        ASSERT(!m_directory->isCanAllocate(block));
         return nullptr;
     }
     
@@ -340,8 +383,7 @@ void* LocalAllocator::tryAllocateIn(MarkedBlock::Handle* block, size_t cellSize)
             return nullptr;
         }, cellSize);
 
-    // FIXME: We should make this work with thread safety analysis.
-    m_directory->m_bits.setIsEden(m_currentBlock->index(), true);
+    m_directory->markedSpace().heap().assertIsMutatorOrMutatorIsStopped();
     m_directory->markedSpace().didAllocateInBlock(m_currentBlock);
     return result;
 }
@@ -357,7 +399,7 @@ void LocalAllocator::doTestCollectionsIfNeeded(JSC::Heap& heap, GCDeferralContex
             if (deferralContext)
                 deferralContext->m_shouldGC = true;
             else
-                heap.collectNow(Sync, CollectionScope::Full);
+                heap.collectNow(Sync, Options::useEdenCollectionsAtSlowPathAllocs() ? CollectionScope::Eden : CollectionScope::Full);
         }
     }
     if (++allocationCount >= Options::slowPathAllocsBetweenGCs())

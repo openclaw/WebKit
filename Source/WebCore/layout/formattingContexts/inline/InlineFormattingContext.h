@@ -49,6 +49,8 @@ struct InlineLayoutResult {
         PartialFromDamage // Display content represents part of the inline content starting from damaged line until damage stops -result of partial layout with damage that does not cover the entire inline content
     };
     Range range { Range::Full };
+    // The display content is the line built while computing the maximum intrinsic width (see createDisplayContentForLineFromCachedContent).
+    bool isFromMaximumIntrinsicWidthLine { false };
     struct LineClamp {
         bool didDiscardContent { false };
         bool contentFitsWithinMaximumLines { false }; // Without the (eagerly placed) block ellipsis, this inline content would fit within max-lines lines.
@@ -99,7 +101,7 @@ private:
     void resetBoxGeometriesForDiscardedContent(const InlineItemRange& discardedRange, const LineLayoutResult::SuspendedFloatList& suspendedFloats);
     bool createDisplayContentForLineFromCachedContent(const ConstraintsForInlineContent&, InlineLayoutResult&, bool mayUseSimplifiedDisplayContentBuild);
     bool createDisplayContentForEmptyInlineContent(const ConstraintsForInlineContent&, const InlineItemList&, InlineLayoutResult&);
-    void NODELETE initializeInlineLayoutState(const LayoutState&);
+    void LEGACY_NODELETE initializeInlineLayoutState(const LayoutState&);
     void rebuildInlineItemListIfNeeded(InlineDamage*);
 
     InlineContentCache& inlineContentCache() LIFETIME_BOUND { return m_inlineContentCache; }

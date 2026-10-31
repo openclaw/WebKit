@@ -59,9 +59,28 @@ void CommandBuffer::retainTimestampsForOneUpdateLoop()
 CommandBuffer::~CommandBuffer()
 {
     retainTimestampsForOneUpdateLoop();
+    releasePriorCommandBuffers();
     m_device->getQueue()->removeMTLCommandBuffer(m_commandBuffer);
     m_commandBuffer = nil;
     m_cachedCommandBuffer = nil;
+}
+
+void CommandBuffer::setPriorCommandBuffers(Vector<RetainPtr<id<MTLCommandBuffer>>>&& commandBuffers)
+{
+    m_priorCommandBuffers = WTF::move(commandBuffers);
+}
+
+Vector<RetainPtr<id<MTLCommandBuffer>>> CommandBuffer::takePriorCommandBuffers()
+{
+    return std::exchange(m_priorCommandBuffers, { });
+}
+
+void CommandBuffer::releasePriorCommandBuffers()
+{
+    auto commandBuffers = takePriorCommandBuffers();
+    Ref queue = m_device->getQueue();
+    for (auto& commandBuffer : commandBuffers)
+        queue->removeMTLCommandBuffer(commandBuffer.get());
 }
 
 void CommandBuffer::setLabel(String&& label)
@@ -77,6 +96,7 @@ void CommandBuffer::makeInvalid(NSString* lastError)
     m_lastErrorString = lastError;
     m_device->getQueue()->removeMTLCommandBuffer(m_commandBuffer);
     retainTimestampsForOneUpdateLoop();
+    releasePriorCommandBuffers();
     m_commandBuffer = nil;
     m_cachedCommandBuffer = nil;
     if (RefPtr commandEncoder = m_commandEncoder)
@@ -137,6 +157,9 @@ void CommandBuffer::makeInvalidDueToCommit(NSString* lastError)
             }
 
             protectedThis->m_commandEncoder = nullptr;
+
+            if (RefPtr instance = protectedThis->m_device->instance())
+                instance->releaseCompletedCommandBuffers();
         });
     }];
     m_lastErrorString = lastError;
@@ -162,7 +185,7 @@ bool CommandBuffer::waitForCompletion()
 
 #pragma mark WGPU Stubs
 
-void NODELETE wgpuCommandBufferAddRef(WGPUCommandBuffer commandBuffer)
+void LEGACY_NODELETE wgpuCommandBufferAddRef(WGPUCommandBuffer commandBuffer)
 {
     WebGPU::Metal::fromAPI(commandBuffer).ref();
 }

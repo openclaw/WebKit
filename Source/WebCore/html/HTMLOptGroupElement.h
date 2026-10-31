@@ -39,9 +39,11 @@ public:
 
     bool isDisabledFormControl() const final;
     bool isActuallyDisabled() const final;
-    WEBCORE_EXPORT HTMLSelectElement* NODELETE ownerSelectElement() const;
+    WEBCORE_EXPORT HTMLSelectElement* LEGACY_NODELETE ownerSelectElement() const;
 
     WEBCORE_EXPORT String groupLabelText() const;
+    static HTMLOptGroupElement* LEGACY_NODELETE optGroupForLabel(const Element&);
+    void legendElementChanged();
 
     void updateUserAgentShadowTree() final;
 
@@ -50,6 +52,7 @@ private:
 
     NeedsPostConnectionSteps insertionSteps(InsertionType, ContainerNode&) final;
     void removingSteps(RemovalType, ContainerNode& oldParentOfRemovedTree) final;
+    void movingSteps(MovingType, ContainerNode& oldParent) final;
 
     const AtomString& formControlType() const;
     bool isFocusable() const final;
@@ -64,7 +67,7 @@ private:
 
     void recalcSelectOptions();
 
-    HTMLLegendElement* NODELETE legendElement() const;
+    HTMLLegendElement* LEGACY_NODELETE legendElement() const;
 
     void invalidateShadowTree();
 
@@ -72,6 +75,7 @@ private:
     bool m_shadowTreeNeedsUpdate { false };
     WeakPtr<HTMLSelectElement, WeakPtrImplWithEventTargetData> m_ownerSelect;
     WeakPtr<HTMLDivElement, WeakPtrImplWithEventTargetData> m_labelContainer;
+    WeakPtr<HTMLLegendElement, WeakPtrImplWithEventTargetData> m_legendElement;
 };
 
 } // namespace WebCore

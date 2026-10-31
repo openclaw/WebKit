@@ -100,13 +100,6 @@
 #include <gst/gl/gl.h>
 #endif
 
-#if USE(GSTREAMER_FULL) && GST_CHECK_VERSION(1, 18, 0) && !GST_CHECK_VERSION(1, 20, 0)
-#define IS_GST_FULL_1_18 1
-#include <gst/gstinitstaticplugins.h>
-#else
-#define IS_GST_FULL_1_18 0
-#endif
-
 #if USE(GBM)
 #include "DRMDeviceManager.h"
 #include <drm_fourcc.h>
@@ -544,10 +537,6 @@ void registerWebKitGStreamerElements()
     bool registryWasUpdated = false;
     std::call_once(onceFlag, [&registryWasUpdated] {
 
-#if IS_GST_FULL_1_18
-        gst_init_static_plugins();
-#endif
-
         // Rank guidelines are as following:
         // - Use GST_RANK_PRIMARY for elements meant to be auto-plugged and for which we know
         //   there's no other alternative outside of WebKit.
@@ -587,7 +576,7 @@ void registerWebKitGStreamerElements()
         // We don't want autoaudiosink to autoplug our sink.
         gst_element_register(0, "webkitaudiosink", GST_RANK_NONE, WEBKIT_TYPE_AUDIO_SINK);
 
-        // Prevent decodebin(3) from auto-plugging hlsdemux if it was disabled. UAs should be able
+        // Prevent decodebin2 from auto-plugging hlsdemux if it was disabled. UAs should be able
         // to fallback to MSE when this happens.
         auto hlsSupport = UTF8CStringView::unsafeFromUTF8(g_getenv("WEBKIT_GST_ENABLE_HLS_SUPPORT"));
         if (!hlsSupport || hlsSupport == "0"_s) {
@@ -595,11 +584,19 @@ void registerWebKitGStreamerElements()
                 gst_plugin_feature_set_rank(GST_PLUGIN_FEATURE_CAST(factory.get()), GST_RANK_NONE);
         }
 
-        // Prevent decodebin(3) from auto-plugging dashdemux if it was disabled. UAs should be able
+        // Prevent decodebin2 from auto-plugging dashdemux if it was disabled. UAs should be able
         // to fallback to MSE when this happens.
         auto dashSupport = UTF8CStringView::unsafeFromUTF8(g_getenv("WEBKIT_GST_ENABLE_DASH_SUPPORT"));
         if (!dashSupport || dashSupport == "0"_s) {
             if (GRefPtr factory = adoptGRef(gst_element_factory_find("dashdemux")))
+                gst_plugin_feature_set_rank(GST_PLUGIN_FEATURE_CAST(factory.get()), GST_RANK_NONE);
+        }
+
+        // Prevent decodebin2 from auto-plugging mssdemux if it was disabled. UAs should be able
+        // to fallback to MSE when this happens.
+        auto mssSupport = UTF8CStringView::unsafeFromUTF8(g_getenv("WEBKIT_GST_ENABLE_MSS_SUPPORT"));
+        if (!mssSupport || mssSupport == "0"_s) {
+            if (GRefPtr factory = adoptGRef(gst_element_factory_find("mssdemux")))
                 gst_plugin_feature_set_rank(GST_PLUGIN_FEATURE_CAST(factory.get()), GST_RANK_NONE);
         }
 
@@ -708,7 +705,7 @@ void WebCoreLogObserver::didLogMessage(const WTFLogChannel& channel, WTFLogLevel
     const char* file = location ? location->file : __FILE__;
     const char* function = location ? location->function : __FUNCTION__;
     int line = location ? location->line : __LINE__;
-    gst_debug_log(debugCategory(), gstDebugLevel, file, function, line, nullptr, "%s", logString.utf8().legacyCStringPointer());
+    SAFE_GST_DEBUG_LOG(debugCategory(), gstDebugLevel, file, function, line, nullptr, "%s", logString.utf8());
 #else
     UNUSED_PARAM(channel);
     UNUSED_PARAM(level);
@@ -1957,6 +1954,27 @@ bool gstElementMatchesFactoryAndHasProperty(GstElement* element, ASCIILiteral fa
     return gstObjectHasProperty(element, propertyName);
 }
 
+GRefPtr<GstElement> gstElementFindInnermostSink(GstElement* element)
+{
+    GRefPtr<GstElement> sink = element;
+    while (GST_IS_BIN(sink.get())) {
+        GUniquePtr<GstIterator> iterator(gst_bin_iterate_sinks(GST_BIN_CAST(sink.get())));
+        GValue value = G_VALUE_INIT;
+        auto result = gst_iterator_next(iterator.get(), &value);
+        while (result == GST_ITERATOR_RESYNC) {
+            gst_iterator_resync(iterator.get());
+            result = gst_iterator_next(iterator.get(), &value);
+        }
+        if (result != GST_ITERATOR_OK) {
+            g_value_unset(&value);
+            return sink;
+        }
+        sink = GST_ELEMENT_CAST(g_value_get_object(&value));
+        g_value_unset(&value);
+    }
+    return sink;
+}
+
 GRefPtr<GstBuffer> wrapSpanData(const std::span<const uint8_t>& span)
 {
     if (span.empty())
@@ -2163,7 +2181,7 @@ static std::optional<GRefPtr<GstContext>> requestGLContext(ASCIILiteral contextT
     if (!gstGLDisplay || !gstGLContext)
         return std::nullopt;
 
-    if (contextType == ASCIILiteral::fromLiteralUnsafe(GST_GL_DISPLAY_CONTEXT_TYPE)) {
+    if (contextType == ASCIILiteral { GST_GL_DISPLAY_CONTEXT_TYPE }) {
         GRefPtr<GstContext> displayContext = adoptGRef(gst_context_new(GST_GL_DISPLAY_CONTEXT_TYPE, FALSE));
         gst_context_set_gl_display(displayContext.get(), gstGLDisplay);
         return displayContext;
@@ -2287,22 +2305,6 @@ GstDebugLevel gstDebugLevelFromWTFLogLevel(WTFLogLevel level)
 #undef GST_CAT_DEFAULT
 
 } // namespace WebCore
-
-#undef IS_GST_FULL_1_18
-
-#if !GST_CHECK_VERSION(1, 20, 0)
-GstBuffer* gst_buffer_new_memdup(gconstpointer data, gsize size)
-{
-    gpointer copiedData = nullptr;
-
-    if (data && size) {
-        copiedData = g_malloc(size);
-        memcpy(copiedData, data, size);
-    }
-
-    return gst_buffer_new_wrapped_full(static_cast<GstMemoryFlags>(0), copiedData, size, 0, size, copiedData, g_free);
-}
-#endif
 
 #if !GST_CHECK_VERSION(1, 28, 0)
 void gst_pad_probe_info_set_buffer(GstPadProbeInfo* info, GstBuffer* buffer)

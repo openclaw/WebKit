@@ -161,8 +161,8 @@ template<typename Visitor> constexpr decltype(auto) StyleRuleBase::visitDerived(
 
 template<typename Visitor> constexpr decltype(auto) StyleRuleBase::visitDerived(NOESCAPE const Visitor& visitor) const
 {
-    return const_cast<StyleRuleBase&>(*this).visitDerived([&](auto& value) {
-        return std::invoke(visitor, std::as_const(value));
+    return const_cast<StyleRuleBase&>(*this).visitDerived([&](const auto& value) {
+        return std::invoke(visitor, value);
     });
 }
 
@@ -365,8 +365,9 @@ Vector<Ref<StyleRule>> StyleRule::splitIntoMultipleRulesWithMaximumSelectorCompo
         componentsSinceLastSplit.appendVector(componentsInThisSelector);
     }
 
-    if (!componentsSinceLastSplit.isEmpty())
+    if (!componentsSinceLastSplit.isEmpty()) {
         rules.append(createForSplitting(componentsSinceLastSplit, const_cast<StyleProperties&>(properties()), hasDocumentSecurityOrigin()));
+    }
 
     if (!rules.isEmpty())
         rules.last()->markAsLastRuleInSplitRule();
@@ -519,7 +520,8 @@ StyleRuleFontPaletteValues::StyleRuleFontPaletteValues(const AtomString& name, V
     : StyleRuleBase(StyleRuleType::FontPaletteValues)
     , m_name(name)
     , m_fontFamilies(WTF::move(fontFamilies))
-    , m_fontPaletteValues(basePalette, WTF::move(overrideColors))
+    , m_basePalette(basePalette)
+    , m_overrideColors(WTF::move(overrideColors))
 {
 }
 

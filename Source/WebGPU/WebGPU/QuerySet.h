@@ -26,10 +26,8 @@
 #pragma once
 
 #import "BindableResource.h"
-#import <WebGPU/WGPUQuerySetImpl.h>
 #import <WebGPU/WebGPU.h>
 #import <WebGPU/WebGPUCpp.h>
-#import <WebGPU/WebGPUExt.h>
 #import <optional>
 #import <wtf/FastMalloc.h>
 #import <wtf/Range.h>
@@ -48,7 +46,7 @@ class CommandEncoder;
 class Device;
 
 // https://gpuweb.github.io/gpuweb/#gpuqueryset
-class QuerySet final : public WebGPU::QuerySet, public WGPUQuerySetImpl, public TrackedResource {
+class QuerySet final : public WebGPU::QuerySet, public TrackedResource {
     WTF_MAKE_TZONE_ALLOCATED(QuerySet);
 public:
     struct CounterSampleBuffer {
@@ -56,11 +54,11 @@ public:
         uint32_t offset { 0 };
     } SWIFT_SELF_CONTAINED;
 
-    static Ref<QuerySet> create(id<MTLBuffer> visibilityBuffer, uint32_t count, WGPUQueryType type, Device& device)
+    static Ref<QuerySet> create(id<MTLBuffer> visibilityBuffer, uint32_t count, WebGPU::QueryType type, Device& device)
     {
         return adoptRef(*new QuerySet(visibilityBuffer, count, type, device));
     }
-    static Ref<QuerySet> create(CounterSampleBuffer&& counterSampleBuffer, uint32_t count, WGPUQueryType type, Device& device)
+    static Ref<QuerySet> create(CounterSampleBuffer&& counterSampleBuffer, uint32_t count, WebGPU::QueryType type, Device& device)
     {
         return adoptRef(*new QuerySet(WTF::move(counterSampleBuffer), count, type, device));
     }
@@ -71,35 +69,36 @@ public:
 
     ~QuerySet();
 
-    void destroy();
+    void destroy() final;
     void setLabel(String&&) final;
 
-    bool NODELETE isValid() const final;
+    bool LEGACY_NODELETE isValid() const final;
 
-    void NODELETE setOverrideLocation(QuerySet& otherQuerySet, uint32_t beginningOfPassIndex, uint32_t endOfPassIndex);
+    void LEGACY_NODELETE setOverrideLocation(QuerySet& otherQuerySet, uint32_t beginningOfPassIndex, uint32_t endOfPassIndex);
 
     Device& device() const { return m_device; }
     uint32_t count() const { return m_count; }
-    WGPUQueryType type() const { return m_type; }
+    // std::nullopt only for invalid query sets.
+    std::optional<WebGPU::QueryType> type() const { return m_type; }
     id<MTLBuffer> visibilityBuffer() const { return m_visibilityBuffer; }
-    CounterSampleBuffer NODELETE counterSampleBufferWithOffset() const;
+    CounterSampleBuffer LEGACY_NODELETE counterSampleBufferWithOffset() const;
 
     void setCommandEncoder(CommandEncoder&) const;
-    bool NODELETE isDestroyed() const;
+    bool LEGACY_NODELETE isDestroyed() const;
     static void destroyQuerySet(const QuerySet&);
     static CounterSampleBuffer counterSampleBufferWithOffsetForDevice(size_t, const Device&);
     static void createContainersIfNeeded();
 
 private:
-    QuerySet(id<MTLBuffer>, uint32_t, WGPUQueryType, Device&);
-    QuerySet(CounterSampleBuffer&&, uint32_t, WGPUQueryType, Device&);
+    QuerySet(id<MTLBuffer>, uint32_t, WebGPU::QueryType, Device&);
+    QuerySet(CounterSampleBuffer&&, uint32_t, WebGPU::QueryType, Device&);
     QuerySet(Device&);
 
     const Ref<Device> m_device;
     id<MTLBuffer> m_visibilityBuffer { nil };
     CounterSampleBuffer m_timestampBufferWithOffset;
     uint32_t m_count { 0 };
-    const WGPUQueryType m_type { WGPUQueryType_Force32 };
+    const std::optional<WebGPU::QueryType> m_type;
 
     // rdar://91371495 is about how we can't just naively transform PassDescriptor.timestampWrites into MTLComputePassDescriptor.sampleBufferAttachments.
     // Instead, we can resolve all the information to a dummy counter sample buffer, and then internally remember that the data

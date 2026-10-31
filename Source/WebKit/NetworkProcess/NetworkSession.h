@@ -72,7 +72,7 @@ enum class AdvancedPrivacyProtections : uint16_t;
 enum class IncludeHttpOnlyCookies : bool;
 enum class PermissionState : uint8_t;
 enum class ShouldSample : bool;
-enum class IsInitiatedByDedicatedWorker : bool;
+enum class IsInitiatedByWorker : bool;
 struct ClientOrigin;
 }
 
@@ -100,7 +100,6 @@ class WebSWOriginStore;
 class WebSWServerConnection;
 struct BackgroundFetchState;
 struct NetworkSessionCreationParameters;
-struct SessionSet;
 
 enum class WebsiteDataType : uint32_t;
 
@@ -128,7 +127,7 @@ public:
     virtual HashSet<WebCore::SecurityOriginData> originsWithCredentials() { return { }; }
     virtual void removeCredentialsForOrigins(const Vector<WebCore::SecurityOriginData>&) { }
     virtual void clearCredentials(WallTime) { }
-    virtual void loadImageForDecoding(WebCore::ResourceRequest&&, WebPageProxyIdentifier, size_t, CompletionHandler<void(std::expected<Ref<WebCore::FragmentedSharedBuffer>, WebCore::ResourceError>&&)>&&) { ASSERT_NOT_REACHED(); }
+    void loadImageForDecoding(WebCore::ResourceRequest&&, WebPageProxyIdentifier, size_t, CompletionHandler<void(std::expected<Ref<WebCore::FragmentedSharedBuffer>, WebCore::ResourceError>&&)>&&);
 
     // CanMakeCheckedPtr.
     uint32_t checkedPtrCount() const final { return CanMakeCheckedPtr::checkedPtrCount(); }
@@ -139,7 +138,7 @@ public:
 
     PAL::SessionID sessionID() const { return m_sessionID; }
     NetworkProcess& networkProcess() { return m_networkProcess; }
-    NetworkStorageSession* NODELETE networkStorageSession() const;
+    NetworkStorageSession* LEGACY_NODELETE networkStorageSession() const;
 
     void registerNetworkDataTask(NetworkDataTask&);
     void unregisterNetworkDataTask(NetworkDataTask&);
@@ -148,20 +147,22 @@ public:
 
     WebResourceLoadStatisticsStore* resourceLoadStatistics() const { return m_resourceLoadStatistics.get(); }
     void setTrackingPreventionEnabled(bool);
-    bool NODELETE isTrackingPreventionEnabled() const;
+    bool LEGACY_NODELETE isTrackingPreventionEnabled() const;
     static WebCore::IsKnownCrossSiteTracker isRequestToKnownCrossSiteTracker(const WebCore::ResourceRequest&);
     static WebCore::IsKnownCrossSiteTracker isResourceFromKnownCrossSiteTracker(const URL& firstParty, const URL& resource);
+    bool isPrevalentDomain(const URL&) const;
     void deleteAndRestrictWebsiteDataForRegistrableDomains(OptionSet<WebsiteDataType>, RegistrableDomainsToDeleteOrRestrictWebsiteDataFor&&, CompletionHandler<void(HashSet<WebCore::RegistrableDomain>&&)>&&);
     void registrableDomainsWithWebsiteData(OptionSet<WebsiteDataType>, CompletionHandler<void(HashSet<WebCore::RegistrableDomain>&&)>&&);
     bool enableResourceLoadStatisticsLogTestingEvent() const { return m_enableResourceLoadStatisticsLogTestingEvent; }
     void setResourceLoadStatisticsLogTestingEvent(bool log) { m_enableResourceLoadStatisticsLogTestingEvent = log; }
     virtual bool hasIsolatedSession(const WebCore::RegistrableDomain&) const { return false; }
     virtual void clearIsolatedSessions() { }
-    void NODELETE setShouldDowngradeReferrerForTesting(bool);
-    bool NODELETE shouldDowngradeReferrer() const;
+    void LEGACY_NODELETE setShouldDowngradeReferrerForTesting(bool);
+    bool LEGACY_NODELETE shouldDowngradeReferrer() const;
     void setThirdPartyCookieBlockingMode(WebCore::ThirdPartyCookieBlockingMode);
     WebCore::ThirdPartyCookieBlockingMode thirdPartyCookieBlockingMode() const { return m_thirdPartyCookieBlockingMode; }
     void setShouldEnbleSameSiteStrictEnforcement(WebCore::SameSiteStrictEnforcementEnabled);
+    void setExemptAllowlistedCookiesFromITP(bool);
     void setFirstPartyHostCNAMEDomain(String&& firstPartyHost, WebCore::RegistrableDomain&& cnameDomain);
     std::optional<WebCore::RegistrableDomain> firstPartyHostCNAMEDomain(const String& firstPartyHost);
     void setFirstPartyHostIPAddress(const String& firstPartyHost, const String& addressString);
@@ -194,7 +195,7 @@ public:
     void setPrivateClickMeasurementTokenSignatureURLForTesting(URL&&);
     void setPrivateClickMeasurementAttributionReportURLsForTesting(URL&& sourceURL, URL&& destinationURL);
     void markPrivateClickMeasurementsAsExpiredForTesting();
-    void NODELETE setPrivateClickMeasurementEphemeralMeasurementForTesting(bool);
+    void LEGACY_NODELETE setPrivateClickMeasurementEphemeralMeasurementForTesting(bool);
     void setPCMFraudPreventionValuesForTesting(String&& unlinkableToken, String&& secretToken, String&& signature, String&& keyID);
     void firePrivateClickMeasurementTimerImmediatelyForTesting();
     void allowTLSCertificateChainForLocalPCMTesting(const WebCore::CertificateInfo&);
@@ -238,12 +239,12 @@ public:
 
     NetworkCache::Cache* cache() { return m_cache.get(); }
 
-    PrefetchCache& NODELETE prefetchCache();
+    PrefetchCache& LEGACY_NODELETE prefetchCache();
     void clearPrefetchCache() { m_prefetchCache->clear(); }
 
-    virtual RefPtr<WebSocketTask> createWebSocketTask(WebPageProxyIdentifier, std::optional<WebCore::FrameIdentifier>, std::optional<WebCore::PageIdentifier>, NetworkSocketChannel&, const WebCore::ResourceRequest&, const String& protocol, const WebCore::ClientOrigin&, bool hadMainFrameMainResourcePrivateRelayed, bool allowPrivacyProxy, OptionSet<WebCore::AdvancedPrivacyProtections>, WebCore::StoredCredentialsPolicy, WebCore::IsInitiatedByDedicatedWorker);
-    virtual void removeWebSocketTask(SessionSet&, WebSocketTask&) { }
-    virtual void addWebSocketTask(WebPageProxyIdentifier, WebSocketTask&) { }
+    virtual RefPtr<WebSocketTask> createWebSocketTask(WebPageProxyIdentifier, std::optional<WebCore::FrameIdentifier>, std::optional<WebCore::PageIdentifier>, NetworkSocketChannel&, const WebCore::ResourceRequest&, const String& protocol, const WebCore::ClientOrigin&, bool hadMainFrameMainResourcePrivateRelayed, bool allowPrivacyProxy, OptionSet<WebCore::AdvancedPrivacyProtections>, WebCore::StoredCredentialsPolicy, WebCore::IsInitiatedByWorker);
+    virtual void removeWebSocketTask(WebSocketTask&) { }
+    virtual void addWebSocketTask(WebSocketTask&) { }
 
     WebCore::BlobRegistryImpl& blobRegistry() LIFETIME_BOUND { return m_blobRegistry; }
     NetworkBroadcastChannelRegistry& broadcastChannelRegistry() { return m_broadcastChannelRegistry; }
@@ -259,7 +260,7 @@ public:
 
     void removeSoftUpdateLoader(ServiceWorkerSoftUpdateLoader* loader) { m_softUpdateLoaders.remove(loader); }
     void addNavigationPreloaderTask(ServiceWorkerFetchTask&);
-    ServiceWorkerFetchTask* NODELETE navigationPreloaderTaskFromFetchIdentifier(WebCore::FetchIdentifier);
+    ServiceWorkerFetchTask* LEGACY_NODELETE navigationPreloaderTaskFromFetchIdentifier(WebCore::FetchIdentifier);
     void removeNavigationPreloaderTask(ServiceWorkerFetchTask&);
 
     WebCore::SWServer* swServer() { return m_swServer.get(); }
@@ -267,7 +268,7 @@ public:
     void registerSWServerConnection(WebSWServerConnection&);
     void unregisterSWServerConnection(WebSWServerConnection&);
 
-    bool NODELETE hasServiceWorkerDatabasePath() const;
+    bool LEGACY_NODELETE hasServiceWorkerDatabasePath() const;
 
     void getAllBackgroundFetchIdentifiers(CompletionHandler<void(Vector<String>&&)>&&);
     void getBackgroundFetchState(const String&, CompletionHandler<void(std::optional<BackgroundFetchState>&&)>&&);
@@ -287,8 +288,10 @@ public:
     PCM::ManagerInterface& privateClickMeasurement() { return m_privateClickMeasurement.get(); }
     void setPrivateClickMeasurementDebugMode(bool);
     bool privateClickMeasurementDebugModeEnabled() const { return m_privateClickMeasurementDebugModeEnabled; }
+    void setPrivateClickMeasurementPrivateRelayEnforcement(bool);
+    bool privateClickMeasurementPrivateRelayEnforcementEnabled() const { return m_privateClickMeasurementPrivateRelayEnforcementEnabled; }
 
-    void NODELETE setShouldSendPrivateTokenIPCForTesting(bool);
+    void LEGACY_NODELETE setShouldSendPrivateTokenIPCForTesting(bool);
     bool shouldSendPrivateTokenIPCForTesting() const { return m_shouldSendPrivateTokenIPCForTesting; }
 #if ENABLE(OPT_IN_PARTITIONED_COOKIES)
     void setOptInCookiePartitioningEnabled(bool);
@@ -306,7 +309,7 @@ public:
     virtual void removeWebPageNetworkParameters(WebPageProxyIdentifier) { }
     virtual size_t countNonDefaultSessionSets() const { return 0; }
 
-    String NODELETE attributedBundleIdentifierFromPageIdentifier(WebPageProxyIdentifier) const;
+    String LEGACY_NODELETE attributedBundleIdentifierFromPageIdentifier(WebPageProxyIdentifier) const;
 
 #if ENABLE(NETWORK_ISSUE_REPORTING)
     void reportNetworkIssue(WebPageProxyIdentifier, const URL&);
@@ -323,7 +326,7 @@ public:
     void setEmulatedConditions(std::optional<uint64_t> bandwidthBytesPerSecond, Seconds latency);
 #endif
 
-#if HAVE(NW_PROXY_CONFIG)
+#if PLATFORM(COCOA)
     virtual void clearProxyConfigData() { }
     virtual void setProxyConfigData(const Vector<std::pair<Vector<uint8_t>, std::optional<WTF::UUID>>>&) { };
 #endif
@@ -356,7 +359,7 @@ protected:
     NetworkSession(NetworkProcess&, const NetworkSessionCreationParameters&);
 
     void forwardResourceLoadStatisticsSettings();
-    WebSWOriginStore* NODELETE swOriginStore() const LIFETIME_BOUND;
+    WebSWOriginStore* LEGACY_NODELETE swOriginStore() const LIFETIME_BOUND;
 
     // SWServerDelegate
     void softUpdate(WebCore::ServiceWorkerJobData&&, bool shouldRefreshCache, WebCore::ResourceRequest&&, CompletionHandler<void(WebCore::WorkerFetchResult&&)>&&) final;
@@ -391,6 +394,7 @@ protected:
     bool m_isStaleWhileRevalidateEnabled { false };
     const Ref<PCM::ManagerInterface> m_privateClickMeasurement;
     bool m_privateClickMeasurementDebugModeEnabled { false };
+    bool m_privateClickMeasurementPrivateRelayEnforcementEnabled { false };
     std::optional<WebCore::PrivateClickMeasurement> m_ephemeralMeasurement;
     bool m_isRunningEphemeralMeasurementTest { false };
 

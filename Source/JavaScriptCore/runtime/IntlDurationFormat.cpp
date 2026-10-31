@@ -27,12 +27,14 @@
 #include "config.h"
 #include "IntlDurationFormat.h"
 
+#include "AOTRemovableFeature.h"
 #include "IntlNumberFormatInlines.h"
 #include "IntlObjectInlines.h"
 #include "IntlPartObject.h"
 #include "IteratorOperations.h"
 #include "JSCInlines.h"
 #include "ObjectConstructor.h"
+#include <wtf/TZoneMallocInlines.h>
 #include <wtf/text/MakeString.h>
 
 // While UListFormatter APIs are draft in ICU 67, they are stable in ICU 68 with the same function signatures.
@@ -59,6 +61,12 @@ static constexpr unsigned fractionalDigitsUndefinedValue = std::numeric_limits<u
 WTF_MAKE_TZONE_ALLOCATED_IMPL(IntlDurationFormat::FormatterCache);
 
 const ClassInfo IntlDurationFormat::s_info = { "Object"_s, &Base::s_info, nullptr, nullptr, CREATE_METHOD_TABLE(IntlDurationFormat) };
+
+NEVER_INLINE void IntlDurationFormat::destroy(JSCell* cell)
+{
+    JSC_REMOVABLE_DEFINITION(IntlNumberFormat, &IntlDurationFormat::destroy);
+    static_cast<IntlDurationFormat*>(cell)->IntlDurationFormat::~IntlDurationFormat();
+}
 
 IntlDurationFormat* IntlDurationFormat::create(VM& vm, Structure* structure)
 {
@@ -185,7 +193,7 @@ static constexpr StyleListKind styleLists[numberOfTemporalUnits] = {
     StyleListKind::LongShortNarrowNumeric,
 };
 
-static PropertyName NODELETE displayName(VM& vm, TemporalUnit unit)
+static PropertyName LEGACY_NODELETE displayName(VM& vm, TemporalUnit unit)
 {
     switch (unit) {
 #define JSC_TEMPORAL_UNIT_PLURAL_PROPERTY_NAME(name, capitalizedName) case TemporalUnit::capitalizedName: return vm.propertyNames->name##sDisplay;
@@ -350,7 +358,7 @@ enum class DurationSignType : uint8_t {
 };
 
 // https://tc39.es/proposal-intl-duration-format/#sec-durationsign
-static DurationSignType NODELETE getDurationSign(ISO8601::Duration duration)
+static DurationSignType LEGACY_NODELETE getDurationSign(ISO8601::Duration duration)
 {
     for (size_t i = 0; i < numberOfTemporalUnits; ++i) {
         auto value = duration[i];

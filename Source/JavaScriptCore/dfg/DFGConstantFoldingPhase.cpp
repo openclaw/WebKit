@@ -47,20 +47,12 @@ namespace JSC { namespace DFG {
 
 static bool isZeroBigInt(JSValue& value)
 {
-#if USE(BIGINT32)
-    if (value.isBigInt32())
-        return !value.bigInt32AsInt32();
-#endif
     ASSERT(value.isHeapBigInt());
     return value.asHeapBigInt()->isZero();
 }
 
 static bool isNegativeBigInt(JSValue& value)
 {
-#if USE(BIGINT32)
-    if (value.isBigInt32())
-        return value.bigInt32AsInt32() < 0;
-#endif
     ASSERT(value.isHeapBigInt());
     return value.asHeapBigInt()->sign();
 }
@@ -1282,6 +1274,27 @@ private:
             }
 
             case ObjectDefineProperty: {
+                Edge keyEdge = node->child2();
+                bool canFoldKey = false;
+                switch (keyEdge.useKind()) {
+                case StringUse:
+                case SymbolUse:
+                case Int32Use:
+                case NumberUse:
+                    canFoldKey = true;
+                    break;
+                case UntypedUse: {
+                    SpeculatedType keyType = m_state.forNode(keyEdge).m_type;
+                    canFoldKey = keyType && !(keyType & SpecObject);
+                    break;
+                }
+                default:
+                    RELEASE_ASSERT_NOT_REACHED();
+                    break;
+                }
+                if (!canFoldKey)
+                    break;
+
                 JSGlobalObject* globalObject = m_graph.globalObjectFor(node->origin.semantic);
                 VM& vm = m_graph.m_vm;
 
@@ -1357,7 +1370,6 @@ private:
 
                 NodeOrigin origin = node->origin;
                 Edge targetEdge = node->child1();
-                Edge keyEdge = node->child2();
                 Edge descriptorEdge = node->child3();
 
                 m_insertionSet.insertCheck(m_graph, indexInBlock, node);
@@ -1391,7 +1403,7 @@ private:
                 node->convertToObjectDefinePropertyFromFields(
                     m_graph,
                     Edge(targetEdge.node(), ObjectUse),
-                    Edge(keyEdge.node(), UntypedUse),
+                    Edge(keyEdge.node(), keyEdge.useKind()),
                     slotEdges[Node::EnumerableSlot],
                     slotEdges[Node::ConfigurableSlot],
                     slotEdges[Node::ValueSlot],
@@ -1499,7 +1511,7 @@ private:
                     node->convertToDefineDataProperty(
                         m_graph,
                         Edge(targetEdge.node(), ObjectUse),
-                        Edge(keyEdge.node(), UntypedUse),
+                        Edge(keyEdge.node(), keyEdge.useKind()),
                         Edge(valueNode, UntypedUse),
                         Edge(attrsNode, Int32Use));
 
@@ -1539,7 +1551,7 @@ private:
                     node->convertToDefineAccessorProperty(
                         m_graph,
                         Edge(targetEdge.node(), ObjectUse),
-                        Edge(keyEdge.node(), UntypedUse),
+                        Edge(keyEdge.node(), keyEdge.useKind()),
                         Edge(getterNode, CellUse),
                         Edge(setterNode, CellUse),
                         Edge(attrsNode, Int32Use));
@@ -1876,7 +1888,7 @@ private:
             }
 
             case ValuePow: {
-                bool isBigIntBinaryUsedKind = node->isBinaryUseKind(HeapBigIntUse) || node->isBinaryUseKind(AnyBigIntUse) || node->isBinaryUseKind(BigInt32Use);
+                bool isBigIntBinaryUsedKind = node->isBinaryUseKind(HeapBigIntUse);
                 if (node->mustGenerate() && isBigIntBinaryUsedKind) {
                     JSValue right = m_state.forNode(node->child2()).value();
                     if (right && right.isBigInt() && !isNegativeBigInt(right)) {
@@ -1889,7 +1901,7 @@ private:
 
             case ValueMod:
             case ValueDiv: {
-                bool isBigIntBinaryUsedKind = node->isBinaryUseKind(HeapBigIntUse) || node->isBinaryUseKind(AnyBigIntUse) || node->isBinaryUseKind(BigInt32Use);
+                bool isBigIntBinaryUsedKind = node->isBinaryUseKind(HeapBigIntUse);
                 if (node->mustGenerate() && isBigIntBinaryUsedKind) {
                     JSValue right = m_state.forNode(node->child2()).value();
                     if (right && right.isBigInt() && !isZeroBigInt(right)) {
@@ -2005,9 +2017,10 @@ private:
                 }
 
                 // SpecObject | something.
-                // Only for types having structures, we check "then" existence.
+                // Only for types having structures, we check "then" existence. A promise resolved with
+                // itself must reject, so the argument must not be a promise.
                 auto& structureSet = argument.m_structure;
-                if (structureSet.isFinite() && structureSet.size() == 1) {
+                if (argument.isType(~SpecPromiseObject) && structureSet.isFinite() && structureSet.size() == 1) {
                     JSGlobalObject* globalObject = m_graph.globalObjectFor(node->origin.semantic);
                     auto conditionSet = m_graph.tryEnsureAbsence(globalObject, structureSet.toStructureSet(), CacheableIdentifier::createFromImmortalIdentifier(m_graph.m_vm.propertyNames->then.impl()));
                     if (conditionSet.isValid()) {

@@ -26,13 +26,15 @@
 #pragma once
 
 #include <WebCore/QuirkBehaviors.h>
-#include <WebCore/URLMatch.h>
+#include <WebCore/QuirkMatchPattern.h>
 #include <algorithm>
 #include <span>
 #include <wtf/StdLibExtras.h>
 #include <wtf/Vector.h>
+#include <wtf/text/WTFString.h>
 
 namespace WebCore {
+
 class QuirksData {
 public:
     inline bool isBehaviorEnabled(const QuirkBehaviorID& id) const
@@ -45,16 +47,23 @@ public:
         return !m_behaviorFlags.isEmpty();
     }
 
+    inline bool hasSameBehaviorFlags(const QuirksData& other) const
+    {
+        return m_behaviorFlags == other.m_behaviorFlags;
+    }
+
     inline const Vector<QuirkBehavior>& behaviors() const LIFETIME_BOUND
     {
         return m_behaviors;
     }
 
-    inline const Vector<QuirkBehavior> behaviorsMatching(QuirkBehaviorID id)
+    inline Vector<QuirkBehavior> behaviorsMatching(QuirkBehaviorID id) const
     {
-        return m_behaviors
-            | std::views::filter([&](const auto& behavior) { return behavior.id == id; })
-            | WTF::rangeTo<decltype(m_behaviors)>();
+        return WTF::compactMap(m_behaviors, [&](const auto& behavior) -> std::optional<QuirkBehavior> {
+            if (behavior.id == id)
+                return behavior;
+            return std::nullopt;
+        });
     }
 
     inline bool behaviorAppliesToURL(QuirkBehaviorID id, const URL& url) const
@@ -68,12 +77,12 @@ public:
         });
     }
 
-    inline void setEnabled(const QuirkBehavior& behavior, bool state)
+    inline void setEnabled(QuirkBehaviorID id, bool state)
     {
         if (state)
-            addBehavior(behavior);
+            addBehavior(QuirkBehavior { .id = id });
         else
-            removeBehaviorsMatching(behavior.id);
+            removeBehaviorsMatching(id);
     }
 
     inline void addBehavior(const QuirkBehavior& behavior)
@@ -101,4 +110,3 @@ private:
 };
 
 } // namespace WebCore
-

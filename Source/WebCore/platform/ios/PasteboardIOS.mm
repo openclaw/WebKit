@@ -30,7 +30,6 @@
 #import "CommonAtomStrings.h"
 #import "DeprecatedGlobalSettings.h"
 #import "DragData.h"
-#import "Image.h"
 #import "NotImplemented.h"
 #import "PasteboardStrategy.h"
 #import "PlatformPasteboard.h"
@@ -63,7 +62,7 @@ Pasteboard::Pasteboard(std::unique_ptr<PasteboardContext>&& context, const Strin
 
 #if ENABLE(DRAG_SUPPORT)
 
-void Pasteboard::setDragImage(DragImage, const IntPoint&)
+void Pasteboard::setDragImage(DragImage&&, const IntPoint&)
 {
     notImplemented();
 }
@@ -126,7 +125,7 @@ String Pasteboard::resourceMIMEType(NSString *mimeType)
     return UTIFromMIMEType(mimeType);
 }
 
-void Pasteboard::write(const PasteboardImage& pasteboardImage)
+void Pasteboard::write(PasteboardImage&& pasteboardImage)
 {
     platformStrategies()->pasteboardStrategy()->writeToPasteboard(pasteboardImage, m_pasteboardName, context());
 }

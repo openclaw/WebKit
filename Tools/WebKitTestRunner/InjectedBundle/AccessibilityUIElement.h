@@ -57,11 +57,15 @@ namespace WTR {
 
 class AccessibilityController;
 
+#if PLATFORM(COCOA)
+enum class Synchronous : bool { No, Yes };
+#endif
+
 class AccessibilityUIElement : public JSWrappable {
 #if PLATFORM(COCOA)
     // Helper functions that dispatch the corresponding AccessibilityObjectWrapper method to the AX secondary thread when appropriate.
     friend RetainPtr<NSArray> supportedAttributes(id);
-    friend void setAttributeValue(id, NSString *, id, bool synchronous);
+    friend void setAttributeValue(id, NSString *, id, Synchronous);
 #endif
 
 public:
@@ -425,6 +429,9 @@ public:
     virtual bool isRemoteFrame() const;
     // True if the element backing |this| is a platform remote element (e.g. NSAccessibilityRemoteUIElement on macOS).
     virtual bool isRemotePlatformElement() const { return false; }
+    // Reads this element's frame the way AXRuntime resolves the application element on iOS: from inside
+    // +[AXRemoteElement remoteElementsForBlock:], which holds AXRuntime's remote element registry lock.
+    virtual void readFrameDuringRemoteElementLookup() { }
     virtual bool isFrameGeometryInitialized() const { return true; }
 
     virtual bool isMarkAnnotation() const;

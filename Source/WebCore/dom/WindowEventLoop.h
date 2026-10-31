@@ -59,6 +59,9 @@ public:
     HashSet<Ref<MutationObserver>>& suspendedMutationObservers() LIFETIME_BOUND { return m_suspendedObservers; }
     void removeMutationObserversForContext(ScriptExecutionContext&);
 
+    void addAssociatedContext(ScriptExecutionContext&) final;
+    void removeAssociatedContext(ScriptExecutionContext&) final;
+
     CustomElementQueue& backupElementQueue();
 
     void scheduleIdlePeriod();
@@ -68,7 +71,7 @@ public:
     WEBCORE_EXPORT static void breakToAllowRenderingUpdate();
 
 private:
-    static Ref<WindowEventLoop> create(const String&);
+    static Ref<WindowEventLoop> LEGACY_NODELETE create(const String&);
     WindowEventLoop(const String&);
 
     void scheduleToRun() final;
@@ -104,6 +107,7 @@ private:
 
     MonotonicTime m_lastIdlePeriodStartTime;
     Seconds m_expectedIdleCallbackDuration { 4_ms };
+    mutable Markable<MonotonicTime> m_nextRenderingTimeCache;
 };
 
 } // namespace WebCore

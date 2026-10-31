@@ -57,7 +57,7 @@ public:
     static void layoutChildren(RenderElement&, bool selfNeedsLayout);
 
     // Helper function determining wheter overflow is hidden
-    static bool NODELETE isOverflowHidden(const RenderElement&);
+    static bool LEGACY_NODELETE isOverflowHidden(const RenderElement&);
 
     // Applies filter/clipper/masker resource effects to a geometric bounding rect.
     // This is the preferred API for resource code (masks, gradients, clippers) that needs
@@ -86,7 +86,7 @@ public:
     static ContainerBoundingBoxes computeContainerBoundingBoxes(const RenderElement&, RepaintRectCalculation = RepaintRectCalculation::Fast);
 
     static FloatRect computeContainerStrokeBoundingBox(const RenderElement& container);
-    static bool paintInfoIntersectsRepaintRect(const FloatRect& localRepaintRect, const AffineTransform& localTransform, const PaintInfo&);
+    static bool LEGACY_NODELETE paintInfoIntersectsRepaintRect(const FloatRect& localRepaintRect, const AffineTransform& localTransform, const PaintInfo&);
 
     // Important functions used by nearly all SVG renderers centralizing coordinate transformations / repaint rect calculations
     static LayoutRect clippedOverflowRectForRepaint(const RenderElement&, const RenderLayerModelObject* container, const VisibleRectContext&);
@@ -98,12 +98,12 @@ public:
 
     static FloatRect calculateApproximateStrokeBoundingBox(const RenderElement&, StrokeBoundingBoxPurpose = StrokeBoundingBoxPurpose::Painting);
 
-    static void NODELETE updateAncestorNonScalingStrokeCounts(RenderElement&, int delta);
+    static void LEGACY_NODELETE updateAncestorNonScalingStrokeCounts(RenderElement&, int delta);
 
     static bool computeHasScalingAncestor(const RenderElement&);
 
-    static void NODELETE elementInsertedIntoTree(RenderElement&);
-    static void NODELETE elementWillBeRemovedFromTree(RenderElement&);
+    static void LEGACY_NODELETE elementInsertedIntoTree(RenderElement&);
+    static void LEGACY_NODELETE elementWillBeRemovedFromTree(RenderElement&);
 
     // Shared between SVG renderers and resources.
     static void applyStrokeStyleToContext(GraphicsContext&, const Style::ComputedStyle&, const RenderElement&);
@@ -114,15 +114,15 @@ public:
     static void clipContextToCSSClippingArea(GraphicsContext&, const RenderElement& renderer);
 
     // Offset from a renderer's origin-relative bounding box to where it actually paints its content.
-    static FloatSize svgContentLocationOffset(const RenderObject&);
+    static FloatSize LEGACY_NODELETE svgContentLocationOffset(const RenderObject&);
 
     static void styleChanged(RenderElement&, const Style::ComputedStyle*);
 
     static bool isolatesBlending(const Style::ComputedStyle&);
     static void updateMaskedAncestorShouldIsolateBlending(const RenderElement&);
 
-    static LegacyRenderSVGRoot* NODELETE findTreeRootObject(RenderElement&);
-    static const LegacyRenderSVGRoot* NODELETE findTreeRootObject(const RenderElement&);
+    static LegacyRenderSVGRoot* LEGACY_NODELETE findTreeRootObject(RenderElement&);
+    static const LegacyRenderSVGRoot* LEGACY_NODELETE findTreeRootObject(const RenderElement&);
 
 private:
     // This class is not constructable.

@@ -487,7 +487,7 @@ String AXIsolatedObject::computedRoleString() const
 {
     AX_ASSERT(_AXGetClientForCurrentRequestUntrusted() != kAXClientTypeVoiceOver);
 
-    return Accessibility::retrieveValueFromMainThreadWithTimeoutAndDefault([context = mainThreadContext()] () -> String {
+    return Accessibility::retrieveValueFromMainThreadWithTimeoutAndDefault([context = mainThreadContext()] -> String {
         if (RefPtr object = context.axObjectOnMainThread())
             return object->computedRoleString().isolatedCopy();
         return { };

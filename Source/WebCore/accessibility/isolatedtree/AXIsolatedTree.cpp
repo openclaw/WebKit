@@ -300,7 +300,7 @@ void AXIsolatedTree::reportLoadingProgress(double processingProgress)
     String title = AXProcessingPage(loadingProgress());
     AXLOG(title);
 
-    WeakPtr cache = axObjectCache();
+    CheckedPtr cache = axObjectCache();
     if (RefPtr axWebArea = cache ? cache->rootWebArea() : nullptr) {
         AXPropertyVector properties;
         properties.append({ AXProperty::WebAreaTitle, WTF::move(title) });
@@ -337,7 +337,7 @@ void AXIsolatedTree::generateSubtree(AccessibilityObject& axObject)
         return;
 
     // We're about to a lot of read-only work, so start the attribute cache.
-    AXAttributeCacheScope enableCache(axObject.axObjectCache());
+    AXAttributeCacheScope enableCache(protect(axObject.axObjectCache()));
     collectNodeChangesForSubtree(axObject);
     queueRemovalsAndUnresolvedChanges();
 }
@@ -455,7 +455,11 @@ void AXIsolatedTree::addUnconnectedNode(Ref<AccessibilityObject> axObject)
     // to it. It will be removed from m_readerThreadNodeMap when the corresponding DOM element, renderer, or
     // other entity is removed from the page.
     NodeChange nodeChange { createIsolatedObjectData(axObject, *this), axObject->wrapper(), nextChangeSequence() };
-    markDirtyAndGetWorkingChanges().appends.append(WTF::move(nodeChange));
+    auto& workingChanges = markDirtyAndGetWorkingChanges();
+    workingChanges.appends.append(WTF::move(nodeChange));
+#if ASSERT_ENABLED
+    workingChanges.unconnectedNodeIDs.append(objectID);
+#endif
 }
 
 void AXIsolatedTree::queueRemovals(Vector<NodeAndParentID>&& subtreeRemovals)
@@ -754,6 +758,21 @@ void AXIsolatedTree::updateNodeProperties(AccessibilityObject& axObject, const A
             AX_ASSERT(axObject.isWebArea());
             properties.append({ AXProperty::IsFocusedWebArea, axObject.isFocused() });
             break;
+#if ENABLE_ACCESSIBILITY_LOCAL_FRAME
+        case AXProperty::CrossFrameParentAXID: {
+            // The parent's frame ID is only meaningful alongside its AXID, so update both.
+            RefPtr crossFrameParent = axObject.isScrollArea() && !axObject.parentObject() ? axObject.crossFrameParentObject() : nullptr;
+            WeakPtr parentCache = crossFrameParent ? crossFrameParent->axObjectCache() : nullptr;
+            if (parentCache) {
+                properties.append({ AXProperty::CrossFrameParentFrameID, parentCache->frameID() });
+                properties.append({ AXProperty::CrossFrameParentAXID, Markable { crossFrameParent->objectID() } });
+            } else {
+                properties.append({ AXProperty::CrossFrameParentFrameID, nullptr });
+                properties.append({ AXProperty::CrossFrameParentAXID, nullptr });
+            }
+            break;
+        }
+#endif // ENABLE_ACCESSIBILITY_LOCAL_FRAME
         case AXProperty::CurrentState:
             properties.append({ AXProperty::CurrentState, static_cast<int>(axObject.currentState()) });
             break;
@@ -1078,7 +1097,7 @@ void AXIsolatedTree::updateChildren(AccessibilityObject& axObject, ResolveNodeCh
         return;
 
     // We're about to do a lot of work, so start the attribute cache.
-    AXAttributeCacheScope enableCache(axObject.axObjectCache());
+    AXAttributeCacheScope enableCache(protect(axObject.axObjectCache()));
 
     // updateChildren may be called as the result of a children changed
     // notification for an axObject that has no associated isolated object.
@@ -1183,7 +1202,7 @@ void AXIsolatedTree::updateChildrenForObjects(const ListHashSet<Ref<Accessibilit
     if (isUpdatingSubtree())
         return;
 
-    AXAttributeCacheScope enableCache(axObjectCache());
+    AXAttributeCacheScope enableCache(protect(axObjectCache()));
     for (auto& axObject : axObjects)
         queueNodeUpdate(axObject->objectID(), NodeUpdateOptions::childrenUpdate());
 
@@ -1335,8 +1354,10 @@ void AXIsolatedTree::updateFrameGeometryAndScrollPositionIfNeeded(AXObjectCache&
 {
     if (std::optional geometry = cache.getAndUpdateFrameGeometry()) {
         IntPoint viewOriginScrollPosition;
-        if (CheckedPtr view = protect(cache.document())->view())
-            viewOriginScrollPosition = IntPoint(view->documentScrollPositionRelativeToViewOrigin());
+        if (CheckedPtr view = protect(cache.document())->view()) {
+            // FIXME: Remove suppression once rdar://189998444 is fixed.
+            SUPPRESS_MEMORY_UNSAFE_CAST viewOriginScrollPosition = IntPoint(view->documentScrollPositionRelativeToViewOrigin());
+        }
         setFrameGeometry(AXFrameGeometry { *geometry }, viewOriginScrollPosition);
     }
 }
@@ -1746,6 +1767,9 @@ void AXIsolatedTree::PendingChanges::merge(PendingChanges&& source)
     mergeVector(subtreeRemovals, WTF::move(source.subtreeRemovals));
     mergeVector(propertyChanges, WTF::move(source.propertyChanges));
     mergeVector(childrenUpdates, WTF::move(source.childrenUpdates));
+#if ASSERT_ENABLED
+    mergeVector(unconnectedNodeIDs, WTF::move(source.unconnectedNodeIDs));
+#endif
 
     // Set/map union: idempotent for protectedFromDeletionIDs; overwrite-by-key for parentUpdates.
     // As an optimization, when the destination is empty, move-assign instead of element-by-element merge.
@@ -1881,6 +1905,10 @@ void AXIsolatedTree::applyCommittedChanges(PendingChanges&& committedChanges)
     if (hasTreeStructureChange)
         m_cachedUnignoredChildren.clear();
 
+#if ASSERT_ENABLED
+    m_readerThreadUnconnectedNodes.addAll(committedChanges.unconnectedNodeIDs);
+#endif
+
     if (committedChanges.focusedNodeID && *committedChanges.focusedNodeID != m_focusedNodeID) {
         AXLOG(makeString("focusedNodeID "_s, m_focusedNodeID ? m_focusedNodeID->loggingString() : ""_str, " pendingFocusedNodeID "_s, *committedChanges.focusedNodeID ? (*committedChanges.focusedNodeID)->loggingString() : ""_str));
         m_focusedNodeID = *committedChanges.focusedNodeID;
@@ -2010,10 +2038,14 @@ void AXIsolatedTree::applyCommittedChanges(PendingChanges&& committedChanges)
             };
             HashSet<AXID> reachableNodes;
             markReachableNodes(root.get(), reachableNodes, markReachableNodes);
-            // FIXME: This can spuriously fire when the tree has unconnected nodes (relation origins /
-            // targets added via addUnconnectedNode), which live in m_readerThreadNodeMap but aren't
-            // reachable from the root. We can't subtract them here because m_unconnectedNodes is only
-            // safe to read on the main thread.
+            // Unconnected nodes, such as relation targets without a renderer, aren't reachable from the root.
+            m_readerThreadUnconnectedNodes.removeIf([&](auto axID) {
+                RefPtr object = objectForID(axID);
+                if (!object)
+                    return true;
+                markReachableNodes(object.get(), reachableNodes, markReachableNodes);
+                return false;
+            });
             ASSERT_WITH_MESSAGE(reachableNodes.size() == m_readerThreadNodeMap.size(), "AX: After applying pending root node, %u reachable nodes but %u are in the node map", reachableNodes.size(), m_readerThreadNodeMap.size());
         }
 #endif // ASSERT_ENABLED
@@ -2149,7 +2181,7 @@ void AXIsolatedTree::processQueuedNodeUpdates()
         if (!cache)
             break;
 
-        if (RefPtr axObject = cache->objectForID(nodeID))
+        if (RefPtr axObject = protect(cache)->objectForID(nodeID))
             updateChildren(*axObject, ResolveNodeChanges::No);
     }
     m_needsUpdateChildren.clear();
@@ -2170,16 +2202,16 @@ void AXIsolatedTree::processQueuedNodeUpdates()
         if (!cache)
             break;
 
-        if (RefPtr axObject = cache->objectForID(propertyUpdate.key))
+        if (RefPtr axObject = protect(cache)->objectForID(propertyUpdate.key))
             updateNodeProperties(*axObject, propertyUpdate.value);
     }
 
     if (m_relationsNeedUpdate && cache)
-        updateRelations(cache->relations());
+        updateRelations(protect(cache)->relations());
 
     if (m_mostRecentlyPaintedTextIsDirty) {
         m_mostRecentlyPaintedTextIsDirty = false;
-        markDirtyAndGetWorkingChanges().mostRecentlyPaintedText = cache ? cache->mostRecentlyPaintedText() : HashMap<AXID, LineRange> { };
+        markDirtyAndGetWorkingChanges().mostRecentlyPaintedText = cache ? protect(cache)->mostRecentlyPaintedText() : HashMap<AXID, LineRange> { };
     }
 
     queueRemovalsAndUnresolvedChanges();
@@ -2208,7 +2240,7 @@ AXTextMarker AXIsolatedTree::lastMarker()
 
     const auto& children = root->unignoredChildren();
     // Start the `findLast` traversal from the last child of the root to reduce the amount of traversal done.
-    RefPtr endObject = children.isEmpty() ? root : dynamicDowncast<AXIsolatedObject>(children[children.size() - 1]);
+    RefPtr endObject = children.isEmpty() ? root.get() : dynamicDowncast<AXIsolatedObject>(children[children.size() - 1]);
     return endObject ? AXTextMarker { *endObject, 0 }.findLast() : AXTextMarker();
 }
 
@@ -2303,7 +2335,7 @@ void setPropertyIn(AXProperty property, AXPropertyValueVariant&& value, AXProper
         properties.append(std::pair(property, WTF::move(value)));
 }
 
-static bool NODELETE shouldCacheElementName(ElementName name)
+static bool LEGACY_NODELETE shouldCacheElementName(ElementName name)
 {
     switch (name) {
     case ElementName::HTML_area:
@@ -2327,6 +2359,7 @@ static bool NODELETE shouldCacheElementName(ElementName name)
     case ElementName::HTML_tbody:
     case ElementName::HTML_tfoot:
     case ElementName::HTML_output:
+    case ElementName::HTML_option:
         return true;
     default:
         return false;
@@ -2352,7 +2385,9 @@ static bool canBeMultilineTextField(AccessibilityObject& object)
 static constexpr unsigned unignoredSizeToReserve = 2;
 IsolatedObjectData createIsolatedObjectData(const Ref<AccessibilityObject>& axObject, Ref<AXIsolatedTree> tree)
 {
-    auto& object = axObject.get();
+    // axObject is a Ref which keeps the object alive throughout this function. We avoid converting this local to Ref
+    // since it's used as AccessibilityObject& in hundreds of places in this function.
+    SUPPRESS_UNCOUNTED_LOCAL auto& object = axObject.get();
 
     bool getsGeometryFromChildren = false;
     AXPropertyVector properties;
@@ -2657,10 +2692,6 @@ IsolatedObjectData createIsolatedObjectData(const Ref<AccessibilityObject>& axOb
 
         if (object.isImage())
             setProperty(AXProperty::EmbeddedImageDescription, object.embeddedImageDescription().isolatedCopy());
-
-        // On macOS, we only advertise support for the visible children attribute for lists and listboxes.
-        if (object.isList() || object.isListBox())
-            setObjectVectorProperty(AXProperty::VisibleChildren, object.visibleChildren());
 
         if (object.isDateTime()) {
             setProperty(AXProperty::DateTimeValue, object.dateTimeValue().isolatedCopy());

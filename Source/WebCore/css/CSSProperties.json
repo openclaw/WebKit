@@ -432,10 +432,11 @@
         },
         "continue": {
             "animation-type": "discrete",
-            "initial": "auto",
+            "initial": "normal",
             "values": [
-                "auto",
+                "normal",
                 "discard",
+                "collapse",
                 "-webkit-legacy"
             ],
             "codegen-properties": {
@@ -649,6 +650,7 @@
                 "style-extractor-custom": true,
                 "style-builder-custom": "All",
                 "high-priority": true,
+                "computed-style-getter-nodelete": false,
                 "skip-computed-style-initial": true,
                 "computed-style-storage-container": "opaque",
                 "computed-style-storage-path": ["m_inheritedData", "fontData", "fontCascade"],
@@ -3026,6 +3028,7 @@
                 "double"
             ],
             "codegen-properties": {
+                "computed-style-setter-did-set-function": "updateHasZeroEffectiveBorderWidths",
                 "logical-property-group": {
                     "name": "border-style",
                     "resolver": "bottom"
@@ -3051,6 +3054,8 @@
                 "thick"
             ],
             "codegen-properties": {
+                "computed-style-setter-did-set-function": "updateHasZeroEffectiveBorderWidths",
+                "used-style": "custom",
                 "logical-property-group": {
                     "name": "border-width",
                     "resolver": "bottom"
@@ -3253,6 +3258,7 @@
                 "auto"
             ],
             "codegen-properties": {
+                "computed-style-setter-did-set-function": "updateHasZeroEffectiveBorderWidths",
                 "style-extractor-custom": true,
                 "disables-native-appearance": true,
                 "computed-style-storage-path": ["m_nonInheritedData", "surroundData", "border.borderImage", "borderImage"],
@@ -3623,6 +3629,7 @@
                 "double"
             ],
             "codegen-properties": {
+                "computed-style-setter-did-set-function": "updateHasZeroEffectiveBorderWidths",
                 "logical-property-group": {
                     "name": "border-style",
                     "resolver": "left"
@@ -3648,6 +3655,8 @@
                 "thick"
             ],
             "codegen-properties": {
+                "computed-style-setter-did-set-function": "updateHasZeroEffectiveBorderWidths",
+                "used-style": "custom",
                 "logical-property-group": {
                     "name": "border-width",
                     "resolver": "left"
@@ -3754,6 +3763,7 @@
                 "double"
             ],
             "codegen-properties": {
+                "computed-style-setter-did-set-function": "updateHasZeroEffectiveBorderWidths",
                 "logical-property-group": {
                     "name": "border-style",
                     "resolver": "right"
@@ -3779,6 +3789,8 @@
                 "thick"
             ],
             "codegen-properties": {
+                "computed-style-setter-did-set-function": "updateHasZeroEffectiveBorderWidths",
+                "used-style": "custom",
                 "logical-property-group": {
                     "name": "border-width",
                     "resolver": "right"
@@ -3990,6 +4002,7 @@
                 "double"
             ],
             "codegen-properties": {
+                "computed-style-setter-did-set-function": "updateHasZeroEffectiveBorderWidths",
                 "logical-property-group": {
                     "name": "border-style",
                     "resolver": "top"
@@ -4015,6 +4028,8 @@
                 "thick"
             ],
             "codegen-properties": {
+                "computed-style-setter-did-set-function": "updateHasZeroEffectiveBorderWidths",
+                "used-style": "custom",
                 "logical-property-group": {
                     "name": "border-width",
                     "resolver": "top"
@@ -4285,6 +4300,7 @@
                 "computed-style-storage-container": "struct",
                 "computed-style-storage-kind": "enum",
                 "computed-style-type": "Clear",
+                "used-style": "custom",
                 "parser-grammar": "<<values>>"
             },
             "specification": {
@@ -5414,6 +5430,7 @@
                 "computed-style-storage-container": "struct",
                 "computed-style-storage-kind": "enum",
                 "computed-style-type": "Float",
+                "used-style": "custom",
                 "parser-grammar": "<<values>>"
             },
             "specification": {
@@ -6211,6 +6228,7 @@
                 "computed-style-storage-container": "physical-group",
                 "computed-style-storage-kind": "reference",
                 "computed-style-type": "Style::MarginEdge",
+                "used-style": "evaluate-zoomed-or-auto",
                 "parser-grammar": "<length-percentage anchor-size=allowed> | auto"
             },
             "specification": {
@@ -6294,6 +6312,7 @@
                 "computed-style-storage-container": "physical-group",
                 "computed-style-storage-kind": "reference",
                 "computed-style-type": "Style::MarginEdge",
+                "used-style": "evaluate-zoomed-or-auto",
                 "parser-grammar": "<length-percentage anchor-size=allowed> | auto"
             },
             "specification": {
@@ -6318,6 +6337,7 @@
                 "computed-style-storage-container": "physical-group",
                 "computed-style-storage-kind": "reference",
                 "computed-style-type": "Style::MarginEdge",
+                "used-style": "evaluate-zoomed-or-auto",
                 "parser-grammar": "<length-percentage anchor-size=allowed> | auto"
             },
             "specification": {
@@ -6342,6 +6362,7 @@
                 "computed-style-storage-container": "physical-group",
                 "computed-style-storage-kind": "reference",
                 "computed-style-type": "Style::MarginEdge",
+                "used-style": "evaluate-zoomed-or-auto",
                 "parser-grammar": "<length-percentage anchor-size=allowed> | auto"
             },
             "specification": {
@@ -7664,6 +7685,7 @@
                 "inset"
             ],
             "codegen-properties": {
+                "used-style": "custom",
                 "computed-style-storage-path": ["m_nonInheritedData", "backgroundData", "outline"],
                 "computed-style-storage-container": "struct",
                 "computed-style-storage-kind": "reference",
@@ -7714,6 +7736,7 @@
                 "thick"
             ],
             "codegen-properties": {
+                "used-style": "custom",
                 "computed-style-storage-path": ["m_nonInheritedData", "backgroundData", "outline"],
                 "computed-style-storage-container": "struct",
                 "computed-style-storage-kind": "reference",
@@ -8107,6 +8130,7 @@
             "animation-type": "by computed value",
             "initial": "0px",
             "codegen-properties": {
+                "computed-style-setter-did-set-function": "updateHasZeroPadding",
                 "logical-property-group": {
                     "name": "padding",
                     "resolver": "bottom"
@@ -8119,6 +8143,7 @@
                 "computed-style-storage-container": "physical-group",
                 "computed-style-storage-kind": "reference",
                 "computed-style-type": "Style::PaddingEdge",
+                "used-style": "evaluate-zoomed",
                 "parser-grammar": "<length-percentage [0,inf]>"
             },
             "specification": {
@@ -8183,6 +8208,7 @@
             "animation-type": "by computed value",
             "initial": "0px",
             "codegen-properties": {
+                "computed-style-setter-did-set-function": "updateHasZeroPadding",
                 "logical-property-group": {
                     "name": "padding",
                     "resolver": "left"
@@ -8195,6 +8221,7 @@
                 "computed-style-storage-container": "physical-group",
                 "computed-style-storage-kind": "reference",
                 "computed-style-type": "Style::PaddingEdge",
+                "used-style": "evaluate-zoomed",
                 "parser-grammar": "<length-percentage [0,inf]>"
             },
             "specification": {
@@ -8206,6 +8233,7 @@
             "animation-type": "by computed value",
             "initial": "0px",
             "codegen-properties": {
+                "computed-style-setter-did-set-function": "updateHasZeroPadding",
                 "logical-property-group": {
                     "name": "padding",
                     "resolver": "right"
@@ -8218,6 +8246,7 @@
                 "computed-style-storage-container": "physical-group",
                 "computed-style-storage-kind": "reference",
                 "computed-style-type": "Style::PaddingEdge",
+                "used-style": "evaluate-zoomed",
                 "parser-grammar": "<length-percentage [0,inf]>"
             },
             "specification": {
@@ -8229,6 +8258,7 @@
             "animation-type": "by computed value",
             "initial": "0px",
             "codegen-properties": {
+                "computed-style-setter-did-set-function": "updateHasZeroPadding",
                 "logical-property-group": {
                     "name": "padding",
                     "resolver": "top"
@@ -8241,6 +8271,7 @@
                 "computed-style-storage-container": "physical-group",
                 "computed-style-storage-kind": "reference",
                 "computed-style-type": "Style::PaddingEdge",
+                "used-style": "evaluate-zoomed",
                 "parser-grammar": "<length-percentage [0,inf]>"
             },
             "specification": {
@@ -8814,7 +8845,7 @@
             "codegen-properties": {
                 "animation-wrapper": "StyleTypeWrapper",
                 "animation-wrapper-comment": "FIXME: Why doesn't this use VisitedAffectedStyleTypeWrapper?",
-                "animation-wrapper-requires-override-parameters": ["CSSPropertyID::CSSPropertyStrokeColor", "&ComputedStyle::strokeColor", "&ComputedStyle::setStrokeColor"],
+                "animation-wrapper-requires-override-parameters": ["CSSPropertyID::StrokeColor", "&ComputedStyle::strokeColor", "&ComputedStyle::setStrokeColor"],
                 "computed-style-has-explicitly-set-policy": "value-only",
                 "computed-style-has-explicitly-set-storage-path": ["m_inheritedRareData"],
                 "computed-style-storage-path": ["m_inheritedRareData"],
@@ -9519,6 +9550,7 @@
                 "computed-style-storage-container": "struct",
                 "computed-style-storage-kind": "enum",
                 "computed-style-type": "Visibility",
+                "used-style": "custom",
                 "parser-grammar": "<<values>>",
                 "fast-path-inherited": true
             },
@@ -10669,6 +10701,7 @@
                 "thick"
             ],
             "codegen-properties": {
+                "used-style": "custom",
                 "aliases": [
                     "-webkit-column-rule-width"
                 ],

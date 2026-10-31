@@ -950,7 +950,7 @@ public:
     // - the Addr kind with the base being either SP or FP
     // Callers of this function are allowed to expect that if it returns true, then it must be one of
     // these easy-to-recognize kinds. So, making this function recognize more kinds could break things.
-    bool NODELETE isStackMemory() const;
+    bool LEGACY_NODELETE isStackMemory() const;
 
     bool isRelCond() const
     {
@@ -1018,7 +1018,7 @@ public:
     }
 
     template<typename T>
-    bool NODELETE isRepresentableAs() const
+    bool LEGACY_NODELETE isRepresentableAs() const
     {
         return WTF::isRepresentableAs<T>(value());
     }
@@ -1279,10 +1279,10 @@ public:
         ASSERT_NOT_REACHED();
     }
 
-    bool NODELETE canRepresent(Type) const;
+    bool LEGACY_NODELETE canRepresent(Type) const;
     bool canRepresent(Value* value) const;
 
-    bool NODELETE isCompatibleBank(const Arg& other) const;
+    bool LEGACY_NODELETE isCompatibleBank(const Arg& other) const;
 
     bool isGPR() const
     {
@@ -1371,9 +1371,6 @@ public:
             return false;
 
 #if CPU(ARM64)
-        if (MacroAssembler::supportsFloat16() && ARM64Assembler::canEncodeFPImm<16>(value))
-            return true;
-
         uint16_t u16 = static_cast<uint16_t>(value);
 
         auto shiftedImm = ARM64ShiftedImmediate16::create(u16);
@@ -1823,7 +1820,7 @@ public:
     }
 
     // This computes a hash for comparing this to JSAir's Arg.
-    unsigned NODELETE jsHash() const;
+    unsigned LEGACY_NODELETE jsHash() const;
     
     void dump(PrintStream&) const;
 

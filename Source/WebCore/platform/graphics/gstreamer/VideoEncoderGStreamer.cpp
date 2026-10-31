@@ -28,6 +28,7 @@
 #include "GUniquePtrGStreamer.h"
 #include "VideoEncoderPrivateGStreamer.h"
 #include "VideoFrameGStreamer.h"
+#include "VideoFrameMetadataGStreamer.h"
 #include <wtf/NeverDestroyed.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/ThreadSafeRefCounted.h>
@@ -201,7 +202,6 @@ void GStreamerVideoEncoder::close()
 
 static std::optional<unsigned> retrieveTemporalIndex(const GRefPtr<GstSample>& sample)
 {
-#if GST_CHECK_VERSION(1, 20, 0)
     auto caps = gst_sample_get_caps(sample.get());
     auto structure = gst_caps_get_structure(caps, 0);
     auto buffer = gst_sample_get_buffer(sample.get());
@@ -220,7 +220,6 @@ static std::optional<unsigned> retrieveTemporalIndex(const GRefPtr<GstSample>& s
 #ifndef GST_DISABLE_GST_DEBUG
     auto name = gstStructureGetName(structure);
     GST_TRACE("Retrieval of temporal index from encoded format %s is not yet supported.", name.utf8());
-#endif
 #endif
     return { };
 }
@@ -307,6 +306,12 @@ String GStreamerInternalVideoEncoder::initialize(const String& codecName)
 {
     GST_DEBUG_OBJECT(m_harness->element(), "Initializing encoder for codec %s", codecName.ascii().data());
     IntSize size { static_cast<int>(m_config.width), static_cast<int>(m_config.height) };
+
+    if ((codecName == "vp8"_s || codecName == "vp08"_s) && (size.width() >= 30000 || size.height() >= 30000)) {
+        GST_WARNING_OBJECT(m_harness->element(), "Rejecting too strenuous VP8 encoding parameters");
+        return "Too strenuous VP8 encoding parameters"_s;
+    }
+
     if (!videoEncoderSetCodec(WEBKIT_VIDEO_ENCODER(m_harness->element()), { codecName, m_config.useAnnexB }, size, { }, true))
         return "Unable to set encoder format"_s;
 
@@ -334,7 +339,7 @@ bool GStreamerInternalVideoEncoder::encode(VideoEncoder::RawFrame&& rawFrame, bo
     auto& gstVideoFrame = downcast<VideoFrameGStreamer>(rawFrame.frame.get());
     GRefPtr sample = gstVideoFrame.sample();
 
-    auto orientation = makeString(gstVideoFrame.isMirrored() ? "flip-"_s : ""_s, "rotate-"_s, gstVideoFrame.rotation());
+    auto orientation = webkitGstImageOrientationTag(gstVideoFrame.rotation(), gstVideoFrame.isMirrored());
     if (orientation != m_orientation) {
         auto orientationCString = orientation.utf8();
         GST_DEBUG_OBJECT(m_harness->element(), "New orientation: %s", orientationCString);

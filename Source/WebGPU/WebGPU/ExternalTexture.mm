@@ -36,17 +36,18 @@
 
 namespace WebGPU::Metal {
 
-Ref<ExternalTexture> Device::createExternalTexture(const WGPUExternalTextureDescriptor& descriptor)
+RefPtr<WebGPU::ExternalTexture> Device::importExternalTexture(const WebGPU::ExternalTextureDescriptor& descriptor)
 {
     if (!isValid())
         return ExternalTexture::createInvalid(*this);
 
-    return ExternalTexture::create(RetainPtr { descriptor.pixelBuffer }.get(), descriptor.colorSpace, simd::uint2 { descriptor.visibleWidth, descriptor.visibleHeight }, *this);
+    // The external texture keeps the C API color space, which the pixel buffer conversions take.
+    return ExternalTexture::create(descriptor.pixelBuffer.get(), descriptor.colorSpace, simd::uint2 { descriptor.visibleSize.width, descriptor.visibleSize.height }, *this);
 }
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(ExternalTexture);
 
-ExternalTexture::ExternalTexture(CVPixelBufferRef pixelBuffer, WGPUColorSpace colorSpace, simd::uint2 visibleSize, Device& device)
+ExternalTexture::ExternalTexture(CVPixelBufferRef pixelBuffer, WebGPU::PredefinedColorSpace colorSpace, simd::uint2 visibleSize, Device& device)
     : m_pixelBuffer(pixelBuffer)
     , m_colorSpace(colorSpace)
     , m_visibleSize(visibleSize)
@@ -124,7 +125,7 @@ size_t ExternalTexture::openCommandEncoderCount() const
 
 #pragma mark WGPU Stubs
 
-void NODELETE wgpuExternalTextureAddRef(WGPUExternalTexture externalTexture)
+void LEGACY_NODELETE wgpuExternalTextureAddRef(WGPUExternalTexture externalTexture)
 {
     WebGPU::Metal::fromAPI(externalTexture).ref();
 }
@@ -137,14 +138,4 @@ void wgpuExternalTextureRelease(WGPUExternalTexture externalTexture)
 void wgpuExternalTextureDestroy(WGPUExternalTexture externalTexture)
 {
     protect(WebGPU::Metal::fromAPI(externalTexture))->destroy();
-}
-
-void wgpuExternalTextureUndestroy(WGPUExternalTexture externalTexture)
-{
-    protect(WebGPU::Metal::fromAPI(externalTexture))->undestroy();
-}
-
-void wgpuExternalTextureUpdate(WGPUExternalTexture externalTexture, CVPixelBufferRef pixelBuffer)
-{
-    protect(WebGPU::Metal::fromAPI(externalTexture))->update(pixelBuffer);
 }

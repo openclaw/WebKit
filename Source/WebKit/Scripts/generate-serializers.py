@@ -746,7 +746,8 @@ def generate_forward_declarations(serialized_types, serialized_enums, additional
     all_namespaces = all_namespaces.union(set(template_types_by_namespace.keys()))
     for namespace in sorted(all_namespaces, key=lambda x: (x is None, x)):
         if namespace is not None:
-            result.append(f'namespace {namespace} {{')
+            # A type named from the global namespace, like ::WebGPU::TextureFormat, is forward declared in it.
+            result.append(f'namespace {namespace.removeprefix("::")} {{')
         for enum in serialized_enums_by_namespace.get(namespace, []):
             if enum.condition is not None:
                 result.append(f'#if {enum.condition}')
@@ -782,7 +783,7 @@ def generate_forward_declarations(serialized_types, serialized_enums, additional
                 if type.condition is not None:
                     result.append(f'#if {type.condition}')
                 if namespace is not None:
-                    result.append(f'namespace {namespace} {{')
+                    result.append(f'namespace {namespace.removeprefix("::")} {{')
 
                 if namespace is None or get_alias_namespace(type.alias) is None or get_alias_namespace(type.alias) == type.namespace:
                     result.append(f'template<{typenames(type.alias)}> {alias_struct_or_class(type.alias)} {remove_template_parameters(type.alias)};')
@@ -991,11 +992,20 @@ def decode_cf_type(type):
     return result
 
 
+_members_are_subclasses_by_name_cache = (None, None)
+
+
 def should_decode_ref(member, serialized_types):
-    for serialized_type in serialized_types:
-        if serialized_type.namespace_and_name() == member.type:
-            return serialized_type.members_are_subclasses
-    return False
+    # This is called for every member of every serialized type, so build the name lookup once per
+    # list of serialized types instead of scanning the whole list each time.
+    global _members_are_subclasses_by_name_cache
+    cached_types, members_are_subclasses_by_name = _members_are_subclasses_by_name_cache
+    if cached_types is not serialized_types:
+        members_are_subclasses_by_name = {}
+        for serialized_type in serialized_types:
+            members_are_subclasses_by_name.setdefault(serialized_type.namespace_and_name(), serialized_type.members_are_subclasses)
+        _members_are_subclasses_by_name_cache = (serialized_types, members_are_subclasses_by_name)
+    return members_are_subclasses_by_name.get(member.type, False)
 
 
 def decode_type(type, serialized_types):
@@ -1983,7 +1993,8 @@ def generate_webkit_secure_coding_impl(serialized_types, headers):
     result.append('    if (![array isKindOfClass:NSArray.class])')
     result.append('        return { };')
     result.append('    Vector<RetainPtr<T>> result;')
-    result.append('    for (id element in array) {')
+    # FIXME: Remove SUPPRESS_UNRETAINED_LOCAL once the static analyzer false positive is fixed (rdar://189710680).
+    result.append('    for (SUPPRESS_UNRETAINED_LOCAL id element in array) {')
     # FIXME: isKindOfClass call can cause a static analysis false positive (https://github.com/llvm/llvm-project/issues/162979).
     result.append('        SUPPRESS_UNRETAINED_ARG if ([element isKindOfClass:retainPtr(IPC::getClass<T>()).get()])')
     result.append('            result.append((T *)element);')

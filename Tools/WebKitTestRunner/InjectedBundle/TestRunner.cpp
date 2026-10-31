@@ -42,7 +42,6 @@
 #include <WebKit/WKBundleBackForwardList.h>
 #include <WebKit/WKBundleFrame.h>
 #include <WebKit/WKBundleFramePrivate.h>
-#include <WebKit/WKBundleNodeHandlePrivate.h>
 #include <WebKit/WKBundlePage.h>
 #include <WebKit/WKBundlePagePrivate.h>
 #include <WebKit/WKBundlePrivate.h>
@@ -395,6 +394,14 @@ void TestRunner::setVirtualWalletBehavior(JSStringRef action, JSStringRef protoc
     }));
 }
 
+double TestRunner::textScaleFactorForContentSizeCategory(JSStringRef contentSizeCategory)
+{
+    auto result = postSynchronousMessageWithReturnValue("TextScaleFactorForContentSizeCategory", toWK(contentSizeCategory));
+    if (!result || WKGetTypeID(result.get()) != WKDoubleGetTypeID())
+        return 1;
+    return WKDoubleGetValue(static_cast<WKDoubleRef>(result.get()));
+}
+
 RefPtr<OpaqueJSString> TestRunner::lastAddedBackgroundFetchIdentifier() const
 {
     auto identifier = InjectedBundle::singleton().lastAddedBackgroundFetchIdentifier();
@@ -444,14 +451,6 @@ bool TestRunner::isPageBoxVisible(JSContextRef context, int pageIndex)
     auto frame = WKBundleFrameForJavaScriptContext(context);
     auto& injectedBundle = InjectedBundle::singleton();
     return WKBundleIsPageBoxVisible(injectedBundle.bundle(), frame, pageIndex);
-}
-
-void TestRunner::setValueForUser(JSContextRef context, JSValueRef element, JSStringRef value)
-{
-    if (!element || !JSValueIsObject(context, element))
-        return;
-
-    WKBundleNodeHandleSetHTMLInputElementValueForUser(adoptWK(WKBundleNodeHandleCreate(context, const_cast<JSObjectRef>(element))).get(), toWK(value).get());
 }
 
 void TestRunner::setAudioResult(JSContextRef context, JSValueRef data)

@@ -84,8 +84,9 @@ RefPtr<HTMLElement> HTMLLabelElement::control() const
                 continue;
             }
 
-            if (descendant->isLabelable())
+            if (descendant->isLabelable()) {
                 return const_cast<HTMLElement*>(descendant.ptr());
+            }
         }
         return nullptr;
     }

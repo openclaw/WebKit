@@ -87,7 +87,8 @@ bool Path::definitelyEqual(const Path& other) const
 
 PathImpl& Path::setImpl(Ref<PathImpl>&& impl)
 {
-    auto& platformPathImpl = impl.get();
+    // We can't use Ref here since we return a reference to PathImpl after moving impl into m_data, which keeps it alive.
+    SUPPRESS_UNCOUNTED_LOCAL auto& platformPathImpl = impl.get();
     m_data = WTF::move(impl);
     return platformPathImpl;
 }

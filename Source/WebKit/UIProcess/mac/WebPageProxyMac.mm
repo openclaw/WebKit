@@ -68,6 +68,7 @@
 #import <WebCore/LocalizedStrings.h>
 #import <WebCore/Pasteboard.h>
 #import <WebCore/Quirks.h>
+#import <WebCore/RemoteUserInputEventData.h>
 #import <WebCore/SharedBuffer.h>
 #import <WebCore/TextAlternativeWithRange.h>
 #import <WebCore/UniversalAccessZoom.h>
@@ -223,13 +224,15 @@ void WebPageProxy::windowAndViewFramesChanged(const FloatRect& viewFrameInWindow
         if (!hasRunningProcess())
             return;
 
-        protect(legacyMainFrameProcess())->sendWithAsyncReply(
-            Messages::WebPage::WindowAndViewFramesChanged(*m_viewWindowCoordinates),
-            [this, protectedThis, viewFrameInWindowCoordinates]() {
-                updateMouseEventTargetAfterWindowAndViewFramesChanged(viewFrameInWindowCoordinates);
-            },
-            webPageIDInMainFrameProcess()
-        );
+        forEachWebContentProcess([&](auto& webProcess, auto pageID) {
+            if (&webProcess == &legacyMainFrameProcess()) {
+                webProcess.sendWithAsyncReply(Messages::WebPage::WindowAndViewFramesChanged(*m_viewWindowCoordinates), [this, protectedThis, viewFrameInWindowCoordinates] {
+                    updateMouseEventTargetAfterWindowAndViewFramesChanged(viewFrameInWindowCoordinates);
+                }, pageID);
+                return;
+            }
+            webProcess.sendWithAsyncReply(Messages::WebPage::WindowAndViewFramesChanged(*m_viewWindowCoordinates), [] { }, pageID);
+        });
     });
 }
 
@@ -719,14 +722,17 @@ void WebPageProxy::savePDFToTemporaryFolderAndOpenWithNativeApplication(const St
 #if ENABLE(PDF_PLUGIN)
 void WebPageProxy::showPDFContextMenu(const WebKit::PDFContextMenu& contextMenu, PDFPluginIdentifier identifier, WebCore::FrameIdentifier frameID, CompletionHandler<void(std::optional<int32_t>&&)>&& completionHandler)
 {
-    auto items = contextMenu.items;
+    const Vector items = [&] {
+        auto items = contextMenu.items;
 #if HAVE(TRANSLATION_UI_SERVICES) && ENABLE(CONTEXT_MENUS)
-    if (!canHandleContextMenuTranslation()) {
-        items.removeAllMatching([](auto& item) {
-            return item.action == WebCore::ContextMenuItemTagTranslate;
-        });
-    }
+        if (!canHandleContextMenuTranslation()) {
+            items.removeAllMatching([](auto& item) {
+                return item.action == WebCore::ContextMenuItemTagTranslate;
+            });
+        }
 #endif
+        return items;
+    }();
 
     if (items.isEmpty())
         return completionHandler(std::nullopt);
@@ -1267,6 +1273,17 @@ void WebPageProxy::interruptSyntheticMomentumScrolling()
         .inputSource = WebEventInputSource::Automation,
     });
     handleNativeWheelEvent(NativeWebWheelEvent::create(cancelEvent));
+}
+
+void WebPageProxy::dispatchTrackedPointerEvent(std::optional<FrameIdentifier> frameID, WebEventPhase phase, const FloatPoint& locationInRootView, OptionSet<WebEventModifier> modifiers, CompletionHandler<void(bool)>&& completionHandler)
+{
+    sendWithAsyncReplyToProcessContainingFrame(frameID, Messages::WebPage::DispatchTrackedPointerEvent(frameID, phase, locationInRootView, modifiers), Messages::WebPage::DispatchTrackedPointerEvent::Reply { [weakThis = WeakPtr { *this }, phase, modifiers, completionHandler = WTF::move(completionHandler)](bool wasCanceled, std::optional<RemoteUserInputEventData> remoteUserInputEventData) mutable {
+        RefPtr protectedThis = weakThis.get();
+        if (!protectedThis || !remoteUserInputEventData)
+            return completionHandler(wasCanceled);
+
+        protectedThis->dispatchTrackedPointerEvent(remoteUserInputEventData->targetFrameID, phase, FloatPoint { remoteUserInputEventData->transformedPoint }, modifiers, WTF::move(completionHandler));
+    } });
 }
 
 } // namespace WebKit

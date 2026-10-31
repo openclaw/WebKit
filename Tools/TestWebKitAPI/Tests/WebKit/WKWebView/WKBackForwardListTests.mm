@@ -1352,8 +1352,6 @@ static void runGoBackAfterNavigatingSameSiteIframe(ShouldEnablePageCache shouldE
     RetainPtr navigationDelegate = adoptNS([TestNavigationDelegate new]);
     [navigationDelegate allowAnyTLSCertificate];
     RetainPtr webView = adoptNS([[TestWKWebView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600) configuration:configuration.get()]);
-    // FIXME: Remove once the back-forward cache is enabled for site isolation: rdar://161762363.
-    const bool backForwardCacheEnabled = isUsingBackForwardCache(webView.get());
     webView.get().navigationDelegate = navigationDelegate.get();
     static bool didCommitLoadForAllFrames = false;
     static unsigned expectedCommittedFrameSize = 2;
@@ -1401,7 +1399,7 @@ static void runGoBackAfterNavigatingSameSiteIframe(ShouldEnablePageCache shouldE
 
     // Navigate main frame back.
     // For page cache case, iframe is not reloaded, so there is only one commit.
-    expectedCommittedFrameSize = backForwardCacheEnabled ? 1 : 2;
+    expectedCommittedFrameSize = shouldEnablePageCache == ShouldEnablePageCache::Yes ? 1 : 2;
     [webView goBack];
 
     TestWebKitAPI::Util::run(&didCommitLoadForAllFrames);
@@ -1749,8 +1747,6 @@ static void runGoBackAfterNavigatingSameSiteIframe2(ShouldEnablePageCache should
     RetainPtr navigationDelegate = adoptNS([TestNavigationDelegate new]);
     [navigationDelegate allowAnyTLSCertificate];
     RetainPtr webView = adoptNS([[TestWKWebView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600) configuration:configuration.get()]);
-    // FIXME: Remove once the back-forward cache is enabled for site isolation: rdar://161762363.
-    const bool backForwardCacheEnabled = isUsingBackForwardCache(webView.get());
     webView.get().navigationDelegate = navigationDelegate.get();
     static bool didCommitLoadForAllFrames = false;
     static unsigned expectedCommittedFrameSize = 2;
@@ -1798,7 +1794,7 @@ static void runGoBackAfterNavigatingSameSiteIframe2(ShouldEnablePageCache should
 
     // Navigate main frame back.
     // For page cache case, iframe is not reloaded, so there is only one commit.
-    expectedCommittedFrameSize = backForwardCacheEnabled ? 1 : 2;
+    expectedCommittedFrameSize = shouldEnablePageCache == ShouldEnablePageCache::Yes ? 1 : 2;
     [webView goBack];
 
     TestWebKitAPI::Util::run(&didCommitLoadForAllFrames);
@@ -2327,6 +2323,42 @@ static void runIframeBackThenPushStateAdjustsAggregatedTraversalTest(BOOL useUIP
     EXPECT_STREQ([[[[webView backForwardList] currentItem] URL] absoluteString].UTF8String, loadableURL1.UTF8String);
 }
 
+static void runTraversalInLaterTaskWaitsForPendingBackTest(NSString *laterTraversal, NSString *expectedURL, unsigned expectedBackCount)
+{
+    RetainPtr webView = webViewForCoalescingTests(YES);
+    RetainPtr delegate = adoptNS([[TestNavigationDelegate alloc] init]);
+    [webView setNavigationDelegate:delegate.get()];
+    __block unsigned finishCount = 0;
+    [delegate setDidFinishNavigation:^(WKWebView *, WKNavigation *) {
+        ++finishCount;
+    }];
+    auto waitForFinishCount = ^(unsigned target) {
+        while (finishCount < target)
+            TestWebKitAPI::Util::runFor(10_ms);
+    };
+
+    [webView loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:loadableURL1]]];
+    waitForFinishCount(1);
+    [webView loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:loadableURL2]]];
+    waitForFinishCount(2);
+    [webView loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:loadableURL3]]];
+    waitForFinishCount(3);
+    if (expectedBackCount) {
+        [webView goBack];
+        waitForFinishCount(4);
+    }
+
+    finishCount = 0;
+    [webView _evaluateJavaScriptWithoutUserGesture:[NSString stringWithFormat:@"history.back(); setTimeout(() => %@, 0);", laterTraversal] completionHandler:nil];
+    for (unsigned i = 0; i < 200 && finishCount < 2; ++i)
+        TestWebKitAPI::Util::runFor(10_ms);
+    TestWebKitAPI::Util::runFor(0.2_s);
+
+    EXPECT_STREQ([[[[webView backForwardList] currentItem] URL] absoluteString].UTF8String, expectedURL.UTF8String);
+    EXPECT_EQ([webView backForwardList].backList.count, expectedBackCount);
+    EXPECT_EQ([webView backForwardList].forwardList.count, 2 - expectedBackCount);
+}
+
 TEST(WKBackForwardList, SynchronousBackForwardGoesNowhere)
 {
     runSynchronousBackForwardGoesNowhereTest(NO);
@@ -2385,6 +2417,16 @@ TEST(WKBackForwardList, IframeBackThenPushStateAdjustsAggregatedTraversal)
 TEST(WKBackForwardList, IframeBackThenPushStateAdjustsAggregatedTraversalWithUIProcessLoading)
 {
     runIframeBackThenPushStateAdjustsAggregatedTraversalTest(YES);
+}
+
+TEST(WKBackForwardList, BackInLaterTaskWaitsForPendingBackWithUIProcessLoading)
+{
+    runTraversalInLaterTaskWaitsForPendingBackTest(@"history.back()", loadableURL1, 0);
+}
+
+TEST(WKBackForwardList, ForwardInLaterTaskWaitsForPendingBackWithUIProcessLoading)
+{
+    runTraversalInLaterTaskWaitsForPendingBackTest(@"history.forward()", loadableURL2, 1);
 }
 
 #if ENABLE(IPC_TESTING_API)

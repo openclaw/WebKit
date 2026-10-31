@@ -42,7 +42,6 @@
 #import "VideoFrameMetadata.h"
 #import "VideoLayerManagerObjC.h"
 #import "VideoTrackPrivateMediaStream.h"
-#import <numbers>
 #import <objc_runtime.h>
 #import <pal/avfoundation/MediaTimeAVFoundation.h>
 #import <pal/spi/cocoa/AVFoundationSPI.h>
@@ -151,10 +150,9 @@ MediaPlayerPrivateMediaStreamAVFObjC::MediaPlayerPrivateMediaStreamAVFObjC(Media
 {
     INFO_LOG(LOGIDENTIFIER);
     // MediaPlayerPrivateMediaStreamAVFObjC::processNewVideoFrame expects a weak pointer to be created in the constructor.
-    lazyInitialize(m_boundsChangeListener, adoptNS([[WebRootSampleBufferBoundsChangeListener alloc] initWithCallback:[this, weakThis = WeakPtr { *this }] {
-        if (!weakThis)
-            return;
-        rootLayerBoundsDidChange();
+    lazyInitialize(m_boundsChangeListener, adoptNS([[WebRootSampleBufferBoundsChangeListener alloc] initWithCallback:[weakThis = WeakPtr { *this }] {
+        if (RefPtr protectedThis = weakThis)
+            protectedThis->rootLayerBoundsDidChange();
     }]));
 }
 
@@ -437,8 +435,9 @@ void MediaPlayerPrivateMediaStreamAVFObjC::ensureLayers()
 
     sampleBufferDisplayLayer->initialize(hideRootLayer(), size, m_shouldMaintainAspectRatio, [weakThis = WeakPtr { *this }, weakLayer = ThreadSafeWeakPtr { *m_sampleBufferDisplayLayer }, size](auto didSucceed) {
         auto layer = weakLayer.get();
-        if (weakThis && layer && layer.get() == weakThis->m_sampleBufferDisplayLayer.get())
-            weakThis->layersAreInitialized(size, didSucceed);
+        RefPtr protectedThis = weakThis;
+        if (protectedThis && layer && layer.get() == protectedThis->m_sampleBufferDisplayLayer.get())
+            protectedThis->layersAreInitialized(size, didSucceed);
     });
 }
 
@@ -562,7 +561,7 @@ void MediaPlayerPrivateMediaStreamAVFObjC::prepareToPlay()
     INFO_LOG(LOGIDENTIFIER);
 }
 
-PlatformLayer* MediaPlayerPrivateMediaStreamAVFObjC::platformLayer() const
+PlatformLayer* MediaPlayerPrivateMediaStreamAVFObjC::platformLayer()
 {
     RefPtr sampleBufferDisplayLayer = m_sampleBufferDisplayLayer;
     if (!sampleBufferDisplayLayer || !sampleBufferDisplayLayer->rootLayer() || m_displayMode == None)
@@ -1000,7 +999,7 @@ void MediaPlayerPrivateMediaStreamAVFObjC::checkSelectedVideoTrack()
             if (m_sampleBufferDisplayLayer && source->isCaptureSource())
                 protect(m_sampleBufferDisplayLayer)->setRenderPolicy(SampleBufferDisplayLayer::RenderPolicy::Immediately);
             source->addVideoFrameObserver(*this);
-            ALWAYS_LOG(LOGIDENTIFIER, "observing video source ", m_activeVideoTrack->streamTrack().logIdentifier());
+            ALWAYS_LOG(LOGIDENTIFIER, "observing video source ", protect(m_activeVideoTrack->streamTrack())->logIdentifier());
         }
     } else
         m_isActiveVideoTrackEnabled = m_activeVideoTrack ? m_activeVideoTrack->streamTrack().enabled() : true;
@@ -1097,7 +1096,7 @@ void MediaPlayerPrivateMediaStreamAVFObjC::updateCurrentFrameImage()
         return;
 
     if (m_nativeImageCreator) {
-        m_imagePainter.cgImage = m_nativeImageCreator(*m_imagePainter.videoFrame);
+        m_imagePainter.cgImage = m_nativeImageCreator(*protect(m_imagePainter.videoFrame));
         return;
     }
 
@@ -1120,11 +1119,7 @@ static inline CGAffineTransform videoTransformationMatrix(VideoFrame& videoFrame
     if (!width || !height)
         return CGAffineTransformIdentity;
 
-    auto videoTransform = CGAffineTransformMakeRotation(static_cast<int>(videoFrame.rotation()) * std::numbers::pi / 180);
-    if (videoFrame.isMirrored())
-        videoTransform = CGAffineTransformScale(videoTransform, -1, 1);
-
-    return videoTransform;
+    return videoFrame.affineTransform();
 }
 
 void MediaPlayerPrivateMediaStreamAVFObjC::paintCurrentFrameInContext(GraphicsContext& context, const FloatRect& destRect)

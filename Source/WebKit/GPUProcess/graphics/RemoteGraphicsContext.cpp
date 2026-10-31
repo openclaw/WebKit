@@ -377,7 +377,7 @@ void RemoteGraphicsContext::drawFilteredImageBuffer(std::optional<RenderingResou
 
     if (!svgFilter || !svgFilter->hasValidRenderingResourceIdentifier()) {
 #if HAVE(IOSURFACE)
-        FilterResults results(makeUnique<ImageBufferShareableAllocator>(m_sharedResourceCache->resourceOwner(), &m_sharedResourceCache->ioSurfacePool()));
+        FilterResults results(makeUnique<ImageBufferShareableAllocator>(m_sharedResourceCache->resourceOwner(), &m_sharedResourceCache->ioSurfacePool(), useIOSurfaceWebKitBehavior()));
 #else
         FilterResults results(makeUnique<ImageBufferShareableAllocator>(m_sharedResourceCache->resourceOwner()));
 #endif
@@ -393,7 +393,7 @@ void RemoteGraphicsContext::drawFilteredImageBuffer(std::optional<RenderingResou
 
     auto& results = cachedSVGFilter->ensureResults([&]() {
 #if HAVE(IOSURFACE)
-        auto allocator = makeUnique<ImageBufferShareableAllocator>(m_sharedResourceCache->resourceOwner(), &m_sharedResourceCache->ioSurfacePool());
+        auto allocator = makeUnique<ImageBufferShareableAllocator>(m_sharedResourceCache->resourceOwner(), &m_sharedResourceCache->ioSurfacePool(), useIOSurfaceWebKitBehavior());
 #else
         auto allocator = makeUnique<ImageBufferShareableAllocator>(m_sharedResourceCache->resourceOwner());
 #endif
@@ -407,12 +407,12 @@ void RemoteGraphicsContext::drawGlyphs(RenderingResourceIdentifier fontIdentifie
 {
     RefPtr font = resourceCache().cachedFont(fontIdentifier);
     MESSAGE_CHECK(font);
-    Vector<GlyphBufferGlyph, 128> glyphs { glyphsAdvances.span<0>() };
-    Vector<GlyphBufferAdvance, 128> advances { glyphsAdvances.span<1>() };
+    const Vector<GlyphBufferGlyph, 128> glyphs { glyphsAdvances.span<0>() };
+    const Vector<GlyphBufferAdvance, 128> advances { glyphsAdvances.span<1>() };
     context().drawGlyphsImmediate(*font, glyphs.span(), advances.span(), localAnchor, fontSmoothingMode);
 }
 
-void RemoteGraphicsContext::drawImageBuffer(RenderingResourceIdentifier imageBufferIdentifier, const FloatRect& destinationRect, const FloatRect& srcRect, ImagePaintingOptions options)
+void RemoteGraphicsContext::drawImageBuffer(RenderingResourceIdentifier imageBufferIdentifier, const FloatRect& destinationRect, const FloatRect& srcRect, ImageDrawingOptions options)
 {
     RefPtr sourceImage = imageBuffer(imageBufferIdentifier);
     MESSAGE_CHECK(sourceImage);
@@ -427,35 +427,41 @@ void RemoteGraphicsContext::drawDisplayList(RemoteDisplayListIdentifier identifi
     context().drawDisplayList(*displayList, controlFactory());
 }
 
-void RemoteGraphicsContext::drawNativeImage(RenderingResourceIdentifier imageIdentifier, const FloatRect& destRect, const FloatRect& srcRect, ImagePaintingOptions options)
+void RemoteGraphicsContext::drawNativeImage(RenderingResourceIdentifier imageIdentifier, const FloatRect& destRect, const FloatRect& srcRect, ImageDrawingOptions options)
 {
     RefPtr image = resourceCache().cachedNativeImage(imageIdentifier);
     MESSAGE_CHECK(image);
     context().drawNativeImage(*image, destRect, srcRect, options);
 }
 
+#if USE(SYSTEM_PREVIEW)
+void RemoteGraphicsContext::drawBadgeSystemImage(std::optional<RenderingResourceIdentifier> imageIdentifier, const FloatRect& destinationRect)
+{
+    RefPtr<NativeImage> nativeImage;
+
+    if (imageIdentifier) {
+        nativeImage = resourceCache().cachedNativeImage(*imageIdentifier);
+        MESSAGE_CHECK(nativeImage);
+    }
+
+    Ref badge = ARKitBadgeSystemImage::create(WTF::move(nativeImage));
+    drawSystemImage(WTF::move(badge), destinationRect);
+}
+#endif
+
 void RemoteGraphicsContext::drawSystemImage(Ref<SystemImage>&& systemImage, const FloatRect& destinationRect)
 {
-#if USE(SYSTEM_PREVIEW)
-    if (auto* badge = dynamicDowncast<ARKitBadgeSystemImage>(systemImage.get())) {
-        if (auto imageIdentifier = badge->imageIdentifier()) {
-            RefPtr nativeImage = resourceCache().cachedNativeImage(*imageIdentifier);
-            MESSAGE_CHECK(nativeImage);
-            badge->setImage(BitmapImage::create(nativeImage.releaseNonNull()));
-        }
-    }
-#endif
     context().drawSystemImage(systemImage, destinationRect);
 }
 
-void RemoteGraphicsContext::drawPatternNativeImage(RenderingResourceIdentifier imageIdentifier, const FloatRect& destRect, const FloatRect& tileRect, const AffineTransform& transform, const FloatPoint& phase, const FloatSize& spacing, ImagePaintingOptions options)
+void RemoteGraphicsContext::drawPatternNativeImage(RenderingResourceIdentifier imageIdentifier, const FloatRect& destRect, const FloatRect& tileRect, const AffineTransform& transform, const FloatPoint& phase, const FloatSize& spacing, ImageDrawingOptions options)
 {
     RefPtr image = resourceCache().cachedNativeImage(imageIdentifier);
     MESSAGE_CHECK(image);
     context().drawPattern(*image, destRect, tileRect, transform, phase, spacing, options);
 }
 
-void RemoteGraphicsContext::drawPatternImageBuffer(RenderingResourceIdentifier imageIdentifier, const FloatRect& destRect, const FloatRect& tileRect, const AffineTransform& transform, const FloatPoint& phase, const FloatSize& spacing, ImagePaintingOptions options)
+void RemoteGraphicsContext::drawPatternImageBuffer(RenderingResourceIdentifier imageIdentifier, const FloatRect& destRect, const FloatRect& tileRect, const AffineTransform& transform, const FloatPoint& phase, const FloatSize& spacing, ImageDrawingOptions options)
 {
     RefPtr image = imageBuffer(imageIdentifier);
     MESSAGE_CHECK(image);
@@ -611,7 +617,7 @@ SharedVideoFrameReader& RemoteGraphicsContext::sharedVideoFrameReader()
     return *m_sharedVideoFrameReader;
 }
 
-void RemoteGraphicsContext::drawVideoFrame(SharedVideoFrame&& frame, const FloatRect& destination, ShouldDiscardAlpha shouldDiscardAlpha, ImagePaintingOptions options)
+void RemoteGraphicsContext::drawVideoFrame(SharedVideoFrame&& frame, const FloatRect& destination, ShouldDiscardAlpha shouldDiscardAlpha, ImageDrawingOptions options)
 {
     if (auto videoFrame = sharedVideoFrameReader().read(WTF::move(frame)))
         context().drawVideoFrame(*videoFrame, destination, shouldDiscardAlpha, options);
@@ -743,6 +749,18 @@ std::optional<SharedPreferencesForWebProcess> RemoteGraphicsContext::sharedPrefe
 {
     return m_renderingBackend->sharedPreferencesForWebProcess();
 }
+
+#if HAVE(IOSURFACE)
+bool RemoteGraphicsContext::useIOSurfaceWebKitBehavior() const
+{
+#if USE(APPLE_INTERNAL_SDK)
+    auto preferences = sharedPreferencesForWebProcess();
+    return preferences && preferences->useIOSurfaceWebKitBehavior;
+#else
+    return false;
+#endif
+}
+#endif
 
 } // namespace WebKit
 

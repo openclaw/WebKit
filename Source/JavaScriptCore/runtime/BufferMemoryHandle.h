@@ -193,8 +193,8 @@ public:
     }
 #endif
 
-    static size_t NODELETE fastMappedRedzoneBytes();
-    static size_t NODELETE fastMappedBytes();
+    static size_t LEGACY_NODELETE fastMappedRedzoneBytes();
+    static size_t LEGACY_NODELETE fastMappedBytes();
 
     static void* nullBasePointer();
 

@@ -64,7 +64,7 @@ namespace WebCore {
 // List of displays ever instantiated from EGL. When terminating all EGL resources, we need to
 // terminate all displays. However, we cannot ask EGL all the displays it has created.
 // We must know all the displays via this set.
-static HashSet<GCGLDisplay>& NODELETE usedDisplays()
+static HashSet<GCGLDisplay>& LEGACY_NODELETE usedDisplays()
 {
     static NeverDestroyed<HashSet<GCGLDisplay>> s_usedDisplays;
     return s_usedDisplays;
@@ -151,7 +151,7 @@ static constexpr SortedArrayMap extensionsMapping { WTF::toArray<std::pair<Compa
     { "GL_QCOM_render_shared_exponent"_s, GCGLExtension::QCOM_render_shared_exponent },
 }) };
 
-static ASCIILiteral NODELETE extensionName(GCGLExtension extension)
+static ASCIILiteral LEGACY_NODELETE extensionName(GCGLExtension extension)
 {
     size_t index = static_cast<size_t>(extension);
     std::span mapping { extensionsMapping.array() };
@@ -269,6 +269,9 @@ bool GraphicsContextGLANGLE::initialize()
     GL_DebugMessageControlKHR(DONT_CARE, DONT_CARE, DONT_CARE, 0, nullptr, 0);
     GL_DebugMessageControlKHR(DEBUG_SOURCE_API, DONT_CARE, DONT_CARE, 0, nullptr, 1);
     auto debugMessageCallback = [](GCGLenum, GCGLenum type, GCGLenum id, GCGLenum severity, GCGLsizei length, const GCGLchar* message, const void* context) {
+        // The context loss is reported with forceContextLost(), not as the errors of the calls after the loss.
+        if (type == DEBUG_TYPE_ERROR && id == CONTEXT_LOST)
+            return;
         auto* gl = reinterpret_cast<const GraphicsContextGLANGLE*>(context);
         if (gl->m_client)
             gl->m_client->addDebugMessage(type, id, severity, byteCast<char8_t>(unsafeMakeSpan(message, length)));
@@ -3183,7 +3186,13 @@ void GraphicsContextGLANGLE::simulateEventForTesting(SimulatedEventForTesting ev
 {
     switch (event) {
     case SimulatedEventForTesting::GPUStatusFailure:
+#if PLATFORM(COCOA)
+        // Lose the ANGLE context now, so that the context notices the failure like a real GPU reset.
+        if (makeContextCurrent() && enableExtensionsImpl({ "GL_CHROMIUM_lose_context"_s }))
+            GL_LoseContextCHROMIUM(GL_GUILTY_CONTEXT_RESET, GL_INNOCENT_CONTEXT_RESET);
+#else
         m_failNextStatusCheck = true;
+#endif
         return;
     case SimulatedEventForTesting::DisplayBufferAllocationFailure:
         m_failNextDrawingBufferAllocation = true;

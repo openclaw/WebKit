@@ -63,6 +63,7 @@
 #include <WebCore/ImageBufferDisplayListBackend.h>
 #include <WebCore/NullImageBufferBackend.h>
 #include <WebCore/RenderingResourceIdentifier.h>
+#include <wtf/Borrow.h>
 #include <wtf/CheckedArithmetic.h>
 #include <wtf/RunLoop.h>
 #include <wtf/StdLibExtras.h>
@@ -294,8 +295,7 @@ void RemoteRenderingBackend::sinkSnapshotRecorderIntoSnapshotFrame(RemoteSnapsho
     MESSAGE_CHECK(recorder, "Recorder sunk into snapshot before being cached");
     Ref snapshot = recorder->snapshot();
     // FIXME: using global identifiers (frameIdentifier) is not secure. Do not follow this pattern.
-    bool success = snapshot->setFrame(frameIdentifier, recorder->takeDisplayList(), workQueue());
-    MESSAGE_CHECK(success, "Frame already present");
+    snapshot->setFrame(frameIdentifier, recorder->takeDisplayList(), workQueue());
     completionHandler(true);
 }
 
@@ -334,7 +334,7 @@ static RefPtr<ImageBuffer> allocateImageBufferInternal(const FloatSize& logicalS
     return imageBuffer;
 }
 
-static void NODELETE adjustImageBufferRenderingMode(const RemoteSharedResourceCache& sharedResourceCache, RenderingPurpose purpose, RenderingMode& renderingMode)
+static void LEGACY_NODELETE adjustImageBufferRenderingMode(const RemoteSharedResourceCache& sharedResourceCache, RenderingPurpose purpose, RenderingMode& renderingMode)
 {
     if (renderingMode == RenderingMode::Accelerated && sharedResourceCache.reachedAcceleratedImageBufferLimit(purpose))
         renderingMode = RenderingMode::Unaccelerated;
@@ -353,6 +353,9 @@ RefPtr<ImageBuffer> RemoteRenderingBackend::allocateImageBuffer(const FloatSize&
     }
 
     adjustImageBufferCreationContext(m_sharedResourceCache, creationContext);
+#if HAVE(IOSURFACE) && USE(APPLE_INTERNAL_SDK)
+    creationContext.useIOSurfaceWebKitBehavior = m_sharedPreferencesForWebProcess.useIOSurfaceWebKitBehavior;
+#endif
 
     // Backing store the web process allocated is adopted as-is. Its geometry is
     // attacker-controlled, so the backends validate it against what was requested and
@@ -364,7 +367,7 @@ RefPtr<ImageBuffer> RemoteRenderingBackend::allocateImageBuffer(const FloatSize&
         switch (renderingMode) {
         case RenderingMode::Accelerated:
 #if HAVE(IOSURFACE)
-            if (auto backend = ImageBufferShareableMappedIOSurfaceBackend::create(parameters, WTF::move(*providedBackingStore)))
+            if (auto backend = ImageBufferShareableMappedIOSurfaceBackend::create(parameters, WTF::move(*providedBackingStore), creationContext.useIOSurfaceWebKitBehavior))
                 return ImageBuffer::create(parameters, creationContext, WTF::move(backend));
 #endif
             return nullptr;
@@ -649,7 +652,7 @@ void RemoteRenderingBackend::prepareImageBufferSetsForDisplay(Vector<ImageBuffer
         RefPtr<RemoteImageBufferSet> remoteImageBufferSet = m_remoteImageBufferSets.get(swapBuffersInput[i].remoteBufferSet);
         MESSAGE_CHECK(remoteImageBufferSet, "BufferSet is being updated before being created");
         SwapBuffersDisplayRequirement displayRequirement = SwapBuffersDisplayRequirement::NeedsNormalDisplay;
-        remoteImageBufferSet->ensureBufferForDisplay(swapBuffersInput[i], displayRequirement, false);
+        remoteImageBufferSet->ensureBufferForDisplay(borrow(swapBuffersInput)[i], displayRequirement, false);
 
         if (displayRequirement != SwapBuffersDisplayRequirement::NeedsNoDisplay)
             remoteImageBufferSet->prepareBufferForDisplay(swapBuffersInput[i].dirtyRegion, swapBuffersInput[i].requiresClearedPixels);
@@ -666,7 +669,7 @@ void RemoteRenderingBackend::prepareImageBufferSetsForDisplaySync(Vector<ImageBu
     for (unsigned i = 0; i < swapBuffersInput.size(); ++i) {
         RefPtr<RemoteImageBufferSet> remoteImageBufferSet = m_remoteImageBufferSets.get(swapBuffersInput[i].remoteBufferSet);
         MESSAGE_CHECK(remoteImageBufferSet, "BufferSet is being updated before being created");
-        remoteImageBufferSet->ensureBufferForDisplay(swapBuffersInput[i], outputData[i], true);
+        remoteImageBufferSet->ensureBufferForDisplay(borrow(swapBuffersInput)[i], borrow(outputData)[i], true);
     }
 
     completionHandler(WTF::move(outputData));

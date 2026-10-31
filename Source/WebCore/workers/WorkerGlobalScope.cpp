@@ -98,7 +98,7 @@ namespace WebCore {
 using namespace Inspector;
 
 static Lock allWorkerGlobalScopeIdentifiersLock;
-static HashSet<ScriptExecutionContextIdentifier>& NODELETE allWorkerGlobalScopeIdentifiers() WTF_REQUIRES_LOCK(allWorkerGlobalScopeIdentifiersLock)
+static HashSet<ScriptExecutionContextIdentifier>& LEGACY_NODELETE allWorkerGlobalScopeIdentifiers() WTF_REQUIRES_LOCK(allWorkerGlobalScopeIdentifiersLock)
 {
     static NeverDestroyed<HashSet<ScriptExecutionContextIdentifier>> identifiers;
     ASSERT(allWorkerGlobalScopeIdentifiersLock.isLocked());
@@ -121,6 +121,8 @@ WorkerGlobalScope::WorkerGlobalScope(WorkerThreadType type, const WorkerParamete
     , m_userAgent(params.userAgent)
     , m_isOnline(params.isOnline)
     , m_shouldBypassMainWorldContentSecurityPolicy(params.shouldBypassMainWorldContentSecurityPolicy)
+    , m_isSecureContext(params.isSecureContext == IsSecureContext::Yes)
+    , m_hasUnpartitionedStorageAccess(params.hasUnpartitionedStorageAccess)
     , m_topOrigin(WTF::move(topOrigin))
     , m_connectionProxy(connectionProxy)
     , m_socketProvider(socketProvider)
@@ -132,6 +134,7 @@ WorkerGlobalScope::WorkerGlobalScope(WorkerThreadType type, const WorkerParamete
     , m_credentials(params.credentials)
     , m_agentClusterID(params.agentClusterID)
     , m_networkLoadPolicy(params.networkLoadPolicy)
+    , m_canBeCrossOriginIsolated(params.canBeCrossOriginIsolated)
 {
     {
         Locker locker { allWorkerGlobalScopeIdentifiersLock };
@@ -147,6 +150,7 @@ WorkerGlobalScope::WorkerGlobalScope(WorkerThreadType type, const WorkerParamete
     setSecurityOriginPolicy(SecurityOriginPolicy::create(WTF::move(origin)));
     setContentSecurityPolicy(makeUnique<ContentSecurityPolicy>(URL { m_url }, *this));
     setCrossOriginEmbedderPolicy(params.crossOriginEmbedderPolicy);
+    setDocumentIsolationPolicy(params.documentIsolationPolicy);
 }
 
 WorkerGlobalScope::~WorkerGlobalScope()
@@ -206,7 +210,7 @@ bool WorkerGlobalScope::isSecureContext() const
     if (!settingsValues().secureContextChecksEnabled)
         return true;
 
-    return m_topOrigin->isPotentiallyTrustworthy();
+    return m_isSecureContext;
 }
 
 // https://html.spec.whatwg.org/multipage/webappapis.html#parse-a-url
@@ -475,8 +479,8 @@ ExceptionOr<void> WorkerGlobalScope::importScripts(const FixedVector<Variant<Ref
                 return { };
             }
         }
-        if (sourceProvider)
-            addImportedScriptSourceProvider(url, *sourceProvider);
+        if (RefPtr provider = sourceProvider)
+            addImportedScriptSourceProvider(url, *provider);
     }
 
     return { };
@@ -748,6 +752,8 @@ void WorkerGlobalScope::clearDecodedScriptData()
 
 bool WorkerGlobalScope::crossOriginIsolated() const
 {
+    if (documentIsolationPolicy().value != DocumentIsolationPolicyValue::None)
+        return m_canBeCrossOriginIsolated == CanBeCrossOriginIsolated::Yes;
     return crossOriginEmbedderPolicy().value == CrossOriginEmbedderPolicyValue::RequireCORP;
 }
 
@@ -776,7 +782,7 @@ void WorkerGlobalScope::updateServiceWorkerClientData()
 
     ASSERT(type() == WebCore::WorkerGlobalScope::Type::DedicatedWorker || type() == WebCore::WorkerGlobalScope::Type::SharedWorker);
     auto controllingServiceWorkerRegistrationIdentifier = activeServiceWorker() ? std::make_optional<ServiceWorkerRegistrationIdentifier>(activeServiceWorker()->registrationIdentifier()) : std::nullopt;
-    swClientConnection().registerServiceWorkerClient(clientOrigin(), ServiceWorkerClientData::from(*this), controllingServiceWorkerRegistrationIdentifier, String { m_userAgent });
+    swClientConnection().registerServiceWorkerClient(storageClientOrigin(), ServiceWorkerClientData::from(*this), controllingServiceWorkerRegistrationIdentifier, String { m_userAgent });
 }
 
 void WorkerGlobalScope::enqueueSecurityPolicyViolationEvent(SecurityPolicyViolationEventInit&& eventInit)
@@ -798,6 +804,8 @@ String WorkerGlobalScope::endpointURIForToken(const String& token) const
 
 void WorkerGlobalScope::sendReportToEndpoints(const URL&, std::span<const String> /*endpointURIs*/, std::span<const String> /*endpointTokens*/, Ref<FormData>&&, ViolationReportType)
 {
+    // FIXME: Parse Reporting-Endpoints for workers. A policy a worker inherits, such as Document-Isolation-Policy, names its owner's endpoints,
+    // which might need specification changes.
     notImplemented();
 }
 

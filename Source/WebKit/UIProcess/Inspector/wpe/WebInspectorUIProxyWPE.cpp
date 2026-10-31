@@ -127,8 +127,7 @@ RefPtr<WebPageProxy> WebInspectorUIProxy::platformCreateFrontendPage()
     preferences->setAcceleratedCompositingEnabled(true);
     preferences->setForceCompositingMode(true);
     preferences->setThreadedScrollingEnabled(true);
-    if (m_underTest)
-        preferences->setHiddenPageDOMTimerThrottlingEnabled(false);
+    preferences->setHiddenPageDOMTimerThrottlingEnabled(false);
 
     auto pageGroup = WebPageGroup::create(WebKit::defaultInspectorPageGroupIdentifierForPage(protect(inspectedPage()).get()));
     auto websiteDataStore = inspectorWebsiteDataStore();
@@ -244,7 +243,8 @@ static String computeContentHash(const String& content, bool base64Encoded)
             digest = GMallocString::unsafeAdoptFromUTF8(g_compute_checksum_for_data(G_CHECKSUM_SHA256, decoded->span().data(), decoded->size()));
     } else {
         auto utf8 = content.utf8();
-        digest = GMallocString::unsafeAdoptFromUTF8(g_compute_checksum_for_string(G_CHECKSUM_SHA256, utf8.legacyCStringPointer(), utf8.length()));
+        auto characters = byteCast<char>(utf8.span());
+        digest = GMallocString::unsafeAdoptFromUTF8(g_compute_checksum_for_string(G_CHECKSUM_SHA256, characters.data(), characters.size()));
     }
 
     return String::fromUTF8(digest.span());

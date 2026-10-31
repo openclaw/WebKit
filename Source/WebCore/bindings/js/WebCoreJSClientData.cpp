@@ -43,7 +43,6 @@
 #include "JSPaintWorkletGlobalScope.h"
 #include "JSQuotaExceededError.h"
 #include "JSServiceWorkerGlobalScope.h"
-#include "JSShadowRealmGlobalScope.h"
 #include "JSSharedWorkerGlobalScope.h"
 #include "JSWebTransportError.h"
 #include "JSWindowProxy.h"
@@ -72,6 +71,10 @@
 #include "JSOverconstrainedError.h"
 #endif
 
+#if ENABLE(WEB_AUTHN)
+#include "JSWebAuthnOperationException.h"
+#endif
+
 #if ENABLE(WEB_RTC)
 #include "JSRTCError.h"
 #endif
@@ -93,7 +96,6 @@ JSHeapData::JSHeapData(Heap& heap)
     , m_heapCellTypeForJSDedicatedWorkerGlobalScope(JSC::IsoHeapCellType::Args<JSDedicatedWorkerGlobalScope>())
     , m_heapCellTypeForJSWorkerGlobalScope(JSC::IsoHeapCellType::Args<JSWorkerGlobalScope>())
     , m_heapCellTypeForJSSharedWorkerGlobalScope(JSC::IsoHeapCellType::Args<JSSharedWorkerGlobalScope>())
-    , m_heapCellTypeForJSShadowRealmGlobalScope(JSC::IsoHeapCellType::Args<JSShadowRealmGlobalScope>())
     , m_heapCellTypeForJSServiceWorkerGlobalScope(JSC::IsoHeapCellType::Args<JSServiceWorkerGlobalScope>())
     , m_heapCellTypeForJSWorkletGlobalScope(JSC::IsoHeapCellType::Args<JSWorkletGlobalScope>())
     , m_heapCellTypeForJSPaintWorkletGlobalScope(JSC::IsoHeapCellType::Args<JSPaintWorkletGlobalScope>())
@@ -111,6 +113,9 @@ JSHeapData::JSHeapData(Heap& heap)
 #endif
     , m_heapCellTypeForJSGPUPipelineError(JSC::IsoHeapCellType::Args<JSGPUPipelineError>())
     , m_heapCellTypeForJSWebTransportError(JSC::IsoHeapCellType::Args<JSWebTransportError>())
+#if ENABLE(WEB_AUTHN)
+    , m_heapCellTypeForJSWebAuthnOperationException(JSC::IsoHeapCellType::Args<JSWebAuthnOperationException>())
+#endif
     , m_domBuiltinConstructorSpace ISO_SUBSPACE_INIT(heap, heap.cellHeapCellType, JSDOMBuiltinConstructorBase)
     , m_domConstructorSpace ISO_SUBSPACE_INIT(heap, heap.cellHeapCellType, JSDOMConstructorBase)
     , m_domNamespaceObjectSpace ISO_SUBSPACE_INIT(heap, heap.cellHeapCellType, JSDOMObject)
@@ -225,9 +230,9 @@ void JSVMClientData::initNormalWorld(VM* vm, WorkerThreadType type)
     vm->m_typedArrayController = adoptRef(new WebCoreTypedArrayController(type == WorkerThreadType::DedicatedWorker || type == WorkerThreadType::Worklet));
 }
 
-String unmaskedSourceURLFromException(const JSC::Exception& exception, JSC::VM& vm)
+String unmaskedSourceURLFromException(JSC::Exception& exception, JSC::VM& vm)
 {
-    for (auto& frame : exception.stack()) {
+    for (auto& frame : exception.stackForReporting(vm)) {
         String url = frame.sourceURL(vm, JSC::AllowURLOverride::No);
         if (!url.isEmpty() && url != "[native code]"_s)
             return url;

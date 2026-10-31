@@ -27,6 +27,7 @@
 
 #include <WebCore/Event.h>
 #include <WebCore/QuirksAccessors.h>
+#include <WebCore/QuirksData.h>
 #include <WebCore/RegistrableDomain.h>
 #include <WebCore/UserAgent.h>
 #include <optional>
@@ -61,6 +62,13 @@ namespace Style {
 class ComputedStyle;
 }
 
+enum class IsTopDocument : bool { No, Yes };
+
+WEBCORE_EXPORT QuirksData resolveSiteSpecificQuirks(const URL& topURL, const URL& documentURL, IsTopDocument);
+
+// For callers with no Document, which therefore only see top-URL quirks.
+WEBCORE_EXPORT QuirksData resolveTopURLQuirks(const URL&);
+
 class Quirks : public QuirksAccessors {
     WTF_MAKE_TZONE_ALLOCATED(Quirks);
     WTF_MAKE_NONCOPYABLE(Quirks);
@@ -68,15 +76,15 @@ public:
     Quirks(Document&);
     ~Quirks();
 
-    bool NODELETE hasRelevantQuirks() const;
+    bool LEGACY_NODELETE hasRelevantQuirks() const;
 
     bool shouldSilenceResizeObservers() const;
     bool shouldSilenceWindowResizeEventsDuringApplicationSnapshotting() const;
     bool shouldSilenceMediaQueryListChangeEvents() const;
-    bool shouldIgnoreInvalidSignal() const;
+    bool LEGACY_NODELETE shouldIgnoreInvalidSignal() const;
     bool needsAutoplayPlayPauseEvents() const;
     bool needsPerDocumentAutoplayBehavior() const;
-    bool hasBrokenEncryptedMediaAPISupportQuirk() const;
+    bool LEGACY_NODELETE hasBrokenEncryptedMediaAPISupportQuirk() const;
 
 #if ENABLE(TOUCH_EVENTS) || ENABLE(TOUCH_EVENT_REGIONS)
     bool shouldDispatchSimulatedMouseEvents(const EventTarget*) const;
@@ -85,26 +93,27 @@ public:
 #if ENABLE(TOUCH_EVENTS)
     bool shouldDispatchedSimulatedMouseEventsAssumeDefaultPrevented(EventTarget*) const;
 #endif
-    bool NODELETE needsDeferKeyDownAndKeyPressTimersUntilNextEditingCommand() const;
-    WEBCORE_EXPORT bool NODELETE inputMethodUsesCorrectKeyEventOrder() const;
+    bool LEGACY_NODELETE needsDeferKeyDownAndKeyPressTimersUntilNextEditingCommand() const;
+    WEBCORE_EXPORT bool LEGACY_NODELETE inputMethodUsesCorrectKeyEventOrder() const;
 
-    WEBCORE_EXPORT bool shouldDispatchSyntheticMouseEventsWhenModifyingSelection() const;
+    WEBCORE_EXPORT bool LEGACY_NODELETE shouldDispatchSyntheticMouseEventsWhenModifyingSelection() const;
     WEBCORE_EXPORT static bool shouldAllowNavigationToCustomProtocolWithoutUserGesture(StringView protocol, const SecurityOriginData& requesterOrigin);
 
-    WEBCORE_EXPORT bool NODELETE needsYouTubeMouseOutQuirk() const;
+    WEBCORE_EXPORT bool LEGACY_NODELETE needsYouTubeMouseOutQuirk() const;
 
-    WEBCORE_EXPORT bool needsCaptionMirroringQuirk() const;
+    WEBCORE_EXPORT bool LEGACY_NODELETE needsCaptionMirroringQuirk() const;
 
     WEBCORE_EXPORT static void updateStorageAccessUserAgentStringQuirks(HashMap<RegistrableDomain, String>&&);
     WEBCORE_EXPORT String storageAccessUserAgentStringQuirkForDomain(const URL&);
-    WEBCORE_EXPORT static bool NODELETE needsDesktopUserAgent(const URL&);
+    WEBCORE_EXPORT static bool LEGACY_NODELETE needsDesktopUserAgent(const URL&);
     WEBCORE_EXPORT static std::optional<String> needsCustomUserAgentOverride(const URL&, const String& applicationNameForUserAgent, const String& currentUserAgent);
 
     WEBCORE_EXPORT static bool needsPartitionedCookies(const ResourceRequest&);
+    WEBCORE_EXPORT static bool shouldExemptCookieFromITPDataRemoval(const String& cookieName);
 
-    WEBCORE_EXPORT static std::optional<Vector<HashSet<String>>> NODELETE defaultVisibilityAdjustmentSelectors(const URL&);
+    WEBCORE_EXPORT static std::optional<Vector<HashSet<String>>> LEGACY_NODELETE defaultVisibilityAdjustmentSelectors(const URL&);
 
-    WEBCORE_EXPORT bool static NODELETE shouldDisableBlobFileAccessEnforcement();
+    WEBCORE_EXPORT bool static LEGACY_NODELETE shouldDisableBlobFileAccessEnforcement();
 
     bool shouldAllowMixedContentConnectionToLoopback(const URL&);
 
@@ -115,9 +124,9 @@ public:
     static bool shouldMakeEventListenerPassive(const EventTarget&, const EventTypeInfo&);
 
     Ref<NodeList> applyFacebookFlagQuirk(Document&, NodeList&);
-    bool shouldEnableRTCEncodedStreamsQuirk() const;
+    bool LEGACY_NODELETE shouldEnableRTCEncodedStreamsQuirk() const;
 
-    bool shouldNotAutoUpgradeToHTTPSNavigation(const URL&);
+    bool LEGACY_NODELETE shouldNotAutoUpgradeToHTTPSNavigation(const URL&);
 
     enum StorageAccessResult : bool { ShouldNotCancelEvent, ShouldCancelEvent };
     enum ShouldDispatchClick : bool { No, Yes };
@@ -136,12 +145,12 @@ public:
 
     WEBCORE_EXPORT Vector<String> activeQuirks() const;
 
-    bool shouldEnableFontLoadingAPIQuirk() const;
+    bool LEGACY_NODELETE shouldEnableFontLoadingAPIQuirk() const;
 
     bool shouldDisableScrollAnchoringQuirk() const;
 
     void setNeedsConfigurableIndexedPropertiesQuirk() { m_needsConfigurableIndexedPropertiesQuirk = true; }
-    bool needsConfigurableIndexedPropertiesQuirk() const;
+    bool LEGACY_NODELETE needsConfigurableIndexedPropertiesQuirk() const;
 
     // webkit.org/b/259091.
     bool needsToCopyUserSelectNoneQuirk() const { return m_needsToCopyUserSelectNoneQuirk; }
@@ -167,7 +176,7 @@ public:
     bool needsClaudeSidebarViewportUnitQuirk(Element&, const Style::ComputedStyle&) const;
     bool needsChromeOSNavigatorUserAgentQuirk(const Document&) const;
 
-    WEBCORE_EXPORT bool shouldAvoidStartingSelectionOnMouseDownOverPointerCursor(const Node&) const;
+    WEBCORE_EXPORT bool LEGACY_NODELETE shouldAvoidStartingSelectionOnMouseDownOverPointerCursor(const Node&) const;
 
     bool needsFacebookStoriesCreationFormQuirk(const Element&, const Style::ComputedStyle&) const;
 
@@ -181,6 +190,7 @@ public:
     void clearLogoutSurvivingIdentityCookiesIfNeeded(const URL& fetchURL, int httpStatusCode);
 
     void determineRelevantQuirks();
+    void urlsDidChange();
     void logQuirksToConsoleIfNecessary() const;
 
 private:
@@ -192,18 +202,19 @@ private:
     mutable QuirkBitSet m_probedQuirks;
 
     template<typename Probe>
-    bool isBehaviorEnabledAfterProbing(const QuirkBehavior& quirk, NOESCAPE const Probe& probe) const
+    bool isBehaviorEnabledAfterProbing(QuirkBehaviorID id, NOESCAPE const Probe& probe) const
     {
-        auto index = static_cast<size_t>(quirk.id);
+        auto index = static_cast<size_t>(id);
         if (!m_probedQuirks.get(index)) {
             m_probedQuirks.set(index);
-            m_quirksData.setEnabled(quirk, probe());
+            m_quirksData.setEnabled(id, probe());
         }
-        return m_quirksData.isBehaviorEnabled(quirk.id);
+        return m_quirksData.isBehaviorEnabled(id);
     }
 
     bool m_needsConfigurableIndexedPropertiesQuirk { false };
     bool m_needsToCopyUserSelectNoneQuirk { false };
+    bool m_didApplyFacebookFlagQuirk { false };
 
     Vector<RegistrableDomain> m_subFrameDomainsForStorageAccessQuirk;
     URL m_topDocumentURLForTesting;

@@ -46,6 +46,7 @@
 
 namespace WebCore {
 
+class BitmapImage;
 class BlobCallback;
 class CanvasRenderingContext;
 class CanvasRenderingContext2D;
@@ -80,14 +81,16 @@ public:
     WEBCORE_EXPORT ExceptionOr<void> setWidth(unsigned);
     WEBCORE_EXPORT ExceptionOr<void> setHeight(unsigned);
 
-    const AtomString& canvasContentForBindings() const;
+    const AtomString& LEGACY_NODELETE canvasContentForBindings() const;
     CanvasContent canvasContent() const;
+    bool hasDrawableContent() const;
 
     void requestPaint();
     void dispatchPaintEvent();
+    void drawableElementDidChange(Element&);
 
-    ExceptionOr<Ref<CanvasElementImage>> captureElementImage(Element&);
-    std::optional<CanvasElementSnapshot> drawableElementSnapshot(Element&) const;
+    std::optional<CanvasElementSnapshot> canvasDrawableSnapshot(Element&) const;
+    ExceptionOr<Ref<CanvasElementImage>> captureElementImage(Element&) const;
 
     ExceptionOr<void> updateElementGeometry(const CanvasElementImageSource&, std::optional<UpdateElementGeometryOptions>);
     ExceptionOr<void> clearElementGeometry(const CanvasElementImageSource&);
@@ -139,20 +142,21 @@ public:
 
     std::unique_ptr<CSSParserContext> createCSSParserContext() const final;
 
-    Image* copiedImage() const;
+    BitmapImage* copiedImage() const;
     RefPtr<ImageData> getImageData();
 
     SecurityOrigin* securityOrigin() const final;
 
     bool needsPreparationForDisplay();
     void prepareForDisplay();
+    bool usesContentsAsLayerContents() const;
     void dynamicRangeLimitDidChange(PlatformDynamicRangeLimit);
     WEBCORE_EXPORT std::optional<double> getContextEffectiveDynamicRangeLimitValue() const;
 
     void setIsSnapshotting(bool isSnapshotting) { m_isSnapshotting = isSnapshotting; }
     bool isSnapshotting() const { return m_isSnapshotting; }
 
-    bool NODELETE isControlledByOffscreen() const;
+    bool LEGACY_NODELETE isControlledByOffscreen() const;
 
     void queueTaskKeepingObjectAlive(TaskSource, Function<void(CanvasBase&)>&&) final;
     void dispatchEvent(Event&) final;
@@ -187,13 +191,9 @@ private:
 
     void didUpdateSizeProperties();
 
-    bool usesContentsAsLayerContents() const;
-
     ScriptExecutionContext* canvasBaseScriptExecutionContext() const final { return HTMLElement::scriptExecutionContext(); }
 
     void didMoveToNewDocument(Document& oldDocument, Document& newDocument) final;
-
-    std::optional<FloatRect> computeDirtyRectangleIfNeeded(const std::optional<FloatRect>&) const;
 
     bool m_ignoreDidUpdateSizeProperties { false };
 #if ENABLE(WEBGL)
@@ -202,11 +202,12 @@ private:
     bool m_isSnapshotting { false };
 
     std::unique_ptr<CanvasRenderingContext> m_context;
+    WeakHashSet<Element, WeakPtrImplWithEventTargetData> m_changedDrawableElements;
     PlatformDynamicRangeLimit m_dynamicRangeLimit { PlatformDynamicRangeLimit::initialValue() };
-    mutable RefPtr<Image> m_copiedImage; // For CSSCanvasValue.
+    mutable RefPtr<BitmapImage> m_copiedImage; // For CSSCanvasValue.
 };
 
-WebCoreOpaqueRoot root(HTMLCanvasElement*);
+WebCoreOpaqueRoot LEGACY_NODELETE root(HTMLCanvasElement*);
 
 } // namespace WebCore
 

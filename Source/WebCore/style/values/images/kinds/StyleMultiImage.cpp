@@ -125,13 +125,6 @@ bool MultiImage::hasDecodedImage() const
     return m_selectedImage && protect(m_selectedImage)->hasDecodedImage();
 }
 
-FloatSize MultiImage::imageSize(const RenderElement* renderer, float multiplier, WebCore::CachedImage::SizeType sizeType) const
-{
-    if (!m_selectedImage)
-        return { };
-    return protect(m_selectedImage)->imageSize(renderer, multiplier, sizeType);
-}
-
 NaturalDimensions MultiImage::naturalDimensions(const RenderElement& renderer, const ImageSizingContext& context) const
 {
     if (!m_selectedImage)
@@ -144,13 +137,6 @@ ImageDrawingExtras MultiImage::drawingExtrasForRenderer(const RenderElement& ren
     if (!m_selectedImage)
         return { };
     return protect(m_selectedImage)->drawingExtrasForRenderer(renderer);
-}
-
-void MultiImage::setContainerSizeForRenderer(const RenderElement& renderer, const FloatSize& containerSize)
-{
-    if (!m_selectedImage)
-        return;
-    protect(m_selectedImage)->setContainerSizeForRenderer(renderer, containerSize);
 }
 
 void MultiImage::addClient(RenderElement& renderer)
@@ -174,28 +160,28 @@ bool MultiImage::hasClient(RenderElement& renderer) const
     return protect(m_selectedImage)->hasClient(renderer);
 }
 
-ImageDrawResult MultiImage::draw(GraphicsContext& context, const RenderElement& renderer, ConcreteObjectSize concreteObjectSize, const FloatRect& destination, const FloatRect& source, ImagePaintingOptions options, bool isForFirstLine) const
+ImageDrawResult MultiImage::draw(GraphicsContext& context, const RenderElement& renderer, ConcreteObjectSize concreteObjectSize, const FloatRect& destination, const FloatRect& source, ImageDrawingOptions options, bool isForFirstLine) const
 {
     if (!m_selectedImage)
         return ImageDrawResult::DidNothing;
     return protect(m_selectedImage)->draw(context, renderer, concreteObjectSize, destination, source, options, isForFirstLine);
 }
 
-ImageDrawResult MultiImage::drawAsPattern(GraphicsContext& context, const RenderElement& renderer, ConcreteObjectSize concreteObjectSize, const FloatRect& destination, const FloatRect& tile, const AffineTransform& patternTransform, const FloatPoint& phase, const FloatSize& spacing, ImagePaintingOptions options, bool isForFirstLine) const
+ImageDrawResult MultiImage::drawAsPattern(GraphicsContext& context, const RenderElement& renderer, ConcreteObjectSize concreteObjectSize, const FloatRect& destination, const FloatRect& tile, const AffineTransform& patternTransform, const FloatPoint& phase, const FloatSize& spacing, ImageDrawingOptions options, bool isForFirstLine) const
 {
     if (!m_selectedImage)
         return ImageDrawResult::DidNothing;
     return protect(m_selectedImage)->drawAsPattern(context, renderer, concreteObjectSize, destination, tile, patternTransform, phase, spacing, options, isForFirstLine);
 }
 
-ImageDrawResult MultiImage::drawTiled(GraphicsContext& context, const RenderElement& renderer, ConcreteObjectSize concreteObjectSize, const FloatRect& destination, const FloatPoint& phase, const FloatSize& tileSize, const FloatSize& spacing, ImagePaintingOptions options, bool isForFirstLine) const
+ImageDrawResult MultiImage::drawTiled(GraphicsContext& context, const RenderElement& renderer, ConcreteObjectSize concreteObjectSize, const FloatRect& destination, const FloatPoint& phase, const FloatSize& tileSize, const FloatSize& spacing, ImageDrawingOptions options, bool isForFirstLine) const
 {
     if (!m_selectedImage)
         return ImageDrawResult::DidNothing;
     return protect(m_selectedImage)->drawTiled(context, renderer, concreteObjectSize, destination, phase, tileSize, spacing, options, isForFirstLine);
 }
 
-ImageDrawResult MultiImage::drawNinePiece(GraphicsContext& context, const RenderElement& renderer, ConcreteObjectSize concreteObjectSize, const NinePieceGeometry& geometry, ImagePaintingOptions options) const
+ImageDrawResult MultiImage::drawNinePiece(GraphicsContext& context, const RenderElement& renderer, ConcreteObjectSize concreteObjectSize, const NinePieceGeometry& geometry, ImageDrawingOptions options) const
 {
     if (!m_selectedImage)
         return ImageDrawResult::DidNothing;
@@ -227,6 +213,16 @@ bool MultiImage::canDraw(const RenderElement& renderer) const
 bool MultiImage::canDrawAtSize(const RenderElement& renderer, const FloatSize& size) const
 {
     return m_selectedImage && protect(m_selectedImage)->canDrawAtSize(renderer, size);
+}
+
+RefPtr<NativeImage> MultiImage::nativeImage(const RenderElement& renderer, ConcreteObjectSize concreteObjectSize, float resolutionScale, ImageDrawingOptions options) const
+{
+    return m_selectedImage ? protect(m_selectedImage)->nativeImage(renderer, concreteObjectSize, resolutionScale, options) : nullptr;
+}
+
+std::optional<IntPoint> MultiImage::hotSpot() const
+{
+    return m_selectedImage ? protect(m_selectedImage)->hotSpot() : std::nullopt;
 }
 
 bool MultiImage::drawsSVGImage() const
@@ -265,11 +261,23 @@ DecodingMode MultiImage::decodingModeForImageDraw(const RenderBoxModelObject& re
     return protect(m_selectedImage)->decodingModeForImageDraw(renderer, paintInfo);
 }
 
-InterpolationQuality MultiImage::interpolationQualityForImageDraw(GraphicsContext& context, const RenderElement& renderer, const void* layer, const LayoutSize& size) const
+InterpolationQuality MultiImage::interpolationQualityForImageDraw(GraphicsContext& context, const RenderElement& renderer, ConcreteObjectSize concreteObjectSize, const void* layer, const LayoutSize& size) const
 {
     if (!m_selectedImage)
-        return Image::interpolationQualityForImageDraw(context, renderer, layer, size);
-    return protect(m_selectedImage)->interpolationQualityForImageDraw(context, renderer, layer, size);
+        return Image::interpolationQualityForImageDraw(context, renderer, concreteObjectSize, layer, size);
+    return protect(m_selectedImage)->interpolationQualityForImageDraw(context, renderer, concreteObjectSize, layer, size);
+}
+
+FloatRect MultiImage::mapChangedRectToSource(const RenderElement& renderer, ConcreteObjectSize concreteObjectSize, const FloatRect& changedRect) const
+{
+    if (!m_selectedImage)
+        return Image::mapChangedRectToSource(renderer, concreteObjectSize, changedRect);
+    return protect(m_selectedImage)->mapChangedRectToSource(renderer, concreteObjectSize, changedRect);
+}
+
+bool MultiImage::containsCurrentColor() const
+{
+    return m_selectedImage && protect(m_selectedImage)->containsCurrentColor();
 }
 
 } // namespace Style

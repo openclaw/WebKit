@@ -30,10 +30,10 @@
 
 #import "AudioUtilities.h"
 #import "DeprecatedGlobalSettings.h"
-#import "ImageAdapter.h"
 #import "Logging.h"
 #import "MediaPlayer.h"
 #import "MediaStrategy.h"
+#import "NativeImageCocoa.h"
 #import "NowPlayingInfo.h"
 #import "Page.h"
 #import "PlatformMediaSession.h"
@@ -328,8 +328,8 @@ void MediaSessionManagerCocoa::sessionWillEndPlayback(PlatformMediaSessionInterf
     PlatformMediaSessionManager::sessionWillEndPlayback(session, delayCallingUpdateNowPlaying);
 
     enqueueTaskOnMainThread([weakSession = WeakPtr { session }] {
-        if (weakSession)
-            weakSession->updateMediaUsageIfChanged();
+        if (RefPtr session = weakSession)
+            session->updateMediaUsageIfChanged();
     });
 
     if (delayCallingUpdateNowPlaying == DelayCallingUpdateNowPlaying::No)
@@ -461,12 +461,14 @@ void MediaSessionManagerCocoa::setNowPlayingInfo(bool setAsNowPlayingApplication
         auto cfCurrentTime = adoptCF(CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &nowPlayingInfo.currentTime));
         CFDictionarySetValue(info.get(), kMRMediaRemoteNowPlayingInfoElapsedTime, cfCurrentTime.get());
     }
-    RetainPtr tiffImage = nowPlayingInfo.metadata.artwork && nowPlayingInfo.metadata.artwork->image ? Ref { *nowPlayingInfo.metadata.artwork->image }->adapter().tiffRepresentation() : nullptr;
+    RefPtr artworkImage = nowPlayingInfo.metadata.artwork ? nowPlayingInfo.metadata.artwork->image : nullptr;
+    RetainPtr tiffImage = artworkImage ? tiffRepresentation(*artworkImage) : nullptr;
     if (tiffImage) {
         CFDictionarySetValue(info.get(), kMRMediaRemoteNowPlayingInfoArtworkData, tiffImage.get());
         CFDictionarySetValue(info.get(), kMRMediaRemoteNowPlayingInfoArtworkMIMEType, @"image/tiff");
-        CFDictionarySetValue(info.get(), kMRMediaRemoteNowPlayingInfoArtworkDataWidth, [NSNumber numberWithFloat:Ref { *nowPlayingInfo.metadata.artwork->image }->width()]);
-        CFDictionarySetValue(info.get(), kMRMediaRemoteNowPlayingInfoArtworkDataHeight, [NSNumber numberWithFloat:Ref { *nowPlayingInfo.metadata.artwork->image }->height()]);
+        auto artworkSize = artworkImage->size();
+        CFDictionarySetValue(info.get(), kMRMediaRemoteNowPlayingInfoArtworkDataWidth, @(artworkSize.width()));
+        CFDictionarySetValue(info.get(), kMRMediaRemoteNowPlayingInfoArtworkDataHeight, @(artworkSize.height()));
         CFDictionarySetValue(info.get(), kMRMediaRemoteNowPlayingInfoArtworkIdentifier, String::number(nowPlayingInfo.metadata.artwork->src.hash()).createCFString().get());
     }
 

@@ -638,33 +638,6 @@
     "imported/w3c/web-platform-tests/audio-output/setSinkId-manual.https.html": [
         "slow"
     ],
-    "imported/w3c/web-platform-tests/beacon/beacon-basic-blob.html": [
-        "slow"
-    ],
-    "imported/w3c/web-platform-tests/beacon/beacon-basic-blobMax.html": [
-        "slow"
-    ],
-    "imported/w3c/web-platform-tests/beacon/beacon-basic-buffersource.html": [
-        "slow"
-    ],
-    "imported/w3c/web-platform-tests/beacon/beacon-basic-buffersourceMax.html": [
-        "slow"
-    ],
-    "imported/w3c/web-platform-tests/beacon/beacon-basic-formdata.html": [
-        "slow"
-    ],
-    "imported/w3c/web-platform-tests/beacon/beacon-basic-formdataMax.html": [
-        "slow"
-    ],
-    "imported/w3c/web-platform-tests/beacon/beacon-basic-string.html": [
-        "slow"
-    ],
-    "imported/w3c/web-platform-tests/beacon/beacon-basic-stringMax.html": [
-        "slow"
-    ],
-    "imported/w3c/web-platform-tests/beacon/beacon-navigate.html": [
-        "slow"
-    ],
     "imported/w3c/web-platform-tests/clipboard-apis/async-idlharness.https.html": [
         "slow"
     ],
@@ -2999,6 +2972,9 @@
     "imported/w3c/web-platform-tests/focus/activeelement-after-calling-window-focus.sub.html": [
         "slow"
     ],
+    "imported/w3c/web-platform-tests/fullscreen/api/keyboard-lock-cross-origin-iframe.sub.html": [
+        "slow"
+    ],
     "imported/w3c/web-platform-tests/geolocation/enabled-by-permission-policy-attribute-redirect-on-load.https.sub.html": [
         "slow"
     ],
@@ -3491,6 +3467,12 @@
     "imported/w3c/web-platform-tests/html/cross-origin-opener-policy/tentative/noopener/coop-noopener-allow-popups-restrict-properties.https.html": [
         "slow"
     ],
+    "imported/w3c/web-platform-tests/html/document-isolation-policy/agent-cluster.tentative.https.html": [
+        "slow"
+    ],
+    "imported/w3c/web-platform-tests/html/document-isolation-policy/header-parsing.tentative.https.html": [
+        "slow"
+    ],
     "imported/w3c/web-platform-tests/html/document-isolation-policy/isolate-and-require-corp.tentative.https.html": [
         "slow"
     ],
@@ -3660,6 +3642,15 @@
         "slow"
     ],
     "imported/w3c/web-platform-tests/html/dom/render-blocking/element-render-blocking-041.html": [
+        "slow"
+    ],
+    "imported/w3c/web-platform-tests/html/dom/render-blocking/element-render-blocking-form-stack-removal.html": [
+        "slow"
+    ],
+    "imported/w3c/web-platform-tests/html/dom/render-blocking/element-render-blocking-insert-named-anchor.html": [
+        "slow"
+    ],
+    "imported/w3c/web-platform-tests/html/dom/render-blocking/element-render-blocking-top-of-document.html": [
         "slow"
     ],
     "imported/w3c/web-platform-tests/html/editing/the-hidden-attribute/beforematch-scroll-to-text-fragment.html": [
@@ -4230,6 +4221,9 @@
         "slow"
     ],
     "imported/w3c/web-platform-tests/html/semantics/scripting-1/the-script-element/script-not-executed-after-shutdown.html": [
+        "slow"
+    ],
+    "imported/w3c/web-platform-tests/html/semantics/scripting-1/the-template-element/reflect-html-for.html": [
         "slow"
     ],
     "imported/w3c/web-platform-tests/html/semantics/tabular-data/processing-model-1/span-limits.html": [

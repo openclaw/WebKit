@@ -128,6 +128,7 @@ inspector/canvas/setShaderProgramHighlighted-webgpu.html [ Skip ]
 inspector/canvas/shaderProgram-add-remove-webgpu.html [ Skip ]
 inspector/canvas/updateShader-webgpu.html [ Skip ]
 inspector/canvas/worker-webgpu.html [ Skip ]
+inspector/worker/webgpu-device-uncapturederror-terminate-crash.html [ Skip ]
 
 # QUOTA is disabled
 fast/workers/worker-storagequota-query-usage.html [ Skip ]
@@ -218,6 +219,7 @@ webkit.org/b/86914 fast/history/page-cache-running-audiocontext.html [ Skip ]
 webkit.org/b/86914 fast/history/page-cache-suspended-audiocontext.html [ Skip ]
 webkit.org/b/86914 media/W3C/audio [ Skip ]
 webaudio [ Skip ]
+imported/w3c/web-platform-tests/webidl/ecmascript-binding/es-exceptions/DOMException-audioworklet.https.html [ Skip ]
 
 # WEB_RTC is disabled
 webrtc [ Skip ]
@@ -362,6 +364,9 @@ fast/text/softbank-emoji.html [ Skip ]
 # This requires a specific font on Mac
 fast/text/hidpi-text-selection-gap-between-words.html [ Skip ]
 
+# text-spacing-trim does not use half-width fonts for punctuation.
+webkit.org/b/281333 fast/text/text-spacing-trim-width-cache.html [ Failure ]
+
 # This test relies on iOS-specific font fallback.
 fast/text/arabic-blocked-fonts.html [ Pass ImageOnlyFailure ]
 
@@ -396,6 +401,7 @@ fast/events/wheel/platform-wheelevent-paging-y-in-scrolling-page.html [ Skip ]
 fast/harness/platform-layer-tree-as-text.html [ Skip ]
 
 # OffscreenCanvas isn't supported yet
+fast/canvas/canvas-font-attributes-state.html [ Skip ]
 fast/canvas/offscreen-backing-store-attached.html [ Skip ]
 fast/canvas/offscreen-border.html [ Skip ]
 fast/canvas/offscreen-clipped.html [ Skip ]
@@ -410,6 +416,12 @@ fast/canvas/offscreen-visibility-change.html [ Skip ]
 fast/canvas/offscreencanvas-in-dedicated-worker-readback.html [ Skip ]
 fast/canvas/offscreencanvas-in-shared-worker-readback.html [ Skip ]
 fast/images/protected-image-queue.html [ Skip ]
+http/tests/canvas/canvas-2d-accelerated-in-dedicated-worker.html [ Skip ]
+http/tests/canvas/canvas-2d-accelerated-in-main-thread.html [ Skip ]
+http/tests/canvas/canvas-2d-accelerated-in-service-worker-separate-process.html [ Skip ]
+http/tests/canvas/canvas-2d-accelerated-in-service-worker.html [ Skip ]
+http/tests/canvas/canvas-2d-accelerated-in-shared-worker-separate-process.html [ Skip ]
+http/tests/canvas/canvas-2d-accelerated-in-shared-worker.html [ Skip ]
 http/wpt/service-workers/offscreencanvas-in-separate-service-worker-process-cpu-fallback.https.html [ Skip ]
 http/wpt/service-workers/offscreencanvas-in-separate-service-worker-process.https.html [ Skip ]
 webgl/2.0.y/conformance/offscreencanvas/context-lost-restored.html [ Skip ]
@@ -704,7 +716,6 @@ webkit.org/b/214673 js/weakref-finalizationregistry.html [ Skip ] # Timeout Pass
 
 webkit.org/b/129758 js/dom/create-lots-of-workers.html [ Skip ]
 
-webkit.org/b/253868 js/ShadowRealm-iframe-detach.html [ Timeout Pass ]
 
 js/throw-large-string-oom.html [ Skip ] # Pass Timeout
 
@@ -1060,12 +1071,24 @@ webkit.org/b/209455 http/wpt/misc/no-last-modified.html [ Failure Pass ]
 http/tests/cookies/document-cookie-multiple-cookies.html [ Failure ]
 http/tests/misc/form-post-textplain-cross-site.html [ Failure ]
 http/tests/misc/form-post-textplain.html [ Failure ]
-http/tests/misc/gamepads-insecure.html [ Failure ]
+http/wpt/gamepad/getGamepads-insecure-context.html [ Failure ]
 http/tests/misc/large-js-program.py [ Skip ] # Timeout
 http/wpt/fetch/response-opaque-clone.html [ Skip ]
 http/wpt/fetch/response-status-text.html [ Failure Slow ]
+webkit.org/b/295047 http/wpt/fetch/local-network-access/a-forged-client-is-judged-by-what-the-network-process-served.html [ Skip ]
 webkit.org/b/295047 http/wpt/fetch/local-network-access/navigating-a-frame-is-checked-against-the-initiator.html [ Skip ]
 webkit.org/b/295047 http/wpt/fetch/local-network-access/prompt-records-the-answer.html [ Skip ]
+webkit.org/b/295047 imported/w3c/web-platform-tests/fetch/local-network-access/dedicated-worker.tentative.https.html [ Skip ]
+webkit.org/b/295047 imported/w3c/web-platform-tests/fetch/local-network-access/fetch.tentative.https.html [ Skip ]
+webkit.org/b/295047 imported/w3c/web-platform-tests/fetch/local-network-access/iframe-opener.tentative.https.html [ Skip ]
+webkit.org/b/295047 imported/w3c/web-platform-tests/fetch/local-network-access/iframe.tentative.https.window.html [ Skip ]
+webkit.org/b/295047 imported/w3c/web-platform-tests/fetch/local-network-access/navigate.tentative.https.window.html [ Skip ]
+webkit.org/b/295047 imported/w3c/web-platform-tests/fetch/local-network-access/navigate.tentative.window.html [ Skip ]
+webkit.org/b/295047 imported/w3c/web-platform-tests/fetch/local-network-access/service-worker-background-fetch.tentative.https.html [ Skip ]
+webkit.org/b/295047 imported/w3c/web-platform-tests/fetch/local-network-access/service-worker.tentative.https.html [ Skip ]
+webkit.org/b/295047 imported/w3c/web-platform-tests/fetch/local-network-access/shared-worker.tentative.https.html [ Skip ]
+webkit.org/b/295047 imported/w3c/web-platform-tests/fetch/local-network-access/websocket.tentative.https.html [ Skip ]
+webkit.org/b/295047 imported/w3c/web-platform-tests/fetch/local-network-access/webtransport.tentative.https.html [ Skip ]
 
 
 http/tests/lists/list-new-parent-no-sibling-append.html [ Failure ]
@@ -2707,7 +2730,6 @@ compositing/transitions/scale-transition-no-start.html [ Skip ]
 compositing/transitions/singular-scale-transition.html [ Skip ]
 compositing/visibility/visibility-image-layers-dynamic-composited.html [ Skip ]
 compositing/webgl/webgl-background-color.html [ Skip ]
-compositing/webgl/webgl-nonpremultiplied-blend.html [ Skip ]
 compositing/webgl/webgl-reflection.html [ Skip ]
 css1 [ Skip ]
 css2.1 [ Skip ]
@@ -4503,6 +4525,9 @@ fast/html/history-action-user-activation.html [ Skip ]
 http/tests/inspector/network/resource-timing.html [ Pass Failure ]
 http/tests/inspector/target/pause-on-inline-debugger-statement.html [ Skip ]
 
+# Needs implementing the paint event of the drawable element
+fast/canvas/draw-element-image [ Skip ]
+
 fast/canvas/image-buffer-backend-variants.html [ Skip ]
 
 fast/box-shadow/box-shadow-radius.html [ Failure ]
@@ -4815,11 +4840,18 @@ imported/w3c/web-platform-tests/largest-contentful-paint/repeated-image.html [ P
 # Consistent image failures, in every run. These are all reftests, so they cannot be
 # rebaselined; corner-shape is not applied through the composited path on Windows.
 compositing/corner-shape-ancestor-clip.html [ ImageOnlyFailure ]
+compositing/corner-shape-ancestor-clip-nested-rect-clip.html [ ImageOnlyFailure ]
 compositing/corner-shape-mask-layer-offset.html [ ImageOnlyFailure ]
 http/tests/canvas/canvas-tainted-image-capture-video-frame.html [ ImageOnlyFailure ]
 imported/w3c/web-platform-tests/css/css-borders/corner-shape/corner-shape-bevel-overflow-composite.html [ ImageOnlyFailure ]
 imported/w3c/web-platform-tests/css/css-borders/corner-shape/corner-shape-notch-mixed.html [ ImageOnlyFailure ]
 imported/w3c/web-platform-tests/css/css-borders/corner-shape/corner-shape-superellipse-negative-100.html [ ImageOnlyFailure ]
+
+# Windows WK2 release crashes while parsing some invalid corner shorthand declarations.
+# Skip until the shared parser is corrected in 326108.
+webkit.org/b/327293 imported/w3c/web-platform-tests/css/css-borders/corner-shape/corner-invalid.html [ Skip ]
+webkit.org/b/327293 imported/w3c/web-platform-tests/css/css-borders/corner-shape/corner-top-invalid.html [ Skip ]
+webkit.org/b/327293 imported/w3c/web-platform-tests/css/css-borders/corner-shape/corner-top-left-invalid.html [ Skip ]
 
 # Consistent text failures, in every run
 compositing/geometry/composited-bounds-single-axis-clip-taller-than-document.html [ Failure ]
@@ -4939,9 +4971,6 @@ imported/w3c/web-platform-tests/largest-contentful-paint/observe-svg-data-uri-im
 # Consistent text failures, in every run
 fast/forms/select/listbox-multiple-shift-click-with-optgroup.html [ Failure ]
 
-# Consistent image failures, in every run
-compositing/filters/filter-source-outside-viewport.html [ ImageOnlyFailure ]
-
 # Flaky crashes
 webkit.org/b/326177 workers/weblock-manager-query-crash.html [ Skip ] # Flaky Crash
 
@@ -4960,6 +4989,11 @@ imported/w3c/web-platform-tests/largest-contentful-paint/redirects-tao-star.html
 imported/w3c/web-platform-tests/largest-contentful-paint/same-origin-redirects.html [ Pass Failure ]
 imported/w3c/web-platform-tests/largest-contentful-paint/video-poster.html [ Pass Failure ]
 webgl/2.0.y/conformance/rendering/triangle.html [ Pass Failure ]
+
+# New failures on Win-Tests-EWS, 2026-10-21
+webkit.org/b/328270 http/tests/IndexedDB/transaction-abort-pending-requests-stop.html [ Failure ]
+webkit.org/b/328270 http/tests/IndexedDB/transaction-commit-pending-requests-stop.html [ Failure ]
+webkit.org/b/328271 fast/events/suspend-timers.html [ Skip ] # Timeout
 
 # GPU process crashes in WebGL tests. A webgl directory entry here overrides
 # the webgl entries of LayoutTests/TestExpectations, so these are restated below with Crash.

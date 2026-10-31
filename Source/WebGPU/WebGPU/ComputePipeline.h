@@ -37,8 +37,6 @@
 #import <wtf/TZoneMalloc.h>
 #import <wtf/WeakPtr.h>
 
-struct WGPUComputePipelineImpl {
-};
 
 namespace WebGPU::Metal {
 
@@ -47,7 +45,7 @@ class Device;
 class PipelineLayout;
 
 // https://gpuweb.github.io/gpuweb/#gpucomputepipeline
-class ComputePipeline final : public WebGPU::ComputePipeline, public WGPUComputePipelineImpl {
+class ComputePipeline final : public WebGPU::ComputePipeline {
     WTF_MAKE_TZONE_ALLOCATED(ComputePipeline);
 public:
     static Ref<ComputePipeline> create(id<MTLComputePipelineState> computePipelineState, Ref<PipelineLayout>&& pipelineLayout, MTLSize threadsPerThreadgroup, BufferBindingSizesForPipeline&& minimumBufferSizes, uint64_t uniqueId, Device& device)
@@ -61,8 +59,8 @@ public:
 
     ~ComputePipeline();
 
-    Ref<BindGroupLayout> getBindGroupLayout(uint32_t groupIndex);
-    void NODELETE setLabel(String&&) final;
+    Ref<WebGPU::BindGroupLayout> getBindGroupLayout(uint32_t groupIndex) final;
+    void LEGACY_NODELETE setLabel(String&&) final;
 
     bool isValid() const final { return m_computePipelineState && m_pipelineLayout->isValid(); }
 
@@ -73,7 +71,7 @@ public:
 
     PipelineLayout& pipelineLayout() const { return m_pipelineLayout; }
 
-    const BufferBindingSizesForBindGroup* NODELETE minimumBufferSizes(uint32_t) const;
+    const BufferBindingSizesForBindGroup* LEGACY_NODELETE minimumBufferSizes(uint32_t) const;
     uint64_t uniqueId() const { return m_uniqueId; }
 private:
     ComputePipeline(id<MTLComputePipelineState>, Ref<PipelineLayout>&&, MTLSize, BufferBindingSizesForPipeline&&, uint64_t uniqueId, Device&);

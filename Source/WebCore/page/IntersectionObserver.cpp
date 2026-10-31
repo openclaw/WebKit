@@ -51,7 +51,6 @@
 #include "RenderAncestorIterator.h"
 #include "RenderBlock.h"
 #include "RenderBoxInlines.h"
-#include "RenderInline.h"
 #include "RenderObjectInlines.h"
 #include "RenderSVGRoot.h"
 #include "RenderView.h"
@@ -505,8 +504,10 @@ auto IntersectionObserver::computeIntersectionState(const IntersectionObserverRe
     auto rootLocalIntersectionRect = intersectionState.rootBounds;
     intersectionState.isIntersecting = rootRelativeTargetRect && rootLocalIntersectionRect.edgeInclusiveIntersect(*rootRelativeTargetRect);
 
-    if (isFirstObservation || intersectionState.isIntersecting)
-        intersectionState.absoluteTargetRect = targetRenderer->localToAbsoluteQuad(FloatRect(localTargetBounds)).boundingBox();
+    if (isFirstObservation || intersectionState.isIntersecting) {
+        // FIXME: Remove suppression once rdar://189998444 is fixed.
+        SUPPRESS_MEMORY_UNSAFE_CAST intersectionState.absoluteTargetRect = targetRenderer->localToAbsoluteQuad(FloatRect(localTargetBounds)).boundingBox();
+    }
 
     auto rootLocalToAbsoluteRect = [&] (FloatRect rect) {
         if (rootRenderer)
@@ -515,17 +516,13 @@ auto IntersectionObserver::computeIntersectionState(const IntersectionObserverRe
         // The below codepath is specific to implicit root, where the root is the main frame.
         ASSERT(!root());
 
-        // When page scale is > 1 (e.g by pinch-to-zoom), a scale transform is applied on the
-        // main frame's RenderView in Style::resolveForDocument(). Therefore we have to apply
-        // this transform to the local coordinate to turn it into absolute.
+        // When page scale is > 1 (e.g by pinch-to-zoom), a scale transform of frameScaleFactor() is
+        // applied on the main frame's RenderView in Style::resolveForDocument(). Therefore we have to
+        // apply this transform to the local coordinate to turn it into absolute.
         // This is identical to calling localToAbsoluteQuad() on the main frame's RenderView,
-        // as it'll apply the same transform.
-        // Not applicable on iOS family as they apply page scale differently.
-        // FIXME: replace the platform ifdef with something else.
-#if !PLATFORM(IOS_FAMILY)
-        if (RefPtr hostPage = hostFrameView.frame().page())
-            rect.scale(hostPage->pageScaleFactor());
-#endif
+        // as it'll apply the same transform. frameScaleFactor() is 1 when page scale is delegated
+        // to the UI process, in which case no transform is applied.
+        rect.scale(protect(hostFrameView.frame())->frameScaleFactor());
 
         return rect;
     };
@@ -537,7 +534,7 @@ auto IntersectionObserver::computeIntersectionState(const IntersectionObserverRe
             intersectionState.absoluteIntersectionRect = rootAbsoluteIntersectionRect;
         else {
             auto rootViewIntersectionRect = hostFrameView.contentsToView(rootAbsoluteIntersectionRect);
-            intersectionState.absoluteIntersectionRect = targetRenderer->view().frameView().rootViewToContentsAcrossIsolatedFrames(rootViewIntersectionRect);
+            intersectionState.absoluteIntersectionRect = protect(targetRenderer->view().frameView())->rootViewToContentsAcrossIsolatedFrames(rootViewIntersectionRect);
         }
 
         intersectionState.isIntersecting = intersectionState.absoluteIntersectionRect->edgeInclusiveIntersect(*intersectionState.absoluteTargetRect);
@@ -564,8 +561,10 @@ auto IntersectionObserver::computeIntersectionState(const IntersectionObserverRe
     if (intersectionState.observationChanged) {
         intersectionState.absoluteRootBounds = rootLocalToAbsoluteRect(intersectionState.rootBounds);
 
-        if (!intersectionState.absoluteTargetRect)
-            intersectionState.absoluteTargetRect = targetRenderer->localToAbsoluteQuad(FloatRect(localTargetBounds)).boundingBox();
+        if (!intersectionState.absoluteTargetRect) {
+            // FIXME: Remove suppression once rdar://189998444 is fixed.
+            SUPPRESS_MEMORY_UNSAFE_CAST intersectionState.absoluteTargetRect = targetRenderer->localToAbsoluteQuad(FloatRect(localTargetBounds)).boundingBox();
+        }
     }
 
     return intersectionState;
@@ -747,12 +746,12 @@ bool IntersectionObserver::isReachableFromOpaqueRoots(JSC::AbstractSlotVisitor& 
     }
 
     for (auto& target : m_pendingTargets) {
-        if (containsWebCoreOpaqueRoot(visitor, target.get()))
+        SUPPRESS_UNCOUNTED_ARG SUPPRESS_UNCHECKED_ARG if (containsWebCoreOpaqueRoot(visitor, target.get()))
             return true;
     }
 
     for (auto& target : m_targetsWaitingForFirstObservation) {
-        if (containsWebCoreOpaqueRoot(visitor, target.get()))
+        SUPPRESS_UNCOUNTED_ARG SUPPRESS_UNCHECKED_ARG if (containsWebCoreOpaqueRoot(visitor, target.get()))
             return true;
     }
 

@@ -80,12 +80,15 @@ inline ComputedStyleBase::ComputedStyleBase(CreateDefaultStyleTag)
     m_nonInheritedFlags.useTreeCountingFunctions = false;
     m_nonInheritedFlags.hasExplicitlyInheritedProperties = false;
     m_nonInheritedFlags.disallowsFastPathInheritance = false;
+    m_nonInheritedFlags.hasZeroEffectiveBorderWidths = true;
+    m_nonInheritedFlags.hasZeroPadding = true;
     m_nonInheritedFlags.firstChildState = false;
     m_nonInheritedFlags.lastChildState = false;
     m_nonInheritedFlags.isLink = false;
     m_nonInheritedFlags.pseudoElementType = 0;
     m_nonInheritedFlags.pseudoBits = 0;
     m_nonInheritedFlags.pseudoElementBoxGeneration = std::to_underlying(PseudoElementBoxGeneration::Normal);
+    m_nonInheritedFlags.useSVGZoomRulesForLength = false;
 
     static_assert((sizeof(InheritedFlags) <= 8), "InheritedFlags does not grow");
     static_assert((sizeof(NonInheritedFlags) <= 12), "NonInheritedFlags does not grow");
@@ -130,6 +133,8 @@ inline void ComputedStyleBase::NonInheritedFlags::copyNonInheritedFrom(const Non
     useTreeCountingFunctions = other.useTreeCountingFunctions;
     hasExplicitlyInheritedProperties = other.hasExplicitlyInheritedProperties;
     disallowsFastPathInheritance = other.disallowsFastPathInheritance;
+    hasZeroEffectiveBorderWidths = other.hasZeroEffectiveBorderWidths;
+    hasZeroPadding = other.hasZeroPadding;
 }
 
 } // namespace Style

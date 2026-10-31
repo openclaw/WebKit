@@ -99,7 +99,7 @@ public:
     void setCSPResponseHeaders(WebCore::ContentSecurityPolicyResponseHeaders&& headers) { m_cspResponseHeaders = WTF::move(headers); }
     void setParentCrossOriginEmbedderPolicy(const WebCore::CrossOriginEmbedderPolicy& parentCrossOriginEmbedderPolicy) { m_parentCrossOriginEmbedderPolicy = parentCrossOriginEmbedderPolicy; }
     void setCrossOriginEmbedderPolicy(const WebCore::CrossOriginEmbedderPolicy& crossOriginEmbedderPolicy) { m_crossOriginEmbedderPolicy = crossOriginEmbedderPolicy; }
-    void setDocumentIsolationPolicy(WebCore::DocumentIsolationPolicy documentIsolationPolicy) { m_documentIsolationPolicy = documentIsolationPolicy; }
+    void setDocumentIsolationPolicy(const WebCore::DocumentIsolationPolicy& documentIsolationPolicy) { m_documentIsolationPolicy = documentIsolationPolicy; }
 #if ENABLE(CONTENT_EXTENSIONS)
     void setContentExtensionController(URL&& mainDocumentURL, URL&& frameURL, std::optional<UserContentControllerIdentifier> identifier)
     {
@@ -132,7 +132,7 @@ private:
     NetworkLoadChecker(NetworkProcess&, NetworkResourceLoader*, NetworkSchemeRegistry*, WebCore::FetchOptions&&, PAL::SessionID, std::optional<WebPageProxyIdentifier>, WebCore::HTTPHeaderMap&&, URL&&, DocumentURL&&,  RefPtr<WebCore::SecurityOrigin>&&, RefPtr<WebCore::SecurityOrigin>&& topOrigin, RefPtr<WebCore::SecurityOrigin>&& parentOrigin, WebCore::PreflightPolicy, String&& referrer, bool allowPrivacyProxy, OptionSet<WebCore::AdvancedPrivacyProtections>, bool shouldCaptureExtraNetworkLoadMetrics, LoadType requestLoadType);
 
     WebCore::ContentSecurityPolicy* contentSecurityPolicy();
-    const WebCore::OriginAccessPatterns& NODELETE originAccessPatterns() const;
+    const WebCore::OriginAccessPatterns& LEGACY_NODELETE originAccessPatterns() const;
     bool isSameOrigin(const URL&, const WebCore::SecurityOrigin*) const;
     bool isChecking() const { return !!m_corsPreflightChecker; }
     bool isRedirected() const { return m_redirectCount; }
@@ -185,7 +185,7 @@ private:
     std::optional<WebCore::ContentSecurityPolicyResponseHeaders> m_cspResponseHeaders;
     WebCore::CrossOriginEmbedderPolicy m_parentCrossOriginEmbedderPolicy;
     WebCore::CrossOriginEmbedderPolicy m_crossOriginEmbedderPolicy;
-    WebCore::DocumentIsolationPolicy m_documentIsolationPolicy { WebCore::DocumentIsolationPolicy::None };
+    WebCore::DocumentIsolationPolicy m_documentIsolationPolicy;
 #if ENABLE(CONTENT_EXTENSIONS)
     URL m_mainDocumentURL;
     URL m_frameURL;

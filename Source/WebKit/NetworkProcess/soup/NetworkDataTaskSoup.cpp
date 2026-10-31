@@ -39,6 +39,7 @@
 #include "WebErrors.h"
 #include "WebKitDirectoryInputStream.h"
 #include <WebCore/AuthenticationChallenge.h>
+#include <WebCore/DNS.h>
 #include <WebCore/HTTPParsers.h>
 #include <WebCore/HTTPStatusCodes.h>
 #include <WebCore/MIMETypeRegistry.h>
@@ -62,7 +63,7 @@ using namespace WebCore;
 static const size_t gDefaultReadBufferSize = 8192;
 
 NetworkDataTaskSoup::NetworkDataTaskSoup(NetworkSession& session, NetworkDataTaskClient& client, const NetworkLoadParameters& parameters)
-    : NetworkDataTask(session, client, parameters.request, parameters.storedCredentialsPolicy, parameters.shouldClearReferrerOnHTTPSToHTTPRedirect, parameters.isMainFrameNavigation, parameters.isInitiatedByDedicatedWorker)
+    : NetworkDataTask(session, client, parameters.request, parameters.storedCredentialsPolicy, parameters.shouldClearReferrerOnHTTPSToHTTPRedirect, parameters.isMainFrameNavigation, parameters.isInitiatedByWorker)
     , m_frameID(parameters.webFrameID)
     , m_webPageProxyID(parameters.webPageProxyID)
     , m_shouldContentSniff(parameters.contentSniffingPolicy)
@@ -186,7 +187,7 @@ void NetworkDataTaskSoup::createRequest(ResourceRequest&& request, WasBlockingCo
     // the dictionary itself only if the server answers with dcb or dcz.
     if (m_compressionDictionary && m_compressionDictionary->match) {
         auto& match = *m_compressionDictionary->match;
-        GRefPtr<GBytes> hash = adoptGRef(g_bytes_new(match.hash.data(), match.hash.size()));
+        GRefPtr hash = gBytesNew(std::span { match.hash });
         soup_message_set_compression_dictionary_hash(m_soupMessage.get(), hash.get());
         auto dictionaryID = match.id.utf8();
         soup_message_set_compression_dictionary_id(m_soupMessage.get(), match.id.isEmpty() ? nullptr : dictionaryID.legacyCStringPointer());
@@ -425,12 +426,7 @@ enum class ShouldStartHTTPRedirection {
 
 static ShouldStartHTTPRedirection shouldStartHTTPRedirection(const WebCore::ResourceResponse& response)
 {
-    auto status = response.httpStatusCode();
-    if (!SOUP_STATUS_IS_REDIRECTION(status))
-        return ShouldStartHTTPRedirection::No;
-
-    // Some 3xx status codes aren't actually redirects.
-    if (status == 300 || status == 304 || status == 305 || status == 306)
+    if (!response.isRedirection())
         return ShouldStartHTTPRedirection::No;
 
     auto location = response.httpHeaderField(HTTPHeaderName::Location);
@@ -442,9 +438,35 @@ static ShouldStartHTTPRedirection shouldStartHTTPRedirection(const WebCore::Reso
     return ShouldStartHTTPRedirection::Yes;
 }
 
+static std::optional<IPAddress> remoteIPAddress(SoupMessage* message)
+{
+    auto* address = soup_message_get_remote_address(message);
+    if (!G_IS_INET_SOCKET_ADDRESS(address))
+        return std::nullopt;
+    auto* inetAddress = g_inet_socket_address_get_address(G_INET_SOCKET_ADDRESS(address));
+    switch (g_inet_address_get_family(inetAddress)) {
+    case G_SOCKET_FAMILY_IPV4: {
+        struct in_addr ipv4Address;
+        memcpySpan(asMutableByteSpan(ipv4Address), unsafeMakeSpan(g_inet_address_to_bytes(inetAddress), g_inet_address_get_native_size(inetAddress)));
+        return IPAddress(ipv4Address);
+    }
+    case G_SOCKET_FAMILY_IPV6: {
+        struct in6_addr ipv6Address;
+        memcpySpan(asMutableByteSpan(ipv6Address), unsafeMakeSpan(g_inet_address_to_bytes(inetAddress), g_inet_address_get_native_size(inetAddress)));
+        return IPAddress(ipv6Address);
+    }
+    case G_SOCKET_FAMILY_INVALID:
+    case G_SOCKET_FAMILY_UNIX:
+        break;
+    }
+    return std::nullopt;
+}
+
 void NetworkDataTaskSoup::didSendRequest(GRefPtr<GInputStream>&& inputStream)
 {
     m_response = ResourceResponse(m_soupMessage.get(), m_sniffedContentType);
+    if (CheckedPtr session = networkSession())
+        m_response.setIPAddressSpace(session->classifyConnectionAddressSpace(remoteIPAddress(m_soupMessage.get()), m_response.url()));
 
     switch (shouldStartHTTPRedirection(m_response)) {
     case ShouldStartHTTPRedirection::Yes:
@@ -908,8 +930,7 @@ void NetworkDataTaskSoup::continueHTTPRedirection()
         // be recomputed for the new URL. https://fetch.spec.whatwg.org/#http-network-compression-dictionary-fetch
         if (m_compressionDictionary) {
             m_compressionDictionary->match = std::nullopt;
-            if (m_session && request.url().protocolIsInHTTPFamily() && shouldTreatAsPotentiallyTrustworthy(request.url())
-                && !shouldBlockCookies(request, wasBlockingCookies)) {
+            if (m_session && request.url().protocolIs("https"_s) && !shouldBlockCookies(request, wasBlockingCookies)) {
                 if (RefPtr cache = m_session->cache()) {
                     if (auto match = cache->bestCompressionDictionaryMatch(request, m_compressionDictionary->destination))
                         m_compressionDictionary->match = CompressionDictionaryParameters::Match { match->key, match->hash, match->id };

@@ -1763,7 +1763,7 @@ void genericTestCompare(
 }
 
 template<typename InputType>
-InputType NODELETE modelCompare(B3::Opcode opcode, InputType left, InputType right)
+InputType LEGACY_NODELETE modelCompare(B3::Opcode opcode, InputType left, InputType right)
 {
     switch (opcode) {
     case Equal:
@@ -2425,7 +2425,11 @@ void testForcedSpillCalleeOnStack()
     // use of the scratch register.
     // https://bugs.webkit.org/show_bug.cgi?id=170672
 
-    Procedure proc;
+    // Force the greedy register allocator to spill everything.
+    Policy policy = Policy::fromProcessOptions();
+    policy.air.registers.spillsEverything = true;
+
+    Procedure proc(policy);
     BasicBlock* root = proc.addBlock();
     auto arguments = cCallArgumentValues<intptr_t, intptr_t>(proc, root);
 
@@ -2436,14 +2440,8 @@ void testForcedSpillCalleeOnStack()
             arguments[0],
             arguments[1]));
 
-    // Force the greedy register allocator to spill everything.
-    auto original = Options::airGreedyRegAllocSpillsEverything();
-    Options::airGreedyRegAllocSpillsEverything() = true;
-
     auto code = compileProc(proc);
     CHECK_EQ(invoke<int>(*code, 41, 1), 42);
-
-    Options::airGreedyRegAllocSpillsEverything() = original;
 }
 
 void testChillDiv(int num, int den, int res)
@@ -2941,6 +2939,68 @@ void testSwitchTargettingSameBlockFoldPathConstant()
 
     for (unsigned i = 0; i < 20; ++i) {
         int32_t expected = (i == 3 || i == 13) ? i : 42;
+        CHECK_EQ(invoke<int32_t>(*code, i), expected);
+    }
+}
+
+void testBranchOnPhiOfTakenComparesFoldPathConstant()
+{
+    // Models `if (x === 36 || x === 95)`: each compare's taken edge feeds the compare itself to a Phi
+    // that is branched on again.
+    Procedure proc;
+    BasicBlock* root = proc.addBlock();
+    BasicBlock* firstTaken = proc.addBlock();
+    BasicBlock* secondCompare = proc.addBlock();
+    BasicBlock* secondTaken = proc.addBlock();
+    BasicBlock* join = proc.addBlock();
+    BasicBlock* matched = proc.addBlock();
+    BasicBlock* unmatched = proc.addBlock();
+
+    auto arguments = cCallArgumentValues<int32_t>(proc, root);
+    Value* argument = arguments[0];
+    Value* firstEqual = root->appendNew<Value>(proc, Equal, Origin(), argument, root->appendNew<Const32Value>(proc, Origin(), 36));
+    root->setSuccessors(FrequentedBlock(firstTaken), FrequentedBlock(secondCompare));
+    root->appendNew<Value>(proc, Branch, Origin(), firstEqual);
+
+    Value* phi = join->appendNew<Value>(proc, Phi, Int32, Origin());
+
+    UpsilonValue* firstUpsilon = firstTaken->appendNew<UpsilonValue>(proc, Origin(), firstEqual);
+    firstUpsilon->setPhi(phi);
+    firstTaken->setSuccessors(FrequentedBlock(join));
+    firstTaken->appendNew<Value>(proc, Jump, Origin());
+
+    Value* secondEqual = secondCompare->appendNew<Value>(proc, Equal, Origin(), argument, secondCompare->appendNew<Const32Value>(proc, Origin(), 95));
+    secondCompare->setSuccessors(FrequentedBlock(secondTaken), FrequentedBlock(unmatched));
+    secondCompare->appendNew<Value>(proc, Branch, Origin(), secondEqual);
+
+    UpsilonValue* secondUpsilon = secondTaken->appendNew<UpsilonValue>(proc, Origin(), secondEqual);
+    secondUpsilon->setPhi(phi);
+    secondTaken->setSuccessors(FrequentedBlock(join));
+    secondTaken->appendNew<Value>(proc, Jump, Origin());
+
+    // Large enough that duplicateTails does not copy the join into its predecessors.
+    Value* incremented = join->appendNew<Value>(proc, Add, Origin(), argument, join->appendNew<Const32Value>(proc, Origin(), 1));
+    Value* squared = join->appendNew<Value>(proc, Mul, Origin(), incremented, incremented);
+    Value* result = join->appendNew<Value>(proc, Add, Origin(), squared, join->appendNew<Const32Value>(proc, Origin(), 7));
+    join->setSuccessors(FrequentedBlock(matched), FrequentedBlock(unmatched));
+    join->appendNew<Value>(proc, Branch, Origin(), phi);
+
+    matched->clearSuccessors();
+    matched->appendNew<Value>(proc, Return, Origin(), result);
+    unmatched->clearSuccessors();
+    unmatched->appendNew<Value>(proc, Return, Origin(), unmatched->appendNew<Const32Value>(proc, Origin(), 5));
+
+    auto code = compileProc(proc);
+
+    if (proc.optLevel() >= 2) {
+        if (isARM64())
+            checkDoesNotUseInstruction(*code, "cset");
+        if (isX86())
+            checkDoesNotUseInstruction(*code, "sete");
+    }
+
+    for (int32_t i : { 0, 35, 36, 37, 94, 95, 96, -36 }) {
+        int32_t expected = (i == 36 || i == 95) ? (i + 1) * (i + 1) + 7 : 5;
         CHECK_EQ(invoke<int32_t>(*code, i), expected);
     }
 }

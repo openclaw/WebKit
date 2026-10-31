@@ -62,7 +62,6 @@
 #include "RenderMultiColumnFlow.h"
 #include "RenderMultiColumnSet.h"
 #include "RenderMultiColumnSpannerPlaceholder.h"
-#include "RenderQuote.h"
 #include "RenderSVGRoot.h"
 #include "RenderTreeBuilder.h"
 #include "RenderWidget.h"
@@ -178,7 +177,7 @@ bool RenderView::isChildAllowed(const RenderObject& child, const Style::Computed
 void RenderView::layout()
 {
     StackStats::LayoutCheckPoint layoutCheckPoint;
-    if (!protect(document())->paginated())
+    if (!document().paginated())
         m_pageLogicalSize = { };
 
     if (shouldUsePrintingLayout()) {
@@ -388,7 +387,7 @@ RenderElement* RenderView::rendererForRootBackground() const
 static inline bool rendererObscuresBackground(const RenderElement& rootElement)
 {
     auto& style = rootElement.style();
-    if (style.usedVisibility() != Visibility::Visible || !style.opacity().isOpaque() || !style.transform().isNone() || !style.offsetPath().isNone())
+    if (rootElement.usedStyle().visibility() != UsedVisibility::Visible || !style.opacity().isOpaque() || !style.transform().isNone() || !style.offsetPath().isNone())
         return false;
 
     if (style.border().hasBorderRadius())
@@ -496,7 +495,7 @@ void RenderView::repaintRootContents()
     // If the root is not composited, repainting this RenderView should repaint it and
     // its background. But if it's composited, then the background doesn't get repainted
     // unless we explicitly repaint its layers.
-    if (RefPtr rootElement = protect(document())->documentElement()) {
+    if (RefPtr rootElement = document().documentElement()) {
         if (CheckedPtr rootRenderer = dynamicDowncast<RenderLayerModelObject>(rootElement->renderer())) {
             // Only repaint if its has its own backing. Otherwise, it paints into its
             // ancestor layer (this RenderView), which we're repainting anyway.
@@ -526,7 +525,10 @@ static LayoutRect mapRepaintRectToOwnerCoordinates(LayoutRect rect, const Render
     Ref frameView = renderView.frameView();
     rect.moveBy(-renderView.viewRect().location());
     rect.scale(frameView->frameScaleFactor());
-    rect.moveBy(ownerRenderer.contentBoxRect().location());
+    if (auto* ownerWidget = dynamicDowncast<RenderWidget>(ownerRenderer))
+        rect.moveBy(ownerWidget->widgetContentLocation());
+    else
+        rect.moveBy(ownerRenderer.contentBoxRect().location());
     if (frameView->verticalScrollbar() && frameView->shouldPlaceVerticalScrollbarOnLeft())
         rect.move(LayoutSize(protect(frameView->verticalScrollbar())->occupiedWidth(), 0));
     return rect;
@@ -653,7 +655,7 @@ auto RenderView::computeVisibleRectsInContainer(const RepaintRects& rects, const
 
     // Apply our transform if we have one (because of full page zooming).
     if (!container && hasLayer() && layer()->transform())
-        adjustedRects.transform(*layer()->transform(), protect(document())->deviceScaleFactor());
+        adjustedRects.transform(*layer()->transform(), document().deviceScaleFactor());
 
     return adjustedRects;
 }
@@ -1013,7 +1015,7 @@ void RenderView::resumePausedImageAnimationsIfNeeded(const IntRect& visibleRect)
 }
 
 #if ENABLE(ACCESSIBILITY_ANIMATION_CONTROL)
-static SVGSVGElement* NODELETE svgSvgElementFrom(RenderElement& renderElement)
+static SVGSVGElement* LEGACY_NODELETE svgSvgElementFrom(RenderElement& renderElement)
 {
     if (auto* svgSvgElement = dynamicDowncast<SVGSVGElement>(renderElement.element()))
         return svgSvgElement;

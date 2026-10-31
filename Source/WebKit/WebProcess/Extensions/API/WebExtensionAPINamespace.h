@@ -90,7 +90,7 @@ public:
     WebExtensionAPIAction& pageAction() { return action(); }
     WebExtensionAPIPermissions& permissions();
 #endif
-    WebExtensionAPIRuntime& runtime() const final;
+    WebExtensionAPIRuntime& runtime() final;
 #if PLATFORM(COCOA)
     WebExtensionAPIScripting& scripting();
 #if ENABLE(WK_WEB_EXTENSIONS_SIDEBAR)
@@ -100,7 +100,9 @@ public:
 #if ENABLE(WK_WEB_EXTENSIONS_BOOKMARKS)
     WebExtensionAPIBookmarks& bookmarks();
 #endif
+#endif
     WebExtensionAPIStorage& storage();
+#if PLATFORM(COCOA)
     WebExtensionAPITabs& tabs();
 #endif
     WebExtensionAPITest& test();

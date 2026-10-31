@@ -1,2 +1,2 @@
-[ iOS ] mac/WebInspector/WebNodeHighlight.mm
-[ iOS ] mac/WebView/WebHTMLView.mm
+[ iOS ] ios/WebCoreSupport/WebChromeClientIOS.mm
+[ iOS ] mac/WebView/WebFrame.mm

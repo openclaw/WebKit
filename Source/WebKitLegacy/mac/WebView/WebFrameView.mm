@@ -124,6 +124,11 @@ enum {
 
 @end
 
+@interface WebFrameView () {
+    RetainPtr<WebFrameViewPrivate> _private;
+}
+@end
+
 @implementation WebFrameView (WebFrameViewFileInternal)
 
 - (float)_verticalKeyboardScrollDistance
@@ -278,7 +283,8 @@ enum {
 
 + (Class)_viewClassForMIMEType:(NSString *)MIMEType allowingPlugins:(BOOL)allowPlugins
 {
-    Class viewClass;
+    // Out-parameter; classes are never deallocated.
+    SUPPRESS_UNRETAINED_LOCAL Class viewClass;
     return [WebView _viewClass:&viewClass andRepresentationClass:nil forMIMEType:MIMEType allowingPlugins:allowPlugins] ? viewClass : nil;
 }
 
@@ -360,7 +366,7 @@ enum {
 #endif
     }
 
-    _private = [[WebFrameViewPrivate alloc] init];
+    _private = adoptNS([[WebFrameViewPrivate alloc] init]);
 
     auto scrollView = adoptNS([[WebDynamicScrollBarsView alloc] initWithFrame:NSMakeRect(0.0f, 0.0f, frame.size.width, frame.size.height)]);
     _private->frameScrollView = scrollView;
@@ -388,9 +394,7 @@ enum {
 {
     if (_private && _private->includedInWebKitStatistics)
         --WebFrameViewCount;
-    
-    // Retaining the member just to release it would be pointless.
-    SUPPRESS_UNRETAINED_ARG [_private release];
+
     _private = nil;
     
     [super dealloc];

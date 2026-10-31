@@ -375,7 +375,7 @@ void main() {
 
     std::string result =
         std::string("'") + longName +
-        std::string("' : identifiers beginning with `_` must be < 1022 characters");
+        std::string("' : identifiers beginning with `_` must be <= 1022 characters");
 
     validateError(GL_FRAGMENT_SHADER, shader.c_str(), result.c_str());
 }
@@ -392,7 +392,7 @@ void main() {
 
     std::string result =
         std::string("'") + longName +
-        std::string("' : identifiers beginning with `_` must be < 1022 characters");
+        std::string("' : identifiers beginning with `_` must be <= 1022 characters");
 
     validateError(GL_FRAGMENT_SHADER, shader.c_str(), result.c_str());
 }
@@ -407,11 +407,7 @@ void main() {
   float )" + longName + R"( = 1.0;
 })";
 
-    std::string result =
-        std::string("'") + longName +
-        std::string("' : identifiers beginning with `_` must be < 1022 characters");
-
-    validateError(GL_FRAGMENT_SHADER, shader.c_str(), result.c_str());
+    validateSuccess(GL_FRAGMENT_SHADER, shader.c_str());
 }
 // https://crbug.com/499176133
 TEST_P(GLSLValidationTest, LongIdentifierAtLimit_1021)
@@ -3218,6 +3214,35 @@ TEST_P(WebGL2GLSLValidationTest, LargeStructConstructorOnly)
     fs << "}\n";
 
     validateError(GL_FRAGMENT_SHADER, fs.str().c_str(),
+                  "'' : Size of declared private variable exceeds implementation-defined limit");
+}
+
+// Validate that implicitly sized array constructor with excessive size cannot bypass variable
+// size checks.
+TEST_P(WebGL2GLSLValidationTest, ImplicitlySizedArrayConstructorExcessiveSize)
+{
+    constexpr char kFS[] = R"(#version 300 es
+precision highp float;
+out vec4 color;
+uniform int elementIndex;
+struct S { mat4 m[512]; };
+void main() {
+    S a;
+    S b;
+    float x = S[](
+        a, b, a, b, a, b, a, b, a, b, a, b, a, b, a, b,
+        a, b, a, b, a, b, a, b, a, b, a, b, a, b, a, b,
+        a, b, a, b, a, b, a, b, a, b, a, b, a, b, a, b,
+        a, b, a, b, a, b, a, b, a, b, a, b, a, b, a, b,
+        a, b, a, b, a, b, a, b, a, b, a, b, a, b, a, b,
+        a, b, a, b, a, b, a, b, a, b, a, b, a, b, a, b,
+        a, b, a, b, a, b, a, b, a, b, a, b, a, b, a, b,
+        a, b, a, b, a, b, a, b, a, b, a, b, a, b, a, b
+    )[elementIndex].m[0][0][0];
+    color = vec4(x);
+})";
+
+    validateError(GL_FRAGMENT_SHADER, kFS,
                   "'' : Size of declared private variable exceeds implementation-defined limit");
 }
 
@@ -10224,14 +10249,14 @@ class GLSLValidationTest_ES3_LimitOutputVaryings : public GLSLValidationTest_ES3
 {};
 
 // Regression test for crbug.com/529991907.
-// Verify that compiling a shader with up to 1024 output varying components
-// succeeds, and exceeding 1024 components is rejected at compile time.
+// Verify that compiling a shader with up to 256 output varying components
+// succeeds, and exceeding 256 components is rejected at compile time.
 TEST_P(GLSLValidationTest_ES3_LimitOutputVaryings, TooManyDeclaredVertexOutputComponents)
 {
     ANGLE_SKIP_TEST_IF(
         !getEGLWindow()->isFeatureEnabled(Feature::LimitOutputVaryingsTo256AtCompileTime));
 
-    constexpr int kMaxVectors = 1024 / 4;
+    constexpr int kMaxVectors = 256 / 4;
 
     std::stringstream vsValid;
     vsValid << "#version 300 es\n";

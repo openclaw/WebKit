@@ -394,6 +394,62 @@ TEST(WTF_WeakPtr, DerivedConstructAndAssignConst)
     }
 }
 
+class WeakPtrCastBase : public RefCounted<WeakPtrCastBase>, public CanMakeWeakPtr<WeakPtrCastBase> {
+public:
+    static Ref<WeakPtrCastBase> create() { return adoptRef(*new WeakPtrCastBase); }
+
+    virtual ~WeakPtrCastBase() = default;
+    virtual bool isWeakPtrCastDerived() const { return false; }
+
+protected:
+    WeakPtrCastBase() = default;
+};
+
+class WeakPtrCastDerived final : public WeakPtrCastBase {
+public:
+    static Ref<WeakPtrCastDerived> create() { return adoptRef(*new WeakPtrCastDerived); }
+
+private:
+    WeakPtrCastDerived() = default;
+    bool isWeakPtrCastDerived() const final { return true; }
+};
+
+} // namespace TestWebKitAPI
+
+SPECIALIZE_TYPE_TRAITS_BEGIN(TestWebKitAPI::WeakPtrCastDerived)
+    static bool isType(const TestWebKitAPI::WeakPtrCastBase& object) { return object.isWeakPtrCastDerived(); }
+SPECIALIZE_TYPE_TRAITS_END()
+
+namespace TestWebKitAPI {
+
+TEST(WTF_WeakPtr, DowncastAndDynamicDowncast)
+{
+    RefPtr<WeakPtrCastBase> derived = WeakPtrCastDerived::create();
+    Ref base = WeakPtrCastBase::create();
+
+    WeakRef<WeakPtrCastBase> weakRef { *derived };
+    EXPECT_EQ(&downcast<WeakPtrCastDerived>(weakRef), derived.get());
+    EXPECT_EQ(&downcast<WeakPtrCastDerived>(std::as_const(weakRef)), derived.get());
+    EXPECT_EQ(dynamicDowncast<WeakPtrCastDerived>(weakRef), derived.get());
+    EXPECT_EQ(dynamicDowncast<WeakPtrCastDerived>(std::as_const(weakRef)), derived.get());
+    EXPECT_EQ(downcast<WeakPtrCastDerived>(WeakRef<WeakPtrCastBase> { *derived }).ptr(), derived.get());
+    EXPECT_EQ(dynamicDowncast<WeakPtrCastDerived>(WTF::move(weakRef)).get(), derived.get());
+
+    WeakPtr<WeakPtrCastBase> weakPtr { *derived };
+    EXPECT_EQ(downcast<WeakPtrCastDerived>(weakPtr), derived.get());
+    EXPECT_EQ(downcast<WeakPtrCastDerived>(std::as_const(weakPtr)), derived.get());
+    EXPECT_EQ(dynamicDowncast<WeakPtrCastDerived>(weakPtr)->weakCount(), 1U);
+    EXPECT_EQ(dynamicDowncast<WeakPtrCastDerived>(std::as_const(weakPtr)), derived.get());
+    EXPECT_EQ(downcast<WeakPtrCastDerived>(WeakPtr<WeakPtrCastBase> { *derived }).get(), derived.get());
+    EXPECT_NULL(dynamicDowncast<WeakPtrCastDerived>(WeakPtr<WeakPtrCastBase> { base.get() }).get());
+
+    WeakPtr<WeakPtrCastDerived> weakDerived = dynamicDowncast<WeakPtrCastDerived>(WTF::move(weakPtr));
+    EXPECT_EQ(derived->weakCount(), 1U);
+    EXPECT_EQ(weakDerived.get(), derived.get());
+    derived = nullptr;
+    EXPECT_NULL(weakDerived.get());
+}
+
 class BaseObjectWithRefAndWeakPtr : public RefCounted<BaseObjectWithRefAndWeakPtr>, public CanMakeWeakPtr<BaseObjectWithRefAndWeakPtr> {
 public:
     static Ref<BaseObjectWithRefAndWeakPtr> create() { return adoptRef(*new BaseObjectWithRefAndWeakPtr()); }
@@ -2738,6 +2794,22 @@ TEST(WTF_WeakPtr, WeakListHashSetPrependOrMoveToFirst)
 
         EXPECT_EQ(collectItemsInWeakListHashSet(weakListHashSet).size(), 0u);
     }
+}
+
+TEST(WTF_WeakPtr, WeakListHashSetConstIteratorAccess)
+{
+    WeakListHashSet<Base> weakListHashSet;
+    Base object;
+    weakListHashSet.add(object);
+
+    const auto& constSet = weakListHashSet;
+    const auto it = constSet.begin();
+    EXPECT_EQ(&object, it.get());
+    EXPECT_EQ(&object, &*it);
+    EXPECT_EQ(&object, it.operator->());
+
+    const auto foundIt = constSet.find(object);
+    EXPECT_EQ(&object, foundIt.get());
 }
 
 TEST(WTF_WeakPtr, WeakListHashSetInsertBefore)

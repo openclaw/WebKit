@@ -177,14 +177,14 @@ template<> struct CSSValueCreation<BorderImageWidth> { auto operator()(CSSValueP
 // MARK: - Blending
 
 template<> struct Blending<BorderImageWidthValue> {
-    bool NODELETE canBlend(const BorderImageWidthValue&, const BorderImageWidthValue&);
-    auto requiresInterpolationForAccumulativeIteration(const BorderImageWidthValue&, const BorderImageWidthValue&) -> bool;
+    bool LEGACY_NODELETE canBlend(const BorderImageWidthValue&, const BorderImageWidthValue&);
+    bool LEGACY_NODELETE requiresInterpolationForAccumulativeIteration(const BorderImageWidthValue&, const BorderImageWidthValue&);
     auto blend(const BorderImageWidthValue&, const BorderImageWidthValue&, const BlendingContext&) -> BorderImageWidthValue;
 };
 
 template<> struct Blending<BorderImageWidth> {
-    auto canBlend(const BorderImageWidth&, const BorderImageWidth&) -> bool;
-    auto requiresInterpolationForAccumulativeIteration(const BorderImageWidth&, const BorderImageWidth&) -> bool;
+    bool LEGACY_NODELETE canBlend(const BorderImageWidth&, const BorderImageWidth&);
+    bool LEGACY_NODELETE requiresInterpolationForAccumulativeIteration(const BorderImageWidth&, const BorderImageWidth&);
     auto blend(const BorderImageWidth&, const BorderImageWidth&, const BlendingContext&) -> BorderImageWidth;
 };
 

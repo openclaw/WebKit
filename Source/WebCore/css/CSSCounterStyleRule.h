@@ -34,7 +34,7 @@
 namespace WebCore {
 class StyleRuleCounterStyle final : public StyleRuleBase {
 public:
-    static Ref<StyleRuleCounterStyle> create(const AtomString&, CSSCounterStyleDescriptors&&);
+    static Ref<StyleRuleCounterStyle> create(CSSCounterStyleDescriptors&&);
     ~StyleRuleCounterStyle();
 
     Ref<StyleRuleCounterStyle> copy() const { return adoptRef(*new StyleRuleCounterStyle(*this)); }
@@ -42,7 +42,7 @@ public:
     const CSSCounterStyleDescriptors& descriptors() const LIFETIME_BOUND { return m_descriptors; };
     CSSCounterStyleDescriptors& mutableDescriptors() LIFETIME_BOUND { return m_descriptors; };
 
-    const AtomString& name() const LIFETIME_BOUND { return m_name; }
+    const AtomString& name() const LIFETIME_BOUND { return m_descriptors.m_name; }
     String system() const { return m_descriptors.systemCSSText(); }
     String negative() const { return m_descriptors.negativeCSSText(); }
     String prefix() const { return m_descriptors.prefixCSSText(); }
@@ -55,23 +55,20 @@ public:
     String speakAs() const { return { }; }
     bool newValueInvalidOrEqual(CSSPropertyID, const RefPtr<CSSValue> newValue) const;
 
-    void setName(const AtomString& name) { m_name = name; }
-
 private:
-    explicit StyleRuleCounterStyle(const AtomString&, CSSCounterStyleDescriptors&&);
+    explicit StyleRuleCounterStyle(CSSCounterStyleDescriptors&&);
     StyleRuleCounterStyle(const StyleRuleCounterStyle&) = default;
 
-    AtomString m_name;
     CSSCounterStyleDescriptors m_descriptors;
 };
 
 class CSSCounterStyleRule final : public CSSRule {
 public:
-    static Ref<CSSCounterStyleRule> create(StyleRuleCounterStyle&, CSSStyleSheet*);
+    static Ref<CSSCounterStyleRule> LEGACY_NODELETE create(StyleRuleCounterStyle&, CSSStyleSheet*);
     virtual ~CSSCounterStyleRule();
 
     String cssText() const final;
-    void NODELETE reattach(StyleRuleBase&) final;
+    void reattach(StyleRuleBase&) final;
     StyleRuleType styleRuleType() const final { return StyleRuleType::CounterStyle; }
 
     String name() const { return m_counterStyleRule->name(); }
@@ -96,7 +93,7 @@ public:
     void setFallback(const String&);
     void setSymbols(const String&);
     void setAdditiveSymbols(const String&);
-    void NODELETE setSpeakAs(const String&);
+    void LEGACY_NODELETE setSpeakAs(const String&);
 
 private:
     CSSCounterStyleRule(StyleRuleCounterStyle&, CSSStyleSheet* parent);
@@ -109,7 +106,7 @@ private:
     Ref<StyleRuleCounterStyle> m_counterStyleRule;
 };
 
-CSSCounterStyleDescriptors::System NODELETE toCounterStyleSystemEnum(const CSSValue*);
+CSSCounterStyleDescriptors::System toCounterStyleSystemEnum(const CSSValue*);
 
 } // namespace WebCore
 

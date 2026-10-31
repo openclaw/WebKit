@@ -60,6 +60,12 @@
         _didStartProvisionalNavigation(webView, navigation);
 }
 
+- (void)_webView:(WKWebView *)webView didStartProvisionalLoadWithRequest:(NSURLRequest *)request inFrame:(WKFrameInfo *)frame
+{
+    if (_didStartProvisionalLoadWithRequestInFrame)
+        _didStartProvisionalLoadWithRequestInFrame(webView, request, frame);
+}
+
 - (void)webView:(WKWebView *)webView didCommitNavigation:(WKNavigation *)navigation
 {
     if (_didCommitNavigation)
@@ -98,6 +104,12 @@
     // release the block, while it is still executing.
     if (auto didFinishNavigation = makeBlockPtr(_didFinishNavigation))
         didFinishNavigation(webView, navigation);
+}
+
+- (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error
+{
+    if (auto didFailNavigation = makeBlockPtr(_didFailNavigation))
+        didFailNavigation(webView, navigation, error);
 }
 
 - (void)_webView:(WKWebView *)webView didFinishLoadWithRequest:(NSURLRequest *)request inFrame:(WKFrameInfo *)frame

@@ -26,6 +26,7 @@
 #include "config.h"
 #include "GraphicsLayerCARemote.h"
 
+#include "DisplayOnlyImageProxy.h"
 #include "ImageBufferBackendHandleSharing.h"
 #include "PlatformCAAnimationRemote.h"
 #include "PlatformCALayerRemote.h"
@@ -165,6 +166,24 @@ public:
         return !!storeContents(buffer, opaque, frame);
     }
 
+    bool tryDisplaySurface(const MachSendRight& surface, ContentsFormat contentsFormat, bool opaque, PlaceholderFrameIdentifier frame) final
+    {
+        if (!m_layerID || !surface)
+            return false;
+
+        {
+            Locker locker { m_surfaceLock };
+            m_surfaceBackendHandle = ImageBufferBackendHandle { MachSendRight { surface } };
+            m_frame = frame;
+            m_contentsFormat = contentsFormat;
+            m_opaque = opaque;
+        }
+
+        RemoteLayerBackingStoreProperties properties(ImageBufferBackendHandle { MachSendRight { surface } }, frame, opaque);
+        m_connection->send(Messages::RemoteLayerTreeDrawingAreaProxy::AsyncSetLayerContents(*m_layerID, WTF::move(properties)), m_drawingArea.toUInt64());
+        return true;
+    }
+
     void display(PlatformCALayer& layer) final
     {
         Locker locker { m_surfaceLock };
@@ -175,7 +194,7 @@ public:
         }
     }
 
-    void NODELETE setDestinationLayerID(WebCore::PlatformLayerIdentifier layerID)
+    void LEGACY_NODELETE setDestinationLayerID(WebCore::PlatformLayerIdentifier layerID)
     {
         m_layerID = layerID;
     }
@@ -296,6 +315,17 @@ void GraphicsLayerCARemote::setLayerContentsToImageBuffer(PlatformCALayer& layer
     layer.setTonemappingEnabled(true);
 #endif
     downcast<PlatformCALayerRemote>(layer).setRemoteDelegatedContents({ ImageBufferBackendHandle { *backendHandle }, fence, std::nullopt });
+}
+
+void GraphicsLayerCARemote::setLayerContentsToNativeImage(PlatformCALayer& layer, NativeImage& image)
+{
+#if ENABLE(GPU_PROCESS) && HAVE(IOSURFACE)
+    if (RefPtr proxy = dynamicDowncast<DisplayOnlyImageProxy>(image)) {
+        downcast<PlatformCALayerRemote>(layer).setDisplayOnlyImage(proxy->identifier());
+        return;
+    }
+#endif
+    layer.setContents(image.platformImage().get());
 }
 
 GraphicsLayer::LayerMode GraphicsLayerCARemote::layerMode() const

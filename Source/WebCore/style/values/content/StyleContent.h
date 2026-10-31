@@ -73,8 +73,8 @@ struct ContentImage {
 DEFINE_TYPE_WRAPPER_GET(ContentImage, image);
 
 struct ContentCounter {
-    using CounterFunction = FunctionNotation<CSSValueCounter, CommaSeparatedTuple<CustomIdent, std::optional<CounterStyle>>>;
-    using CountersFunction = FunctionNotation<CSSValueCounters, CommaSeparatedTuple<CustomIdent, String, std::optional<CounterStyle>>>;
+    using CounterFunction = FunctionNotation<CSSValueID::Counter, CommaSeparatedTuple<CustomIdent, std::optional<CounterStyle>>>;
+    using CountersFunction = FunctionNotation<CSSValueID::Counters, CommaSeparatedTuple<CustomIdent, String, std::optional<CounterStyle>>>;
 
     CustomIdent identifier;
     String separator;
@@ -145,7 +145,7 @@ struct Content {
         return WTF::switchOn(m_value, std::forward<F>(f)...);
     }
 
-    WTF::String altText() const;
+    WTF::String LEGACY_NODELETE altText() const;
 
     bool operator==(const Content&) const = default;
 
@@ -170,7 +170,7 @@ template<typename... F> decltype(auto) ContentCounter::switchOn(NOESCAPE F&&... 
         return visitor(CounterFunction {
             .parameters = {
                 identifier,
-                style != CSSValueDecimal ? std::make_optional(style) : std::nullopt
+                style != CSSValueID::Decimal ? std::make_optional(style) : std::nullopt
             }
         });
     } else {
@@ -178,7 +178,7 @@ template<typename... F> decltype(auto) ContentCounter::switchOn(NOESCAPE F&&... 
             .parameters = {
                 identifier,
                 separator,
-                style != CSSValueDecimal ? std::make_optional(style) : std::nullopt
+                style != CSSValueID::Decimal ? std::make_optional(style) : std::nullopt
             }
         });
     }

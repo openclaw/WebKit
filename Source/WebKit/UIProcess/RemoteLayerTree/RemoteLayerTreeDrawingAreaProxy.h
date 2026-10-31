@@ -33,6 +33,7 @@
 #include <WebCore/FloatPoint.h>
 #include <WebCore/IntPoint.h>
 #include <WebCore/IntSize.h>
+#include <WebCore/PageIdentifier.h>
 #include <wtf/Deque.h>
 #include <wtf/RefCounted.h>
 #include <wtf/WeakHashMap.h>
@@ -72,7 +73,7 @@ struct PendingCommit {
 
 struct ProcessState {
     WTF_MAKE_NONCOPYABLE(ProcessState);
-    ProcessState(WebProcessProxy&);
+    ProcessState(WebProcessProxy&, std::optional<WebCore::PageIdentifier> = std::nullopt);
     ProcessState(WTF::HashTableDeletedValueType)
         : nextLayerTreeTransactionID(WTF::HashTableDeletedValue)
     {
@@ -86,6 +87,7 @@ struct ProcessState {
 
     bool canSendDisplayDidRefresh(RemoteLayerTreeDrawingAreaProxy&);
 
+    std::optional<WebCore::PageIdentifier> webPageID;
     Vector<PendingCommit, 2> pendingCommits;
     TransactionID nextLayerTreeTransactionID;
     std::optional<TransactionID> committedLayerTreeTransactionID;
@@ -115,6 +117,10 @@ public:
     // checked may set them.
     void setLayerContentsFromAnotherProcess(WebCore::PlatformLayerIdentifier, RemoteLayerBackingStoreProperties&&);
 
+    bool startDisplayOnlyImage(RemoteSnapshotIdentifier);
+    bool completeDisplayOnlyImage(RemoteSnapshotIdentifier, ImageBufferBackendHandle&&);
+    void releaseDisplayOnlyImage(RemoteSnapshotIdentifier);
+
     virtual ~RemoteLayerTreeDrawingAreaProxy();
 
     void ref() const final { RefCounted::ref(); }
@@ -123,13 +129,13 @@ public:
     const RemoteLayerTreeHost& remoteLayerTreeHost() const LIFETIME_BOUND { return *m_remoteLayerTreeHost; }
     std::unique_ptr<RemoteLayerTreeHost> detachRemoteLayerTreeHost();
 
-    virtual std::unique_ptr<RemoteScrollingCoordinatorProxy> createScrollingCoordinatorProxy() const = 0;
+    virtual Ref<RemoteScrollingCoordinatorProxy> createScrollingCoordinatorProxy() const = 0;
 
     void acceleratedAnimationDidStart(WebCore::PlatformLayerIdentifier, const String& key, MonotonicTime startTime);
     void acceleratedAnimationDidEnd(WebCore::PlatformLayerIdentifier, const String& key);
 
-    TransactionID NODELETE nextMainFrameLayerTreeTransactionID() const;
-    TransactionID NODELETE lastCommittedMainFrameLayerTreeTransactionID() const;
+    TransactionID LEGACY_NODELETE nextMainFrameLayerTreeTransactionID() const;
+    TransactionID LEGACY_NODELETE lastCommittedMainFrameLayerTreeTransactionID() const;
 
     virtual void didRefreshDisplay();
     virtual bool displayLinkWantsHighFrameRateForTesting() const { return false; };
@@ -176,7 +182,7 @@ protected:
     bool shouldCoalesceVisualEditorStateUpdates() const override { return true; }
 
     ProcessState& processStateForConnection(IPC::Connection&);
-    const ProcessState& NODELETE processStateForIdentifier(WebCore::ProcessIdentifier) const;
+    const ProcessState& LEGACY_NODELETE processStateForIdentifier(WebCore::ProcessIdentifier) const;
     IPC::Connection* connectionForIdentifier(WebCore::ProcessIdentifier);
     void forEachProcessState(NOESCAPE const Function<void(ProcessState&, WebProcessProxy&)>&);
 
@@ -232,8 +238,9 @@ private:
     // per-frame.
     virtual void setPreferredFramesPerSecond(IPC::Connection&, WebCore::FramesPerSecond) { }
 
-    void notifyPendingCommitLayerTree(IPC::Connection&, std::optional<TransactionID>);
-    void notifyFlushingLayerTree(IPC::Connection&, TransactionID);
+    void notifyPendingCommitLayerTree(IPC::Connection&, std::optional<TransactionID>, WebCore::PageIdentifier);
+    void notifyFlushingLayerTree(IPC::Connection&, TransactionID, WebCore::PageIdentifier);
+    bool isFromPreviousWebPage(const ProcessState&, WebCore::PageIdentifier, ASCIILiteral messageName) const;
     void commitLayerTree(IPC::Connection&, const RemoteLayerTreeCommitBundle&, HashMap<ImageBufferSetIdentifier, std::unique_ptr<BufferSetBackendHandle>>&&);
     void commitLayerTreeTransaction(IPC::Connection&, const RemoteLayerTreeTransaction&, const RemoteScrollingCoordinatorTransaction&, const std::optional<MainFrameData>&, const PageData&, const TransactionID&);
     virtual void didCommitLayerTree(IPC::Connection&, const RemoteLayerTreeTransaction&, const RemoteScrollingCoordinatorTransaction&, const std::optional<MainFrameData>&, const TransactionID&) { }
