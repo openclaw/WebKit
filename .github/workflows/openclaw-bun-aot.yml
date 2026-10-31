@@ -1,0 +1,126 @@
+name: OpenClaw pinned Bun AOT consumer
+on:
+  pull_request:
+    branches: [claude/sync-webkit-upstream-20261014]
+    paths:
+      - .github/workflows/openclaw-bun-aot.yml
+      - .github/openclaw/qualification/bun-aot/**
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: openclaw-bun-aot-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux-arm64:
+    if: >-
+      github.repository == 'openclaw/WebKit' &&
+      (github.head_ref == 'claude/bun-aot-consumer-proof-20261031' ||
+       github.ref == 'refs/heads/claude/bun-aot-consumer-proof-20261031')
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: controls
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: .github/openclaw/qualification/bun-aot
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: openclaw/bun
+          ref: 7b573c05d0c52dffc67d4d25daf108bed5930cf2
+          path: pipeline
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: openclaw/bun
+          ref: fd40ba44187c721ee023062fa153a6a27560e6b1
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 5ec9ac8557722128588184ed9cf77347d9a30cf1
+          path: engine
+          persist-credentials: false
+      - name: Free disposable runner space
+        if: runner.environment == 'github-hosted'
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /usr/local/julia* /opt/microsoft
+      - uses: ./pipeline/.github/actions/setup-bun
+        with:
+          bun-version: '1.4.4'
+      - name: Generate the frozen provisioning script
+        id: provision
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir aot-proof
+          script=$(bun pipeline/scripts/openclaw-release/release.ts provision --source "$GITHUB_WORKSPACE/source" --target linux-arm64 | tail -1)
+          test -f "$script"
+          script_relative=${script#"$GITHUB_WORKSPACE/"}
+          test "$script_relative" != "$script"
+          echo "script=/work/$script_relative" >> "$GITHUB_OUTPUT"
+      - name: Provision the pinned ARM64 toolchain
+        id: container
+        timeout-minutes: 45
+        shell: bash
+        env:
+          SCRIPT: ${{ steps.provision.outputs.script }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          container_id=$(docker run --detach --name bun-aot-consumer -e CI=true -v "$GITHUB_WORKSPACE:/work" -w /work \
+            docker.io/library/debian:13@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c sleep infinity)
+          echo "id=$container_id" >> "$GITHUB_OUTPUT"
+          docker exec -e SCRIPT bun-aot-consumer sh -euc 'sh "$SCRIPT" fd40ba44187c721ee023062fa153a6a27560e6b1 openclaw-release'
+          docker exec bun-aot-consumer sh -euc 'apt-get update; apt-get install --yes --no-install-recommends python3 ruby bison gawk perl libxml2-dev pkg-config'
+      - name: Prepare source or qualify the pinned compiler
+        timeout-minutes: 285
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec bun-aot-consumer bash -e -lc '
+            . /etc/profile.d/bun-ci.sh
+            for repo in /work/source /work/engine /work/pipeline; do git config --global --add safe.directory "$repo"; done
+            python3 controls/.github/openclaw/qualification/bun-aot/qualify.py
+          '
+      - name: Retain bounded source and native proof
+        if: always()
+        shell: bash
+        env:
+          CONTAINER_ID: ${{ steps.container.outputs.id }}
+        run: |
+          set -euo pipefail
+          if test -n "$CONTAINER_ID"; then
+            [[ "$CONTAINER_ID" =~ ^[0-9a-f]{64}$ ]]
+            docker stop --time 30 "$CONTAINER_ID" > /dev/null
+            test "$(docker inspect --format '{{.State.Running}}' "$CONTAINER_ID")" = false
+          fi
+          python3 - <<'PY'
+          import hashlib, json, stat, subprocess
+          from pathlib import Path
+          out = Path('aot-proof')
+          out.mkdir(exist_ok=True)
+          files = sorted(out.iterdir()) + sorted(Path('controls/.github/openclaw/qualification/bun-aot').iterdir())
+          assert 0 < len(files) <= 96 and all(stat.S_ISREG(p.lstat().st_mode) for p in files)
+          assert sum(p.stat().st_size for p in files) <= 128 * 1024**2
+          def sha(path):
+              with path.open('rb') as stream: return hashlib.file_digest(stream, 'sha256').hexdigest()
+          manifest = out / 'archive-manifest.json'
+          manifest.write_text(json.dumps({str(p): {'bytes': p.stat().st_size, 'sha256': sha(p)} for p in files}, indent=2) + '\n')
+          files.append(manifest)
+          archive = Path('bun-aot-proof.tar.gz.partial')
+          subprocess.run(['tar', '-czf', str(archive), '--', *map(str, files)], check=True)
+          assert archive.stat().st_size <= 32 * 1024**2
+          archive.rename('bun-aot-proof.tar.gz')
+          Path('bun-aot-SHA256SUMS').write_text(sha(Path('bun-aot-proof.tar.gz')) + '  bun-aot-proof.tar.gz\n')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: pinned-bun-aot-linux-arm64-proof
+          path: |
+            bun-aot-proof.tar.gz
+            bun-aot-SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7

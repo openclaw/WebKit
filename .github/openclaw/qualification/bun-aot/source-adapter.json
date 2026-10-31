@@ -1,0 +1,3690 @@
+{
+  "bun": "fd40ba44187c721ee023062fa153a6a27560e6b1",
+  "webkit": "5ec9ac8557722128588184ed9cf77347d9a30cf1",
+  "prepare_only": false,
+  "patch_sha256": "35286f32f850bb0845d407604ee69d484c0252df738493a342b09dd62c73909f",
+  "files": {
+    "CHANGELOG.md": {
+      "before": "aa3d183726734a0c1dd7f255d783b7e7b1946e4ff88e9432623e31556c206308",
+      "after": "0ccec7ae23479479b1bd114b7d4177828f31091f816db1acb33c6e38ec5726d6",
+      "base_blob": "ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0",
+      "adapted_blob": "277de39f7dab51420caf7290599989aa9b91fa66",
+      "mode": "100644"
+    },
+    "Cargo.lock": {
+      "before": "ad355812d9b9f34b8212a8a91e2f320ff7b7ac1a80f27aeefc23bf80cc8d22bc",
+      "after": "c2bfb6d8f0f79eb2cd175f89dcee34d47ff1845b1c1423d32cb727189fe68adf",
+      "base_blob": "edaf84c7a78292be0e69884156a6c27f204d3c68",
+      "adapted_blob": "a18131a5aa6ede6ccfcbe06da5d0dabd843b8ad0",
+      "mode": "100644"
+    },
+    "docs/bundler/aot-debugging.mdx": {
+      "before": "41af0f1c07e80aa8d89273ca7911d29899c6e7fe5446187e4576705f94b412ad",
+      "after": "ac21c55a85a859ec820f427eb7bd38cc65605ef0175a576e3ae7e31fb63bfacf",
+      "base_blob": "31e67ad82c588dc02b8fd0d942e0c8e69268ce41",
+      "adapted_blob": "600bad27769b43fcc75890d9e43114fad976bc89",
+      "mode": "100644"
+    },
+    "docs/bundler/aot-explain.mdx": {
+      "before": "7244acb4a3a5f8459156a782777aac3cdbd4f259349841511dbcc5e539d263d2",
+      "after": "31808a79d8dc71ec72e1c7a02d31ce9650103803ebd48e49c5c4c97e6093624c",
+      "base_blob": "d43ffaa8e08fbcc293db760d42032f080d78c4f2",
+      "adapted_blob": "d526148ed4006dcec1046529d07b86f1ea651a5d",
+      "mode": "100644"
+    },
+    "docs/bundler/aot-troubleshooting.mdx": {
+      "before": "7dbed9aa0004515e8e78b74f79418e81c743e2c6dcb5cd94271f690044167345",
+      "after": "046ec032e825fae39ae0a4c10c5164389571e56d47477f0f712ade6c85187b61",
+      "base_blob": "73ee34e1f13cf3e0bbff1ae5c6c87f12e01c3bb6",
+      "adapted_blob": "8bed8aa93882a7a56b3aeac9a7f65bfdaf81b042",
+      "mode": "100644"
+    },
+    "docs/bundler/aot-types.mdx": {
+      "before": "439b64f25fa457a6e1f2301457df380647b2437c3d59619e6068676cc325a25f",
+      "after": "72d4df72a759ed0f6dd26b2464f3c7424612b1913dcf6651b8c02ef300cfd243",
+      "base_blob": "1b38a67c8f6a3378591d5228b9a9705f918a6102",
+      "adapted_blob": "3a47c64361366005a547521c737af246acdf4c14",
+      "mode": "100644"
+    },
+    "docs/bundler/validate.mdx": {
+      "before": "586b991241c4e43c37b087479d2fd3412e7ce874a7f2f53094278bdf9f9c1807",
+      "after": null,
+      "base_blob": "3e906b9048ef95af0e1ab3987da7db8a9bc46233",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "docs/docs.json": {
+      "before": "aeae0d6722e37b0ba7b5e5bfa7b6e287de463fcf6c256a8dfb2feda8dff84d43",
+      "after": "a5b377c5416e998828b1f8d3d51c05d7414fd32ae976c60e2e23a9e8f5fa46ec",
+      "base_blob": "c5094ae445d3af155342130b49c2a35e203e1fd6",
+      "adapted_blob": "295e0ec1552a3d6c0f6f344d8c619470104000f7",
+      "mode": "100644"
+    },
+    "packages/bun-types/aot.d.ts": {
+      "before": "a71a520cb59b35a64045e3d96536bf1d15e0fb11a231690dfe4a6c64499f545c",
+      "after": null,
+      "base_blob": "00ec27a6c59620306d1575df2984bd8969939f1f",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "packages/bun-types/bun.d.ts": {
+      "before": "a1c9704e0c57c0c14d0f42868cdaa6765dba93cfe5fef18aada03c81b1e73eb3",
+      "after": "b07359d448d6b61c0cd90d865a213ab2f8149ed115d92012dd2f3cb278e8ef7a",
+      "base_blob": "d8f90a4a83064e2ba2ced63b17345c1229d67fd4",
+      "adapted_blob": "810cfcc07136fd1444b06e1d4df0fbcd1d718bdd",
+      "mode": "100644"
+    },
+    "packages/bun-types/bundle.d.ts": {
+      "before": "acd52eac6fcbd44b8be237c3f9ba65c665c2b4a075f672ed783f9344eccfec16",
+      "after": "3dcc4b55fea81a137b43a8706e24c1f12f47f9116736d78064e8edcb5d63e7fe",
+      "base_blob": "9fe20113e84fda2f7b3368adc72fa7c0c4c5bef2",
+      "adapted_blob": "c1b734cef2f5ed1a65f7fdd61cfc6fae513774c3",
+      "mode": "100644"
+    },
+    "scripts/build/aot-source-lists.ts": {
+      "before": "881654b517a593c56bf65ca3f84a238a8825b43c9ad92b1bd3587cb78a579ffa",
+      "after": "7bcd40648bf2798aab69a6bdf1201e44863b2e98cd63ddd1337b2eb550295395",
+      "base_blob": "3a340c0ec58bf172926ab963c38364363e23c9ea",
+      "adapted_blob": "2eea08b824cc83e18b086845efa9a616ddbd9c54",
+      "mode": "100644"
+    },
+    "scripts/build/aot.ts": {
+      "before": "a9d2051afc9204ca7625f853f97ffa2d3141e6e8f81cd1733d3657a0778699c9",
+      "after": "4264932add06b74a3c0206c7ca365661cadc12b173a864910752dd0bc3643e02",
+      "base_blob": "5ae4884d3402dd1627375d888b2c8eca98733229",
+      "adapted_blob": "16d3e7736a43c90fedb249c95cf8ead3fad09ae6",
+      "mode": "100644"
+    },
+    "scripts/build/bun.ts": {
+      "before": "c62e14bcff8fd64619df3be99177ac88f0a0c489e758952aeab09745ffcdfc07",
+      "after": "2280ad754a0846a50e6fefc80f495f7685301b68c59b1ad8f3016a22edce2f37",
+      "base_blob": "747ed9ef4c8d3a2dd9d784c099a91da4b4477df6",
+      "adapted_blob": "d741a7b0e74bc68f106d9888471b7d3f6fb9426f",
+      "mode": "100644"
+    },
+    "scripts/build/deps/webkit.ts": {
+      "before": "12933600404cf33f4d23a59f6336dec2546ad95eecca6d036165b2a1b52b7c33",
+      "after": "1f416f1a947cd473bc4a3a9e88588b6da6d79453b90ed510cf4fbb59b8deccfa",
+      "base_blob": "4fc1df1f0bf8bbb865505a995fcd7c32e8646223",
+      "adapted_blob": "cac003a7a9c9f85dbf768277fcdd17f2c5604a9f",
+      "mode": "100644"
+    },
+    "scripts/build/ninja.ts": {
+      "before": "3035405b5a273099242feb6a76798a3eff14fd6f992cda1211f7574fac81d266",
+      "after": "ea19b3bb1fd2ebce9ce6a32ef96fb8a7ea9f99ac3aaaa1b5bb192162f639efce",
+      "base_blob": "6d0eb950721760a5bbe426b94bab7d6413edb4cc",
+      "adapted_blob": "89f4ab89a2c47fbac710a8ab426401eb8a07d590",
+      "mode": "100644"
+    },
+    "scripts/build/rules.ts": {
+      "before": "ecf7810912d33bdc4106e3a137b0b800c811274b902f5e51f0146804ffbe01aa",
+      "after": "2f184f99a29560350d80c92929a5a745cddef80d7b1c18dc5c345cae647c7612",
+      "base_blob": "4f2b1ce576424e75d93d1d6ccf65a073805c57e9",
+      "adapted_blob": "1c2173c5647ac4acfe5e0dc947ccb2384ef56e20",
+      "mode": "100644"
+    },
+    "scripts/build/timings.ts": {
+      "before": "6fd843eb5ab1b232865c29145a2bfb58b829ad03f6a7c30d2a23460e42c6b578",
+      "after": "8a84d94e6e475628c8b288473743ff96606eae751383050502c87a4bf4f3b217",
+      "base_blob": "c017df06e1d7cc94bec31b03292fde4820b8dab6",
+      "adapted_blob": "952c8081f92e4f033ca592f8931b57b921865869",
+      "mode": "100644"
+    },
+    "src/aot/Cargo.toml": {
+      "before": "d47c29b550e9706fff6e46da02e5743df908cb49857f3d063ab575f15e246162",
+      "after": "37d572a6ff4fbe1237b133cbd41978d41149205cb84097da89068da0785b9499",
+      "base_blob": "23cda0614d69e135de188819ac164ca03addf12f",
+      "adapted_blob": "307020fc06e6491912e4727ca1b9f55dd5cdaf91",
+      "mode": "100644"
+    },
+    "src/aot/builtins/intrinsics/tests.rs": {
+      "before": "cb80545f4b21ad8ef649f4341295b44ea679054364cc23edd5a8b9f6f38d4f3c",
+      "after": "dc44b0c0a1cc10615963038e60d6625cd5ed932cf5f10bf28fef2a8d7625e8eb",
+      "base_blob": "ce23d42585dd33dc81d2a0ec7dad909fdecee01c",
+      "adapted_blob": "9780607d5a80f0847fa9dab4f24fc92dd6e34025",
+      "mode": "100644"
+    },
+    "src/aot/builtins/names.rs": {
+      "before": "02e526bc3e1434b1f6d86fe384959e4fc80f4facf20dc5dd9056d0dae77cb2c7",
+      "after": "d7cbfda7310d97739d21984fd649d83d8520ba444b9b282693e30904861b1d05",
+      "base_blob": "cb3f5e02dc1bd14bededcc936e311f570983c4f0",
+      "adapted_blob": "8b60cc3384f3566cf27595cd52f9497717505c8d",
+      "mode": "100644"
+    },
+    "src/aot/builtins/resolve.rs": {
+      "before": "bc7e7d905476445659453c7899604431e23ac115d004a52a47f2f20962ae121e",
+      "after": "07a4c8b77b420d8a3a4f4642c2b43952a93c93345a5b41b184d40abf3ad3d959",
+      "base_blob": "329dc2b39c07e6187ea6029fa8768e5f89388ea4",
+      "adapted_blob": "1a20b133d6765b2b596fc8948ddd2e3f6d2528c6",
+      "mode": "100644"
+    },
+    "src/aot/builtins/resolve/aliases.rs": {
+      "before": "8de6231fcf1337b3ac86c5fcba4167efff81b7340ff5e0dd4c418708c860b322",
+      "after": "7512a3f48ddc456391bd3415e32cd947f8533298c05a26dac3428128b8f9ae95",
+      "base_blob": "e0e85592d38839392942d5361093ddcb00f6a469",
+      "adapted_blob": "270f0a39ea9286db0cca6670d27fa09a4c45ab77",
+      "mode": "100644"
+    },
+    "src/aot/builtins/resolve/imports.rs": {
+      "before": "f914809f26d23e9a58bb3e922f69dc7ddd0cb6683307bb3bf21834ba848bbee1",
+      "after": "dfb42f3b8481b52790ccba4108c4e56462ac9033925ba51a2d22b15b1c4b4483",
+      "base_blob": "3c0693b48db51a235f33ac763ecb88ea8624879a",
+      "adapted_blob": "c8a7c2da5b945c6c5cfd0099eb7457a548ac5a9c",
+      "mode": "100644"
+    },
+    "src/aot/builtins/resolve/mentions.rs": {
+      "before": "b0883ebd6a6c6124b679eebca2fb52a299344e254ed4b99bed9b54b2b64856b4",
+      "after": "8377d2d1288d478d752d212e6ccab63134e1dc41cb85745a9cbfd79729ac622d",
+      "base_blob": "c9faca89b70c70c0360c3da22a41d39ef3c97782",
+      "adapted_blob": "0522c4376b30a76c7419a5167f2730c5f1808712",
+      "mode": "100644"
+    },
+    "src/aot/builtins/resolve/paths.rs": {
+      "before": "ab402fc40c9795027fade0fbc1d1843671ca354865369f4012460d370c934e96",
+      "after": "0b399a8777d8b75c9b76f20126a7c93093f29b03826133edbd01eaa28a2e6e91",
+      "base_blob": "1d6d56c4d9c7db546b196f14beb417d54910fe63",
+      "adapted_blob": "bb8b691ebcff94873c472f2f505a0fce2ce50994",
+      "mode": "100644"
+    },
+    "src/aot/builtins/resolve/resolver.rs": {
+      "before": "0be3538314131069c41eaee0ac4b7e0d34a3077970572c333f88f7127e131b66",
+      "after": "99a79469fd5f46806d495636377f1702fe49185ff4f43c55f03e231be0341dd6",
+      "base_blob": "5992063b2a05d41b22d65c2a8909fdd255cb7e3a",
+      "adapted_blob": "1af2d39e4209b4d5a63363980f03711883685fe4",
+      "mode": "100644"
+    },
+    "src/aot/builtins/resolve/tests.rs": {
+      "before": "2a4fe643597914d681cb43b3bed4ead6526f8911591ebbe217270acfc702ad4e",
+      "after": "e87f3fef3dd36ec5951a9157cc11b65ea1bbb8836eaf55f41dc9ce13c5c69913",
+      "base_blob": "2b8f0dd6aa506bbc2e9d4367f10e162991e78965",
+      "adapted_blob": "52ffcec209a8c8fb7421b8703f6bc69fd603ffd0",
+      "mode": "100644"
+    },
+    "src/aot/builtins/resolve/tests/imports.rs": {
+      "before": "6f50fe4a8f226f261788578f96b09f253fca75c8c065c538fef805f5c6606646",
+      "after": "11449378b5d49897addfdb87921fff265d0e7569157abad7570477f81d49304d",
+      "base_blob": "4a8630438b065a0b081727e63b23b6f495b207a8",
+      "adapted_blob": "d9b055c1fe2f9e962de5fa53d44f290be29d21fb",
+      "mode": "100644"
+    },
+    "src/aot/builtins/resolve/tests/paths.rs": {
+      "before": "8b61767e04db6d40867f6cc2ef871d4934a1a0a228e53b71eb223a56ff882b89",
+      "after": "530c2ee31054de1a33469700ffffeebf33916ee66422858441d9877d7014d9b9",
+      "base_blob": "10066fa4d65186cab506b54cad1111711da3b410",
+      "adapted_blob": "19e33b543a36da66cf34c527f357f197de658610",
+      "mode": "100644"
+    },
+    "src/aot/builtins/runtime_uses.rs": {
+      "before": "d9ce1845282ca0ebaafa17b0230693c8033217619733e57dbfd1035b2d0910c0",
+      "after": "f19a3f22c05492063306c0828e76c8b8817c9aab7d70f0d96339faf1765401c9",
+      "base_blob": "582a773834da9fa8d81098a2a597f3a8321cc32e",
+      "adapted_blob": "5e91e2c2ebbf9af57b490ebddf8fac7881f33c37",
+      "mode": "100644"
+    },
+    "src/aot/builtins/runtime_uses/tests.rs": {
+      "before": "c253b8f301e3e4fa32482709212059e9e4704f3076ca1c232fb56acb883a6bae",
+      "after": "e82b715e7158bc859762c87d79ed122992fa20ec243d6b21df8732b1ebf309a6",
+      "base_blob": "5be60f6ada933b49bb1fb891bacae215b3d2de23",
+      "adapted_blob": "72821bd1146f5f3adf79fdc4c114cf36ec7b5b44",
+      "mode": "100644"
+    },
+    "src/aot/builtins/table.rs": {
+      "before": "81c87917dde378078721f9b2290f487777576c14f1dca3cf5947c412743fe6ce",
+      "after": "6c3894d7172f477263dcf87a64e444498e43f8912358b3ea38e1e71db74590bd",
+      "base_blob": "afeccb76582f506a698cf9ce421a5f28341832eb",
+      "adapted_blob": "83dfe4283f16a12ccfc38914f1c6b0d1cc2c8753",
+      "mode": "100644"
+    },
+    "src/aot/builtins/table/entries.rs": {
+      "before": "07c3ba217682eafae5cca82cf89a273f2bcc5638956473d0d3cc2713e9fa1a62",
+      "after": "b8a457513819427ff0013a1462a009bd40d937b77d044e3cc2adedb99b1b09d3",
+      "base_blob": "a36627e8bca786cfa0afd5ae98a96834fe559d73",
+      "adapted_blob": "250025fa1de01d762ce48e74ed540a4b666a05e6",
+      "mode": "100644"
+    },
+    "src/aot/builtins/table/lookup.rs": {
+      "before": "0ac0bdc65bf4e8d98e15b602b4aff31f2b4215192a56f5861b0fcb28cb514133",
+      "after": "36c0fda0da0129c5c7d36eb522803928b841f482825df9e836d50d6c2bd606c3",
+      "base_blob": "cee47827cc07245af48cff4e453209117f4742d0",
+      "adapted_blob": "4f348c2ba721f0a567837788007f9f1f43d54bed",
+      "mode": "100644"
+    },
+    "src/aot/builtins/table/syntax.rs": {
+      "before": "b08c476ee24e95985c1a349cd05d9b419e60b8cc2e193e2dd4271fbb287415bf",
+      "after": "08ea2ffb05af1afdd2defb8f39d55e5250fedbbf8320ab43a29a7558d3d0a3ac",
+      "base_blob": "662d94c180778e5fd96a76eeda018c9390ab6918",
+      "adapted_blob": "896fc9c39ddd10278c4d55a7ec9750659fb81bf2",
+      "mode": "100644"
+    },
+    "src/aot/builtins/table/tests/lookup.rs": {
+      "before": "e7910cdaf772628be31e039af9b39754ad4aeff7f7a84d62119798feb61fdfb6",
+      "after": "d2c6958b346a1d37ed8204655a635016542e01abd1b3bd0be530e2cbb89fe10f",
+      "base_blob": "89d67d455f5bae541673c6017500ff47adc46af7",
+      "adapted_blob": "235f5be6298b4a33b8debbb1b32076c873ea7acf",
+      "mode": "100644"
+    },
+    "src/aot/builtins/table/tests/modules.rs": {
+      "before": "0d0296470ccacc7a0b8d0a5aed4b41964e455f13184adab105df2d3ed6d10e0d",
+      "after": "653a2653a7ef261403fc0889da036f38d09826a4c9a8348b8c13da919cc442b1",
+      "base_blob": "4aa03e7cf573d9b5d999b66672f6994f26986f96",
+      "adapted_blob": "e035d9896e902a80a38f82d601b7f45056b65e66",
+      "mode": "100644"
+    },
+    "src/aot/builtins/type_paths/tests.rs": {
+      "before": "f212d6a2cf6fe51edb281eebd0bbc606e953d934b8b6dd086ebbd9b7e3970b8a",
+      "after": "f17f1375a24470a4f583b80d6075bd0424828263b03926069306ee01c8a59417",
+      "base_blob": "dd966c7c951334c8f268da5621b82a46366f036d",
+      "adapted_blob": "4d8d4b5fbd8c2afc779f61a366c8d7913ef33f0a",
+      "mode": "100644"
+    },
+    "src/aot/compile.rs": {
+      "before": "fd694230967005a5de533144d7a7a106739d9e016261d3cd7f6addf73c17edc9",
+      "after": "1ffd0599ff63bea72bd6f4cba87cb496080e0683439e8b8991b70b82128ba485",
+      "base_blob": "8baa1f65df9d4b69eb2a4386e08aa117eafa17f3",
+      "adapted_blob": "cb85f4a981bd1b2804cfb407ea3e6442e884571c",
+      "mode": "100644"
+    },
+    "src/aot/compile/link_stage.rs": {
+      "before": "c86229ce860f2327c45721d57190e40d9cc26ef0e1b47208e361ab15ed04fdfd",
+      "after": "60fd27299c2c9f225c0db966560e1754fe87fb43eb9d8f85211a2a5ec661addc",
+      "base_blob": "04a4beeb52edee8f4d281c417376e669e3e44bbd",
+      "adapted_blob": "95ae61eaa5b7d349fd063b766d5658a61667ab4b",
+      "mode": "100644"
+    },
+    "src/aot/compile/program_reach.rs": {
+      "before": "64b62682fdaf1002d4b2cafb758c9941e0cd43356d9a6b67c99916c5700711a3",
+      "after": "3b0b308b2d0941513c993150b51f28c9652c3c2bf98b97b8b6e078baaa96c4df",
+      "base_blob": "2c99e605f4617d17935d3d612211fe8d8d02eaea",
+      "adapted_blob": "6cc0355813122b14f1ebc264fc70d4396cb41643",
+      "mode": "100644"
+    },
+    "src/aot/compile/removable.rs": {
+      "before": "b68f6450a91715ba9118d05bbf93de94da259956a2ec515b5e40ecd6a38d0a0f",
+      "after": "3ae1e4e453d5841d7bac6fa48a3efac7f4d1462673d63fb7762a69d0c7ab77ed",
+      "base_blob": "e6f8d999d88300e3fbcc26bf87647b993a971b96",
+      "adapted_blob": "acdfc24f0508abc3361759bd73a49707ea26d811",
+      "mode": "100644"
+    },
+    "src/aot/compile/removable/rows.tsv": {
+      "before": "82fff3ba744769954ad8b437ced28b014fe0e138e4654750ca31e99ef2c72432",
+      "after": "f5facad1db8e20f4854ad121e4fa647164e0237f9143ae3633210edbd96d1189",
+      "base_blob": "ef567b1634418a095460e237108f6bcbd0a8c51f",
+      "adapted_blob": "7f9956fe7c83bc54230379c5ec5cb58ebbb0bfae",
+      "mode": "100644"
+    },
+    "src/aot/compile/removable/tests.rs": {
+      "before": "d94927b7e47ee49514ec642bb38f8d3c383335dc8a7cfb5da7c637781f02d4cf",
+      "after": "e7f2e5b465df75cbee950a035340ea091f53055a39189c78b343a39fde338500",
+      "base_blob": "725a6564c2c46ad65556f2367f88c25d34452c20",
+      "adapted_blob": "9a885b207822dd4ea517c5203bfecb1d2fd7807c",
+      "mode": "100644"
+    },
+    "src/aot/compile/removable/unused.rs": {
+      "before": "013b514444e3054dabce146080a420d1267b7abf68a381e7bf25597b821d569e",
+      "after": "6503e4fcf2451c9cae1c0ef6da3d0ad51969ee81198df57227ae2c997db71ade",
+      "base_blob": "a37e0ea6dcda750a398dd3c65016f92b74de5ea0",
+      "adapted_blob": "eab9d6a170bcc29f32177a68f01812a3d4bf7fd7",
+      "mode": "100644"
+    },
+    "src/aot/compile/runtime_reach.rs": {
+      "before": "2c485e19dda9a9f634452c07736170e9f47acbd8aca510d616056eaf9438b36d",
+      "after": "1cb8e47218eb43db06095b31adaa154e214658d8dc52a3ea25ede9118cc2996e",
+      "base_blob": "6fc2a928dc2e7f547394612d11db9d9a88f0da62",
+      "adapted_blob": "42e236719ad5a01d15a4f13aa3bfb440976a061b",
+      "mode": "100644"
+    },
+    "src/aot/compile/tests.rs": {
+      "before": "40b3818083976602712d8d5d5c576783df8bafbce3173963b9fe30018affbd15",
+      "after": "a7f3599edb894d2bc316ac5bbbf8692ee8b2b2fc069d683b90a488301abea8f5",
+      "base_blob": "65e9f4b505be0e4d7236270fc8a7e27c8b313a22",
+      "adapted_blob": "5a3770e9739acb6c541394413a1a92456fa052be",
+      "mode": "100644"
+    },
+    "src/aot/diagnostic_codes.rs": {
+      "before": "a59404d2a25a659f64fb9c9b5374f03a7c0455f4c8384d6a62f9e91c1bb5f727",
+      "after": "f877f683c58b2028b8579bece9edab2f1f3bf789797aee29cc77616510c35e5d",
+      "base_blob": "cd434ad7e276825584fc4e66ce11ac564112b5ea",
+      "adapted_blob": "b4b499a298f6f58908e617a1285b5cba15714828",
+      "mode": "100644"
+    },
+    "src/aot/emit/tables.rs": {
+      "before": "50eab7da4d5942a811ce07d43332878c2d9b1c8dffc2fa6327e1003456af1dba",
+      "after": "5a1ce13322435501a8f2d132bdf18987460704c11c820c1b94c61bb561e45265",
+      "base_blob": "18973a2e52f0a77c6a165d24b83d4ef6a134dcc2",
+      "adapted_blob": "a0e59ad54690fa05c126c0ca056f98a818cbe196",
+      "mode": "100644"
+    },
+    "src/aot/emit/tests.rs": {
+      "before": "317d5bbf957762eb09f476306a7bf5ec414a0d5aa9a755af6da9389dccf67fce",
+      "after": "ec945a8e5d9ebead40afe25cb4150b106a4f23d8b1e7e6b748ff46edf2d97c22",
+      "base_blob": "9c283e28ecbab439613be07d139410ff5cfbea72",
+      "adapted_blob": "e1d270b31a643f25b6f2a655bb6ad64e66993e56",
+      "mode": "100644"
+    },
+    "src/aot/engine/used_features.rs": {
+      "before": "e3308ca2e32e7d826d341fe8fd65dbe5532dad439f96375f36db97c6762e0721",
+      "after": "53ce025354157b263ba2bcab989239d15d407532a59b80c5113456aa7cb4ab14",
+      "base_blob": "13876f765c5c8772f64f026e97804268fa753c21",
+      "adapted_blob": "6d716f8ca6dc3324f7e902aa809a2ce212cb5043",
+      "mode": "100644"
+    },
+    "src/aot/engine/used_features/tests.rs": {
+      "before": "a83ddfebdeeac7f3e9da664f3b09c2732c5e26b85489834489db05422b493043",
+      "after": "fbd3c50500ec61b30bc7fb90dad592f425fcce21eb660d051d253dec92bfca98",
+      "base_blob": "5bd6ed9159ad28acd5500636131d2701394fb290",
+      "adapted_blob": "1648bae973a838351b9409650d62942ea652b5bd",
+      "mode": "100644"
+    },
+    "src/aot/interface/compile.rs": {
+      "before": "685669cb0de41499895eeca10342b7cfac2081f82d1d4e022b0d2eb3bd53d279",
+      "after": "76de3cfd2648480f3284dccb8b52c6a75f390ccb8748b64f1ffafb84989d443a",
+      "base_blob": "19c1a5bb3a13e850073b40fd0e07242cce961bb6",
+      "adapted_blob": "7a86fd887d0421bb6ea9d0a725168939fd39e820",
+      "mode": "100644"
+    },
+    "src/aot/ir/finish/tests.rs": {
+      "before": "8e900ecab4af5c71bb45af02e337f4653474de8c29170143c970d9a8b21472b5",
+      "after": "11405b6a447bf95cf3b1e30d7b160c7110f74362927add037610e0629e0a6a97",
+      "base_blob": "6623766bbadb966f98405261c5861d2939332c13",
+      "adapted_blob": "b3dbc0d5506cd08be5f52bb990d866ab735c8623",
+      "mode": "100644"
+    },
+    "src/aot/ir/print_names.rs": {
+      "before": "26f61894d245a954686446a00a6adffe4351a12f1c38bb92872cc112c19b5409",
+      "after": "352a2029a361c7f0a70d8c3dfacfbba001a46b4c11074818b01217314538a8d9",
+      "base_blob": "8f05c1f5ccea3651bb147e566ad369c263116e67",
+      "adapted_blob": "bd3c28b38315b02897b0d9714054892f0897d1a9",
+      "mode": "100644"
+    },
+    "src/aot/ir/print_names/tests.rs": {
+      "before": "6234234bbd20f62a300bd28ca656890191b0472594977a292ebf23b3322d2ffc",
+      "after": "79ad428f40840a297a91c1b7ea5d1142928c3cd5c66f63cf0dcecb003eaa6e5b",
+      "base_blob": "899907b825214cb0e7bffdde941c5de7a550c303",
+      "adapted_blob": "cd078c3fa180e88a1d913ce6b46d8acea2dc3b10",
+      "mode": "100644"
+    },
+    "src/aot/ir/property_keys.rs": {
+      "before": "1bdd2dd432626e5d4b0e10e41aae3b3dfcb62cd7b1adbfdd8e630a00763b2a1d",
+      "after": "92ef5e5668c59f59cd5656449b5d02366c213be6a103b6add6cd287e3fcde8f2",
+      "base_blob": "766c1366de7d3092ccded1d6c08d3ee2ea8843ed",
+      "adapted_blob": "bbed12b4e91be1a0109210a87d684712c2bbbcc3",
+      "mode": "100644"
+    },
+    "src/aot/ir/tests/body.rs": {
+      "before": "7515e55d37fe03a8871d5b70a086dce2cb412742aed6c29fc0e7147c5e4077b8",
+      "after": "c7e95f69d63a1e429f824b55b0043f7d769e7ed6ded4fd7a62157692c610d1b7",
+      "base_blob": "6187be0c91101dd406cf76ff6d7ba6eaf45ead2f",
+      "adapted_blob": "9994484b5a8a08b0f114d32b88e22798410565be",
+      "mode": "100644"
+    },
+    "src/aot/ir/tests/handlers.rs": {
+      "before": "ddc067e0809ac3bec4ae7cdb1e624a376d788e7d5d4e4041c8de070b850204b3",
+      "after": "857218e9773654e858376a7c5b576caec2d6897ea62dea5378e65807611222a0",
+      "base_blob": "a188da3a54757714572344d8bcf65f4f741123c6",
+      "adapted_blob": "a33dd64dcdace1013af34398301551dbeafb2eeb",
+      "mode": "100644"
+    },
+    "src/aot/ir/tests/property_keys.rs": {
+      "before": "435e96596636954725886cb95493ab64cd0fc3422edc62f20d28f14376ce52fd",
+      "after": "936770739ed28fc8dbbf995227042abcb7da0d7c740a166982e04cd0c4b25bf3",
+      "base_blob": "845837d1c4d195883bac108416a497b72dda374d",
+      "adapted_blob": "3825a94437d89b19560f0993f7b6d0a523010fb7",
+      "mode": "100644"
+    },
+    "src/aot/link/marks/tests.rs": {
+      "before": "de8e2d2bc7c6f67bf6eb4268cb1852cff581946192cb0fab7da2e1fd53fb4d4b",
+      "after": "8d5df7bd0d95e5e550805aa529a7244b190f6903b04b2ec2c8f35e9c13a38418",
+      "base_blob": "39791f2055d64202fc94b00a41f5e721c8fab0d6",
+      "adapted_blob": "cc65f0aea6813a8d70e6bf6f79bbf8ec85602682",
+      "mode": "100644"
+    },
+    "src/aot/link/marks/tests/modules.rs": {
+      "before": "2a6f4b7c6dbe18c4845330592b83b78ae902e88db4b70497f010d405f6139ce4",
+      "after": "a2f02ebf246addf5537628e6be4690d2f46c52a8fdc36e8b373e83812b9fcacc",
+      "base_blob": "56cb5278dd3bb66e65f8e3babdca2eb9e88a77e3",
+      "adapted_blob": "bc85e545be8b21be1b559bb2fd8d60205a60a99a",
+      "mode": "100644"
+    },
+    "src/aot/link/module_records.rs": {
+      "before": "935ba7a1c38209aa320c064c3b351f92c9f5ecbb368cb6a8202c303f5b1275b0",
+      "after": "3687f24213276c6afeb3f733a17cb8e75e53f0474e7616b638b518042e949221",
+      "base_blob": "8b714cc6682d28b7fe91c75cc7ce8e8eda044013",
+      "adapted_blob": "2f88efa537bbf286285ba646bafbfdb71f4bedc0",
+      "mode": "100644"
+    },
+    "src/aot/link/module_records/tests.rs": {
+      "before": "8758024ed9247bac88bd3ee598cde7939b98cb487f2776ca8e280a0cb48ab15a",
+      "after": "78891d2ee67f5339221aa930edf6fad4a6f3b5c4bddf7fa2d1fa490631dbbbb6",
+      "base_blob": "015542b027f97b29f88a6c3ce7bf8d4f4159b53b",
+      "adapted_blob": "b9e52d7cd8c426b9b4216e6cd702b5f372085a38",
+      "mode": "100644"
+    },
+    "src/aot/link/numbering/tests.rs": {
+      "before": "8f58497767e659be04d0a90a13a9838a80680a9a8e3761645d9234e6aa242328",
+      "after": "843fa964b07a5ad2ca174286e5c48592d35b3cd0dd9ac327c1c29037861931c7",
+      "base_blob": "bf056698ed19d16dc6494a2f12a79f576384ba04",
+      "adapted_blob": "9118d396a86ed521f4bc6650de9e00551fe6cf18",
+      "mode": "100644"
+    },
+    "src/aot/link/property_keys.rs": {
+      "before": "0f0707632879b54fa66c5f0b0ed5dd2c67d8aaa359c828ced05f54c2d1a7330d",
+      "after": "d036b3e9da32a68bd37cf61f41950329f672a47f07f3514c9f6c88ab016a2569",
+      "base_blob": "e4b70407da4a98501c9610ed0998d1e91030ef6a",
+      "adapted_blob": "e0d41462e4b9f9f64b57eb15dac667af5c1297d4",
+      "mode": "100644"
+    },
+    "src/aot/link/tests.rs": {
+      "before": "499efd8c784d4d94aaa19ae10394aa78f8853c797866e008a865cfe45ab6b311",
+      "after": "0baf6f2f2608a839a00acca1b7ca28797bc272bd6d4e14aaf7f8a06aa1fd9e6e",
+      "base_blob": "992841f77b38c188e27dec57b9da3083e5e6b2b5",
+      "adapted_blob": "69abb1d59d8d206c331172d84597158f36b63647",
+      "mode": "100644"
+    },
+    "src/aot/link/unit/tests.rs": {
+      "before": "9d7e10186a63c52791b0e005532f4243f1d8cb16be31eb6dccf98b27819ac942",
+      "after": "af6bb0adb679ae2a306c83993abff05053fc54e98f9b3e0b1cc95868b502de56",
+      "base_blob": "acddb976e18c73aa41142be5a3de39934b7420e3",
+      "adapted_blob": "eb9e2832f2d73f10986d8f6a9fca6578c3630b02",
+      "mode": "100644"
+    },
+    "src/aot/link/unused_records.rs": {
+      "before": "a29e6213cc7d3448a1514053a3bab10c65cc1eb63a882e840c763ebdb4f22464",
+      "after": "b95e0963ea32359e1cb224c9feca09ae8b480e1a409a91b512b7cd3864584fdd",
+      "base_blob": "5bc838f0830b1415c49f6b33c91ae0100a9344a6",
+      "adapted_blob": "13fef7f7226a3c04715f49ed8db1820060302a0a",
+      "mode": "100644"
+    },
+    "src/aot/linked.rs": {
+      "before": "1d9be2523b7543b6a8ec48e913deaab09fcf9320482cae736dd9b0cfc79ff3d4",
+      "after": "bd5a83701eb51e86d649285b334d51494b50e8978a78066a6280b7bdeb926900",
+      "base_blob": "f1826de4f98f3a8d67702f215430244b2b1a8039",
+      "adapted_blob": "c2e1e31293239dbb55c5615f5b06b16f1f5e9176",
+      "mode": "100644"
+    },
+    "src/aot/load/fold_inputs.rs": {
+      "before": "fd3d13aca307c371735657cf480e6d1b216eef53063817baf9993cf3f62971bf",
+      "after": "d423716514cbdb4cda23ffc05da49b5948f9ea1074ec37b091496bd80812946c",
+      "base_blob": "7aecf9627bbb385f08843cca28d0b43039810d36",
+      "adapted_blob": "4e6e0ce0bc09e4cc0608ae45cd6d11c05ca34dc4",
+      "mode": "100644"
+    },
+    "src/aot/load/react_compiler/tests/types.rs": {
+      "before": "b380d0a039f37b1e1cbc81e91e6011df30f656e6a975bed123bf06a2c39cd1ee",
+      "after": "077c04721523ab4c05353893112f5fd5941052a7d79b69213bc6676a1b90939c",
+      "base_blob": "882af5e53db665aed0a1df3c71822b3f58e02f0d",
+      "adapted_blob": "1f90b156699dee12045d157403b4783bdc6d9f2a",
+      "mode": "100644"
+    },
+    "src/aot/load/sources/freeze.rs": {
+      "before": "2060ff8c535945ddcde05e3233684bbb16a6d7e835225d5409d6c10fec280136",
+      "after": "73b4489776f499d2b08fbd2a614cb0c24e22517f1235d52bcaf3dbe530279444",
+      "base_blob": "11589de96c8505c4e6442c567c9857c42650238c",
+      "adapted_blob": "f36ea33b4c8078988863a7d82816565ee82659e1",
+      "mode": "100644"
+    },
+    "src/aot/load/typed_packages/tests.rs": {
+      "before": "af89c714c2955d4d03c25a41d11b0f7bdd73e2d7f509933b940909f7253d6877",
+      "after": "58040a277b93c8821b24b6d4f095597f053e2ca716d8339e7c39770beb8d4dd7",
+      "base_blob": "81d8db52a5db9181ee70f0cc27b46c667c8b6111",
+      "adapted_blob": "f3900e7391515596221af7a7eeab898ccbf1f155",
+      "mode": "100644"
+    },
+    "src/aot/lower/async_function.rs": {
+      "before": "990eb05d8885b0bf32c1ba5e5a880d3cb44064b2e1ec3eca7b0525d2df6b6698",
+      "after": "02bf450caf4778be4e6eec7649759803bd4d9d700b5a3efd716d1c061957b11d",
+      "base_blob": "3f9029d21a8e6c10be7e62918381f6931dd84dc9",
+      "adapted_blob": "29698fb0f023982f477f5527b2d904b33c6e41a5",
+      "mode": "100644"
+    },
+    "src/aot/lower/call.rs": {
+      "before": "4e6b8de703f2ab4f4a10c92c6daf8e33750a2ceb372d774ef12af2f738b47a8d",
+      "after": "47590a6877e97dd525054fc701e5331c36f1e36d549ab3e9d0617760eee7bd02",
+      "base_blob": "03fe1d7c328d2e764e30090c558cee9c74566caa",
+      "adapted_blob": "7d01dcc575820c35f3e753172104306c69500628",
+      "mode": "100644"
+    },
+    "src/aot/lower/call/array_makers.rs": {
+      "before": "0c824623f151f80b7cf25dc530a3f6573adf7e60d75bfa2c5d218ccec0bb18c3",
+      "after": "7857d59bf9be0c1857aeb1df82859030b3d3436bc48323ddaf7a24acd2601e37",
+      "base_blob": "7da57de327e05ee2381fe24672e918d42219b03d",
+      "adapted_blob": "26475721a13df02d54c18b4d9f271c1c26de35c8",
+      "mode": "100644"
+    },
+    "src/aot/lower/call/callee.rs": {
+      "before": "fd4d8a22bbdfea9ba5dcd04088f25974ab7b3c3b40dc8f6ad0bc82967f776618",
+      "after": "8b909236e3033af3963871c573b166a79440893b8a5ae23b1417d2d3e94e0992",
+      "base_blob": "ab3cc9bed40ee45d1b0a3d6cee2adf18863e74f6",
+      "adapted_blob": "084e13ea63b54b5fd2853e9f889f6ad6faeae36d",
+      "mode": "100644"
+    },
+    "src/aot/lower/call/evaluated_text.rs": {
+      "before": "b354731336dc2f5f08c6daa2b0b1b48311435d8899ec6f7b369141aaf62924c7",
+      "after": "c0c235b390f1fb3e1b110cf867a417e5e92c6458e7c61b84c1dcf17c028826bd",
+      "base_blob": "54caf68a17627207dc4754676981fb23faba9122",
+      "adapted_blob": "40a20ac20694394e3500a22c200b01331f34302b",
+      "mode": "100644"
+    },
+    "src/aot/lower/call/intrinsic.rs": {
+      "before": "15f41bb7e3e9def2c431bf50b4191b21937c797576c287760e0415b4e12c3bb0",
+      "after": "2332867ad1d14cb23c6eef1d34274372d070cee9318507d4a071de22ae03bc8a",
+      "base_blob": "3e72f30cd6fa368339d93c1a541f6804abb235d7",
+      "adapted_blob": "f361afb2c35ca2f0d55cca7754fd2f2a7c3aec5b",
+      "mode": "100644"
+    },
+    "src/aot/lower/call/intrinsic_call.rs": {
+      "before": "390c7ce79c8b33e43620b6608811a214bf8e59c92733a253876604e5c2d24a12",
+      "after": "f8888d599c76d2acd58d1b03406f26d717f59a21eadf4f579a39427ea0182300",
+      "base_blob": "675c3089a882f2529fdb6a0b5a2121f19f739caa",
+      "adapted_blob": "9b9a7ff1982c92dd703405c21000db60c9919859",
+      "mode": "100644"
+    },
+    "src/aot/lower/call/number_questions.rs": {
+      "before": "751d1e763335b612ce044134ecdb1b51d5fe65158766f29a13a3609fb56fc829",
+      "after": "07e7987547881cf5da734615012dece659fd9d8f16c09043dc35d130ca1d9c88",
+      "base_blob": "74d683c44214a59206eb4f4b7bfb4bf393e16943",
+      "adapted_blob": "b0a47f04eafaf022cc5617a44bf651499a81153f",
+      "mode": "100644"
+    },
+    "src/aot/lower/call/written_operands.rs": {
+      "before": "e85f39e0d4a630612188600b2829b5a179e29b223a5f38bcc84b644910ca1d75",
+      "after": "cb90c9117db17840775e2289d45b20dbd6b68551d05c8d88c7656d9491d94288",
+      "base_blob": "15f839d93fde600b7388cdeb8c7844b94f41d892",
+      "adapted_blob": "8fe2dd03cb21261fa3a8607e59fccc346fcc3dd8",
+      "mode": "100644"
+    },
+    "src/aot/lower/class/constructor.rs": {
+      "before": "052d316245aeb21d82ccd92491302d9e1f6b773b4960a4c091826f1576309015",
+      "after": "3faee3513293080ac786d603330950f608540523b910c749faea5edfccaa4600",
+      "base_blob": "95b4b43c94b337fae6445daeaec31f5d41f50916",
+      "adapted_blob": "d76ed5cd264eed28eccfcd314e672a4f148986a3",
+      "mode": "100644"
+    },
+    "src/aot/lower/class/definition.rs": {
+      "before": "de245c1e53eab6eb4cfb48c3ebe3717f353cab368f22c7772d91ee6ec6e43f1e",
+      "after": "c244d2d3d83a5623d6870ce1553c8e712ade3717d88a4dc6d5eeca8b0b269e2a",
+      "base_blob": "2c72231b3ababa119c4fd0f5ffd806024e59deae",
+      "adapted_blob": "3215ab059a1d0602cf9e7038312f3880ec4f1635",
+      "mode": "100644"
+    },
+    "src/aot/lower/class/fields.rs": {
+      "before": "6e948fa4f779bbb7120a098af55df3283053afe1833d303188a6392a2e683ee7",
+      "after": "8c35b413032dc8e4907e34e1cc0f153720263eabff4d64bc9971945747765866",
+      "base_blob": "76791a1987e51e4d5ede2af4d0e4405795c2e275",
+      "adapted_blob": "2c781c21e2c463192060cdd9008f41c45a7e9bf1",
+      "mode": "100644"
+    },
+    "src/aot/lower/class/members.rs": {
+      "before": "16834649a6e413e3b3d7cdd93bc06d4415c85a59533aaba52aa9ca62af738ed2",
+      "after": "dd539b0581eef8c7d0fa82c379efaffe632910881d77655271af04ced0fd4e38",
+      "base_blob": "7b68555964037d42c341dfef139f8c585b7b4e02",
+      "adapted_blob": "b87d0f4036febdf94fa3f816310236e8621441fd",
+      "mode": "100644"
+    },
+    "src/aot/lower/commonjs/exports.rs": {
+      "before": "1f5ad612e75e55990caa9f140c8eac78df080826443ac8c875961ba3d99070a8",
+      "after": "2ae9953393362c28a251e899d1f66f7ac96eed7d74601cc4ac1b9294140cdc7f",
+      "base_blob": "f11405ac1eb615ee8b7b697030cdd7b659db1f90",
+      "adapted_blob": "8dc2e8c80305c001980181e7b5239308ded1f14f",
+      "mode": "100644"
+    },
+    "src/aot/lower/condition.rs": {
+      "before": "5d7af9300c868adc1933f8190bdb1cb08a04449844c73fe6c60663e8ef41d28d",
+      "after": "1c76a268d375330f568d81818a745f99099d961cd03b1134d9f5fdd4de5b8935",
+      "base_blob": "d32265cd0264cd1b90482cb457674d919e5f76f0",
+      "adapted_blob": "ffcb1fb7e95dd443099f9b3676e94e463eda29ba",
+      "mode": "100644"
+    },
+    "src/aot/lower/convert.rs": {
+      "before": "ceebf7f59a5b8d80bb3bfa78567ea146bff8350b6ccea459bd3550fb76833e82",
+      "after": "6b4f1e78cc8b32b11db6ad51ab61bba7a7c7cbd744c165ab680d5925a0f08940",
+      "base_blob": "3d80e65aa90ca3a9a35ddc12738aef1d1e5f09d6",
+      "adapted_blob": "1e1b041ee4a005e40c6ebc730a32cb69a4bf4f0e",
+      "mode": "100644"
+    },
+    "src/aot/lower/expected_result.rs": {
+      "before": null,
+      "after": "00e979aa288e05d9a60f8fb2cba3da97eb7ad4d9bd78b74192cab0840bc80902",
+      "base_blob": null,
+      "adapted_blob": "8b54cca9a6568f65899439586103fe3cf37b2823",
+      "mode": "100644"
+    },
+    "src/aot/lower/expression.rs": {
+      "before": "daac430c9a2c9197bbe7c70fd703011ed0251fc50b170dccdb61b55d0ac3a6c1",
+      "after": "510f335ffbdc4f61f2539a4c479ccd43afbf6bce8528e1c630ea88e10ef0fec7",
+      "base_blob": "89972f0978aa88b1ded14e3cf04c28af77be61a6",
+      "adapted_blob": "90564ddffcb4c6e761005856299242cfe8d3727e",
+      "mode": "100644"
+    },
+    "src/aot/lower/expression/builtin_path.rs": {
+      "before": "e8027d1ef3b4e610032a2d3edb4771bd87cf5727cb0ba09c02eace9fbb839789",
+      "after": "18eb42def34fdd36622fb822b3b1a5306084a67936fcdde0f05e3f7c1a6d488a",
+      "base_blob": "b236d49f335c8a8086609e6aca782bf17134ea52",
+      "adapted_blob": "7dfd6a6ad46bf9fbe6e19ef099c62cfa4e6e11a1",
+      "mode": "100644"
+    },
+    "src/aot/lower/expression/global_path.rs": {
+      "before": "6c0d4c086ad27bd65fb5f55386d2d3763d3e515c94a6092ef20071653ac8ae73",
+      "after": "8d8edde75fdd3218fbed2a4ad18397fec5391e48747789bfd41091ba60b45e50",
+      "base_blob": "bac59efd59f800b5b406b9e087af9f73974868c5",
+      "adapted_blob": "3d2f97a6f34566dbc79ead455d1a4703d2527471",
+      "mode": "100644"
+    },
+    "src/aot/lower/expression/logical.rs": {
+      "before": "b2058dbe97876f3571ef85bce64b309d8b2ecc30fec7de118adcfc9196b43ddd",
+      "after": "d8fe05e11620be58766b5f88b8c663f4d2c88cbd83d80fa02b511dd17b429cf1",
+      "base_blob": "619989f991d1aa283306f6c53b4488d1b7a42330",
+      "adapted_blob": "4e35eb2a522ea4811e9881ac9fa077ef647d87e9",
+      "mode": "100644"
+    },
+    "src/aot/lower/expression/unused.rs": {
+      "before": "068bfda4020aeedbef1efc169b4705c92933f5303f01342d249898f3b4a50376",
+      "after": "74598c90c9c6d4e55177dbb26a16bd475105fea689997f001e01da965af23499",
+      "base_blob": "39a0816e61eb52e11c888ae195f498ddf0c1a914",
+      "adapted_blob": "d89e8fb4601286232bf1c1c5d6639992d35a94c5",
+      "mode": "100644"
+    },
+    "src/aot/lower/function/closures.rs": {
+      "before": "cd8ff85980d91756de948ddeb853735f1c105e21471cc419d6ac56603d8d0dd9",
+      "after": "3811f415fc64c3b4594c338f4897586ddb967b2ce1c61d178aed1e4176e5b4e0",
+      "base_blob": "47c2241bb20f20fc28b7255b6d9c331d199b9ec4",
+      "adapted_blob": "6b724c074f2d5f0d7e6f2e2d69ed74b4ed826fe5",
+      "mode": "100644"
+    },
+    "src/aot/lower/function/header.rs": {
+      "before": "cd303947582efde82e3ce709585e96d9cfdbea7b970fa205122d1412f56ce143",
+      "after": "468ba67ca8b46cb21a8b73f853001bd8e62123c26498289429975543d8d527b4",
+      "base_blob": "8a14872bf0677085bf68842dcc3dc425505878c8",
+      "adapted_blob": "55c644967e1fd13c976a78738e1b790ce3a7732c",
+      "mode": "100644"
+    },
+    "src/aot/lower/function_types.rs": {
+      "before": "6a0b20a88a10eca27808d591f86fdf878009636c91109b83b467ab03d178e0e7",
+      "after": "547370f5c8a5d749728b6f8ace351507fe4872005a75460177f74b52f225ac45",
+      "base_blob": "a16e810cbe5eca411bc700bf5c4e24070cdd3476",
+      "adapted_blob": "316791fd99193297bd9d0562ecca2e7095707ed4",
+      "mode": "100644"
+    },
+    "src/aot/lower/generator.rs": {
+      "before": "eceb8f811d2dda01b2ad95cab9a05ca74fe51a615002af48876f49fda0ec2518",
+      "after": "c42c7cca3a3495971cf8719cf1fe94a655428c70472d93d696c98b3ae88c475a",
+      "base_blob": "70c23029e55a7853d05e32d3edb217165e7e102f",
+      "adapted_blob": "85f98b300feadf5bf256c7e900cf7c79ed662c21",
+      "mode": "100644"
+    },
+    "src/aot/lower/iteration.rs": {
+      "before": "9486e66466c442823918b92fb4e8d4aa858ec4d4e04ae74191a17d7ddf0804b3",
+      "after": "94fbfb7d730439c8c62038e547c27b0acfcbb773410599b00fcf7b0edf6ddec6",
+      "base_blob": "06bd16d4b57d3284e960abfdb49ccee71c0fb30a",
+      "adapted_blob": "c4c254d8d0e8c5545776fef5923ab20972db15b2",
+      "mode": "100644"
+    },
+    "src/aot/lower/known_call.rs": {
+      "before": "bdb3807123ef0e759fb5d67d0f7174ab48bdcdd3e0f01ed2b0d79e4ac1893f18",
+      "after": "7ab8712d1c52d7e93f3d17b199ec7d0a86443550074f863b260da885885b395a",
+      "base_blob": "bc7d63b1e39094b3916fbaf2031559f529fba0ab",
+      "adapted_blob": "c75ffc0d77638f4dbeb02e794b63a1a90d234e3d",
+      "mode": "100644"
+    },
+    "src/aot/lower/known_function.rs": {
+      "before": "1de0ebea76dce1d85f6821d004cfd224389b891eff0da4263a745033de937f80",
+      "after": "aa0dcc57504ae92e75cb4d8c38969a69d4d27d34c636c9f4cc93925acc16881a",
+      "base_blob": "cac7a5f1d5fb828ed9b786facb126c2573922769",
+      "adapted_blob": "ab3a776236af5b94ddbb39a80fc13ae2c622b80d",
+      "mode": "100644"
+    },
+    "src/aot/lower/layouts/object_types.rs": {
+      "before": "a1681946e245f471c33f48c03564d20ec56af7a992e18627e0af5374c9f2082f",
+      "after": "c1843ed5ace7ebba3444f5287e7a88f0333d4b9dc507ec4732b6117deb3ab943",
+      "base_blob": "12024eb504d6c44c841a573906a2a5e701022ae5",
+      "adapted_blob": "cb51848cd648fc7c7ae5c68d6876ca15e6ce2024",
+      "mode": "100644"
+    },
+    "src/aot/lower/member.rs": {
+      "before": "601b18339d9ab94efbeff011ad536514d3ceec267e28a56b9f6bf5b56f9a480c",
+      "after": "7c05035627f535d35211fb6d54145c1692370e55e3df9f5f07711991ef69814e",
+      "base_blob": "4cb9f6272d18e4ea4ec17f2278697882e48cada1",
+      "adapted_blob": "db52b8142c1d4a83cc7a1759187a5773d9b4892d",
+      "mode": "100644"
+    },
+    "src/aot/lower/member/key.rs": {
+      "before": "50597b91ff9673fabef61bdcd19ca0aac834ad6c2560ed15faf3bb9d5f9a0592",
+      "after": "2a99a83257d01820da9406a3a9734637ec07e54dec82217635e4e0bb1a4e809d",
+      "base_blob": "500d7ac6ea6766858e32133b19dc12ad2c55afc0",
+      "adapted_blob": "317412ea41610f51b03f7d31f5740454ba4d5132",
+      "mode": "100644"
+    },
+    "src/aot/lower/mod.rs": {
+      "before": "3fd6b544e96bdaf9baee5728db34a9345f4e61a6b390ee56923768e404f8ebed",
+      "after": "bda4d9e4cc299b5e7fffcf8f3e4eec71f3f9d1b6d4639c5372acce7186401460",
+      "base_blob": "15f1f3b40421f5649235ea08702a52e2308f1a13",
+      "adapted_blob": "9eed6d2415a2fc80d830e48b03711f9cb592c9aa",
+      "mode": "100644"
+    },
+    "src/aot/lower/module.rs": {
+      "before": "a2f8cb079437142dceafe9f437c974f17e53c70a44c4e289c0d4454ea5a22230",
+      "after": "f40d59db1761256d2029c4b2f88dee43be1a95d79372be3c5ec130c7050d2eb2",
+      "base_blob": "d15c1dcf15af52545c455d31b6dac4d2178930cf",
+      "adapted_blob": "b5fda4ec7aba26a04bf624a75dfab8dc4971bc82",
+      "mode": "100644"
+    },
+    "src/aot/lower/module/body.rs": {
+      "before": "15856955038b0bd27f0ef789868ec13e13a0af87a535fe88de0a9196186ce8c6",
+      "after": "21f04d8247ca2127e315db9c9c07a397db9e498b5dfd68e1581e9e27086569b5",
+      "base_blob": "dfa1e856eff7c2a23404dc37c04b29e608e9adfb",
+      "adapted_blob": "4dac836c074d0aafceef59ce7ea6ba4d52b0ecc6",
+      "mode": "100644"
+    },
+    "src/aot/lower/module/faces.rs": {
+      "before": "6cd27ba734ed620bf1fce90ac1ed0cef316f9601c79db1ba05c591b61da3853d",
+      "after": "236ceca359b65fa519cff49c7223e03135e69dcd71d5a4ac2a4d31e1924e6fca",
+      "base_blob": "50d17e27d615ed9f093cf8e11683b6e1753866d8",
+      "adapted_blob": "2af2bea305e678597e2bdefca27fecbb5d61f24d",
+      "mode": "100644"
+    },
+    "src/aot/lower/module/imports.rs": {
+      "before": "8facacea7c00dffaaa3ac488158382ac0b1d211048d952396476f9cb1591001c",
+      "after": "f41f30e475a6b1926f4e99fc03f5ac8dbb05052317015b49e9cb0fe9992e795d",
+      "base_blob": "d66fedf72455173d18daf2ee5bcc4e55289afc2d",
+      "adapted_blob": "9d1f5995732c379c1237967635294bb6334e6291",
+      "mode": "100644"
+    },
+    "src/aot/lower/module/loads.rs": {
+      "before": "2624fd11e675ab47a09f79cddca30038c74b8c87c4b707709322fe0490846996",
+      "after": "52edb8911dc640dded49e4ba98c6db179fdd89f3ca917b56c887313e572abe01",
+      "base_blob": "65f8d32781f0d4d7d223b7439f4021a80c97488d",
+      "adapted_blob": "20e181e77c70d1a97811dc5a5eaadb65332e3a1b",
+      "mode": "100644"
+    },
+    "src/aot/lower/object.rs": {
+      "before": "8900fed2efe50ba828824d5cc57631dce7eb9d0901a589fdd1c8a755609f5af2",
+      "after": "cb7ee1bd9c9762a6fe58723117829d23c69407ea4b8a05e14bb62c7b9fb45905",
+      "base_blob": "3c7833568cb9e99c5ae0f7cf2f198b5a51930404",
+      "adapted_blob": "d23de3d36d598877a9888722c6e799b72b8db953",
+      "mode": "100644"
+    },
+    "src/aot/lower/object/literal.rs": {
+      "before": "9531c7f1503acbd8d018f009848815b10005786d3ff49cd966617123159f160a",
+      "after": "7136adad62e4efe7c00a094a3b18785ad22747bbe0f140d7cb469503e777f73c",
+      "base_blob": "df7e16bd3585bef6938cd68109a283d4e93d7235",
+      "adapted_blob": "8893121c1e6c50882bb67942416817b82b22833b",
+      "mode": "100644"
+    },
+    "src/aot/lower/operator.rs": {
+      "before": "d72e3ba610926f7622668ce35a9c28864d2141c7112349d86f4eebc204ea1724",
+      "after": "c36793a8618f528fea5e76e0c382c4778883d04ff5889a4e12a7530a6a35905e",
+      "base_blob": "dec24c1002fa1ae11d75d1c7130241ed567b3200",
+      "adapted_blob": "d61e73f7fda0e05f2cc7ce4fca4927d64b8ec534",
+      "mode": "100644"
+    },
+    "src/aot/lower/parameters.rs": {
+      "before": "b0b3790b2421606ad02c261ade2cd7619c7786981f323ba40943802c4a9ab5d0",
+      "after": "697a5b2d891d9f0269dbea98f3a2136129a68f93ed9de3195e146088be0821a9",
+      "base_blob": "1f0c1cde38509f0acd86a388e25e16218a5da54f",
+      "adapted_blob": "876a735330492e55cc4b6ac19ae5c74cf86b039a",
+      "mode": "100644"
+    },
+    "src/aot/lower/parameters/binding.rs": {
+      "before": "67f7b5c5d50b88d927d774e55e118ee1f63dbd42938b01d76127a6f1edbb7b8c",
+      "after": "434146fdb14e2dd60b96307c646834229e46281bc56109764533e23573c22db0",
+      "base_blob": "fff1784f453e45270d3de8afe5a7c1a5aa624d01",
+      "adapted_blob": "cf3ce60168e0b915b53e57a93175dcec600feea7",
+      "mode": "100644"
+    },
+    "src/aot/lower/private_names.rs": {
+      "before": "3723f11d4cb6f053107e6830017e9bb2a76b0515c19387758f303ee44888d841",
+      "after": "eca29feee2335de1dc1a8aea8656222f4e0eb1971bbc1d0f9a4b42c310828552",
+      "base_blob": "dc17ffb540f284e81fe82af961b82079af1b1bd1",
+      "adapted_blob": "fb775161826b8f26447408cafc5ef5bc699d0eca",
+      "mode": "100644"
+    },
+    "src/aot/lower/scope/eval.rs": {
+      "before": "e2da9ec76a178ec6fc0a3db66209bcbd3b1259a8898b959cd24711bc63e7c84f",
+      "after": "a8381cf3119b77ef3a5bfc5d6879305e7523501a34087143f127bfedef468b13",
+      "base_blob": "836987baf2b81b6af5c905ba70af74dfd1951748",
+      "adapted_blob": "0a4d3cef7f33bc36b65ab6c08dada0fc25b5e26b",
+      "mode": "100644"
+    },
+    "src/aot/lower/scope/walk/functions.rs": {
+      "before": "232b909c46d0e48ecf45446ce73a302c2f02ea205344b1eb7b701f9df65cdfcd",
+      "after": "aafadcbf5488ac607beb3d9ab1595189d32fe92609908cfefc58a700f235f155",
+      "base_blob": "5dc9f015489f6339698c3ab1a73cfdf112f48a27",
+      "adapted_blob": "be06f5bfa2b17b8dc8625d0d5ff4b1d33fe43c87",
+      "mode": "100644"
+    },
+    "src/aot/lower/statement.rs": {
+      "before": "c918a0c3a7c5f42e3f1382ebbec7b8b0b6a2c3c2e515c432c0ff97d3282d632f",
+      "after": "450398ffad593b2963283867f510da5e1f87e1c8204af04902d8e1415109df23",
+      "base_blob": "f73a7b08a3d8d11a466e88a8ab016efc333962f1",
+      "adapted_blob": "f9c6f9ec45f20d21a823b6ee384a93c33fd8d3f0",
+      "mode": "100644"
+    },
+    "src/aot/lower/statement/loops.rs": {
+      "before": "8f1b8279da57d23f9a00cd26540301119cdbde30260ded96b3e69b7c94b2c275",
+      "after": "9702989a838db2685e60d3097d11e71f8d0f1ca80a4866373c70e0cf03ec376d",
+      "base_blob": "f45662998cbd0c09cf005fdb65b9aaeb5b9ff456",
+      "adapted_blob": "43d299dc1557803d05b71d954b07c67d074e69e7",
+      "mode": "100644"
+    },
+    "src/aot/lower/validate.rs": {
+      "before": "2d62899ccbd193ee0840f62f8a7aae9e6f9701e30d9c032e41917063f18c943b",
+      "after": null,
+      "base_blob": "a98ed04dddfb8f3a110477520d4588c7442f0dcb",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "src/aot/lower/validate/expected_result.rs": {
+      "before": "06b50e93c433f76e827c969bd655a4acd9c97b7632d41a055dd063a3fd773757",
+      "after": null,
+      "base_blob": "10a3ded3a3d09415b431abab2f3b91fcc9dc4ef2",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "src/aot/lower/validate/misuse.rs": {
+      "before": "4e776394927ec6d91de28bf2dc4189e83d1ea24cdac468c09b028392bb4df734",
+      "after": null,
+      "base_blob": "0d36e1bf1ed60a3685356b1ee220af23aa93e4a5",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "src/aot/lower/validate/misuse/tests.rs": {
+      "before": "5c49f913ca42ade23f9098d449645ced315011cdeb5c9a86991e714fa08a81d2",
+      "after": null,
+      "base_blob": "7e95f118b8bb879f032c0eaefd21d5b58e1331d6",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "src/aot/lower/validate/nodes.rs": {
+      "before": "84592ebef1c6116a397480242c3f288e18651050cb865ae437fa75fc07d44ced",
+      "after": null,
+      "base_blob": "6b619191d3e557a4a3c50645ed9a0a685455c90e",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "src/aot/lower/validate/nodes/tests.rs": {
+      "before": "412f087fdddab01a5c7a52192ecaf170543f1e1ef1352258faa55b83a003d2d7",
+      "after": null,
+      "base_blob": "d3bea8243aa4b3b34941aa1877b8dd37b86bb3dd",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "src/aot/lower/validate/rules.rs": {
+      "before": "cd7b50ba61e01fc369e26d7943f506b1f8d4b6868cc7448f61ba77e785f07054",
+      "after": null,
+      "base_blob": "ed0a9637fd8da668817c28400ae632d87987cc8e",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "src/aot/lower/validate/unsupported.rs": {
+      "before": "8ef979eb2d3f6b20e306d42279a7b5dc9b2624d6c6965a66011a810361a8818c",
+      "after": null,
+      "base_blob": "d5c00078f82d90a1180aafbafd95195ace6e4dd9",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "src/aot/lower/yield_star.rs": {
+      "before": "3f7f962dc9be9858b3ff8a8bb4b7199e21e62f81480fcabe6370585ae7221f09",
+      "after": "681dccbe20accba2fbb206e5ab3afa8d148f6bce92f5fb9de16f9d656956f77e",
+      "base_blob": "b13e2990dc5ac8fda1441657b4b3f7eb94365a64",
+      "adapted_blob": "2dbac12fda1e3973993390d3d7af6ea7558d6519",
+      "mode": "100644"
+    },
+    "src/aot/modules/bindings.rs": {
+      "before": "82d516ddacfd976181972e7254e13510fbf3c6d6e300626b421500e1215f3977",
+      "after": "3753f5b31d44b0247d366bc0bc168736d06f538b8bbf1dde4d71b521ae9cfe06",
+      "base_blob": "fe92272ad4d139ac3c12851088c251c151a4ab7d",
+      "adapted_blob": "df405217d689f82b81853eddc7bc670833650e6d",
+      "mode": "100644"
+    },
+    "src/aot/modules/exports.rs": {
+      "before": "e1ef10472c02c8aa27e4371d8341c1c5f0349e4f5b913fbf8946bd292665db95",
+      "after": "5eeabd1d3a334a328b8963c37faeb48206f91d2fab2af9636f19501a525d1762",
+      "base_blob": "fab413b131635e92731e620c63ee633b4aa36d53",
+      "adapted_blob": "be35468697f08b689b84244fbbe5bccb918297db",
+      "mode": "100644"
+    },
+    "src/aot/modules/exports/entries.rs": {
+      "before": "fe2a2375569bcbe0a51b990393c3b3d435798a79ca7606269df61b4e88241316",
+      "after": "fd5b59d25d1362e11e171c127e7e4142a2f96cfb1d1a4a1c1bbd8ddd59dafaa9",
+      "base_blob": "3d5c0c3c86955353c0e39382aaf941653ac19fe2",
+      "adapted_blob": "7fb3fb739fc06dbc124f53957f4dc1c6714be73b",
+      "mode": "100644"
+    },
+    "src/aot/modules/exports/tests.rs": {
+      "before": "01ade9d607e14340efff5be97d53ffae635e02ea5482d15f1cf7e344eead52e2",
+      "after": "0bb03df3d668463fb1837577a240bcc0c96bebb59a6bee68a30e6b9792a76bc4",
+      "base_blob": "c2b15f46052c9de972f4fadabad917031ce9d2d6",
+      "adapted_blob": "04e14fdda5aebf6e26407b6017082702da190c6c",
+      "mode": "100644"
+    },
+    "src/aot/modules/failures.rs": {
+      "before": "0d122cd230deecbc894d87921212dd273ffc258fc0cdef6568b6e1b0fbf0fa9d",
+      "after": "50557b083918997d79eecb74caa8c69c8f0bc5061bbdcf052f1343897c7f8590",
+      "base_blob": "991c5b8dcdbfe52e641ccb138c7b92fad36f0974",
+      "adapted_blob": "27c21484a7d1c05c1e8f5eee31203e63faeac922",
+      "mode": "100644"
+    },
+    "src/aot/modules/imports.rs": {
+      "before": "4f5da6e69309a873d07a75f97e84bd47061bfb026c7f8dbf8412202660c0c56a",
+      "after": "e0bdeb450c203fe364bea5c3d7ef59324b27a06d6ce34c4d5aa6a63d24e63001",
+      "base_blob": "465320d17fbef756fefd802fe5ed559889fb264d",
+      "adapted_blob": "bbed474e755319980eb1bd0f71d5eaadfc2a8a2e",
+      "mode": "100644"
+    },
+    "src/aot/modules/imports/tests.rs": {
+      "before": "03eb13c314d910134cb168e9ac8264db3c7ea288e4876443a20f0d09452e09c2",
+      "after": "e4471a18b3b5fe8d792ee09a98ac40890df16ca7a517be9c4ceaaec53ce273b6",
+      "base_blob": "5e2fa3d93657d2ea65008e7b310a4f4a0f356b20",
+      "adapted_blob": "85a77ac6833f5776405ca84adb8a5ba198f59407",
+      "mode": "100644"
+    },
+    "src/aot/modules/mod.rs": {
+      "before": "baad83268bee25a15f513d9a158a2f3e3ed4a12594d25c9e5e6ae1464d8fc903",
+      "after": "764949122955d04dfd7f79fecc944f03d774f615547cd1aa152ac526450a157d",
+      "base_blob": "b0277eb4caf2f3656a5e9ba4cbcfe2204191b79c",
+      "adapted_blob": "83c36326bee6da9ed7f8446ae44a55c4415a456e",
+      "mode": "100644"
+    },
+    "src/aot/modules/plan.rs": {
+      "before": "d3b91daf391a02161dea7f39eb3d8beddcd372855ef3748f8a874f7d6659d05c",
+      "after": "c977c424b5a5fceaa0101509cec261f0d6cd1c23fea603aac068353988ef3263",
+      "base_blob": "afa3e2d0c492a26b178950a08910ab2f858f0870",
+      "adapted_blob": "702491d7dd5416b6b1c1c1be6590dbaf67877ee3",
+      "mode": "100644"
+    },
+    "src/aot/modules/plan/tests.rs": {
+      "before": "c189c102bd17721ca7dede8e76227d1a8e30272da62cd94926c1d6ddb0e32a2a",
+      "after": "12573779f55d72717d976ed55cb8290befc661de4e3c4d5d8e0694b73b6093bc",
+      "base_blob": "76e99bf94e542160131c01b579961bb63eb34bb3",
+      "adapted_blob": "78c1878964ad94f18be8fc98dd358bd2fc0e83b5",
+      "mode": "100644"
+    },
+    "src/aot/modules/tests.rs": {
+      "before": "d8dc07a35583a056672d6a60fa727a3901d4782cc12bffd407d9db367746f4a2",
+      "after": "9c51e55975153ecafbf707d7cb7595d3dca6d1180e0f0917b2d09ff62e038a71",
+      "base_blob": "8fc2b7a6683a3409431a9085a90e7ef59f85dbc5",
+      "adapted_blob": "7358766ae10bb6fe0b8e5f210a19c319b2c7d7d3",
+      "mode": "100644"
+    },
+    "src/aot/prelude/bun-intrinsics.d.ts": {
+      "before": "0b1a11f046ecd6c511c7da13ca3d3b3ac5e1a3caaa669c08802babb93077d55f",
+      "after": "f12285af77292ed83406a00cb82981f8b4b760dc1b597f0123a73d0c64582979",
+      "base_blob": "740e2606b2b740d06528008d0de16498026d5e4e",
+      "adapted_blob": "a88dd92e1427576cf9659913c011300a0b293828",
+      "mode": "100644"
+    },
+    "src/aot/prelude/mod.rs": {
+      "before": "4c9429bfa145d78b1f38f9717140001da123ba55f8bf9e1f0149d1652ce7404c",
+      "after": "3c053eb11fc4b16a43aaf700cde5b1dd3187d7ed6a55990ae88b59b916090e86",
+      "base_blob": "475eec6bc7db23c62554de4ffa8b57312fc99fe9",
+      "adapted_blob": "633a499b38604344e7d26309ff55fa48f6af79eb",
+      "mode": "100644"
+    },
+    "src/aot/prelude/tests.rs": {
+      "before": "02d27c5ca68eb81cac651cbe7ae236794cae8d604f0b1e9b50695da8a3321d13",
+      "after": "0ad8260e5ad463fc5bce4e6b87295f4a82c88d84b55cfa8e5cb94b6886093e18",
+      "base_blob": "d17adec905ba638c30c56e6416cef04a17efd289",
+      "adapted_blob": "d2325b7f6a8808e3c27c9ed38c3a1a1ed081ed0b",
+      "mode": "100644"
+    },
+    "src/aot/prelude/validation.ts": {
+      "before": "941dec2c61f2aed5d2332c472b0f7fe476251ca79ea454e5ae8f59754a29f34d",
+      "after": null,
+      "base_blob": "506eca67445a5f6c99df133368ec597669b911cf",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "src/aot/report/causes.rs": {
+      "before": "dac2eacd3a975601064306b018f080acba0a2d198588aee5990f2ecb9098bbd5",
+      "after": "a98a8c456f46944151ef806c25a82be429827620926390c948db693a2c0f5442",
+      "base_blob": "1fddbb69c9a2b946b4497548b820d536bfd1b183",
+      "adapted_blob": "5def2fc76d37f23deca7c71d9f2d89d3b6ed90ad",
+      "mode": "100644"
+    },
+    "src/aot/report/causes/tests.rs": {
+      "before": "fdfe3cc93d36dceef4968fa6d2506a47fb020743aad37f98c2f2c7ed0e4ecb29",
+      "after": "f1954644dfad70d15fc63c466cbf84fb0535a47a8e3b02b85dfeae99a818a8c9",
+      "base_blob": "2ab0a1fb1e98e56d00860083322ab76c8efc7a21",
+      "adapted_blob": "2800eb694e514fdb48cb3e3ae7689f76490373b6",
+      "mode": "100644"
+    },
+    "src/aot/report/declines.rs": {
+      "before": "421ff88f85904a00deb578af74f12c99e2da5a8e0d67c33be228ab7ec42937f3",
+      "after": "a6a4ac3fe4e82cb3177b053602b57ddfd1f410032bb9e8d598b1f417b3e28422",
+      "base_blob": "fbff80c383cda2faa95833ed41a178d21b8ffaa1",
+      "adapted_blob": "0f4e045a9a1f23ea2c7ea94788f11a18a29b9e23",
+      "mode": "100644"
+    },
+    "src/aot/report/declines/tests.rs": {
+      "before": "f86b6f5458910e4a9d6b148c73526c488478b3fb185b63307b6316fceddf7166",
+      "after": "8f285ae0210ec47aea9d88c2d014fa67d3804c611ca28bf85d510b5fc2282367",
+      "base_blob": "d19b39d25dbfb4b6a3efcecebee6a0bc032952b9",
+      "adapted_blob": "81b81bf32c1e49ede6787587f14c483f203463d9",
+      "mode": "100644"
+    },
+    "src/aot/report/wording.rs": {
+      "before": "603b8e5973558bdba1743f0c8b1cec7f5ba837a52512a90886d8d088b1270db3",
+      "after": "47905f51c60a02d585a583073ecfeed7188391d404e6f6fdbed627cb5c0894bd",
+      "base_blob": "eece435c825a0c410a7ac1b9579a6c4f05d5c0f6",
+      "adapted_blob": "720df2bb3ef60a1c72b59a8da46f001eeaaf12f9",
+      "mode": "100644"
+    },
+    "src/aot/report/wording/tests.rs": {
+      "before": "7c450e9b43841277f379473f5383e206ea0ca2e787d95d3af59115fd28687e52",
+      "after": "80a957daf32d8fad70e4fdbdd30eec8dcf3d0a8f66eae18b91af5621693935f5",
+      "base_blob": "5093e93f2b51c936da206fbb6678c483c34a1dcc",
+      "adapted_blob": "62649ab7c2a722fc3bb7d6ee423877e8f25bd791",
+      "mode": "100644"
+    },
+    "src/aot/statistics.rs": {
+      "before": "c62f260c9802ef055133225e9c8f248c538f447e9b56e676ba3e30c490516836",
+      "after": "a3eee73476d918f317e7453cb973cfc564fc0afdbb1096797001976a5d8a1c06",
+      "base_blob": "f787bbf8b0a1d97804e91fb314d7ac3956510122",
+      "adapted_blob": "9a0d50081f6006e093d46380c0621e72fbd88e63",
+      "mode": "100644"
+    },
+    "src/bundler/aot/mod.rs": {
+      "before": "f0aa49cdbd6c933f09b8a779ec6afc3d0a8357379d2e6488c144d9b1bd6ac81f",
+      "after": "4568bdae6999ba48a5c23061950928fc2c3421da2fdaf44b69194305d43b7025",
+      "base_blob": "3bcc5ee66d0b21ded36e56ad0fd67aac00238aa1",
+      "adapted_blob": "d5a487e1c70226aa6033b395b233554717bb7516",
+      "mode": "100644"
+    },
+    "src/bundler/aot/output.rs": {
+      "before": "987a4d944d65415654446529191097272ae0a40318669c358f43556760644b58",
+      "after": "a11178d0fe760071c62c8f2df46f2fe2031c1f4a6d5489cafbb44ccd7cdefddd",
+      "base_blob": "0cf56354fcf250318a64b54713566a84013a144d",
+      "adapted_blob": "e3e13bee2c5249fbbdcddb0bccb7132bf16614e7",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/data/own-properties.txt": {
+      "before": "31faf6399093c762fada49583e27a09324d4ff50d614f96e904316c8577a498f",
+      "after": "49169739e2e64b7a50f79cd19e3c1d4996ee9967dda8bc3260368af1133b2003",
+      "base_blob": "7eea973220efa53e3c700d26e2dc094d1723ac52",
+      "adapted_blob": "507d48de0f95c6f943196c7203e4fb78ad99ac6f",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/emit-rust-parsers.ts": {
+      "before": null,
+      "after": "b39d92d02edf934ff393df0d67892aa3783f2217260ad45741a690319ca2b11d",
+      "base_blob": null,
+      "adapted_blob": "3e522df4a8c49fbe9197e94ee2137f12dfafa465",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/host/bun-syntax.builtins.ts": {
+      "before": "d5800ef793491d9c9181863a65aeccf74deb4db690fe502256aea2742ec17fd6",
+      "after": "cff30cf8d36698ff3469a02a268fc2f9253fc8d6ff5206b28191e0edabe8ed2c",
+      "base_blob": "9ba4bb1c9de1a943ecb00a80a26e6c858990c026",
+      "adapted_blob": "dc369c9befbed10d5e96a1d78f02677be8fccb7f",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/host/compiler-helpers.builtins.ts": {
+      "before": "824338e5b74c3a6a86aba2cab776dd43bf0e35490b8e87864a656102a20245a9",
+      "after": "6a17d5a7c853c7f083b96127006f445b231bcdec2fe90572034d14342dfb4d61",
+      "base_blob": "da639ebf279ac88cc5146b5eb5dcf0a5988c3c44",
+      "adapted_blob": "881010cd3f3459b8ec55712e6fc8c4c866383f65",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/host/globals.builtins.ts": {
+      "before": "de02630e93c9ca93b474a6e0f15dbdb4cc4c31a7c46ee3a6e2936060cc326379",
+      "after": "585f05b293708980f38f02669235538babe5fd696641adde15f0f5c737c8aa0d",
+      "base_blob": "7a2b3e4b1f541f9686af823fb7006baf2c1b564d",
+      "adapted_blob": "f9d9e223c51da321f02dc3b8b59c6dcfaf91e741",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/host/modules.builtins.ts": {
+      "before": "91beb7e4bc34ea4073fc8fc633b20f8643bf9e8af09814e4334476fbd52cac2b",
+      "after": "83c2e9fe57eedf0c3cc4787ecf2aab78ae0d7565e767049a028e6e2ae96afa0a",
+      "base_blob": "220d9d8158e804e60e412a1a396880421b1f7fcd",
+      "adapted_blob": "ac6458149e3e503a950c83337c07154bd88ff0fd",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/host/operand-changes.builtins.ts": {
+      "before": "9b2bbfd86575513bc597d87f40999d5b1e4bbb6f49898ef4791c3a766aa47a52",
+      "after": "91ffa02c5d9ad0558cf00ed8845737bfe6956eaaec5e6ecf60cdca49228922d5",
+      "base_blob": "16ccb715349687f659f9a94fdb77c1c990478e73",
+      "adapted_blob": "64ad526674e7810f76797ad7452f4b1ab3ae6420",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/host/private-globals.builtins.ts": {
+      "before": "d3a3a79f9fec0d7c07b5e448721dead49a996c0423f8af936b2ad1bd9cd71484",
+      "after": "1ab935da06f538e88c58996dc82d66942ee2401f44ce483233c37a3e98aa1860",
+      "base_blob": "63c8550a48b2482a244c3481860346f716cc607c",
+      "adapted_blob": "90e404f94ea3e684ecf39fc099e9e3a7c1876cb1",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/host/process.builtins.ts": {
+      "before": "04455f8fef0134b4cf102bc467ed3d69776b93c201c280823e2a49e8e5f33896",
+      "after": "33dc5374aba6db635b90098781b1b1b1e7db672972312c762213fc9ad65f352e",
+      "base_blob": "3c937ec37b23fea8867a74b6ed24cc04b2ba4d91",
+      "adapted_blob": "3b0ccf4b09dab990e61898c4ee0540fec22dee77",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/host/typed-results.builtins.ts": {
+      "before": "6ec9119ca0e427963e58825c54e1229ed7483b98df4148954071617ddf270349",
+      "after": "4a528ab80f6fc7c45bfef4f3d14bcf0bb1fcd41f442a138ff7e8d529560b0dd6",
+      "base_blob": "09da751eae8e4d4df47240d76e7fe66cd8d34cdc",
+      "adapted_blob": "267a9cc1ba9e6737b4429db44dabedad9eea23a5",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/host/unseen-code.builtins.ts": {
+      "before": "a9e4507ad555278e38840285f9f613d0302420391b0932a7d2686d7d3196ac98",
+      "after": "b627cbc9fd80601d85b2afed90ed532e211c13f70d8584b1b311d24222088860",
+      "base_blob": "81f9e67ac6a2eb81095c8c6dcdc2a365ff1a78fb",
+      "adapted_blob": "66c61f226fb05ea8ed0cc52212972451d4c0e337",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/host/web-classes.builtins.ts": {
+      "before": "8c3aacf47c824e625f0a5d635c3b9220f7bac84c0b2de4c74ae3061ae98602fa",
+      "after": "7b5879f7a62ce6745ba5540307958931b8ba0ff66c7f9d8868f157e0f71e36f8",
+      "base_blob": "5ca240781809111a43bc2d8956aaf74e238723ee",
+      "adapted_blob": "2a6ef6d6984449c3c76d21ce6f7e151965cf7e20",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/host/web-values.builtins.ts": {
+      "before": "9dcde1a9147855a1c30148571c26549e3fec14b024b552ed0d2218c923c098b3",
+      "after": "81fb34f1205963eed30d3544889f4fecd2a80ecd82982c366732f55303543957",
+      "base_blob": "3ab839d0de2809788401da73485fe6d98456c46c",
+      "adapted_blob": "ed21af3e02c1de2cc2741e524c303e0502278503",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/index.ts": {
+      "before": "4fa6aefa6ebb34f26169f012ec283671cdd7846775d469035468a45d5eb791a6",
+      "after": "a8c9980a8a16ef2d308db32c4b687296701196cfcb2514eb4fc67e0712623883",
+      "base_blob": "eba66eba32f38f0aff67ca7d597c005b1c30bf9d",
+      "adapted_blob": "33fb58ed3aad0de9d483ad6978ef8248c30b476b",
+      "mode": "100644"
+    },
+    "src/jsc/bindings/BunAOTCompile.cpp": {
+      "before": "bf059f23af2810297b8d9dba127102483d08b082551754c8202d9b8c3f758243",
+      "after": "4a6afa1dd4a455f02df4eef5e5b56bc3584f321855a9eff0a56b9da69c0ab979",
+      "base_blob": "1b0f9adefe7424fcc2e4e1a8436f986f01e3c87c",
+      "adapted_blob": "0c33145b5accc54b31883532861d823ca864531d",
+      "mode": "100644"
+    },
+    "src/jsc/bindings/ZigGlobalObject.cpp": {
+      "before": "8584a3b992a9e930eb7dbda1a4ef6c8986e10e09e9bd76819fead2a9110baa57",
+      "after": "55f8ce0aaa4866e131713def9bd0e16693af344a29109c4dc265c37a339ad6d5",
+      "base_blob": "f8b13cf1ac2723adb6908b5095eacfa462c3b863",
+      "adapted_blob": "b7fd10726d8879ca59c0cb2da4b669e75b18ff4f",
+      "mode": "100644"
+    },
+    "src/runtime/cli/compile_command.rs": {
+      "before": "17307afd29ba5c4ea587d47db24430599beb86bcff8a993edff107d3888a195b",
+      "after": "b17f3385dd0552eaedbfc4d5a3c33657fdadea3208dc0ef59653fddd58be6a65",
+      "base_blob": "7ff8c0519f7314f3bcfcc42fb819fd2790e146a5",
+      "adapted_blob": "2eb8d6294470b1292b094475b1a8dacde8bdf23b",
+      "mode": "100644"
+    },
+    "src/runtime/cli/compile_command/build.rs": {
+      "before": "385cd46edc16978b7bab118a646733a508a3a3b9f0c47ff36e5f4cac6c913cce",
+      "after": "867647de3ace9acd74a2fcc5ce8fc431f10c29b7b0ed8684fded524486e91d4a",
+      "base_blob": "8dbc9a157be0254cfdd57b6d366768c9479fdcca",
+      "adapted_blob": "bd5f69676ced489e7a3ee02901fe1eaf2d8f9ef2",
+      "mode": "100644"
+    },
+    "src/runtime/cli/run_compiled.rs": {
+      "before": "0c6a54ec1d94f7ee68cdf3cc382213bbd3f09bf4caf3accdc5696e7dcc11917f",
+      "after": "2ea04189419bbdb39be69b8b05191a34956953dc967a5831fcb557abf3a2cc9b",
+      "base_blob": "5468b6ed2d0cbcb43a7437eda0783d047c46465b",
+      "adapted_blob": "42fd89bef373639636aad89a6b25ee21317a69b3",
+      "mode": "100644"
+    },
+    "src/sema/check/aot/answers.rs": {
+      "before": "9a6b724b67dffec062e1d0a397da4ce4ae03688b74a844c70e111cc0bcb639b6",
+      "after": "cb05c6d18af49932b14d7aedb2fc5161f713716bf667ff99758a109adf9d6b7a",
+      "base_blob": "3670954ff6192275983d2fa1d00e222b3bf9c46b",
+      "adapted_blob": "d296393ff39492a09d2c74b3275598ddbee83ce7",
+      "mode": "100644"
+    },
+    "src/sema/check/aot/member_types.rs": {
+      "before": "54cccd5c84d6dfd2bd76cace9be44b967832bf049bb27f30a73019618ee1a42f",
+      "after": "dffc732934f2e396937756bbcfa9577328bd10175bece53911723dc3980cf0ef",
+      "base_blob": "f8ba3b13efb8a7e1cb479c18fb13a203f8bac2d8",
+      "adapted_blob": "41fa022d8a1671174490733af35d84cfde3927d0",
+      "mode": "100644"
+    },
+    "src/sema/check/aot/queries.rs": {
+      "before": "392b4bd5f534533e461539ad63dfbe364d09713ac4e47c60031de067057503c8",
+      "after": "531b0b18b95ff6194b01da65938b7a6d79da5b525e2e09dbb5a58e0d53970aef",
+      "base_blob": "7fd237090b26c38ea59b10c44441ec74747a1fce",
+      "adapted_blob": "9db78f9239f75479b13e285a2d030c7fd633b442",
+      "mode": "100644"
+    },
+    "src/sema/file_analysis.rs": {
+      "before": "89f782ba6db6f98c1f12bdbc46d02561c090d4e91affa63e2f0f9eaf004e2162",
+      "after": "adfe68847928ea810cddb38241ba4c9d2c8e78c16921d4f7042caec90846bb6a",
+      "base_blob": "13077b695a3a013e1174659f2883dcfbbef42f3d",
+      "adapted_blob": "63ea7096cc10dccd11e5597412d694ed56359bec",
+      "mode": "100644"
+    },
+    "src/sema/file_analysis/source_tests/fold.rs": {
+      "before": "9acdcc80ebf1316edd832134267b37acea52a8843396799326b052af324f0bdd",
+      "after": "9da49e3727d4c80e77dd4ca328e349d42d2f810c9d1e7f37e21ea907f50c70d4",
+      "base_blob": "ad77980983d3dc48c45923876de862890a5cfd41",
+      "adapted_blob": "e3fa7238d77f523a4c8e79b1e8f04d24c34b7755",
+      "mode": "100644"
+    },
+    "src/sema/file_analysis/top_level_await.rs": {
+      "before": "07efa54ac59b665ce56245b78b3e10759bd703248f1016f079da292d5e240d9c",
+      "after": "605584b5f7fbe1b37ac73ad3692946441e3c64da8072e8a6b6e80e6e8b8e7dc9",
+      "base_blob": "e80ba8e94b5a0e93831addb5b66a3fc30f448bd3",
+      "adapted_blob": "a014b5b759bf042c202f59b4fdefd20ecf767776",
+      "mode": "100644"
+    },
+    "src/sema/fold.rs": {
+      "before": "5f89c40ea50e0cbecdda2b1d4c899354e36fab804be948d1fecedbc3d62ccd02",
+      "after": "12a0559bea4e1ad36d2ac25347639761261ed16133a8ac62c1fd72c752c19702",
+      "base_blob": "23f8cd89955e060cb8bed8c74b68f25e8d878009",
+      "adapted_blob": "fe1d38016814342c331ee26c66c770961901b761",
+      "mode": "100644"
+    },
+    "src/sema/fold/data_literals.rs": {
+      "before": "01924ec668fc6e75734d86013eb29e43aab9719fa0e5d36dab88488308b421ae",
+      "after": "ea9123369fa9b6c1a2ff2058826590cbffaeb6e92ed2c69f5495a9646cd4a3ba",
+      "base_blob": "3d0c8cb9a089344063b88aaccd7c732ce4bc4d76",
+      "adapted_blob": "2f3f0ea84ab02fe573eee36c547ed700e2f3a791",
+      "mode": "100644"
+    },
+    "src/sema/fold/dead_code.rs": {
+      "before": "6f0465890886d68bfe7df553cc70d3b1bd2648bb74d17cd58fd6c4fab2bf8f08",
+      "after": "c5e3ade88224cd88707577b3a3ac79c376d7c7fbd2d8e93eabff3e223a843436",
+      "base_blob": "f31b95745fb1a0ba6e266fab8a3361ea5d6e2e5a",
+      "adapted_blob": "dec876d32f32bb44a046c394d9df1eb8127fefbb",
+      "mode": "100644"
+    },
+    "src/sema/fold/evaluate.rs": {
+      "before": "f389c5e6f3ab5849be68c43d462e3aa20b38e94e3c7de69fd854a5b946dee31c",
+      "after": "7cca420d50e3fbf1bfc8da921a8159baf1f37a57af6f9db87f95713fc6bb3c3d",
+      "base_blob": "81804f69da6a77c267fc7206052b489ed09696e5",
+      "adapted_blob": "2f62f043a8369d13a541b5059ed651448d885793",
+      "mode": "100644"
+    },
+    "src/sema/fold/folder.rs": {
+      "before": "092507e8bb8d2091659c58b57667209ed6a38df065a1cece52ecaea627d2ede1",
+      "after": "292b8d892ce43328208db368d1456c3479d65f8eae6e4ab129ea31a064a9339a",
+      "base_blob": "10197935111cb78be77eae26156b0047d2a46064",
+      "adapted_blob": "c30ffbee6faaaf149529b339391d8055308bf743",
+      "mode": "100644"
+    },
+    "src/sema/fold/folder_calls.rs": {
+      "before": "0701a453dba521f9a78cc20738e068bcb339346c719c1526b1b2650ae5ee5d1e",
+      "after": "6209dfb3907c79aaf1d8cdae27448c0f3cf533fe8eee391767a866be7b486ae6",
+      "base_blob": "2dfc8707ace56cb99ce121e21e185c13c41b3401",
+      "adapted_blob": "dd7825aa13c507ad17bfbea395d3e50da6761d76",
+      "mode": "100644"
+    },
+    "src/sema/fold/folder_commonjs.rs": {
+      "before": "57e8c7fb50e8efbb4cc11e33955301e0c55c18fdd8a7fb35595e53dcca41ecb3",
+      "after": "46c2476dce147d7f77c61e4781267419902ade6499c08697ddf26a75245b8fe2",
+      "base_blob": "74f69aa0e2d550d3ac3498d2ca7602c0e39be164",
+      "adapted_blob": "ce466b5cc6f28a23bc35dbda35611e617133165e",
+      "mode": "100644"
+    },
+    "src/sema/fold/folder_names.rs": {
+      "before": "f641f34dd61e54f80e1b16abe5f9226d35102d2ca7856306b3274810cc52aa1f",
+      "after": "9b7b462a542e53af1bbdc6d419056cd7bb3dad332971ec7f0a4fdd1c4777445f",
+      "base_blob": "68abf323eb93e932e3c1a8367bb63c9d3337785f",
+      "adapted_blob": "96197678eb7bdbe43217b88b29ddd64f2d9f4418",
+      "mode": "100644"
+    },
+    "src/sema/fold/folder_operators.rs": {
+      "before": "fe293f41a09107e10b9303d3d2aab55527bbef71344e9164bf4908951e25fc16",
+      "after": "128ad3d59fb0315531d865883a2019c78c3a55648eff2660aa94da0f19b8083b",
+      "base_blob": "d1777422b699d1c6a740f21ee72bcf54a2008453",
+      "adapted_blob": "a8ca44c1a4392d44976b7ac380ef489c4b91cc4b",
+      "mode": "100644"
+    },
+    "src/sema/fold/known_to_bun_run.rs": {
+      "before": null,
+      "after": "717dbc6e17fd7502f57cf35b251fc9a5e59e9bea124137f93dcbf84d88ea61cb",
+      "base_blob": null,
+      "adapted_blob": "f425c1f10ff9380ad14240fd07e49ecf151fb2c2",
+      "mode": "100644"
+    },
+    "src/sema/fold/removed_by_bun_run.rs": {
+      "before": null,
+      "after": "ad2d10ad5662c59d1e93566d93fe97d07d34f3cd67258d67ff4659d73957fb00",
+      "base_blob": null,
+      "adapted_blob": "425d39db14082d6967229b749f7430ecfa0ab40e",
+      "mode": "100644"
+    },
+    "src/trim/decide.rs": {
+      "before": "e9ef692d027a719c835735ca81d22f13d0e54df9db9cd8e9219ffc4da879dca0",
+      "after": "397040c17aa521a5d514310629ec6c250545c2cc417af73a78d9fe92ea2955f2",
+      "base_blob": "7172d69c4cf0caaf6f8d0b1cad52e69fe6df469b",
+      "adapted_blob": "37fbf043a7bf1b9d6351d6b3f0a011a72bf966d2",
+      "mode": "100644"
+    },
+    "src/trim/model.rs": {
+      "before": "d2d454a6dae9d7885ea34001655360a5848ae08dd671c3e49dc87e1f7c42a031",
+      "after": "3fbac25ed30266f52af52f2e68a2aa4956a3ee93b056912b57472d3bc6c23f2e",
+      "base_blob": "30472f1f0d3f987525cce5384e3c3c1e54667a71",
+      "adapted_blob": "761a8644f4a435823afc23db3d1dc0a9e804258a",
+      "mode": "100644"
+    },
+    "src/trim/tests/trimming_invariants.rs": {
+      "before": "1e51f437c252fc18411df7802576d51d79bb3d0b566801dea89ad9176c5d00b0",
+      "after": "f88bb09e8c3d3896ce09eaddc2eb7865f511da2cb27569f1c652fd2cc84b6927",
+      "base_blob": "c90d21266cbe516c789661e9c69e918619572fca",
+      "adapted_blob": "c9e04ad869e3ba96d115eee916de8d2d80f957d1",
+      "mode": "100644"
+    },
+    "test/aot/backend/README.md": {
+      "before": "7bb1e3835174b48cc9f0c234e926cf4dbf4dbe4db9dc6f7003ce71fb8863b180",
+      "after": "a2eb5632ba6d72cc8238c9fc82691a6b0cc2e475f71bd2e51e9c4018f06c0a3f",
+      "base_blob": "a4532e70d90eb68e56ef4248633e6095f99e56b2",
+      "adapted_blob": "e353913abee7293941054c0e4012078d1c77b565",
+      "mode": "100644"
+    },
+    "test/aot/backend/backend.test.ts": {
+      "before": "56d2a73189fea36d091d9aa18a9d5c8848390641e94353571e7f372bb0a68ec3",
+      "after": "ad7b6f5e14b9c9b6b999ac019447639e7e9940dec5732b44a1db15c4e5470f9c",
+      "base_blob": "d8dc9efe158087af6f5b57d59c136d05b12840bc",
+      "adapted_blob": "08a64cbf711378a2e42dd9626ecb01e62d848c74",
+      "mode": "100644"
+    },
+    "test/aot/backend/by-type/shop/carrier-client.ts": {
+      "before": "46a7308e0d7d73eb697c52baaaf8d732a7f019d19afbf0e099535a983f165000",
+      "after": null,
+      "base_blob": "f18c918e5c3c47c07d00494d78bd4d6c1421f863",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/backend/by-type/shop/validation.ts": {
+      "before": "fe0dac4c350a8cb9ab90a5698fcfd012619266c833cfcdedb7d0de0d78163e75",
+      "after": null,
+      "base_blob": "537a9cb2d26c872a7cfbb4112f8b4c4d86f728e1",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/backend/card.py": {
+      "before": "feb74850144a45f20ce1144522cf5edc8e43b383d5d727c10cd6b5c44ce82130",
+      "after": "e83f04e1d830a3d6415e5489e51637b13adc3276a12accc03611da0c0107d606",
+      "base_blob": "3ed981e1db9db5c6f6c0207806cf6a02b80c1e53",
+      "adapted_blob": "feca65879507023f7dba73d96f2eae7d0cc7b501",
+      "mode": "100644"
+    },
+    "test/aot/backend/tracker/README.md": {
+      "before": "ea0d925c282e2accad5d12b413472c672f1dc13645ec8eb7eef5bdff12c4884c",
+      "after": "6a43752e6fe63d276bd89e6014df047889eead217bc7bf0cf92d35fe466dcbbf",
+      "base_blob": "edb2d3356f00f000295e444a5b7960e291c8335f",
+      "adapted_blob": "1eff035c616b6d804fae6a9a7390aeb589298e44",
+      "mode": "100644"
+    },
+    "test/aot/backend/tracker/app/validation.ts": {
+      "before": "2e1f3b020bd8dc16726af49132dd66a2423244ad6dc3f165459219f9d493bb15",
+      "after": "6b63c669c56cc24f2217ae9dd1b9d4f9a15f31cd21f5a71b68b45a176e2bf879",
+      "base_blob": "45074fbaa52e9d735f012273ae42284e343d5774",
+      "adapted_blob": "70cba1ea5cc8bdeca8b55b5b49319f7df74bdd20",
+      "mode": "100644"
+    },
+    "test/aot/backend/tracker/by-hand/validation.ts": {
+      "before": "f0b9d74dfaf7d228540871b23549d97ec4fa1478bcfa4edf6100d52346233bec",
+      "after": null,
+      "base_blob": "754733a5465a9c5fef355d1a57453623581c616d",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/backend/tracker/tracker.test.ts": {
+      "before": "66e8213dd7a8de016c8c10dc447d8560887c2b6e96126b74ba6dc61ea076c496",
+      "after": "7b58d03f1ac8350277adaea38bcaed515fdc68dbd4fed8c163d8d3ca6a80abb3",
+      "base_blob": "74e0f355cc41870706b4684784ad2c5b870ff0c2",
+      "adapted_blob": "f8aa4a4bfa11567a6c6eb18e3e9ce37c77ac1ed5",
+      "mode": "100644"
+    },
+    "test/aot/builtins/differential/not-checked.txt": {
+      "before": "ef681454d1b64fbb4f68bb8dcf681fcb19cf8e62d313ade3c7bb35d4436a014f",
+      "after": "3c7d2861369b6ccc6c7fa5bf9aba2db893e5ad159eaf2c27fb4d2215160a0e67",
+      "base_blob": "9b8d5c03d8a12e676ea705a85ced0c7e1bcfb2de",
+      "adapted_blob": "8c176522c4c794f8488e887d9ac8a03dbd20b24f",
+      "mode": "100644"
+    },
+    "test/aot/builtins/realm-agreement.test.ts": {
+      "before": "a0b630a6981202d37a6a476c516bc00758845ada15ad84df04673ea4141bf4df",
+      "after": "57fc1876830d2b3706cf0a951af8c6b29246eca921cef324d195fc2d824f0a6a",
+      "base_blob": "5c51b4761814ee9398e507d87ac77cb229c1a638",
+      "adapted_blob": "512df2cae2ce877daa276f9cb38339778eda4e2f",
+      "mode": "100644"
+    },
+    "test/aot/bun-intrinsics-any-installed-types.test.ts": {
+      "before": "ff9a1591585ab95485e2b4b3c6bae97e201c1ccdfef5df6ec4e80a1e63cba3e0",
+      "after": "5c2aa69ce9fb231643126cb0435493dc7808e50190c159f6d4b95d49b94d4913",
+      "base_blob": "61c91f6583edebbb6c40a5df60f30334ebd85a0c",
+      "adapted_blob": "9c7e23062d5757a47ff248aa7510fb4142347ce0",
+      "mode": "100644"
+    },
+    "test/aot/checker-queries/schema-constraints/every-constraint.queries.txt": {
+      "before": "65951dd800b19a6518cdcbb9c44e10eb0313c1ab8e779134eac40d9c3160a28b",
+      "after": null,
+      "base_blob": "1206601bd6838ea22fc5d871f389332fd6592286",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/checker-queries/schema-constraints/every-constraint.ts": {
+      "before": "f55c715e6ea0f8f28dded33db6f00036a905cad8f02bea4237f7fd4da66e055d",
+      "after": null,
+      "base_blob": "174f767c430986702adbfc2018b4a479004ca24b",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/checker-queries/schema-constraints/invalid-arguments.queries.txt": {
+      "before": "3e6bcc2902baee829d519d3dbf976d2785e6bcd8029d901647902d6efb176552",
+      "after": null,
+      "base_blob": "dca47fd0ad921609cee1da3c8fa669e4256ae95b",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/checker-queries/schema-constraints/invalid-arguments.ts": {
+      "before": "d5bf635d9d67d2c21c5f7d437d9b08225e718524f35d990b057c14054f0b87e5",
+      "after": null,
+      "base_blob": "95015c57ba0ddb1b8ec4c66880e698537b8db526",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/checker-queries/schema-constraints/own-schema-namespace.queries.txt": {
+      "before": "18421e5972d93c5753d21e6598ae5d1ee5571755b71ced417b31e6393ad5be33",
+      "after": null,
+      "base_blob": "e3c231393d836e36df4804ee0ebe0dfd8c17c320",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/checker-queries/schema-constraints/own-schema-namespace.ts": {
+      "before": "a2c53f94ad6f4d504649345490f31dad3267ea816c873544af52ce72b57a755c",
+      "after": null,
+      "base_blob": "6106cb853326d9a654bc06140d43e83637f5d207",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/checker-queries/schema-constraints/renamed-alias.queries.txt": {
+      "before": "f8bb10a77187ccb716559f3c2fb7d8d562b89c09163afc92f0aad65b8353decf",
+      "after": null,
+      "base_blob": "d4cc8f80570b036068810c93a0b1dc945ce6b5fd",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/checker-queries/schema-constraints/renamed-alias.ts": {
+      "before": "1e64080062a9e9b18aa133e76f1ee1d5619c65202df0ae714b47510f587d2003",
+      "after": null,
+      "base_blob": "e4074b80ac4587068f2bab86935c89c12af8adf4",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/checker-queries/schema-constraints/strict-object.queries.txt": {
+      "before": "547671720b55ca70b15434e845513db730ac45fe9d67d34b19fbb5486cc6dd8f",
+      "after": null,
+      "base_blob": "66b118e3497e654b99c2a69502fe4f103c35bd26",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/checker-queries/schema-constraints/strict-object.ts": {
+      "before": "00a99d5f8b0955ed5d4688180c373866607f21d0be7c8da0a283796a8d96cec6",
+      "after": null,
+      "base_blob": "465a799b059de192e4a13d6c22159611c202bd26",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/checker-queries/type-identity/constraint-order.queries.txt": {
+      "before": "a369a0a1a7f9eae8e6b46d0efd9048b964385ee41da338887fa6e39467d6f738",
+      "after": null,
+      "base_blob": "5e0154cb019822003589cf07f7cd0187a33a961e",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/checker-queries/type-identity/constraint-order.ts": {
+      "before": "566caebdef888f4cb155704c188177f0e2cf4c4235c916865665dde2f5ea57b6",
+      "after": null,
+      "base_blob": "0eb805d94db6964872160063c3cddcf1685b9b50",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/checker-queries/type-identity/declaration-order.queries.txt": {
+      "before": "02dadcb597861329f12e8f09052db564fec07c0997b5381f0d7ca59518095c6f",
+      "after": "b19e086d4bd68b800abccd1bb62c0f8144f2dec5b1ee815503a8b7061c952aba",
+      "base_blob": "1ce368c6644d5a394cf7746c101af1492c5dc84f",
+      "adapted_blob": "d6f5c141b80fbb9b547f95d8112b99f4fd6f3f0c",
+      "mode": "100644"
+    },
+    "test/aot/checker-queries/type-identity/declaration-order.ts": {
+      "before": "c1b9c69271e6319918b7fc716ee446bf536986ac807b4e5c7d2f414b20ed26fc",
+      "after": "5d1ab8d0664c1ca2ff79a6b7b8c2393c3fdc1c4927063e49c39a32d26e4d687a",
+      "base_blob": "a27a8b8ea359f0f0a0772ff9f9008b49108f5d9b",
+      "adapted_blob": "7f2496558882f4963e3c5b1573bb1815bfa740b7",
+      "mode": "100644"
+    },
+    "test/aot/collector-stress/json-parse-generate.ts": {
+      "before": "27721b7b89dce41324159ddf6331174fcfd6837b20bc5112ff6d76121e2ee11f",
+      "after": null,
+      "base_blob": "83d90edbcc795d71af12f79d2702514ad87bac33",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/engine-tests/place/tables-parsed-record-fields-beside-a-validator.ir": {
+      "before": "f1ac8db4cdc1170d0c9e9f4f8f9d1c7da14f5fbba72b2c1dfe9d592b7e1cb22c",
+      "after": null,
+      "base_blob": "dcf2d604a707178345d11b304c6b91407c424113",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/engine-tests/valueflow/results/member-of-a-string-parameter.ir": {
+      "before": "3509b95acec89c7c89d72fe8d9d9c321f223bab350214d8c3ef02cce800ca502",
+      "after": "79144fc98382fb83d74e2b1a394d8ab326d891d487337eb81493c44224dec61f",
+      "base_blob": "f943e8af03a10e5702ee2877957d0486ac3e0858",
+      "adapted_blob": "c8974d68ab6328fc0abfaaf46caa9f7b5d8002cb",
+      "mode": "100644"
+    },
+    "test/aot/explain-counts-and-causes-of-parsed-data.test.ts": {
+      "before": "0c017b74e2e9921e1eb1e1780416a554a0fab477e4501650b756800114953377",
+      "after": "04d9d7782f3352c5fc3ca0ad9095d4fa9776b76501bb38787f1a7015a4221897",
+      "base_blob": "aa5248e7635b827666b90bd0831346013cba7126",
+      "adapted_blob": "955f2294df9198e15670e12406d9adc2b7b7cef7",
+      "mode": "100644"
+    },
+    "test/aot/generate/data-from-outside.ts": {
+      "before": "fe7ff4ea6d92fa4c530ff109313a330604400794b8a7d203443d21e0b3560945",
+      "after": "62854d875ca6371d055b55497ae3de0612a896a9883200cd2d89b4e3fd4b3e82",
+      "base_blob": "fbb98213512bd3c00deb6236168059acadfd76d2",
+      "adapted_blob": "9806a928f4be17d39f48a02cceb946caec388aa4",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/calls/built-in-on-written-operands.js": {
+      "before": "fc2123c9addd6e4596bd2b17c4b9527a139ffacb58c8dff359a0c8cc9b219494",
+      "after": "fb1d20053c43558dde7b9e056c7b96feeb222e51ddee4219e8b51a7a9366dee9",
+      "base_blob": "ae4e5ab36f004cf14b91fa8beb989865783fde75",
+      "adapted_blob": "08b663558e02b5894261cc3fc8e517184b4dece1",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/expected-results/type-argument-of-another-signature.ts": {
+      "before": null,
+      "after": "3426bd45b3caca5d8739b9645c432d04b9fa5362b443a9aacd07a05633ef0c2e",
+      "base_blob": null,
+      "adapted_blob": "cc938b25e6bf08a9214caf776f1c1325640589a7",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/expected-results/written-result-of-fluent-type.ts": {
+      "before": null,
+      "after": "6837b89cc5e1ab5c6f9ccb261a27e8a48da9c60957f346ee6e7bd07f12c2dbc0",
+      "base_blob": null,
+      "adapted_blob": "f587d34fabfaa3391591ca0e9c39ce2bddaede31",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/expected-results/written-result-without-end.ts": {
+      "before": null,
+      "after": "3a4103d08134929a6442e228608b45d89d4c3526f54f4ab522d6abffaaf75e81",
+      "base_blob": null,
+      "adapted_blob": "91f17c1229d166574ecd1609e2588efa87db5a7e",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/expected-results/written-type-argument.ts": {
+      "before": null,
+      "after": "033cae6f3d58ac68c75e04c1c678fbacc442e602b55d77cb7952bb1b3416dcd6",
+      "base_blob": null,
+      "adapted_blob": "656cf53a5008d19562ac69ca65e249adc2621207",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/functions/key-in-brackets-names-function.ts": {
+      "before": null,
+      "after": "3e4a31021a8c694f8ff2077b8c9d3d0ab6e93a3b73f3656ac9e4083ced00027a",
+      "base_blob": null,
+      "adapted_blob": "019ee3e450e8246b661d6d39afa9b160ec0eba1c",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/functions/symbol-key-names-function.js": {
+      "before": "eff6058b3648a0e74271f8c8d34f43ce22b38e6976eba5b389d087613a09fdfa",
+      "after": "184d9b51ffe3a21a6eb0e43ac690207841906c63538ab26eef363950b5f03a8a",
+      "base_blob": "e5728d80128cc5715d0e7f9e379e2258ba3b30fb",
+      "adapted_blob": "6c4a0feea2ac656c5e8ed3997fd95a84430f81a2",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/installed-types/rows-of-a-query-repository-types/main.ts": {
+      "before": null,
+      "after": "25673054e2b55743b6aa03ad2b3d59eebcfb01d0cf202ab022460ded15bfc8c9",
+      "base_blob": null,
+      "adapted_blob": "3d784566dccd85ba9bf3ede28c9450765fb27736",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/installed-types/rows-of-a-query-repository-types/tsconfig.json": {
+      "before": null,
+      "after": "136c852a033805a25b98e6d8879238007a1dc12b93fdfff17c4285d55b2fd123",
+      "base_blob": null,
+      "adapted_blob": "e9c97b7890417ce3032b08c34a588c9ffda44b9d",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/modules/commonjs-cycle.cjs": {
+      "before": "ed53e84ae5a4d6e8389178a26bf6d5f9f999f85bc1e6f0a26d90d710e43f8b93",
+      "after": "9582552de06ca4e5e162fe9f921c83c10ee7736c17856ece5b5bb78ae11ea3a9",
+      "base_blob": "e174278508c0b06ca63fe110a310e0afd177efc2",
+      "adapted_blob": "2f82e96f05ee1c136b6e201113c69e07ad166821",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/modules/commonjs-one-value-with-members.cjs": {
+      "before": "1a5ac91fcb30e4008735abefd26539475a92b4b904935884ede0740349cd1edf",
+      "after": "f49ed2b759759141f7f968e71405a76654abb0827e32534f03df132feb9738ae",
+      "base_blob": "f8fa54018dd6dd0fb078789690f49aba788017fe",
+      "adapted_blob": "074969c06edfd62d6dd75665cfd6c9ab2b4ccec0",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/modules/commonjs-requires-commonjs.cjs": {
+      "before": "75f48b61be744c4d685660a3d167788d50421fb3d07e0964de307af4ddde7ad9",
+      "after": "f8f73d3deed648fca043fab342bcbf116784df0ff90e815387165e992bf9109a",
+      "base_blob": "2cff31da58066cce539c9c9a17f8cd474b1c2a91",
+      "adapted_blob": "6896aa9ca3d5fdb850501f63c9d98425e7010fdb",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/modules/es-module-imports-names-of-commonjs.mjs": {
+      "before": "09fc35a4aa30cde483d1d8a4068a5aa9ce383e555c457d14b306fabf546088c7",
+      "after": "49b3eb42a4b0eff677f2a7c708ef36c24c67df91559117052410bded3560c31a",
+      "base_blob": "b17772840e6289b06fa1504e13afa7d76bdb10df",
+      "adapted_blob": "dc7bcbd86333326c31f8f46fd83b20d2d66ed089",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/modules/import-calls.js": {
+      "before": "a4f92a164007a192636e52eab1b0432239cb2004b69ae2224ef4eedce2d49934",
+      "after": "d33a906c4b449a21a4e3ff848b48a5d4abd1cca13e954dc84d37a47c9e528dae",
+      "base_blob": "7ca4bec878dbbb3439f74adba4a989ee18169bce",
+      "adapted_blob": "98919a7ca07364e80a8f2f6d3a8ce1a1e5224a67",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/modules/require-calls.cjs": {
+      "before": "a7d2453f9c1d18aa5df2f726329a1703aae52c6445db0f07d5f30b9f99312e96",
+      "after": "f9ab8d8bc726b836503e6b1c83e07188b9c7f771c7ea4378b93d76f39c549607",
+      "base_blob": "daaa3512da918a699caaa116be86db4416dd8aba",
+      "adapted_blob": "54a52f1d4670447322c21e291239fa6d41dfb45d",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/modules/require-of-an-es-module-at-the-top.mjs": {
+      "before": "bdc6f6bcd3eca10dd7ffb39032550bca5771c7bb83801680c29bb5389e746621",
+      "after": "78ae82253c386b80839a12e9a21651a5e32b4f0814eec8531b42cac9d4f574a7",
+      "base_blob": "9278430676eec95365a30be14243643999225be4",
+      "adapted_blob": "8acf0f14961b3b5fad71857e53e26f93da5c0170",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/modules/required-names.ts": {
+      "before": "34ba94a9388fe182503bd015a774027b0a00aee470619ffb348b13d16d61ae20",
+      "after": "6a3884fa8c4926542911a3209ad96940499586355b32e8346cec5cf596289c47",
+      "base_blob": "e0acd1610c475072df141c1eaf7d88871f24917e",
+      "adapted_blob": "2a5c46144e8c54e15498e293b6ea6645934ad866",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/modules/resolve-calls.js": {
+      "before": "87ff58fa7f4006fcbe6fd625cf6187190ac7427039f354902d4a2fea4b1a5b2b",
+      "after": "d7a825d4f98bbbee909a07f6580d01205877675b65d7edca13c3330b1ee36d38",
+      "base_blob": "931d31eef4c1118c4c916f698f94872f6f4bd2a1",
+      "adapted_blob": "f45376a551b42087d9ec1d7cab787bd8c92dd150",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/types/constrained-type-is-base.ts": {
+      "before": "2cca38c92a8ab59fd2d6a3307c55d52c0810f915b54b4c2af8a9e0970eb56c71",
+      "after": null,
+      "base_blob": "281df70331670f8ca2c11291ad68f7e2adaecb7d",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/types/imports/bun-declarations.d.ts": {
+      "before": "8abfc45deb2ef6d2a97e9748718b9e73e8184cb2a6850081c264c776010c7fa6",
+      "after": "75edfe062fd59ba8737e20d81aeeff6aea06aeb26ace1c0dc7aba09792aae394",
+      "base_blob": "01873f46dc4e182c1dd61577b6ce67b85ac17a4d",
+      "adapted_blob": "73955435b981d1e64ebe50dda10795ea2b0a9382",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/types/invalid-schema-argument-is-dropped.ts": {
+      "before": "ebe466c827c795d1f9f28b261898bc9863b8bf7950b4d8444c5d5bb85190c2c1",
+      "after": null,
+      "base_blob": "977882f56f374edcb13f6d2c11cf5117e377667d",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/typescript/import-equals-require.cts": {
+      "before": "55848068e50a8b7219c011a7454a615b778eaac26a9318b97436801c8f59ad13",
+      "after": "060d26c3ec3217f5882031e4dd14aeb9e63bedc4d58cef7edc34ff823c7c90e0",
+      "base_blob": "c40fcd576cd750229edaa7cbe92ed2368b74849b",
+      "adapted_blob": "5874ba2575c70665d4221fab294a53477fdebd21",
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/validation/any-and-unknown-validate-nothing.ts": {
+      "before": "7320b044c58eb529d98c3de13ce319b7cb7bae9ffdf3ad9a7ef928d8ac7b0e1a",
+      "after": null,
+      "base_blob": "17133775eb4e7314996cfbdcd05365351b8876ec",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/validation/erased-types-still-validate.ts": {
+      "before": "cd8aba241b42bf24db6aa836cd4afd63bdaa76c92386c455d334fe534273982d",
+      "after": null,
+      "base_blob": "aa668eb883ec842dc7ff7651f241c7db059edbaa",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/validation/imports/declarations.d.ts": {
+      "before": "db3799b559f0a6a7f503935d0ae8af3000775c819d9629fd162abbcba1983f86",
+      "after": null,
+      "base_blob": "571615c53dca6d7d3ecaac2c7cbc4c590ad9b2ca",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/validation/parse-held-in-a-constant.ts": {
+      "before": "802b2392a45c74d0410e5877a6b05c112d08e7f6c979c5396a945c4f6baeff14",
+      "after": null,
+      "base_blob": "109d4b993893da9e159bc823b96478a253ead9a5",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/validation/parse-with-reviver.ts": {
+      "before": "cabc7e7139cc09cefa2f86a38e6e9ab9ad7eb6b61fe8710ca7e25f4dfff0dc05",
+      "after": null,
+      "base_blob": "0268777c8aed25cbc831a61df7a5790d9f589066",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/validation/type-argument-of-another-signature.ts": {
+      "before": "e7a929243725c96918cf0a94e2df6bbdbc121e205cca3468ff284a2d574c16cd",
+      "after": null,
+      "base_blob": "e9aff5a4d0b1b14e64f8134b4ebeb5b57f605927",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/validation/typed-parse.ts": {
+      "before": "693f4a6e3f85b146957e461da5d1069816152caa9c9e9b5722e305330c73a759",
+      "after": null,
+      "base_blob": "4005764cfb7d100fd9a4da1dd273fdf9fe9193c6",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/validation/union-arms-in-written-order.ts": {
+      "before": "8da9097431c64b016a1acb7843b72248fe9425d2307a5ec7fe6b624ef48b8607",
+      "after": null,
+      "base_blob": "c060ed517a0120f7f0d114ddd56ccc492d80d060",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/validation/validate-call.ts": {
+      "before": "b63a7e61a271e48e78075b7cc65081ab5afb725732f2509e9d852654286a4d14",
+      "after": null,
+      "base_blob": "5c2b4a03efa31a7974e7263ca3a0bae73a3c9083",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/validation/written-result-of-fluent-type.ts": {
+      "before": "6837b89cc5e1ab5c6f9ccb261a27e8a48da9c60957f346ee6e7bd07f12c2dbc0",
+      "after": null,
+      "base_blob": "f587d34fabfaa3391591ca0e9c39ce2bddaede31",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/validation/written-result-without-end.ts": {
+      "before": "3a4103d08134929a6442e228608b45d89d4c3526f54f4ab522d6abffaaf75e81",
+      "after": null,
+      "base_blob": "91f17c1229d166574ecd1609e2588efa87db5a7e",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/ir/lower/validation/written-type-argument.ts": {
+      "before": "410a711abd9aaaf32c7b41aded7163993b2109b5d3a0c24db2cec5e455c701a9",
+      "after": null,
+      "base_blob": "531f577178a11f7d8f30f595940fd94685077961",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/async-and-generators/what-the-names-of-the-parameters-of-a-suspended-function-hold.json": {
+      "before": null,
+      "after": "858c5750e8bedda14b9af9df3dc944745384f5deb7594719e4ab870d221aa2ff",
+      "base_blob": null,
+      "adapted_blob": "eda4fe317835e456be758196574e30265d0a4070",
+      "mode": "100644"
+    },
+    "test/aot/programs/async-and-generators/what-the-names-of-the-parameters-of-a-suspended-function-hold.mjs": {
+      "before": null,
+      "after": "32a0a3590e5b4e2dfb5cda99278b53344c009e087ec2e8ebce68a47b72aad854",
+      "base_blob": null,
+      "adapted_blob": "5caea5c9679a4179503e02879f84005f49c22714",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/async-function-returns-json-parse.ts": {
+      "before": null,
+      "after": "16d1ae1ecae97036bd82893a6b6147e0e0d73c1d60761ec43ec13de8039c4914",
+      "base_blob": null,
+      "adapted_blob": "07fdb3e02bec1a97f1add82d1d931205e645f7e5",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/clone-as-fallback.ts": {
+      "before": "51001ce73160df26b6a4b0d71f1eb485d43d9dcb90f8f27a0cbddff4424a7bc6",
+      "after": "786b8c01794e2385d3ae1a4479a8a24dcd3470fa7979a5153bf6575696c3893c",
+      "base_blob": "13a99c699dd4862b323a90b683cdb096d95a1c1c",
+      "adapted_blob": "60796e2fecdcef53ba5563832990a6868afbd990",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/clone-as-undefined-value.expected.txt": {
+      "before": "1ec3c9bba2cd613cdbcac71d70d7beee4b1f8d72c03c0c2610c4c51e4e08e607",
+      "after": null,
+      "base_blob": "c021e235b236a2885bca4bbe09875ab1e41a96d5",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/clone-as-undefined-value.ts": {
+      "before": "f769d826941356537e6e8e13ce1b42e1c49726937f32bc65e31710705f29eefd",
+      "after": null,
+      "base_blob": "a4d2fadc133734cef615bdcddae099e3161c817d",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-imported-from-bun.expected.txt": {
+      "before": "8677ba53fdc374854579b6f51759e96afd88a8308af1daf7c3da47dcc0e5761a",
+      "after": null,
+      "base_blob": "2dbb5e7324834b72668043f17207997bb25d381a",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-imported-from-bun.ts": {
+      "before": "9a1eab4b8fefdae47a200e51d131abc33908baa0203031593890715384c3c686",
+      "after": null,
+      "base_blob": "4fda2888e308e7603287342bb7791cee8ef03c87",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-equal-texts-same-arm.ts": {
+      "before": "c614ef7ef07e3af5acf2037b9e5d0ca7a03855da70e70a81dbf5eb3f14312c88",
+      "after": null,
+      "base_blob": "c2bf5440ea97cfc8b1f68be8353e825edfb3c6e6",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-recursive-union-retry.ts": {
+      "before": "249c8fc4361fdb1dc351e35325e2b9236c127ffb63ffe40eb0a2c22af6cc67f2",
+      "after": "4c5d821fb48613b70248b1bdb7df73cc34fef6258d14ef42fc3ef598fbd46304",
+      "base_blob": "692470ab8d9cf089efc663068062472d76f04564",
+      "adapted_blob": "930d98f9b2ba677e9160998d8ba8f4c46afcf8a9",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-a-buffer-used-again-and-odd-characters-everywhere.ts": {
+      "before": "bdd6843aa62b77b52db069c956179e8261f46b28685f5be1e710aed83eaa6650",
+      "after": "49ad52cad7c5b557e422d142c8ad238e4595d20098ae3bb2ec3e0a446079a518",
+      "base_blob": "141bc5c5588d882098fbeb8b5751e156e2ca149e",
+      "adapted_blob": "9c3a180eba42be8953ece3d900e5bd8dbc489aaa",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-a-long-undeclared-key-then-a-short-text.ts": {
+      "before": "e232d6d4bf91ef62cfa8cf60009d43de3eca4f6d4995893c4d3f549be8fe4b67",
+      "after": "752e6d3d4403493584c2b4e89daefc4075fa5e50213b006693e073d19cb94d56",
+      "base_blob": "34a76ec500fbb4d405f26888116807dfb5d1de78",
+      "adapted_blob": "ca561a586761bc6517a20c9b241568eaec756a94",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-a-parse-that-throws-is-closed.ts": {
+      "before": "b22b92463a2487ea782f9fe61602df3a3bd87fbffb94ff2021b984965f000a4a",
+      "after": "9fbd39f54d134e824b3cdb0a76aa9305827e180a2804c14b66c2da91da2e689b",
+      "base_blob": "e03420e8f00445064e66c012d1fb5c0b89f14d8c",
+      "adapted_blob": "e913b1718922433e255a2aed0c33918acf17bcc1",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-arms-that-differ-far-below-validated-or-cast.expected.txt": {
+      "before": "3c3275e65b1c48f526d6cc22dd187419c98ca1bc6de44af8dcec91eb234494c3",
+      "after": null,
+      "base_blob": "d67ab15d7f0b4d3742c321b0b3623158c1b78a66",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-arms-that-differ-far-below-validated-or-cast.ts": {
+      "before": "5cda9d3c45442f23c203df43fd15dbc517410ef7833ff0a5eece44d71d9e277d",
+      "after": null,
+      "base_blob": "1a9b6055a704c3d5291cfb9c0b3fcfc3c7dfe1ab",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-arms-that-differ-far-below.expected.txt": {
+      "before": "06552a58a8b36aea2b32c5445c9ec44979faaaa679dbb6c1f980fc717e18a269",
+      "after": null,
+      "base_blob": "52a73c61ba32e4aeb0760d67f951bd3ad2ac0544",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-arms-that-differ-far-below.ts": {
+      "before": "0a583dd5fb2a5c4f8494a271ed2fc51de0e0feb6e68571b0485fe03531de41ca",
+      "after": "3e95abe49a0883dd9cbe48001f1e10ab692f01b793b8af8c6b08c2115c805427",
+      "base_blob": "ec6648b14718b53b159f2e659050a6f654dfc93e",
+      "adapted_blob": "e289d49207cf741ad63fee47eb06b474996e42f8",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-branded-primitives.ts": {
+      "before": "6a9f4098f4a1ff121777931c0cf96c502267bb29f93ce6191689fe72566f64ec",
+      "after": "6f770e1cb0b4b9dce61185083a55c6f156b44eacf90782c89a8e04b2d008fce9",
+      "base_blob": "f78aafa9e03c2816df089ea2d33371852f5e0f82",
+      "adapted_blob": "300f853eae11fceecd0dd81172c98867db1d673c",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-by-declared-types.expected.txt": {
+      "before": "27920bb47636c16287e1009c97858767ac2373e14ccfb75eebaf4a6994e8f614",
+      "after": null,
+      "base_blob": "6d0d130ab6bb95082c402c763f8db202fc9947b9",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-by-declared-types.ts": {
+      "before": "8ace409a80b9fc52f283e3ef3be0a75a522ffa13e7ddfb7106fec28771909570",
+      "after": null,
+      "base_blob": "ea0a975103cb863b3a17871ee08621d4b16ac97f",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-constant-numbers-in-every-spelling.expected.txt": {
+      "before": "e22fd46a134ac85c4fa2fba28359f48ce17fc51ea1d93a3bbc2f8fa497c1a1c6",
+      "after": null,
+      "base_blob": "7337caa3711eea7148267f8610637dca48c4aeab",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-constant-numbers-in-every-spelling.ts": {
+      "before": "dcee8ea4d072c2b0c2c598e6150ee3802da7aa974c88add1b06ca1722cac61d8",
+      "after": null,
+      "base_blob": "39aa4619e4479a2cc4b966962630536aefbcfff7",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-declared-keys-again-and-again.ts": {
+      "before": "c9fdbf357b667f53fede44abeaa08285ff353195d77f639692a968a7d914aa41",
+      "after": "638f23b4b91f8a7da10dc591ef0b6e68e3fea6095a763ba11a483b608172fbfd",
+      "base_blob": "83b67275221ace787e2cd51b50354e635214074f",
+      "adapted_blob": "77d15ed321b55902df922c6421aa25de68067371",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-declared-keys-of-thousands-of-bytes.ts": {
+      "before": "e76f98cee3c3d9e192385e81431d81dbc652568f653269e68d40d94885a27535",
+      "after": "13b9a2a7bfcaa96260d98ec57f62587e90ddeed8aa24c6183a0ee87ecf2cec1d",
+      "base_blob": "e9906ca73c5b85ccdc754524409f7fdf16ff6c00",
+      "adapted_blob": "90d3b94f8b54d7a81f26e660710047acddddc762",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-error-lists-at-most-100-issues.expected.txt": {
+      "before": "458386795c354bdf7f268a0accd96ff0f588daf01b696f88ff24dbbab2a01f1b",
+      "after": null,
+      "base_blob": "d4160f86bf48dc29e84bdec948eced01801cbe84",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-error-lists-at-most-100-issues.ts": {
+      "before": "0f5ffae60fc3a8f54839099e589995657e333928c0772fb2e8a2ae51463c1fc6",
+      "after": null,
+      "base_blob": "c8c7974be730f0412567a887a3471c198bc69a61",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-every-byte-cut-and-changed.ts": {
+      "before": "81133f85ec3478ead3da968d14a2b737759abe59a694c9b97d1812617dcd537d",
+      "after": "3175ab037aeeec6d1609f9da94ba3f225a18363e9775af955c776e551890bca5",
+      "base_blob": "fbffd31faa3366d8cabaa067d1848ba48f17612c",
+      "adapted_blob": "bb12426e333a4b8d0dee316107f841e5b4728498",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-every-cache-past-its-cap.expected.txt": {
+      "before": "f38196b8c6732dd033dff9a4935ab0115d950a65c841ef6079d452fc1b352532",
+      "after": null,
+      "base_blob": "54c2ead9e79eabe4feded16043e512699d84b6d3",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-every-cache-past-its-cap.ts": {
+      "before": "24cb1c14cae66dabde99a6144973a1a3e99710b5656e0c5c8fbd0ac67ad46c3a",
+      "after": "22b8afb14a196391c939d7adbd32c13f5f6085fbb49416efdda377932e160988",
+      "base_blob": "9fd304f9b85c242f1d30a45ea7bac954df04d5ab",
+      "adapted_blob": "1d9597ba4c6696d5f705e17fa103b64d37c3da64",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-field-without-slot.ts": {
+      "before": "d028551c185d978ccaf6bd4947e010f68f7ae006b49974b924ae61fee7166aff",
+      "after": "9acb411f297c473d6d94220b4f55cf307922056646ec474a911454b165af5733",
+      "base_blob": "8f10f1acbb647cda544798e75d96597fc6ade7af",
+      "adapted_blob": "b087bb904f2307eca08490058cf61ab50917a958",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-first-object-has-many-undeclared-keys.ts": {
+      "before": "30ad0faa561088adf436f57981010794753e2c38baebf74d4c9e841a7002b042",
+      "after": "b27c60d4f336b044672bd5e7e1cd4acf31c4c50437c87f7d992f79398fda69b0",
+      "base_blob": "169391f93272cbb5cc5a2a449f1a2efea3fee1ad",
+      "adapted_blob": "5ffa93a495bcd4bbcf7829fd20782452a22e3cfa",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-goes-by-binding.expected.txt": {
+      "before": "e2f4e06ec459121a81f9b0f774cb63cb7fa95c1241806414bd2cec0528633043",
+      "after": null,
+      "base_blob": "2dc4439d1b2bd181487888b304e16e8e7f40a9ea",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-goes-by-binding.ts": {
+      "before": "0e45f3e3e335308a4df1f655f92f901160defed987f7cb34b26482eda6d4119a",
+      "after": null,
+      "base_blob": "39a9dc255f9a97bbe25195889ef893e2a586b049",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-hundreds-of-orders-of-declared-keys.ts": {
+      "before": "98a8cc864deee0084abfb0b66576266ecdaeb99f91c3554baa11313da0f3a53d",
+      "after": "120a3d9b2269083460ea3e903c2947510ecfbf2c1cf23a01c579e4dfe9285165",
+      "base_blob": "7eed6e35c7dc135660727b3619226b27fd57be69",
+      "adapted_blob": "1157d2d996bae1ab8b9966e626dc7766d7ef0d8f",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-in-workers-that-are-ended/main.ts": {
+      "before": "b9e87d8dca51aad0b9b49cf0594e7d1478347f71620ddc562315b474e0cbd76c",
+      "after": "f912be86974b2a001bda5809596f6794be6424b50dcc4d6d7f7dc927f7e4f826",
+      "base_blob": "e3568f7ee8e541b1f9767eb4b0a3ddd9928604c4",
+      "adapted_blob": "a8fd62fc8e6937c1fcad60bf00e87d6f7d0b2216",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-in-workers-that-are-ended/work.ts": {
+      "before": "79abbca9514c20531a47559194491b586883fb724e7de98c3c98c28a730d56c8",
+      "after": "dfc5fecf18936957cd4ae2f4ec124391c6550f176dbc2bbe90521d2ff4dbdacc",
+      "base_blob": "a0f5c399dc07065ce2880f1c194728cb07382896",
+      "adapted_blob": "ce5ec45ee50e2d7e7284ed63565de14125463218",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-in-workers/main.ts": {
+      "before": "53f5470997308b35e637b5fceec6303063ad6dc26a17d87337a6e7717c17c506",
+      "after": "d6865620d29fd40b7f607d35178fc4827c6174ee0043bf846aa2ac267db0fe72",
+      "base_blob": "459616090cd5ed30af3ceb9fa12536143166de1f",
+      "adapted_blob": "c42f0082fd27932a9eb776f854831cc2605b3344",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-in-workers/work.ts": {
+      "before": "cac3150c3b85a4e0809585fcfd4c676dba7fb3e496936c6fc14df4b0ae754345",
+      "after": "3a5b28c07c1907e67f7edf3083c7100bccf019c60a3d3413464ecc842b8cce97",
+      "base_blob": "4abb2e6aab0b1b30d2c7d131bccb77c8b3e37bcb",
+      "adapted_blob": "400cbbffb078bf7c0ac40122d45169a293bd64d2",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-index-signatures-that-cannot-be-checked.build-errors.txt": {
+      "before": "3f193f0bbac35a1591f0fb11a1e4b3d1a85913ff927b19a808dd793df13705b1",
+      "after": null,
+      "base_blob": "bb6b850457670c061acf0a1578d53a5b521b2573",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-index-signatures-that-cannot-be-checked.ts": {
+      "before": "cb80da440436f45a25cb48b68fd9bce0e2a39a28e28516980d13c415c15c44ab",
+      "after": null,
+      "base_blob": "78937cc66b729f8d6b57f94bb3eff85347416054",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-keys-in-another-order-stay-in-line.ts": {
+      "before": "9a74e9dc916ad975b8e872c72e974b7a063157209216f52cbc65702b243fbfd5",
+      "after": "90f4f7d4bd2dffdcac8dc1a468889df1c66cb7fb8a78a4b2978dec08bfcc67c1",
+      "base_blob": "f19e90cf4f89d2733f9586c4883ba4d519183303",
+      "adapted_blob": "1cbd9fe9e5697a23164c55c373d6fd1fca4c3c95",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-keys-in-every-order.expected.txt": {
+      "before": "d8cda63795fbfa8912a80de576a4afdc66999fa3e794a6c87f0be97ffb3e217c",
+      "after": null,
+      "base_blob": "dd3dcdb7a39982b6485e6042f4d3491c91339777",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-keys-in-every-order.ts": {
+      "before": "f87afc891209d44708d30b591c27337db0dc7822ee0b4cd6822cb690c01cc26b",
+      "after": "fa8f441bc5af17657e48062cb1c6d0cab58247be6b081db8c53d13f159de0455",
+      "base_blob": "c637003cd2001160624c8f7e66987fccb85bc4ea",
+      "adapted_blob": "b5688da433c3c0d7890237d85f188cb8124e3f2b",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-long-runs-of-undeclared-members.ts": {
+      "before": "f2c98705d0a34d6be09835bf9ed6a110875d50df1af9be14b9b16fed8d5a233f",
+      "after": "f6cc3f2e3cbae82132d3fa3159ceb6c456f2acea9ec338baa5c5ff8196da9a8f",
+      "base_blob": "74e4125315582b19bc0fc6502da06519e3be08b5",
+      "adapted_blob": "9f5ef7e2552ad4ab6b67987b2df6c2e1303b91a1",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-long-things-learned-then-short-texts.ts": {
+      "before": "9661a024283e5d4565f29ca6cb858d6caf96995023344d0e5a62a752ff281da4",
+      "after": "d90bd618e50ab52fb75097c84c693bb9c75c08ec98060dc5eb71362b1e329113",
+      "base_blob": "20cbc11ed1d3a2e18bdd92a2d02a326b605b72f2",
+      "adapted_blob": "d7972204a4562e74863c093a3250ea8d76cb8537",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-many-sets-of-undeclared-keys.ts": {
+      "before": "d704418d3566f8d7b1314523ece65a788ee0002018050fb905cbf3a2e3099908",
+      "after": "8c96007092fdbfdd15358639526e8b2c7b6c017d28f48e0d39622cf7237c3730",
+      "base_blob": "e8bbb8bb0fe97d2a43aa541a384846be4e39df65",
+      "adapted_blob": "2981e815411b79c4d45fd5bc258900e13e2214e0",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-many-undeclared-keys.ts": {
+      "before": "0060b92736b5dbedd6f39eb1f8034c7611d1250b6ff6798e446c5290c4a7cbe3",
+      "after": "e7e7bcf214d033e5f12bd7b2cfdf915835eae4bfd8ba2695779e10a1af9bf8d3",
+      "base_blob": "36893dcbd60ce2317f09a8566e986832a9edda32",
+      "adapted_blob": "a1deadc11304b52187f38adec7b0500f39759842",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-minus-zero-under-an-enum.expected.txt": {
+      "before": "20a2c4ffe72d2a859f26fbabf812ee99da5625acf6bd025dc803be1c82492e5d",
+      "after": null,
+      "base_blob": "b0f1e7b5e97d0fa79a395d69d402652a93f1e095",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-minus-zero-under-an-enum.ts": {
+      "before": "9cf7012650223e465f6327170aec04e5582bdde7a36fe5455cac220df4aeccc2",
+      "after": null,
+      "base_blob": "6ec2f362e857b3a7ca33d350a19130f9a5801ea0",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-minus-zero.ts": {
+      "before": "a4d074415ae6f687c53a3761011d5c50f401609e9ce500fe28ebd1f167180f78",
+      "after": "d010c986194ee7780c7df935d7bc529444c40263225ba2908f8a22cfead1268c",
+      "base_blob": "c59f1ca552d8882810e6fa91ce3b18e7cee729bc",
+      "adapted_blob": "2599b06e87dc0b57fe5bb0f61fc1bcd1817b6e64",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-more-orders-of-keys-than-a-table-holds.ts": {
+      "before": "a049f607422d01035ed59920c0ed80149c496c5edaf2a0b6b3c8cbbc9b8478cf",
+      "after": "ba0daeb9a5182b23a1db4f2b192d996508abc71ac1442db3e8414c2e2e39d1b6",
+      "base_blob": "c24b8203ab4e990f4480baeb5023c212ea41d309",
+      "adapted_blob": "c8b8b244d454fea5fab4961d0c14c60ea919ec55",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-mutated-texts-against-what-is-learned.expected.txt": {
+      "before": "a765251b74a53053025beb2aaedc81ff66c88fbff988f18044e0fdb7c5c28d1b",
+      "after": null,
+      "base_blob": "3a05ffa784305cb56d662bff2923a423a657794b",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-mutated-texts-against-what-is-learned.ts": {
+      "before": "97b6d3aab4d1d69762e308555d70ba456107b0fec8ae6c31b78c41b7cdd82f30",
+      "after": "e37a1d4528ec378c0f4ae11b5f0acd1bc46c728e250f24764a2a69a65b6310ba",
+      "base_blob": "2fff160c54a99c6513802ed08349fb9b73bdd0e1",
+      "adapted_blob": "f3afcb50f333cbc28093c1a188c8c63eb0d87bbb",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-mutated-texts-of-less-common-types.expected.txt": {
+      "before": "1058083fcf1ff4eb9fa0750ed804b28a29d6e0fc00f6d1fd293657f38bbd7bfa",
+      "after": null,
+      "base_blob": "de8929cd5c894a78c776ed0013d6227890b0484f",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-mutated-texts-of-less-common-types.ts": {
+      "before": "310c35ca2866c6c4a8700298a0208474edf6340a8b51255db4db04e1a511fc60",
+      "after": "95b9168a1e88743ca6f9d1a20b4f1e49a11da6770fa1e3badbcf7d72a1232e15",
+      "base_blob": "a5632b30ae8e7ac7a55db79b690d20008fcb98bd",
+      "adapted_blob": "af8f6d601b576cafac54faa06490edfd968cbfe1",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-mutated-texts.expected.txt": {
+      "before": "d93d40414843dfaa1c125086bdb5ee5e7b25a78370f23914ad65df3f049c2610",
+      "after": null,
+      "base_blob": "ddd6d6cb24501b52b442365d5f6f427253b8069e",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-mutated-texts.ts": {
+      "before": "ebd55b0fb03d708f6fbbc66ba5530448678f3ec7decba6d636da97148e779c18",
+      "after": "0a47d2f5db618e0d1105d032bfc8133ac4a5e033720f5728638d9d1c26f18c04",
+      "base_blob": "b2f84049a259ea18fd60dcb66452bd8b451707cf",
+      "adapted_blob": "22787de57af53ea664603b82b04ff428e4d5e6a1",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-nesting-to-the-end-of-the-stack.ts": {
+      "before": "2c0d5f6ea65632d51bbe33ff7113f30977fe34f5aa44f4db20be9e2a30f96bfb",
+      "after": "d45ee546a9caeab68627f2458f88888ea2504b09ee9fcdd84b11e68845bc9cbe",
+      "base_blob": "4f42c8a3cd412af3e6bf415c45f758eb1356a184",
+      "adapted_blob": "9f6f79ffa089502b1a1fa9f47317871f19d92e32",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-numbers-in-every-spelling.ts": {
+      "before": "2e441e73e8b192bf9c198b76e90531cfd39a09dc2458cd4946fc025736b08750",
+      "after": "365bd330526eaca769d563302a944428595ff0fdb2766e77080ff5440a05ae6c",
+      "base_blob": "16d5d63551214b9928f9a1ff86b77c4b453c9440",
+      "adapted_blob": "1260e45f0388894cfff6585b103774fd61fe496b",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-public-test-suite/fitted.ts": {
+      "before": "084ac746c65abceaee1c308d16943a705f7d8f604936a8836901e771f46a7c2a",
+      "after": "077d948824541df2c9cb28bce6c0a395ebd8d42218f0c0801f65554a737f0e31",
+      "base_blob": "2fa61e4b5ea6d63b55b2f1753bfb0b1281da7e0d",
+      "adapted_blob": "fd1f48e235a28c5c0562c1ef07b214df004c5372",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-public-test-suite/generate.ts": {
+      "before": "09156a635f32c9c574a9cff060ac79564e52b2ebd757cb92dd845d231faa4506",
+      "after": "5981f370f3704192d8f992677a8d4c041981fdb3e6d5fd10f359399f0c07e5ce",
+      "base_blob": "a5464005f26d970f9976fb8b18a2618355e830ea",
+      "adapted_blob": "c6b41c8ddff551614b3c889a779b5e50d6ee1f7b",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-public-test-suite/main.ts": {
+      "before": "e29b0579d2b386657289c2bf8f6a277ac1193d88bd650746e8c51507f48015f7",
+      "after": "a80966500d418066b24e2c28d5bb0262fb18fee7102bee96a25e598a7b6befdb",
+      "base_blob": "e5a290f11b6825e7728d50897bd5ffcd00386ae9",
+      "adapted_blob": "7e8650e672240095a12a1a65ecac22cf42a01abc",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-recursive-unions-take-linear-time.expected.txt": {
+      "before": "91c01d3956f99054e1c03e7967c7d1fefe6577a0c3dfd3d6e5d659f6f2e7aaf5",
+      "after": null,
+      "base_blob": "ddfb786736d29afcec5e4d52dd1857eb438ba834",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-recursive-unions-take-linear-time.ts": {
+      "before": "3533a93cb94fc527d6d473afc51575cec01fb549964bedff7e4a0b9bd9485385",
+      "after": "35faf0d76cdd2b8e2076a798453043b5a9426c6722f27947c2914cc6b1707515",
+      "base_blob": "bac84ac7a560c7922e47d1c43f58794a904f3446",
+      "adapted_blob": "0954c0c8c2431a941b8df0dd7dd753591d28fb42",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-result-is-what-json-parse-gives.ts": {
+      "before": "551cf2e98fd99cf555c793cec7351d83add9a562ec3ef6ec0c03adf274a689c2",
+      "after": "ee1dd827e99c6efe1457d9b279d63487cca5b035efa90d24e8fb5a45fddc4b4f",
+      "base_blob": "3993cdf8d94a95843f0fe21e6f227c08f15daeba",
+      "adapted_blob": "1cb393950ec7b581c9fb66e00fdbc4e117d85b98",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-strings-and-keys-of-every-kind.ts": {
+      "before": "a70404cda0a8df0d7f04a0faac74a6644a2986b5bb3b3e538ff22dcf7b35a709",
+      "after": "5bf7c559e02513a855d19f76870379e39a17a07e9a0ff2fbd51c544686b4705e",
+      "base_blob": "ed95467de05e42ad4266684652fdef769ef2fabf",
+      "adapted_blob": "73b2e2898b8926be39245500fae32cb9c3c43b3b",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-tag-in-any-place.expected.txt": {
+      "before": "720ac757cd04b2eae04bf10e56eb19986566b0c6d750018f0b940b65113f9e5c",
+      "after": null,
+      "base_blob": "a84f395c1f5b66b1781324a886b29a591cc50c31",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-tag-in-any-place.json": {
+      "before": "d804b2c915a594269e8a2215e99b477519f81e28d392ecc18807a9f510c96d7c",
+      "after": null,
+      "base_blob": "88e0805f9615a03f315d960657ab0bfd8c1f681f",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-tag-in-any-place.ts": {
+      "before": "b0bc32b758234d37817cac9ca4eb85589b8c77b7c74df877d748d80263b1bf9a",
+      "after": null,
+      "base_blob": "edac5adbb968b487097246ed6d168f96ac894f28",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-tags-that-are-no-texts.ts": {
+      "before": "2f7790795af655f766f395405bce46d7b0fb4a5457600b052623aec79bad1377",
+      "after": "edb4fbc046c87fa30e3b9a07ff7f2ee93f0e4124e2307ebd11a494bdb9947f5c",
+      "base_blob": "fb5bf7a14ebc465a61884efaee60d06fd6f35cd3",
+      "adapted_blob": "21bf16e770138264cbbfb94b9555254cec9d23da",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-template-literal-types.expected.txt": {
+      "before": "5318219519a015105a6e28a23596e49c9b037ebdd5bd5121eb6d13bda17efe4b",
+      "after": null,
+      "base_blob": "b648e86e86d5d006dd0f9752ef157fe6a5f61d33",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-template-literal-types.ts": {
+      "before": "58b62432636ba3d366b94a3181dd9c6dbfb65dfc7c932561914c79782dfdeb62",
+      "after": null,
+      "base_blob": "a7933a4e29f4feaa48f2bc95efcefa52ad57c598",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-texts-broken-far-below-take-linear-time.ts": {
+      "before": "a0b7b1223f715ad2c1861be03a0b621c541144658af23bba8c4423048d823dfa",
+      "after": "7829293aa76aab48b8fae53a716da2678e753e2d2029c38ed0d34f1383012e92",
+      "base_blob": "9464df2b6754fa8dcf340b847f5020d939c033d1",
+      "adapted_blob": "74f4c705b016b9b3cb9c8a95d410682791d3bc47",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-texts-from-every-source.ts": {
+      "before": "9706ca998ed5534504b70ad25c5deff3550db91ae51c7857eff0d34923d594dc",
+      "after": "14cf21a3103ea1a511fd748e24bbecf8902d238da77bf73d50e1dd775c212ba5",
+      "base_blob": "851979e47e8458c781e01d925d3d1baa8afef727",
+      "adapted_blob": "f8da9ffd1a0e0097ca2d500028fc80e2e4f9deb6",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-thousands-of-kinds-below-a-holder.ts": {
+      "before": "74c87cf4bd9794528c79a66b504440878f2c6a2bbe790041419e6a9e0db35168",
+      "after": "63d0ce6dc5e6e62da363bc73b780c6a9d9eb42297a63a99e6fc3868b11d63069",
+      "base_blob": "f942da4b1b75331d33b9df9f44e28b3cb980b80c",
+      "adapted_blob": "2f37c89a0dc2499b3001cf5a0f0e47f71bae2a67",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-throws-on-a-misfit.expected.txt": {
+      "before": "18f61128b8cae3e390bfcc03f50ae205a2d885b8acb0c967a1d3038f7ada8b9c",
+      "after": null,
+      "base_blob": "f632509c3488793d463527c65d2ca7120838d67b",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-throws-on-a-misfit.ts": {
+      "before": "b6412beac90e429d752bea2486e03e22e7e7ee9e441af74e7486ee772748c904",
+      "after": null,
+      "base_blob": "69c7b0f269354841ff365dc4f6978d4f7e6de872",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-undeclared-keys-in-every-place.ts": {
+      "before": "d504a65a9554be1ce985fdfe19839659c925163a744733b19eaf975c6923fd5a",
+      "after": "46735aff0d8dc57f3f9142b54612bd162393543834cb713b33851f82087d6696",
+      "base_blob": "6b8c76a2cfa63f7e24c351f3b5cdc3bcc6b2d7c2",
+      "adapted_blob": "0dc9848a1aea1f86ff856704cf4a8a3123a18540",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-undeclared-keys-stay-compiled.ts": {
+      "before": "8d0e1d671122e7c3c94b26eb2160d3b3730a295abb488d5105177ad6922cff75",
+      "after": "81f4b8839e6b4b190151fa5e4823e09111919c8f8998c9743ee49138d0e4f571",
+      "base_blob": "8758c76f54fc5d8659d2fdc8f72cd103d8d773b0",
+      "adapted_blob": "84f3d1560c2ab978a861b0c6dda99f59683fe6db",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-union-by-discriminant.expected.txt": {
+      "before": "285d911cb559b8ec844690f86b15f89c32643afa5aaf8825e585462d159c2852",
+      "after": null,
+      "base_blob": "186cc47df6195973c1140ebe0b1cee44d8b30038",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-union-by-discriminant.ts": {
+      "before": "362b0a62b9af7dbb7c7bf0b8e50814eda0c7d510cba5ffb860f3ee3abdb86a71",
+      "after": null,
+      "base_blob": "db970caaa2f3591e1c3ee92f9fcc48fbbf6c9e84",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-unions-that-contain-themselves.expected.txt": {
+      "before": "7124de3687ebccaabec2e8c270d574267cd1d1bb6c2c8f8261bcc9c90ec2b9ca",
+      "after": null,
+      "base_blob": "9f20449e05ce29f2d9feb3d8b9c4875b613f3cc4",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-unions-that-contain-themselves.ts": {
+      "before": "d11b375866282883f66cc00f1284ad160ab17b93e0c1c71e108cb4f3c309a772",
+      "after": "f2fbc56bb356835293c609056166493fc3f56c51c1a6be2ea58c03daaf99a07d",
+      "base_blob": "0b7dc0dd5ff45f931ce4d77f3e7d858759e3e678",
+      "adapted_blob": "0caa1f7b9fe58b60f61ebb47c54c6b2bd7628014",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-unsure-refusals.expected.txt": {
+      "before": "88e44c4ecc8c4edcd0a85646769d5762edddb516302a2a6fb67c5f72885ce9d0",
+      "after": null,
+      "base_blob": "308c93ff345cedd91af439fbc730b692c8f2c947",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-unsure-refusals.ts": {
+      "before": "6ff355745f50e4dc2a1c35ee30e29feae0badb85a2219bf594213a486c79a60a",
+      "after": null,
+      "base_blob": "25287532c9d3f713a7b9de214824521bb12f0e88",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-what-an-outer-object-stands-on-is-replaced.ts": {
+      "before": "2d9abd1c512dcdad6d55ecacc23d6b1b3c9e8aa4c4d42f23f01b8de2b25ef6ab",
+      "after": "377e1f1b09c0b65489997dc0f7921c8b6165fefc340810ea9614267a929327bd",
+      "base_blob": "897969fffbf5d066124f731dc5494afaf57a36e4",
+      "adapted_blob": "8e6dffa57ce522e93b515a53fdf2788ed0734aa6",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-what-is-learned-while-an-outer-object-is-open.ts": {
+      "before": "ec30a7e10b3419e4335aed9664a394e30fa1ba11f8a001feb90816dac162b909",
+      "after": "7ddd4d0a370623dc7ecf7051c22ac1ae6320d5ee79105142735d0babb65375cb",
+      "base_blob": "fff7bc253bbcf9bd0b1f9a1cf229e41e307a0f1e",
+      "adapted_blob": "a7833492f252ad10997facc0849e840ca4033bb7",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-what-is-no-text.expected.txt": {
+      "before": "3b0d08adb87de134cf4c6e64cea03c96956166467e7d6b99b686cdede0a5de9a",
+      "after": null,
+      "base_blob": "8b9af3352175e0c40e816e23ecfd5e0af12d448d",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-type-argument-what-is-no-text.ts": {
+      "before": "9bef6fc981cc3a2d4c409efcafef3ad14c8020daa2918b29b00acc071190f47d",
+      "after": "47da0cd123efda0f4b2900887258fa3186eeedc5b7fd243aeeffbffdbdc4b75d",
+      "base_blob": "d6e3fc0f0269ba6cc2ed880211850d383ea01ab8",
+      "adapted_blob": "7d4f91c298a5b3c8ed18b25724b46d47dda0e390",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-union-uncertain-tag.expected.txt": {
+      "before": "0b8a8e149d1e1fedafd7d9f3833433b119f3a41f411d0cd324370ec294c8478e",
+      "after": null,
+      "base_blob": "9f1b2ebcbfba69f232e843fcdedf51e77e78218b",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-union-uncertain-tag.ts": {
+      "before": "878677a9afdb3384f8cf660c5509c333e4293477865e8e9af1c7350e9bdd8296",
+      "after": null,
+      "base_blob": "032bfe71e1bd998b027b1d0fd906b0282783b985",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-untagged-recursive-union.expected.txt": {
+      "before": "36af78ee900c9796b26576e595abd4913e6be637afef324d46c88fa2fa3926be",
+      "after": null,
+      "base_blob": "f5572b917a921e6a67fb2b18632f9af84cf66e83",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-parse-untagged-recursive-union.ts": {
+      "before": "3f162c6018445ce4f7602739282e1d3d657c089c921630c9416161272a849010",
+      "after": "ccac631c91519e30bb49d9abc5937145349dc949a6b2205011c8d0032ba58c08",
+      "base_blob": "1ac2193c908dfb72371722c2598ae790d588ef49",
+      "adapted_blob": "f04656424db2eb131ae52d3cd83c7f1cd0078222",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-stringify-of-what-validate-returned-stays-compiled.expected.txt": {
+      "before": "b3a44ff6ca791d31c52cd82bd8a56e9526e33e766a3e5283be39f430627ff09b",
+      "after": null,
+      "base_blob": "2bcd510da936320a7f26a1019dd65900d69cc1cf",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-stringify-of-what-validate-returned-stays-compiled.json": {
+      "before": "d804b2c915a594269e8a2215e99b477519f81e28d392ecc18807a9f510c96d7c",
+      "after": null,
+      "base_blob": "88e0805f9615a03f315d960657ab0bfd8c1f681f",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/json-stringify-of-what-validate-returned-stays-compiled.ts": {
+      "before": "c155e843718a5eaaf0ddf5a642e426c69da077b03f1baffc5af14ec72dd582c0",
+      "after": null,
+      "base_blob": "b5bbc830c8d3d5a505e4c0ac545c55172195efc6",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/recursive-validator-with-number-bounds.expected.txt": {
+      "before": "842c7894c17e246f9e1663bf86cd7e677a76bd52201cd25402935ff1c7dbd07b",
+      "after": null,
+      "base_blob": "de2bd35bf3fbdfe1cf771e8757a7dafe5ecea58c",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/recursive-validator-with-number-bounds.json": {
+      "before": "e41a921111e02ea0a25605f5ca25cb0541480190e643e5ce47d01624e1e00ccc",
+      "after": null,
+      "base_blob": "98ec102a345a2aaeb2447a67f2071750d33b1787",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/recursive-validator-with-number-bounds.ts": {
+      "before": "e3afa61dd50850a239a7c7bda0f4e46a6d4c315ef43e1277ff70539049a422a2",
+      "after": null,
+      "base_blob": "0ac893313674311068f48754396e345fe7373490",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/schema-arguments-that-constrain-nothing.expected.txt": {
+      "before": "07e7c1724ea3afb7d264542b6b9ba49feb883ce01b968d6aa134d4e9d6c2e256",
+      "after": null,
+      "base_blob": "7fff1e49ffe820e8100d8da604f6c95bdc4f1892",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/schema-arguments-that-constrain-nothing.ts": {
+      "before": "edaf7a581b9c19c63bd72da6dcc3805dd6af6084d877f65dc4733c8a888e7f5c",
+      "after": null,
+      "base_blob": "2c62ce1442842596e5e1992cb598c906334fc7c9",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/shared-validation-functions.expected.txt": {
+      "before": "72171fbfca96c7ae665ced387a22a80ae9cab37fe71ee9d4d145b53aed7746a9",
+      "after": null,
+      "base_blob": "314934b5b32375e05989eb20728158a504e71a3a",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/shared-validation-functions.ts": {
+      "before": "12ffd037931e4731ac6b88958ade6de1bfb60c2d850f2e5652f708a5af4d9e7e",
+      "after": null,
+      "base_blob": "9255cb46a57fe1b096dc6fb8856596b10f20ca4d",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/typed-parse-16-bit-text.ts": {
+      "before": "a6897bd97f72822f2396e438442009f940d0fef40168f9bb95e1563008e1e2c4",
+      "after": "4cac11592cd49295befe5586924f5c64135e5b0e7ddeafaed2d3b69b4ca202c9",
+      "base_blob": "1cecd3b49eb1e47da96bce453ed37c017d3196a2",
+      "adapted_blob": "ab0238744ac1e6eb76d315e4e470731d99099f9c",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/typed-parse-input-ends-at-buffer-end.expected.txt": {
+      "before": "95d56a761a6144f0e779f4c73c10ae12fa0f90c54e9306aed5ce2b92321ccb25",
+      "after": null,
+      "base_blob": "ec250faf960a1349de48827ae8e2a3432361dc18",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/typed-parse-input-ends-at-buffer-end.ts": {
+      "before": "2be66e9582d5f0f41af5627eae2a2909f3519d911d08434fb41dbc64301bcd37",
+      "after": "978df276cc2c87c820ecb4deb7babe3a53520823818ecd3250cb3859b225eb8f",
+      "base_blob": "46246a32800d624ca5addd8683fdaca5051ae53a",
+      "adapted_blob": "4563c9386af884f58db9d22a58eda68bc57d7cc0",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/typed-parse-many-spellings.expected.txt": {
+      "before": "12f1597c690f2117055a0e918cd96f28c56129a42c73eae705abb7b753865911",
+      "after": null,
+      "base_blob": "0f66a7df07422ce387f81a64735bf6c985be79ef",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/typed-parse-many-spellings.ts": {
+      "before": "d748efe531646e5977c7330fc3df4009d5ed336fbb1563895105d500d535c4ca",
+      "after": null,
+      "base_blob": "04c906bed3bffdd68d355af92c216edc37f504e4",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/typed-parse-result-field-reads.ts": {
+      "before": "07d865943fe0106e4e0fec74c1a7668fb9114882034c21d763ae503c48cd9eab",
+      "after": null,
+      "base_blob": "a99837aa57a5196aa7cba38bac5e7090ae82eb8f",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/typed-parse-single-pass.ts": {
+      "before": "1d3fd36cd43eb696538ee716e302516d9706d220a2932c1b1c0f3ef6a27948e9",
+      "after": "66d96f98a44fbfcee4cae5941a65646832b9956c55a675269a31f165e40fe05b",
+      "base_blob": "8863be7e8110277b091675d54eeb95e8e0da04a8",
+      "adapted_blob": "e7127fa63d4cc7915c3727e922f34958a5b6ab08",
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/union-arms-are-tried-in-the-order-written.expected.txt": {
+      "before": "f1a2745524c5c3e581a308017add23cf2587bf1b47350a949297e5a3c039c231",
+      "after": null,
+      "base_blob": "c8b14c7bcdbe2befce1975703f71678dbe7c1a6e",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/union-arms-are-tried-in-the-order-written/main.ts": {
+      "before": "d3445b596568495c8ffe0df0b16dc0be6919d539563b54377d235858ebed951e",
+      "after": null,
+      "base_blob": "9cc5166b54c2fc20ef8ef18d6833211559ac00cc",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/union-arms-are-tried-in-the-order-written/types.ts": {
+      "before": "f5f6a47ed84edc124995377fbbddbf9b56891e04e8af18f7366e98cf6b2886f2",
+      "after": null,
+      "base_blob": "99518022a3122ae40e44a11dd22a178502814845",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-and-revivers-with-values-that-are-no-plain-data.expected.txt": {
+      "before": "7ba0277eda4aafc9c3db18857091cf1975fbf5a8f0f9b32ec11ba5e4e64b5fd3",
+      "after": null,
+      "base_blob": "6447e022eb2766febece496cbff6fe3977877a1c",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-and-revivers-with-values-that-are-no-plain-data.json": {
+      "before": "0185a21f349518aea643c8110dc6267e65a16ccb9b0bed75129b877d310d516d",
+      "after": null,
+      "base_blob": "114b66b4e46e1879360758cbd83b8d58f8710e65",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-and-revivers-with-values-that-are-no-plain-data.ts": {
+      "before": "5d2f947a397925f13df9d1bee0d8965c8066e875e3dd4507ee5976a36abee281",
+      "after": null,
+      "base_blob": "a26190f706b2653a67bd8a5835e1515f8911f66f",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-conversions-into-unions-whose-arms-could-both-take-the-value.expected.txt": {
+      "before": "3c6695da1137ed3bb46787a747885b2f172466086887fcb6467a8b27849371b9",
+      "after": null,
+      "base_blob": "092f2a3ad6437550b321015535feb1a4f23e005b",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-conversions-into-unions-whose-arms-could-both-take-the-value.json": {
+      "before": "5883d93e7e16a2d20b7b9b6975dd9128721007945d68ccafb9c01b4d827a8dbe",
+      "after": null,
+      "base_blob": "991f285c392ba8e6dce20d24826897ce3301605c",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-conversions-into-unions-whose-arms-could-both-take-the-value.ts": {
+      "before": "71193244de45a1e5986f032c569af81a133d4366b2f48ab6588a8a0d41b49dc7",
+      "after": null,
+      "base_blob": "ab36d5651f28f8a1e803f50b430fdbf3d3db4266",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-copies-a-shared-part-once-for-each-place.expected.txt": {
+      "before": "0eb74263ebd2d7e8976e9eded518b66df1cd1765762a1fb08fb7d71a5392e49f",
+      "after": null,
+      "base_blob": "6ffeaaaaf782830178d5eb4960974d2fe24722e4",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-copies-a-shared-part-once-for-each-place.ts": {
+      "before": "e902baab8633162bdc202b96d8d9d687f34bfa0454c9cc3c83d5e24be367e788",
+      "after": null,
+      "base_blob": "3f81fadde0fe90639a3e4de1e4ff1f21c3ad6bea",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-default-or-undefined.expected.txt": {
+      "before": "6be6d823879345d8978189e166f051bf38b5a6e18238c8890903e14bbd68d6d8",
+      "after": null,
+      "base_blob": "fa9da95cfe6480a62e1ff1184f889ff0388913c1",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-default-or-undefined/main.ts": {
+      "before": "7442ce310ed064e4bea145ae7401a2feee6a72df8ae2f521f2cc1b5f1af0ac59",
+      "after": null,
+      "base_blob": "a1ce7d0c694f129ed8142c1998e15017f6ca3f0e",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-default-or-undefined/tsconfig.json": {
+      "before": "9b0958596de9b2fcb79073c9f6720974f74c77558e47d7e20c8ece6fb4476d2b",
+      "after": null,
+      "base_blob": "e3a3ad6ea32b94c99e7a011f09f14777211d1fd6",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-dictionary-symbol-keys.expected.txt": {
+      "before": "f41ced0505a0077545a31f66cafae2006234113166ae1a63cc16ea98cb2300a1",
+      "after": null,
+      "base_blob": "34dbd43d6275d9a1a0245683321d296665d4955d",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-dictionary-symbol-keys.ts": {
+      "before": "7859a6c9990834b6dec284caf11d8371765280ea5e003a3e49683183d7d69042",
+      "after": null,
+      "base_blob": "03e1bd25fe3a5959cac346cd4c6640a56e83062a",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-imported-from-bun-bundle.expected.txt": {
+      "before": "d6dc3dbff11ade3f5a1d864067192964dcd6e74d0b97e4d84ed96eba168f12ad",
+      "after": null,
+      "base_blob": "35b0e4a9fb3b682680665f16734bffe5a9330c6b",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-imported-from-bun-bundle.ts": {
+      "before": "98e9d90852d0235ac33d46f924da5301ddbf5aae930283440b7edf22ae81c993",
+      "after": null,
+      "base_blob": "1abf8dc23303bafda2039f1e88ff37e9e33da015",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-of-an-object-written-in-place.expected.txt": {
+      "before": "8a7520d06d5c1936bba1323639803f5f45a9dc3786aa29142d04a3fdf7daf04a",
+      "after": null,
+      "base_blob": "cd4d89bfb1dd5963e17c12f2cb0394a8bf74b6ac",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-of-an-object-written-in-place.ts": {
+      "before": "ead6c2b3e771db0fd4b7d81066843139994271606515355912ac90877f7d5d18",
+      "after": null,
+      "base_blob": "507ac53aeb86780824722d638b498d57b4b68126",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-of-parts-that-change-between-two-visits.expected.txt": {
+      "before": "e843ca68d347dfb691e63f63822ad95b3ead981ec92a95bb60e5c04b1c3cf557",
+      "after": null,
+      "base_blob": "441685b2ca9617b7097afa22b067a73b60aefc43",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-of-parts-that-change-between-two-visits.json": {
+      "before": "5883d93e7e16a2d20b7b9b6975dd9128721007945d68ccafb9c01b4d827a8dbe",
+      "after": null,
+      "base_blob": "991f285c392ba8e6dce20d24826897ce3301605c",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-of-parts-that-change-between-two-visits.ts": {
+      "before": "b35a32879da0c9ac4dfe0075ba0d3118a3d98da42cffaa1f38ee14e44ea282db",
+      "after": null,
+      "base_blob": "9ce40ca2e7269de54ebb0d21d2a1329737b6f434",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-of-yaml-aliases-nested-as-deep-as-the-parser-allows.expected.txt": {
+      "before": "e3686221167dd6e8f4a6c3793e5e8def117cf5acf114f83a9ed7d7f403095763",
+      "after": null,
+      "base_blob": "1c57e780f08f09cc435916a2dceaccd0a89d4860",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-of-yaml-aliases-nested-as-deep-as-the-parser-allows.json": {
+      "before": "9ceafa2da37cdaed1330146d8fe3cf9588fb3f02f964d238e2b10cc4a5fad411",
+      "after": null,
+      "base_blob": "81bd929c61f1fe10207eb4579a076735e26b48f8",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-of-yaml-aliases-nested-as-deep-as-the-parser-allows.ts": {
+      "before": "7d3faffd8d5aaa4bddc2f0761197d6f4731c8c96d04385195e7ef1de2b7245c5",
+      "after": null,
+      "base_blob": "aa8a403b8f33e85c117b2584b37b73e6dc014aa6",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-optional-member-absent.expected.txt": {
+      "before": "802f858c90a5fefba5d93470e9fb482392a174c3568801342027365144f9d2cd",
+      "after": null,
+      "base_blob": "16aa4d932d2e9229854a844f0801561df80b9d72",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-optional-member-absent.ts": {
+      "before": "8c717aa647500108db84c20d2190d7e237e56f4a3ba2be1e1111a24522420377",
+      "after": null,
+      "base_blob": "20c2aa866e1a1cf7cc84a31875755a784f0d0251",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-random-graphs-with-shared-parts.expected.txt": {
+      "before": "7d5bfb088a4c285ee0eee3d591f1ae6ea7c935a5ebed890eba79db82e7982ca7",
+      "after": null,
+      "base_blob": "8076724a1590770042d58b319508306871495af7",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-random-graphs-with-shared-parts.json": {
+      "before": "92bf12a1bda929b0e70eb4031e1628bc8f2abb10b50f0e1c7a181e95b3667a2a",
+      "after": null,
+      "base_blob": "df874456e2d9fd370e1cdd0b11d77f1d7e6d5a52",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-random-graphs-with-shared-parts.ts": {
+      "before": "b78f2b9f159ea12f58667c153991a353cbf66f06016244ee1ca05bbfbc4fafda",
+      "after": null,
+      "base_blob": "dae6f7b4ea97ca21e6698ed89bc1c419ed003aed",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-reads-a-value-once-whether-it-fits-or-not.expected.txt": {
+      "before": "27361fe24608c0c8872f16bd107cbae45ebd8f04ec5e322374718a782ca17459",
+      "after": null,
+      "base_blob": "e7bbf64c2688c98aae24166dbfc947ed25a9b0a6",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-reads-a-value-once-whether-it-fits-or-not.ts": {
+      "before": "5189500f542281d0fd50e21e5f4ffbfd33c4ac77061cfa182783dc4913d09210",
+      "after": null,
+      "base_blob": "1b68779ed13cf8b1a5afe9d96f6c5c4303625044",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-returns-a-copy.expected.txt": {
+      "before": "5705d7734c584257725bdd08ad28bbaa8953dde3cd808dfed3aaf32cac729454",
+      "after": null,
+      "base_blob": "37a6c61255fdab1037c01d3583a44686c8df4d8b",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-returns-a-copy.ts": {
+      "before": "b562960dbf61e791fcf810d48c3513631a554aa79da16d8929cf7108a49e17fd",
+      "after": null,
+      "base_blob": "fb7cb79759c272410ad971433bf5870d11d07f96",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-takes-what-is-not-json.expected.txt": {
+      "before": "920153cc551daa098b8f228d01c743eeadf7cf1dff0aef682a4197f6ecc1d7d9",
+      "after": null,
+      "base_blob": "316b69619e5490687afce09856a89d7259a545ad",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-takes-what-is-not-json.ts": {
+      "before": "1dca3342320fad1c34d844d292d3ca4be61c137ae15009105fb526a14fe7379b",
+      "after": null,
+      "base_blob": "dafb573a35fe8639d0278e8ca60d2fa1a24f4e6a",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-union-copies-the-arm-that-accepts.expected.txt": {
+      "before": "08b32891f6ff3cc44d8357ae7a72966ed02b186168c47bfcb17146f949ec6a36",
+      "after": null,
+      "base_blob": "6b488e679278a64144837e86d190d6e0b3765b0b",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validate-union-copies-the-arm-that-accepts.ts": {
+      "before": "938ab0dd485ae0ff5ccb27d6f72c76d6dff774eef83d648fa6ba8a1a1397d9ff",
+      "after": null,
+      "base_blob": "87ddc3687f1c6e7dc2b5a8facf4f730ffe927d25",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validated-beside-unvalidated-parse.expected.txt": {
+      "before": "92f08989dbef8d405678629b1e927b4d2fe3452186ab3d9eae4489f14781b98d",
+      "after": null,
+      "base_blob": "a42650cba16c0588fee2e4a531d4ecf6fb686ece",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validated-beside-unvalidated-parse.json": {
+      "before": "417f83c15ab3a3cf230b5002d753e073ba3b88530a3206a42588745b3272e195",
+      "after": null,
+      "base_blob": "f16128d5fae217e386abd36de523bb943a0b78e0",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validated-beside-unvalidated-parse.ts": {
+      "before": "9f918aca42e9f4f2e9bb3cee95dcac26e756c490f0f4d4d6645b945979dcdb2e",
+      "after": null,
+      "base_blob": "fc9a165476661e8436b95a953bfb0758fce44c09",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validated-records-with-array-members.expected.txt": {
+      "before": "90cebf36bec9787a7a8a5df3a5d32064b25c090a673368c1160acc888fc82c08",
+      "after": null,
+      "base_blob": "df66f04708240550727c7c496e206f2707fc55d7",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validated-records-with-array-members.ts": {
+      "before": "184c10461387b5a6a8857adbc4f6496fc6eb7e2240ce15aab5c5aa87429433c9",
+      "after": null,
+      "base_blob": "61be8192e2e772a828d14d787c04622b0246cfe0",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validated-results-stay-open.expected.txt": {
+      "before": "aedbf0749ca1eaf0e95e6065160fbafb25283b888bfad1023789581b2bc08107",
+      "after": null,
+      "base_blob": "ade5d09f8862b1b4d5deedecfc5ba39b94d9a55d",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validated-results-stay-open.ts": {
+      "before": "2ba6b1544f10b30c6103b9e75dee0c3979896e200b7cc8b38cbfde913345df42",
+      "after": null,
+      "base_blob": "e1b84bc6a99ce5e2f0966ab67f3238a7dd968fbd",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validated-trees-are-walked-without-tests.expected.txt": {
+      "before": "febd6d1afb7223365fcc28b00a0fcaa19895281d3a3445e1050fa46970814b9a",
+      "after": null,
+      "base_blob": "10df089ac7c240f02266be487b0bd4c27638b3e1",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validated-trees-are-walked-without-tests.ts": {
+      "before": "07efbc8c765dd4ccb9248ed21b73bda5646fad5a042d59095739cd3f78520711",
+      "after": null,
+      "base_blob": "c4628b3ae6d25eae4358c203f538ebd7eb337404",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-compiled-and-interpreted-agree.expected.txt": {
+      "before": "15b32c66f6e9a81efd6faec57adbba442531287ed838cf70798e72a546a28483",
+      "after": null,
+      "base_blob": "c0bf9e25b584a3c439ee2bf39d1d087173fb1cbf",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-compiled-and-interpreted-agree.json": {
+      "before": "7f5594b79875026ca7e2d23241eeb3bd606833bd51d3f2b131c53d109fc26c4a",
+      "after": null,
+      "base_blob": "0b6a84808040513c5005630e8a3de116c58dd830",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-compiled-and-interpreted-agree.ts": {
+      "before": "38aea56e49f37edf823717e47104252d446478f49513c73fd26336a06f07f59f",
+      "after": null,
+      "base_blob": "d4768ee6b75fd677a0cfab3db9194a5696cc3e2f",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-error-message-without-its-prefix.expected.txt": {
+      "before": "2967d0b8ecab088a413fdfd8437fcf26d93c475fca728ac053477758283e1e63",
+      "after": null,
+      "base_blob": "6755473e74583bf6b0fd9b4b5d2dc41b58147d3c",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-error-message-without-its-prefix.ts": {
+      "before": "0fba27f9ba041fa119b194d374a921e433f395e6a138010462b9920fd0d735f5",
+      "after": null,
+      "base_blob": "557c72f067a3081dadb3e9a03d93263c0c100226",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-fails-first-in-a-worker.expected.txt": {
+      "before": "9021871352deaf899f8342d448f5ce4d8e0adc7d3aad730ca107230d96e9248a",
+      "after": null,
+      "base_blob": "5d8a87f58b32dd5b75581dcbbc4f47f9cec6b649",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-fails-first-in-a-worker.json": {
+      "before": "a6c60c40dd6db97858d2a1b6dfb3d170ffa87ba481d1bef6a0d8bd08315cb7ea",
+      "after": null,
+      "base_blob": "a6959e82f0e5661148b2db7ff08f671bf47afe7c",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-fails-first-in-a-worker/main.ts": {
+      "before": "83705af54fea6dd8ae93b9a32e3924eb7f0f59f6f25a0caae5404ea7187152a3",
+      "after": null,
+      "base_blob": "4e717f26d639d032aaf5da6abf7a384b36dbc047",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-fails-first-in-a-worker/start.ts": {
+      "before": "da4e57b15eb4ee8ecd2b9b1da52df897ebc30bfbbae73efabe43c4dc9ac5c253",
+      "after": null,
+      "base_blob": "a32e2156bbd4bfc25af70c798db2a686fa63130e",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-in-a-file-that-is-not-type-checked.expected.txt": {
+      "before": "366c7ec1a07396599d83bfdd3a0b050fc5ba17cf867ac66ced411863820a8f25",
+      "after": null,
+      "base_blob": "38372d76eafe688c6255b9bf8dbcab4e1d1f8d5f",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-in-a-file-that-is-not-type-checked.ts": {
+      "before": "9e1b6314af27562de0b21c044f1e300cb141382f7807f2747f0ae80670cf6374",
+      "after": null,
+      "base_blob": "e50e2c6e99784398341c5f21ba6f118ab9f6e9f2",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-in-functions-called-with-mismatched-arguments.expected.txt": {
+      "before": "9c541119c9e1234fd324e95a3e1446b1bf987318ce688c7c0d05a15784ce1d5d",
+      "after": null,
+      "base_blob": "e8d05dd7b0fde0ed35fdf028be5c467b1a1a5ffd",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-in-functions-called-with-mismatched-arguments.ts": {
+      "before": "6ae2f4dc3e75f093f6fa0767f6e4a514b94d811c820e4f6e3c776e596cfd8cc1",
+      "after": null,
+      "base_blob": "b82d23cb1159eb89f57fc7623fe850f0d00cbcf3",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-issues-from-shared-routine.expected.txt": {
+      "before": "ed2f2ad0275b41af0750cc294e8e14f24bd04d700d83c1fa3f7c8d88997487df",
+      "after": null,
+      "base_blob": "0b5a8dccdb03068b9b3749501e56311aab517d33",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-issues-from-shared-routine.ts": {
+      "before": "0d06083f5e5eabd6701a6caf3f0883fea82a163a0271cced99b768774566b47a",
+      "after": null,
+      "base_blob": "25356103364d0e6528a1c1333b16ef06a038bc10",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-keeps-a-key-named-proto-as-an-own-property.expected.txt": {
+      "before": "02e643010949ce65c678ed46c46f544621642e2a7acda887df5f38978617aa74",
+      "after": null,
+      "base_blob": "59683072c7fccb70a4b7280167b3e354b1a61343",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-keeps-a-key-named-proto-as-an-own-property.ts": {
+      "before": "d5587ce3cf2527137c47dbe44bacd31348d5a6710694b51906623a70aa15e810",
+      "after": null,
+      "base_blob": "823bf64f7f061e20437b723126e552acf53e9c7a",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-of-names-and-texts-with-half-a-surrogate-pair.expected.txt": {
+      "before": "fea2211a0c2f20288312de16a73726b4e657c2ee0261d17110bfdc9e22fa3eac",
+      "after": null,
+      "base_blob": "909973e0fe0574f07992877dec7fc5e7451ef365",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-of-names-and-texts-with-half-a-surrogate-pair.ts": {
+      "before": "d64272d2f3ce226cf5363407baa3d45e83a7cebf4a812c45b25298e2906a29d2",
+      "after": null,
+      "base_blob": "bcd8fd1d844da5af6b32d4ce5a2db30ea141f5ec",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-of-recursive-unions-remembers-within-one-call.expected.txt": {
+      "before": "8f079465d3aec6d6d978334fb165ea91c6ba43e069504d805c736bde8ad9cd7f",
+      "after": null,
+      "base_blob": "787af6ec157ab888a487075d02272f6588777b75",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validation-of-recursive-unions-remembers-within-one-call.ts": {
+      "before": "e3276fced6aa4636dce93b9518c7f0edc90f118fb7cd520ad69a785768fedd7e",
+      "after": null,
+      "base_blob": "fa34d45201e06f3366cc2a96ad00157cfcf28500",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validators-record-where-they-fail.expected.txt": {
+      "before": "0fc0b8db03bfbf6a22d22295cea82031f7422bb03832aad6dcc15ea763a773f5",
+      "after": null,
+      "base_blob": "cf5c3ee20374a98284fe3ccf6e694a07209aed17",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validators-record-where-they-fail.ts": {
+      "before": "ad3f4d654b8cb9787d28edf4c8b44030520749398eaa9ada1384064fe694f9a2",
+      "after": null,
+      "base_blob": "7b023486a7473d673512526c94584baa81b9382c",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validators-shared-between-types.expected.txt": {
+      "before": "88443cf702f547b480efa0950f419475d662f1f0eccffa46183b5d27c39dab88",
+      "after": null,
+      "base_blob": "f270dc9f0fa5ea3d941095f87bbfcb812b006c3d",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/data-from-outside/validators-shared-between-types.ts": {
+      "before": "9c3d75c5e1d1a233d19ca4ecf64d4e43b707987de75a094730ee3d7d1cfc870b",
+      "after": null,
+      "base_blob": "8b3203610a5210f94ef828b916810521f29f5280",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/errors/functions-declared-under-a-constant-key-in-brackets-show-the-key-as-their-name.expected.txt": {
+      "before": null,
+      "after": "eba7cf6715701d51e79742523ff3d303e077a7e4dadff5297bff3ea28ddea1e3",
+      "base_blob": null,
+      "adapted_blob": "204b1de8156781667c9b5a7d9789790b6702a6d2",
+      "mode": "100644"
+    },
+    "test/aot/programs/errors/functions-declared-under-a-constant-key-in-brackets-show-the-key-as-their-name.mjs": {
+      "before": null,
+      "after": "413c056c6f4534b881cf7441ab5e298282692bc1eb05f2f966371d62237ee7b5",
+      "base_blob": null,
+      "adapted_blob": "aff2bbb297f37ca093b204142c5b786768d82582",
+      "mode": "100644"
+    },
+    "test/aot/programs/errors/names-in-frames-of-async-functions-that-never-reach-their-await.ts": {
+      "before": null,
+      "after": "9e3450f8f8336a4f8dee0c947e13f776d93f27fc2fc5a3101d30fdb9946721a2",
+      "base_blob": null,
+      "adapted_blob": "27c504081d41df22ec33a3e5b6284517b70d2e3b",
+      "mode": "100644"
+    },
+    "test/aot/programs/modules/stack-positions-in-typed-packages/main.ts": {
+      "before": "da59e314b27621dac308ad9757aaf9e87b046ea179cbd567311c582a3841540f",
+      "after": "b61ce8693dd112b24682d061298fae29ea6ac6c13ad63b7927e4e4acba7cee4c",
+      "base_blob": "b98feb51cdda53356789fb21255a3d331992aef7",
+      "adapted_blob": "1e69c99cf5bf43b66fac6efaff456eb4275c6e70",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-objects/async-history-worker-flow/main.ts": {
+      "before": "9da80e130dd0358803d25e21d53bbcee5a3776a1b43dc765a3ac649fd0061d44",
+      "after": "ef8a5f0627bc99f91edf96ebf2f238b29b61557f1e5c17564d961bae56dd0258",
+      "base_blob": "0ad0e7cdef765697e27a4886092e640cb213e779",
+      "adapted_blob": "acf134e2443ff3cdf6b50173cb0ac551324dc97c",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-objects/copies-of-thousands-of-kinds-of-typed-object.expected.txt": {
+      "before": "77b883b0eeefeabbfccc39b7c551b7dac1ce2e592c0aaf762c54388b3b530f7b",
+      "after": null,
+      "base_blob": "97dd759e662058130cf68907dd6e77b6479201e6",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-objects/copies-of-thousands-of-kinds-of-typed-object.ts": {
+      "before": "1ac039caabee7f9464ea18631f992543ef245e54224368d0c5c61e1ca507b5ab",
+      "after": "e3f4548bdc9b5ce106b35ff483ff772c0796b2e2f1ecb15a5c5c89627b8bc7dc",
+      "base_blob": "da4fec1f0b44122cdd4cf056c8c5a6f3525f057b",
+      "adapted_blob": "1b259ee8f140404ee3c8bba981b608982ab3c601",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-objects/inline-nested-record-flow-depth-two.ts": {
+      "before": "44895f5fceee646919422eb6e4f7bd5925f5b8b2969452b967fb86f2f901fd0a",
+      "after": "7b4de61f2ee180dccb41748ef1de828642d517e96d78ed48954f820508ea5f0b",
+      "base_blob": "223fe8d7c3535727884cff50bd6cd7d55dc5b036",
+      "adapted_blob": "91501922124280a4e91329bef4d6a0c7f2ceb979",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-objects/json-stringify-code-that-runs-inside-a-write.ts": {
+      "before": "5e08be5359a330c45801e4856e684a80bf88121958ae372615fede02782468cb",
+      "after": "9f5d3ff318790b02ef8b214147428f685f86258e94c55a5178097ee59c817ca5",
+      "base_blob": "4350caa3ee1086ec5dc7c5ccf7b32ad6d1895e94",
+      "adapted_blob": "ddc0d190640a218ac6497d6347efa269ef26e867",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-objects/json-stringify-deep-values-that-were-parsed-by-a-type.expected.txt": {
+      "before": "56e8369e9217fe32ad3e664b83a648c0e5b78c10ee1deceb05607a96a5609cde",
+      "after": null,
+      "base_blob": "463be1ea556497186f2b21e48fec7dff0abae120",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-objects/json-stringify-deep-values-that-were-parsed-by-a-type.ts": {
+      "before": "e84791d10efc351466bb7dd9a566aed4a1bd94dda493d9b06b51f099f8e91150",
+      "after": "4399a52a8e170dbb56c549a5685990449d20e905625dac7a5d9090d3b84e889e",
+      "base_blob": "1c5a6396e089e338cfecbbe616e0ba80f93c4707",
+      "adapted_blob": "c1e80d79c28d76cf1b7116933cd9f108b8418574",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-objects/json-stringify-long-names-after-short-ones.ts": {
+      "before": "5188775dd91268dd4fb1769e8c82523db3f8555a903dc3bb565b460fcc326aef",
+      "after": "085c2e6d0ae2667077cca2793686aa9e3adeb8f609fe8cb471d54a62f8992afa",
+      "base_blob": "58756fb29946170055859b8e84c03f7f29d22f5b",
+      "adapted_blob": "2eb6ea1238087d3e2b51fd50680698feb48c8542",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-objects/json-stringify-more-kinds-of-objects-than-the-writer-remembers.ts": {
+      "before": "ffa739efdbf6747aa25861a5e4be6751ecc6cf495b30d18e9fba2205f47505c1",
+      "after": "edf51befef727718b4f07634ff405d3d584bb2ed1e58acc873eea30fcfaf8375",
+      "base_blob": "f03e1164850585536c5e4fc8d58f8d9116eb5dd1",
+      "adapted_blob": "08fccd749c0de14082c80d436ea84ce824ea9207",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-objects/json-stringify-plans-after-their-structures-died.ts": {
+      "before": "aa61f78622c9a01013bfd96abd4b2354e21f0864491f4e93599216a1b514b7da",
+      "after": "ac18bce795c7b007902945fac154f872eae3db8d9544dd3951bfa9cccafaebc4",
+      "base_blob": "0159c12ac95f3a9401a861426240846c183d0a8a",
+      "adapted_blob": "b8708acec1de49932ac5ea38d20ca00fe1e2cee5",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-objects/json-stringify-typed-objects-with-undeclared-keys-stay-compiled.ts": {
+      "before": "bdf0b65838c53a6b46102d90c9d0716ca46db91b6d969298646e82d0222dbcf6",
+      "after": "32d0afeaefd4222e8c6a992ed11d85860b0556347d6e89130577722c8582465b",
+      "base_blob": "70a197b4503a7a672526432c9e4456731b2d44a1",
+      "adapted_blob": "c0140d894119bfc1c00de7e4a42363e24e885aa5",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-objects/json-stringify-typed-objects-with-undeclared-keys.ts": {
+      "before": "1c629c5de67284146ba5f01bf7ae5a0fb3f19eb5308fb9053a27dc3e7bbee273",
+      "after": "4020b6ca65cbe09c06ff63459e787c5e83a1c506095e78b6c1f8a46296e02846",
+      "base_blob": "69018ade7040a7ba4eda421de990e572ffc346bb",
+      "adapted_blob": "9511ac1f44383855010f9ccb75b37e17f91f55f0",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-objects/mapped-placement-command-flow/main.ts": {
+      "before": "7f407388cdeaa95126eca8b98bdfd7ef0518ec34f480e20be0596d367fd1a95b",
+      "after": "fc7e7777b266da9cd3e969e7af7b1fd17a270e45d1b52567036b7e5176b9b8c5",
+      "base_blob": "23aa84dd282fff64c8289f093f2881d1e03a6719",
+      "adapted_blob": "c87cb805fc3d063a26c10dbde585ecc5515c62b2",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-objects/narrowed-identity-annotated-store/main.ts": {
+      "before": "97b9ce3d3a49840422dd1a31076b526bc10173cff2f6fdbe16b0aecb7cf4a32d",
+      "after": "8d6188ce4ba0c8f7f64fd36f3a4f54b7f005e033f7e9e840eb7adb73b3768c9d",
+      "base_blob": "39275925aadf8c68e586013f3d22637cf0c21c78",
+      "adapted_blob": "0136744d596131e37f94dd1f2dae23c3bbda0256",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/a-number-is-parsed-by-type.ts": {
+      "before": "26256d9331644b514c95ed19443f0436ce992e260f240f9dfe08e7489f02d0ce",
+      "after": "805bb5ce40a1302fe93cdd463c5bd971c25af0051f355b796d408f4fe8cdd347",
+      "base_blob": "0435f987afea517d3f56995361b0f1f7041af7e7",
+      "adapted_blob": "ab6e10a765a0dbc378074b33988e4715add05b60",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/a-number-member-of-a-result-parsed-by-type-is-added-to.ts": {
+      "before": "b377b033e4f35434fe1cfdd70f5a885b4dc8cdb33dc6ca97421a269ce1bb7cd2",
+      "after": "a4b38fb47af2f64bca3c4828149989363ca7093c4cda40bd9a6752c08c95cde1",
+      "base_blob": "098a4367b16d916f0ad08cd37e6ce17c5ac95ae2",
+      "adapted_blob": "87ea3cb9ba6b44ca989381bd1a9a4a113a202f96",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/an-object-that-a-reviver-returns-twice-is-one-object-after-a-parse-by-type.ts": {
+      "before": "dcd1d1d230ca3225750a40633e7859015edb75c6b46fd2790efb2034d9285668",
+      "after": "70e911eec886e607aa5000d36cb6c8986edee3644d1078ad4ddc7711ef7fc65e",
+      "base_blob": "f445df2b0004a6de29052ca1b01d8f0263dbcdba",
+      "adapted_blob": "be12485a2f264041a4fbbc8a46c3ddc947f9daba",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-fills-in-defaults-for-missing-members.expected.txt": {
+      "before": "f29ab7539373f190a679771fbf335b444ccbca55ddef69a3ed517018cad4c168",
+      "after": null,
+      "base_blob": "47679eb32e633f33f8dca852d8cacbda4a68aaf2",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-fills-in-defaults-for-missing-members.ts": {
+      "before": "e2b7f168ba608a7f8bb6c0137dac1b59feb4300eaba973508fcaa24b779a9f5a",
+      "after": null,
+      "base_blob": "0e1c9ae8de5992f7151ba8d844d1873b02fc80bd",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-a-wrong-kind-for-each-kind-of-member.expected.txt": {
+      "before": "599f4ad4216bcfb963dc50017b46280ee7d16cd1dd2d095a6a0fc3f77319b75e",
+      "after": null,
+      "base_blob": "87bdaba5add64cfd5446ca57939a3908576820c6",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-a-wrong-kind-for-each-kind-of-member.ts": {
+      "before": "b67d542f1bc953348fead6b7f003b3e78d161271d857e20ae669802c68c1a88b",
+      "after": null,
+      "base_blob": "b36c0c67e2fe2415e55b63ffe95bfc49f4003991",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-arrays-for-objects-and-objects-for-arrays.expected.txt": {
+      "before": "8fe5910f5cb7b53153e859d82a90cecf798a599d750f767bdf761e2d1beea8eb",
+      "after": null,
+      "base_blob": "78d233b73abdfe1a0c988e2e49bb2105a3ba3eaa",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-arrays-for-objects-and-objects-for-arrays.ts": {
+      "before": "4264fcdf44252c0ebad35f0ad730af6513cc36cd7f928efbb4a25b53a38db08a",
+      "after": null,
+      "base_blob": "79c499356d7068ac0e8f18cbbaf4dc10865c9392",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-missing-members-and-values-that-are-no-objects.expected.txt": {
+      "before": "24cb33ef71baf66f8faca5a8ad4c1e98fe4d0ea9f53d14af2f23e12710738c73",
+      "after": null,
+      "base_blob": "5ecbcc5d442e67c98dcb1b7351425d32d3dd8277",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-missing-members-and-values-that-are-no-objects.ts": {
+      "before": "eb0536d0337ba3c83a97e63b37ab407885490da45707bb3dda3e2d5c261fbef0",
+      "after": null,
+      "base_blob": "82f7398a160a222c54c5c96d3901860b8a5d2c1a",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-numbers-at-the-edge-of-schema-bounds.expected.txt": {
+      "before": "b4361751a971da5ba05d8f03a002cd8c67f455a3eeda69e48b6508a50ed56725",
+      "after": null,
+      "base_blob": "8945511e0cb4f976e385bd42c5738b05bc2d3ff8",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-numbers-at-the-edge-of-schema-bounds.ts": {
+      "before": "756ce4e873ceb1a8eea942f813ef0f404bb7876a32ecf08e2c96681850fadebb",
+      "after": null,
+      "base_blob": "7202551e69b4276d011a3284187a321deb91bc37",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-numbers-that-are-not-finite-and-int32-out-of-range.expected.txt": {
+      "before": "9e01395a1dc0b2b9007d4d3ff9a02e8a529c6c7b3236bc785e902e2edf77dde2",
+      "after": null,
+      "base_blob": "e171066f276e0c72059d524fb3736baab54369ab",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-numbers-that-are-not-finite-and-int32-out-of-range.ts": {
+      "before": "dce011fbfc93df102a06c13e8204da338dc9a4c03c67e5449a7a77577f672667",
+      "after": null,
+      "base_blob": "8cbe6309c64b78efc5145cb83b6c297ddf463d30",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-texts-and-lists-at-the-edge-of-schema-bounds.expected.txt": {
+      "before": "b72dca5777fd04e98d07772dc99a602aef348165f13873907fa2f58133e2b825",
+      "after": null,
+      "base_blob": "77f5448e585caec8014e8eb999294adcb5d1d6fd",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-texts-and-lists-at-the-edge-of-schema-bounds.ts": {
+      "before": "a2327757e31d489d0159cb321c5629c3bae2aaf511dd853e10fceee5fbf26a3d",
+      "after": null,
+      "base_blob": "0227b83f9b6e2a930fc82d429358192a9a51083b",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-tuples-of-another-length.expected.txt": {
+      "before": "c064e0e99abf626bc9b037d4532dc7bb30a307d5edfa6e4e76194a615f8d33e1",
+      "after": null,
+      "base_blob": "6ce459f8e17e23cde6c66039f7bea3d66db5bd18",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-tuples-of-another-length.ts": {
+      "before": "327b4630ef4bdfc2bac536385af4636d7e6f381d652780d335d3959e7be6bccd",
+      "after": null,
+      "base_blob": "0f77f372a5df8256be30cebc78eaf7afebf70f79",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-unknown-tags-and-mixed-variants.expected.txt": {
+      "before": "b970bfdf75aedd42ae8af5905c9bc050387b20f056cbcb3c51d1ce90d1bcdbe8",
+      "after": null,
+      "base_blob": "9e8ef9ad7a94b7f04d4830a1d0113637d1a0e727",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-unknown-tags-and-mixed-variants.ts": {
+      "before": "e223e1b43e48a2889a78c712d69fee27b7abd8d0900f9e7eb5eb57a91c2b043f",
+      "after": null,
+      "base_blob": "25f69d16fbbc42cb2ff30c67406dc4f12dd2bf47",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-values-outside-enums-and-literals.expected.txt": {
+      "before": "ab83a8aa16be221d42d4409c769dd73568cb5371e39e4b51c4e3304e07e6168b",
+      "after": null,
+      "base_blob": "0af5537a0d58f84ddc0aa951b0106d452aad36eb",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-values-outside-enums-and-literals.ts": {
+      "before": "4b3c0f1e26c18ad545b580c8dbe0dbf46b6e00e66f3a5b70809886edc0c3bdf6",
+      "after": null,
+      "base_blob": "2e8c2d818832d3b9f4b30657bf73156c9192076b",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-what-a-reviver-returns.expected.txt": {
+      "before": "8ad492e4d75513f82e892f5804bc35d85454f802d2bb1bfbf345b7256fafd537",
+      "after": null,
+      "base_blob": "03d1e171ca437935f782aa27925fe28860af380a",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-what-a-reviver-returns.ts": {
+      "before": "7522613bc8e79691c2f21019003d728a5b8a0acb0a6b2773a449df77dfb28a65",
+      "after": null,
+      "base_blob": "8655e4892725bc62da341771863a824369abed45",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-when-the-last-of-two-equal-keys-is-wrong.expected.txt": {
+      "before": "1820a52988bf245b26bdeb69d3ded973ee12977ddf504675ec9dcf9d4063a930",
+      "after": null,
+      "base_blob": "ce029ff02ba397063404294b89b55e7f6b750630",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-refuses-when-the-last-of-two-equal-keys-is-wrong.ts": {
+      "before": "1b88a9037dc9f50104f6d79b4e9ce143d0fd8ae94aae199868087e0184f80a1c",
+      "after": null,
+      "base_blob": "666c54fba7299a64a0fe0013923398e2e53725e1",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-strict-types-refuse-undeclared-keys.expected.txt": {
+      "before": "8ac3468fd0bf0b5919e0bcc36c6dc570d7103f94072b2484104dc322d3f23c3c",
+      "after": null,
+      "base_blob": "f92c4b1f1dce8e0c66313180fab5aa95cf3f7c48",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-strict-types-refuse-undeclared-keys.ts": {
+      "before": "5aa3eb17cad90a294a87e5dace995ef4ac44b3e24e60b842429e1d607b9066f9",
+      "after": null,
+      "base_blob": "7d7b95310aa9043eeb8f122cfbca572fde70d854",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-takes-its-arguments-from-a-list.ts": {
+      "before": "f57b2e37ea63674104226b8526fc7aaf9630bcc20652d3ad19780196d977517b",
+      "after": "983077a19851627a3b6717b9e99c682ef43f6abd3dda6fbacf17f524c2834172",
+      "base_blob": "014c9ebb44613294ba70554f45ba802cfd50683e",
+      "adapted_blob": "cee51cf24b665af987616990c0aafd93f7c49eb0",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-through-the-json-that-bun-exports.expected.txt": {
+      "before": "263b7b7485d588b862dc3bb879162dd498dc785bfdc1e7641a30f847b8ee4db9",
+      "after": null,
+      "base_blob": "22988afbe73b01864a6edde9bb0b7808ab1739b8",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/json-parse-by-type-through-the-json-that-bun-exports.ts": {
+      "before": "33a0840e1602482cdcc420d0ed5377abdfd14158e2f5deab8c0263638ccb5ae5",
+      "after": null,
+      "base_blob": "beb989d0a7723e5a31ef85def8c1d140cdbc3415",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-a-reviver-runs-before-the-check.ts": {
+      "before": "d411d298c9a5e7bec2e4cec7f52549616613b872cbd7fde2e46228eff6905814",
+      "after": "a67feec4afcc9649f9bf9909bf0905c09ee32fe4bdbd78b2540646ce75d308de",
+      "base_blob": "8b801127b443de35417fd29efeb9a83169cad3cc",
+      "adapted_blob": "f45e5dd034aa15c38fa14463ef8198e9f01804cc",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-duplicate-keys-the-last-one-wins.ts": {
+      "before": "fcadcba50ad8de67c52866d599b023da93514c2f4ce09a0d0521df3dc7063b11",
+      "after": "5ee65f8bebc5b3dbc37a76ef843384c595a8b477be7eacdd0f8211fe8ffb5dc1",
+      "base_blob": "ea3dd63a96cb067ebbbbc19b5cbf31eb2ddd6ad7",
+      "adapted_blob": "37f336f618032a2111ba02dd0206cd56e0e7e5b6",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-enums-and-literal-types.ts": {
+      "before": "f4e03456cbb99c88ada79154ad5f4428355537a2b5fb4903e15d2794abfd93d2",
+      "after": "fc5d5586e154a2e7ab08cf15dacdb5306a32d0686607fff65a8421ec761d255e",
+      "base_blob": "65819d7f37bc339379a1dc1efd49d2c8025e606c",
+      "adapted_blob": "1df2d0430e3fc9a9f11567428e0f83495eddb8d7",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-honest.ts": {
+      "before": "1834c67054684c7dfa11f032bde6f0843936e4224aa3c1ef88d475b70d480e8d",
+      "after": "2345bc375d3e3b70b0a80cba617cfa112a13d2520491945df869643e89b4e0dd",
+      "base_blob": "a000fad759d4c78ae4d05cb96cc74985f68bfcdf",
+      "adapted_blob": "6492e5dfa51dc072217862690b624c687f7ac487",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-keys-in-another-order-and-extra-keys-stay-as-written.ts": {
+      "before": "5532cf8b657760b2e022edc21c861c17cb82e713dfee83e3e16a566c9350c958",
+      "after": "b9b10783c56ea69ce61a45391d5cece1fb87421941a1d9b66fa05e278e6ebd70",
+      "base_blob": "0a1d9c3e26461005476799e55bc5799f0faecd0b",
+      "adapted_blob": "d466be4ba5feadd86df047dd799d315808754d52",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-keys-named-proto-constructor-and-to-string.ts": {
+      "before": "6ddd99a106a301b4b5df6f20504dda45acd8d8a6f5e7bbd834adb4367b100da2",
+      "after": "f73bf935702b4f56b291931a1c759f53c7abc8f7b2dc43bfbeac0e37ed0b6022",
+      "base_blob": "ca680045be825f027177beb910e6df8b76c5cb3a",
+      "adapted_blob": "04396ccf44b310495385debd5bb17dc739d4294f",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-keys-that-look-like-numbers.ts": {
+      "before": "b2a8be558c43c25870ba01eda873e6bee8362b52c669b0c01001ae8644f49d2a",
+      "after": "347d93b268276500fc6e0cd22ba441b761de815619cb337e99bcf6b32fe32c02",
+      "base_blob": "2d0df7f9a3f5276698c00555f3b6a2993fe69ab9",
+      "adapted_blob": "c332af88164d69dc12c7918bdd67c492cd5180be",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-long-strings-and-many-elements.ts": {
+      "before": "884b014bd507d54cdd67bc539f443ad5ad04519f1f8e07009a5b837bb179a100",
+      "after": "f58850ea2a41fc40c7d14e2655a4704d79696796fd455fb422cc4b62c45a31b1",
+      "base_blob": "91599bb458cb54c6bb1ba48a974d9dced26558a5",
+      "adapted_blob": "5fd4b61d4e58a536c8fb15e8fb7a1cc83e903eda",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-negative-zero-in-an-int32-member.ts": {
+      "before": "80864c2c074c77f37fc3e7c58682ca0417a516dbd406d2a6d9011420a6b82931",
+      "after": "580e1739b9e48cf71a8ddd900a2cc4c4fdce79a96f187dbcfca3382cf5c8f2fc",
+      "base_blob": "e543c52159a7c0e1c51a15984b7f46098f1a66c0",
+      "adapted_blob": "a77625c4c9c7a79c7c21604c28094ceed3cdb7e5",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-nested-a-few-hundred-levels-deep.ts": {
+      "before": "10c53c45a770d951d0d4c6d577b877f1bd4e4d2f39e6236eac2ade94196660a8",
+      "after": "c9f684deb2a4bdbaf804eda43b592397df2aeb50a4945d26bc7d5862c44eebe7",
+      "base_blob": "8631922eff5fd4fb6fd11df98985438f0cc45607",
+      "adapted_blob": "7410c5b2f013b1f1ae524ecf54eeb03acc3c8909",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-nesting-of-a-million-levels-gives-the-value-or-a-range-error.ts": {
+      "before": "5f763e8667352172429c69e96e5b9df7aa5854b23e228d09fc64f41ce1adfc0c",
+      "after": "0598b15e136cc0a068fc2814e29a3d6a47a8f3967c9ee4201ca2aea17f8d6a39",
+      "base_blob": "e56138723739eccaedfdbf1127115ed2279bcf39",
+      "adapted_blob": "561bdaf6ed1bd7dbe847945f2c69a54d384ca96a",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-numbers-in-odd-spellings.ts": {
+      "before": "ddf7eef2752bd9b75d2e659fb1fbe9d4e9b8913328e87d2fa57f340fbd0a924a",
+      "after": "235a58965f4318f4be90bc21b769e0e5227cfed258f68b7374da20ebd1ed63ed",
+      "base_blob": "b8664e98147eceb2d6f91eb5dcc5d405accfb8d5",
+      "adapted_blob": "009b3c0c954b0f5ffadfd338d92484b7d9337287",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-optional-null-and-absent-members.ts": {
+      "before": "1f3f1d84d8131076ee4958188da435ed843ff77e9e8328e3f432d7f8bc12767d",
+      "after": "d0374d2ec66e69e7b12f6ad52f9df587a1517c1ffecf6d6745edc915b921c94c",
+      "base_blob": "3ce128176803c5383534fca2c4173df0d2295d50",
+      "adapted_blob": "731559fc29cef581eb5f07d4ae89b3b998ef464c",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-results-and-literals-go-through-one-function.ts": {
+      "before": "cc3bb77fa624bc61bc6171b113b7d299dd78fa17c8db236e1e329594ee633b68",
+      "after": "8fca64284997734c7e1200506dc4be3330d0618e88882abe273acd26e04eb4ef",
+      "base_blob": "903fcdb8c026816d4c2fccb7cf21d274362140fe",
+      "adapted_blob": "0b09e686124e406c4425c18fd3882bfa44296355",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-results-are-changed-afterwards.ts": {
+      "before": "19c7b18420a1e7383c6290c1d6f7323d6e689361fd1febc7df296d3fceda67d4",
+      "after": "c5c87bd20ccd79d1987b832cd45572604cd3bb6bdfd1ab66ff5bba0435248969",
+      "base_blob": "b4dce6db4049ce4c0d97d91a98dbac9177f146f3",
+      "adapted_blob": "b3098b60f3c2d2d5b0120330bf731abe22dccfc6",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-strings-with-escapes-and-lone-surrogates.ts": {
+      "before": "1dd9fb0070d245b83b4af44fd5731c5a60d707f3190101174f7368a71dac87a1",
+      "after": "6d7aa0b76fc5a4dfe657477c849c55cf87f9449ba177e242320ca8f316c18372",
+      "base_blob": "84d124282c243cc9d4959a046de5881d57385c9d",
+      "adapted_blob": "78277a1e8c08fe372a4b62426fcca1cde49ae88e",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-text-cut-at-every-position-is-a-syntax-error.ts": {
+      "before": "f94b2c19c9cd61b7286bff7501335c2e6c397785e6e8f2d9f336b65b699d84bb",
+      "after": "d8fc4033150b81125a4679cfd319a3ed21214f54b9d31cf9a85cbfa268aacd54",
+      "base_blob": "99cb3735ba16ad98b80917466389765d5eac1f84",
+      "adapted_blob": "02314d0129181d861f3bcece87fd0a2405cd4f9a",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-text-that-is-both-mistyped-and-broken-is-a-syntax-error.ts": {
+      "before": "3d41d52f836d6929f046e425dd1a75904b31a8219981685ae4d99ffc18208692",
+      "after": "76d155c38e1859822b9229b8d35f6defe52cc1ac6a6c7ff2143cc5670ec1a3af",
+      "base_blob": "2be8af5a649217072446b8d8edfeda0c07d9b16d",
+      "adapted_blob": "e0c0b9d6e39dc86f0021be901910673cf977bc23",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-tuples-records-and-nested-lists.ts": {
+      "before": "d798fefdb88c99bc38ead46d6c873391342911917d4ebcc964000e9fee445748",
+      "after": "dfa3086971a7c35a1e8eeaf72fcf88ba467cc379f41ba474eced1c4478736cfd",
+      "base_blob": "66deca9a87b7dee26832496634059348ebd1c184",
+      "adapted_blob": "e7e94c71867fe6a93a10cfc92605a90cf247521e",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/parsed-by-type-unions-and-tags-in-any-place.ts": {
+      "before": "4f1f14c8f43ec7182bfd141299e576a5fb1fe11f825441bb3abe060161f9d7b9",
+      "after": "9b41420fb11548a24862605cbeedc6887c03a9986678ff909444279e3beb4333",
+      "base_blob": "94f37aba3c822d3077426f05d99041f197ebe717",
+      "adapted_blob": "498e70eb68b1316a13521b51aac61b576fb5abdc",
+      "mode": "100644"
+    },
+    "test/aot/programs/typed-parsing/products-of-members-parsed-by-type-are-summed-in-a-loop.ts": {
+      "before": "df36e7d983a2b5c254f0dd79174ad7efe2f4882f889d6e5f146bc800c33a8af8",
+      "after": "b89f143759e6b6fd0fe043c3eb4ae6c93751af0850dafcb792bdc807de0fe996",
+      "base_blob": "a84c2d5d36ca9e903c9dab32a2590b36c21a643c",
+      "adapted_blob": "cacc8160dd86357abf418f59b21c193ecaa34ed5",
+      "mode": "100644"
+    },
+    "test/aot/standard-functions-without-installed-types.test.ts": {
+      "before": null,
+      "after": "1079b916c47d4d536440463ddf95acda8f2465759626b3f694cabb4145348e75",
+      "base_blob": null,
+      "adapted_blob": "a0189bfa43d698f9bb4ddc1a1660011f9d819985",
+      "mode": "100644"
+    },
+    "test/aot/validated-records-with-array-members.test.ts": {
+      "before": "b6d772aeb2fb6e5f3cd114757687e32a53398fca5fb571d1d133b4ff949bdb6c",
+      "after": null,
+      "base_blob": "67117e2010c98388d2b622dfe729c72a37abd856",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/validation-by-types/both-modes.test.ts": {
+      "before": "f8de183861e4993d9bda6292b5fa20e930e5eb978a81d44b42da172439d5e30b",
+      "after": null,
+      "base_blob": "b775e3ce8405ad66cce3b42a19c141946e4403b8",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/validation-by-types/fuzz.test.ts": {
+      "before": "b01c12badc34ceb3ba890ead50ded93a4b15722e6b2bc2d673c51b41d33031f5",
+      "after": null,
+      "base_blob": "aa418b46c904472f3d9207a94ba550c436a18299",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/validation-by-types/generate.ts": {
+      "before": "318ca5e8cc1d66a610dea68b0fc860f107bbd38f5941fb8fdab057f0903910c4",
+      "after": null,
+      "base_blob": "746e9b5af487d73557a08a36c12572aaa7e7bc65",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/validation-by-types/json-parse-type-argument-without-installed-types.test.ts": {
+      "before": "65dbdb587b170c0a9e37f7000654ad189eb5e50ca6a759debb86dcdccd7ad125",
+      "after": null,
+      "base_blob": "0762ac3519a2c24d96d00614ef09c8552258d741",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/validation-by-types/standard-functions-without-installed-types.test.ts": {
+      "before": "dd817f40dbbb3d6b66418be82339c1e562922096b6478f54f9fd9d1f21bb7828",
+      "after": null,
+      "base_blob": "1ccb9bf89036baf64f01c570af1da689d8fa2192",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/validation-by-types/types-that-cannot-be-validated.test.ts": {
+      "before": "c75e8d5326ed65e437396f3a0b8ff9ea019c5a6b0e1d06348857d4a9515bc2c4",
+      "after": null,
+      "base_blob": "5ac14820d339b06f9d4eeb24de672793437b314d",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/aot/validation-in-packages-compiled-without-types.test.ts": {
+      "before": "9cfd4dac97ac679424d1289b3329f5a0de802687872298acffed17629d7644b6",
+      "after": null,
+      "base_blob": "61d7529437d29341ab6cd16427a4ee9ed0c8616f",
+      "adapted_blob": null,
+      "mode": "100644"
+    },
+    "test/internal/build-aot-codegen-declared-outputs.test.ts": {
+      "before": "9f6e8e2256481c73873de7e5341f383e12f3356f9967681ca4d6f22f9ec0d572",
+      "after": "d33a41f49be51f00253b52af498a45258c7cb1b1ed67259c0566d069a43f598b",
+      "base_blob": "b9b6a5353d4572e45a514d16b41ba84dc3a66f25",
+      "adapted_blob": "db4ea4bf79b52e27196a65582774eab455078ff6",
+      "mode": "100644"
+    },
+    "test/internal/build-local-webkit.test.ts": {
+      "before": "9d64ec86d587d9bb46229ba44ee500c4a5a1ce08c37c2dfad2afdcab3016c7ff",
+      "after": "c9225b71e8d12e8b116600fff79d8bbdb9eb8d7862027a038f8a6a0e81fa38b4",
+      "base_blob": "813be511cb68422034d0567ce65f59733b257fb4",
+      "adapted_blob": "56bee5f41c7552a173ca0d929fd861be7243fb65",
+      "mode": "100644"
+    },
+    "test/internal/builtins-table/places-of-callbacks.test.ts": {
+      "before": "a1378f8448ba71936d41fdcb499cbdf1195f93088e03668497eb1da493bf8b44",
+      "after": "e097de469c3a00f27f8b678b6f43201ff80b507daab7f93a0f604fc0892c2f82",
+      "base_blob": "94235181ac80d7003a771321b3892b5bae45436f",
+      "adapted_blob": "cef51b3eed29c0e5f366964b7c4e6a0d5da67cbd",
+      "mode": "100644"
+    }
+  }
+}
