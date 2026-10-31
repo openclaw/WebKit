@@ -46,6 +46,7 @@ SOURCE = Path(sys.argv[1]).resolve()
 OUTPUT = Path(sys.argv[2]).resolve()
 OUTPUT.mkdir(parents=True, exist_ok=False)
 GIB = 1024 ** 3
+BUILD_TIMEOUTS = {'base': 10800, 'patched': 1800}
 memory = int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines()
                   if line.startswith('MemTotal:'))) * 1024
 cgroup_limit = Path('/sys/fs/cgroup/memory.max')
@@ -80,7 +81,7 @@ def build(arm):
     try:
         with (OUTPUT / (arm + '-build.log')).open('x') as stream:
             command(['/usr/bin/time', '-v', 'make', '-j' + str(jobs)],
-                    stdout=stream, stderr=subprocess.STDOUT, timeout=3600)
+                    stdout=stream, stderr=subprocess.STDOUT, timeout=BUILD_TIMEOUTS[arm])
     finally:
         # Check after either build outcome. Transient products stay on this disposable runner.
         size = int(subprocess.check_output(['du', '-sk', str(SOURCE)]).split()[0]) * 1024
@@ -148,7 +149,8 @@ if destination.exists():
 shutil.copyfile(fixture, destination)
 write('inputs.json', {'source': PIN, 'patch_sha256': digest(patch),
                       'fixture_sha256': digest(fixture), 'compiler_jobs': jobs,
-                      'memory_bytes': memory, 'workspace_post_build_max_bytes': 24 * GIB,
+                      'memory_bytes': memory, 'build_timeout_seconds': BUILD_TIMEOUTS,
+                      'workspace_post_build_max_bytes': 24 * GIB,
                       'artifact_max_bytes': 32 * 1024 ** 2,
                       'artifact_max_input_bytes': 256 * 1024 ** 2, 'artifact_max_input_files': 12})
 with (OUTPUT / 'tools.log').open('x') as stream:
