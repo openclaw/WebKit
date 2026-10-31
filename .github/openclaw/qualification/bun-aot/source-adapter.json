@@ -2,7 +2,7 @@
   "bun": "fd40ba44187c721ee023062fa153a6a27560e6b1",
   "webkit": "5ec9ac8557722128588184ed9cf77347d9a30cf1",
   "prepare_only": false,
-  "patch_sha256": "65c89770ca72aac96a7c9fcc9eef42437547e9eb946ee76b30ccaeee49695f31",
+  "patch_sha256": "9a7b58f76cedea59c3ce3f16b475b2ed39bc51d1a83466f8bf69b15a05dffc72",
   "files": {
     "CHANGELOG.md": {
       "before": "aa3d183726734a0c1dd7f255d783b7e7b1946e4ff88e9432623e31556c206308",
@@ -1308,9 +1308,9 @@
     },
     "src/sema/fold/removed_by_bun_run.rs": {
       "before": null,
-      "after": "b958a4b01a8d369bfe271ed18ae4ba8125f193a6e4001aafc38b476982f0a559",
+      "after": "ad2d10ad5662c59d1e93566d93fe97d07d34f3cd67258d67ff4659d73957fb00",
       "base_blob": null,
-      "adapted_blob": "c82f55c99decd285b29c94229d155aa600a05def",
+      "adapted_blob": "425d39db14082d6967229b749f7430ecfa0ab40e",
       "mode": "100644"
     },
     "src/trim/decide.rs": {

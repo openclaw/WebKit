@@ -11747,7 +11747,7 @@ index 0000000000000000000000000000000000000000..f425c1f10ff9380ad14240fd07e49ecf
 +}
 diff --git a/src/sema/fold/removed_by_bun_run.rs b/src/sema/fold/removed_by_bun_run.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c82f55c99decd285b29c94229d155aa600a05def
+index 0000000000000000000000000000000000000000..425d39db14082d6967229b749f7430ecfa0ab40e
 --- /dev/null
 +++ b/src/sema/fold/removed_by_bun_run.rs
 @@ -0,0 +1,317 @@
@@ -12029,7 +12029,7 @@ index 0000000000000000000000000000000000000000..c82f55c99decd285b29c94229d155aa6
 +}
 +
 +/// What declares a `var` stays, because the name is visible outside.
-+pub fn is_removed_where_never_run(hir: &File<'_>, statement: StmtId) -> bool {
++fn is_removed_where_never_run(hir: &File<'_>, statement: StmtId) -> bool {
 +    let is_removed = |part: StmtId| part.is_none() || is_removed_where_never_run(hir, part);
 +    match hir[statement].kind {
 +        StmtKind::Empty
