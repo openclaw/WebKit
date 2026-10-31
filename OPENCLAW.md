@@ -177,6 +177,8 @@ worker inspection and external-buffer cases alongside the fork selection.
 
 ## Unreleased
 
+- Keep reference-only GC validation visitors concrete with Bun ArrayBuffer accounting enabled, without charging replayed references as additional memory.
+
 - Release class-field identifiers with their parser arena by allocating DefineFieldNode on the deletable arena path.
 
 - Merge upstream `e66916298091dd12469076fd854e135b03fb16ff` with both commit histories intact. Adapt worker verification and ArrayBuffer deductions to upstream per-heap collector accounting, preserve runtime AVX detection with upstream CPU feature reporting, and retain namespace facades alongside AOT exports.
