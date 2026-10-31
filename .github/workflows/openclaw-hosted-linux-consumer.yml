@@ -91,12 +91,23 @@ jobs:
           with zipfile.ZipFile(root / 'engine.zip') as archive:
               entries = archive.infolist()
               assert 0 < len(entries) <= 32 and sum(e.file_size for e in entries) <= 8 * 1024**3
-              seen = set()
+              (Path(os.environ['QUALIFICATION_DIR']) / 'engine-zip-entries.json').write_text(json.dumps([
+                  {'path': e.filename, 'bytes': e.file_size, 'mode': e.external_attr >> 16, 'directory': e.is_dir()}
+                  for e in entries
+              ], indent=2) + '\n')
+              seen_paths, seen_files = set(), set()
               for entry in entries:
                   name = PurePosixPath(entry.filename)
-                  assert len(name.parts) == 1 and name.name not in ('', '.', '..') and not name.is_absolute()
-                  assert not entry.is_dir() and not stat.S_ISLNK(entry.external_attr >> 16) and name.name not in seen
-                  seen.add(name.name)
+                  parts = entry.filename.rstrip('/').split('/')
+                  assert not name.is_absolute() and not any(p in ('', '.', '..') for p in parts)
+                  assert '\\' not in entry.filename and '\x00' not in entry.filename and name not in seen_paths
+                  seen_paths.add(name)
+                  mode = stat.S_IFMT(entry.external_attr >> 16)
+                  if entry.is_dir():
+                      assert mode in (0, stat.S_IFDIR) and entry.file_size == 0
+                      continue
+                  assert mode in (0, stat.S_IFREG) and name.name not in seen_files
+                  seen_files.add(name.name)
                   with archive.open(entry) as source, (target / name.name).open('xb') as output:
                       shutil.copyfileobj(source, output)
           from sys import path
