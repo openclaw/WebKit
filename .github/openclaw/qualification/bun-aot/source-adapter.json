@@ -2,8 +2,15 @@
   "bun": "fd40ba44187c721ee023062fa153a6a27560e6b1",
   "webkit": "5ec9ac8557722128588184ed9cf77347d9a30cf1",
   "prepare_only": false,
-  "patch_sha256": "faba55728e94ff46394f92bdc54b3f518c543243f148ecc05249aea2234a6188",
+  "patch_sha256": "65c89770ca72aac96a7c9fcc9eef42437547e9eb946ee76b30ccaeee49695f31",
   "files": {
+    "CHANGELOG.md": {
+      "before": "aa3d183726734a0c1dd7f255d783b7e7b1946e4ff88e9432623e31556c206308",
+      "after": "3a8dee48ca90849efd154d48bde9de8ac4cc2de6eb485433d1dc76eec44d37ea",
+      "base_blob": "ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0",
+      "adapted_blob": "bff77b818d959f2ab0c8974ca98673a72b5eefe8",
+      "mode": "100644"
+    },
     "Cargo.lock": {
       "before": "ad355812d9b9f34b8212a8a91e2f320ff7b7ac1a80f27aeefc23bf80cc8d22bc",
       "after": "c2bfb6d8f0f79eb2cd175f89dcee34d47ff1845b1c1423d32cb727189fe68adf",
@@ -1073,6 +1080,13 @@
       "after": "b39d92d02edf934ff393df0d67892aa3783f2217260ad45741a690319ca2b11d",
       "base_blob": null,
       "adapted_blob": "3e522df4a8c49fbe9197e94ee2137f12dfafa465",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/host/bun-syntax.builtins.ts": {
+      "before": "d5800ef793491d9c9181863a65aeccf74deb4db690fe502256aea2742ec17fd6",
+      "after": "cff30cf8d36698ff3469a02a268fc2f9253fc8d6ff5206b28191e0edabe8ed2c",
+      "base_blob": "9ba4bb1c9de1a943ecb00a80a26e6c858990c026",
+      "adapted_blob": "dc369c9befbed10d5e96a1d78f02677be8fccb7f",
       "mode": "100644"
     },
     "src/codegen/builtins/host/compiler-helpers.builtins.ts": {

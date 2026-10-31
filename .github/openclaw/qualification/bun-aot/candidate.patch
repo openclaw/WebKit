@@ -1,3 +1,15 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0..bff77b818d959f2ab0c8974ca98673a72b5eefe8 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -2,6 +2,7 @@
+ 
+ ## Unreleased
+ 
++- Align AOT builtin, parser, module, and retention contracts with the synchronized JavaScriptCore engine.
+ - Resolve literal embedded module paths against prepared AOT entry points, including TypeScript and custom output names.
+ 
+ - Add `Bun.Terminal.pause()` and `resume()` for PTY output backpressure without blocking the event loop.
 diff --git a/Cargo.lock b/Cargo.lock
 index edaf84c7a78292be0e69884156a6c27f204d3c68..a18131a5aa6ede6ccfcbe06da5d0dabd843b8ad0 100644
 --- a/Cargo.lock
@@ -10119,6 +10131,25 @@ index 0000000000000000000000000000000000000000..3e522df4a8c49fbe9197e94ee2137f12
 +    emitBuiltinsWithForm(model, "static QUERY_FUNCTIONS: &[BuiltinId]", ["Rows"])
 +  );
 +}
+diff --git a/src/codegen/builtins/host/bun-syntax.builtins.ts b/src/codegen/builtins/host/bun-syntax.builtins.ts
+index 9ba4bb1c9de1a943ecb00a80a26e6c858990c026..dc369c9befbed10d5e96a1d78f02677be8fccb7f 100644
+--- a/src/codegen/builtins/host/bun-syntax.builtins.ts
++++ b/src/codegen/builtins/host/bun-syntax.builtins.ts
+@@ -120,14 +120,7 @@ export default b.declarations(
+   operation("tryPutByValDirect", "TryPutByValDirect"),
+   operation("tryPutIndex", "TryPutIndex"),
+ 
+-  b.intrinsic("arrayFrom", "Call", builtin("Array.from")),
+-  b.intrinsic("hasOwn", "Call", builtin("Object.hasOwn")),
+-  b.intrinsic("jsonParse", "Call", builtin("JSON.parse")),
+   b.intrinsic("jsonStringify", "Call", builtin("JSON.stringify")),
+-  b.intrinsic("numberIsFinite", "Call", builtin("Number.isFinite")),
+-  b.intrinsic("numberIsInteger", "Call", builtin("Number.isInteger")),
+-  b.intrinsic("objectKeys", "Call", builtin("Object.keys")),
+-  b.intrinsic("urlCanParse", "Call", builtin("URL.canParse")),
+ 
+   b.intrinsic("assert", "Call", erased),
+   b.intrinsic("bundleError", "Call", { intrinsic: "BundleError" }),
 diff --git a/src/codegen/builtins/host/compiler-helpers.builtins.ts b/src/codegen/builtins/host/compiler-helpers.builtins.ts
 index da639ebf279ac88cc5146b5eb5dcf0a5988c3c44..881010cd3f3459b8ec55712e6fc8c4c866383f65 100644
 --- a/src/codegen/builtins/host/compiler-helpers.builtins.ts
