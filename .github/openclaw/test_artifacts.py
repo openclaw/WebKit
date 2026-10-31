@@ -157,5 +157,40 @@ class ArtifactHeaders(unittest.TestCase):
                         subprocess.run(command + overrides, input=consumer, text=True, capture_output=True, check=True)
 
 
+class PreflightAdmission(unittest.TestCase):
+    def test_sync_branch_is_qualification_only(self):
+        cases = [
+            ('refs/heads/claude/sync-webkit-upstream-20261014', 'false', True),
+            ('refs/heads/claude/sync-webkit-upstream-20261014', 'true', False),
+            ('refs/heads/claude/sync-webkit-upstream-20261014', None, False),
+            ('refs/heads/unrelated', 'false', False),
+            ('refs/heads/openclaw/main', 'true', True),
+            ('refs/heads/openclaw/batch-1', 'false', True),
+            ('refs/heads/openclaw/release-5718a6ec', 'true', True),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            for ref, publish, allowed in cases:
+                with self.subTest(ref=ref, publish=publish):
+                    output = Path(temporary) / 'output'
+                    output.unlink(missing_ok=True)
+                    env = {'GITHUB_REF': ref, 'INPUT_SHA': 'a' * 40,
+                        'GITHUB_SHA': 'a' * 40, 'GITHUB_OUTPUT': str(output)}
+                    if publish is not None:
+                        env['INPUT_PUBLISH'] = publish
+                    with patch.dict(os.environ, env, clear=True), patch.object(
+                        artifacts, 'source', return_value={'source': 'a' * 40}), patch.object(
+                        artifacts, 'CONFIG', {'lanes': [{'label': 'fixture'}]}), patch.object(
+                        artifacts, 'lane_definitions', return_value=[{'label': 'fixture'}]) as lanes:
+                        if allowed:
+                            artifacts.preflight()
+                            self.assertIn('fixture', output.read_text())
+                            lanes.assert_called_once()
+                        else:
+                            with self.assertRaisesRegex(ValueError, 'permitted owned branch'):
+                                artifacts.preflight()
+                            lanes.assert_not_called()
+                            self.assertFalse(output.exists())
+
+
 if __name__ == '__main__':
     unittest.main()

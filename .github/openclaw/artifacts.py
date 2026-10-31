@@ -82,7 +82,12 @@ def preflight():
     sha = source_record['source']
     if sha != os.environ['INPUT_SHA'] or sha != os.environ['GITHUB_SHA']:
         raise ValueError('dispatch must use the same reviewed branch head and full input SHA')
-    if os.environ['GITHUB_REF'] not in ('refs/heads/openclaw/main', 'refs/heads/openclaw/batch-1', 'refs/heads/openclaw/release-5718a6ec'):
+    ref = os.environ['GITHUB_REF']
+    qualification_only = (
+        ref == 'refs/heads/claude/sync-webkit-upstream-20261014'
+        and os.environ.get('INPUT_PUBLISH') == 'false'
+    )
+    if ref not in ('refs/heads/openclaw/main', 'refs/heads/openclaw/batch-1', 'refs/heads/openclaw/release-5718a6ec') and not qualification_only:
         raise ValueError('only an explicitly permitted owned branch may run this workflow')
     upstream = {l['label'] for l in lane_definitions()}
     wanted = [l['label'] for l in CONFIG['lanes']]

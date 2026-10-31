@@ -17,7 +17,13 @@ concurrency:
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'openclaw/WebKit' && (github.ref == 'refs/heads/openclaw/main' || github.ref == 'refs/heads/openclaw/batch-1' || github.ref == 'refs/heads/openclaw/release-5718a6ec')
+    if: >-
+      github.repository == 'openclaw/WebKit' &&
+      (github.ref == 'refs/heads/openclaw/main' ||
+       github.ref == 'refs/heads/openclaw/batch-1' ||
+       github.ref == 'refs/heads/openclaw/release-5718a6ec' ||
+       (github.ref == 'refs/heads/claude/sync-webkit-upstream-20261014' &&
+        inputs.publish == false))
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 10
     outputs:
@@ -52,6 +58,7 @@ jobs:
         id: source
         env:
           INPUT_SHA: ${{ inputs.sha }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
         run: python3 .github/openclaw/artifacts.py preflight
   build:
     needs: preflight

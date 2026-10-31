@@ -393,6 +393,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86
     set(testVMEntryRecord_SOURCES
         ../API/tests/VMEntryRecordProbeX86_64.S
         ../API/tests/testVMEntryRecord.cpp
+        ${aotProgramSources}
     )
     set(testVMEntryRecord_DEFINITIONS ${jsc_PRIVATE_DEFINITIONS})
     set(testVMEntryRecord_PRIVATE_INCLUDE_DIRECTORIES ${jsc_PRIVATE_INCLUDE_DIRECTORIES})
@@ -408,7 +409,7 @@ endif ()
 
 # Scope retention regression: same source before and after the production fix.
 option(TEST_VM_ENTRY_SCOPE_OPTIONAL_CONTROL "Test the historical std::optional owner" OFF)
-set(testVMEntryScope_SOURCES ../API/tests/testVMEntryScope.cpp)
+set(testVMEntryScope_SOURCES ../API/tests/testVMEntryScope.cpp ${aotProgramSources})
 set(testVMEntryScope_DEFINITIONS ${jsc_PRIVATE_DEFINITIONS})
 set(testVMEntryScope_PRIVATE_INCLUDE_DIRECTORIES ${jsc_PRIVATE_INCLUDE_DIRECTORIES})
 set(testVMEntryScope_FRAMEWORKS ${jsc_FRAMEWORKS})
@@ -438,7 +439,7 @@ endif ()
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND ENABLE_DFG_JIT AND (WTF_CPU_X86_64 OR WTF_CPU_ARM64 OR WTF_CPU_RISCV64)
     AND HAVE_FOREIGN_STACK_TEST_GETCONTEXT AND HAVE_FOREIGN_STACK_TEST_MAKECONTEXT AND HAVE_FOREIGN_STACK_TEST_SWAPCONTEXT)
-    set(testForeignStackSuspension_SOURCES ../API/tests/testForeignStackSuspension.cpp)
+    set(testForeignStackSuspension_SOURCES ../API/tests/testForeignStackSuspension.cpp ${aotProgramSources})
     set(testForeignStackSuspension_DEFINITIONS ${jsc_PRIVATE_DEFINITIONS})
     set(testForeignStackSuspension_PRIVATE_INCLUDE_DIRECTORIES ${jsc_PRIVATE_INCLUDE_DIRECTORIES})
     set(testForeignStackSuspension_FRAMEWORKS ${jsc_FRAMEWORKS})

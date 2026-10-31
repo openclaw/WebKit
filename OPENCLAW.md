@@ -177,6 +177,9 @@ worker inspection and external-buffer cases alongside the fork selection.
 
 ## Unreleased
 
+- Restore standalone regression linking after the upstream removable-feature API change and require the async resume-location fixture in both native test lanes.
+- Permit the reviewed sync branch to run the full artifact matrix without publication, preserving existing release-branch restrictions.
+
 - Use the all-dead sweep specialization during VM destruction while preserving weak finalization and every cell destructor.
 
 - Resolve suspended async stack positions through one switch-relative target lookup shared by both stack capture paths; cover two distinct await locations.
