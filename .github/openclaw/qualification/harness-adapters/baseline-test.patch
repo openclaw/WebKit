@@ -1,8 +1,8 @@
 diff --git a/scripts/buildkite.ts b/scripts/buildkite.ts
-index 7ead30178e05c361388174d3f1ee0d34bff8455a..f40362e587851087d06da8975c83991fd46df4cb 100644
+index 7ead30178e05c361388174d3f1ee0d34bff8455a..e185710cc08ec7a9a5ba5b3d9829aab9a4705960 100644
 --- a/scripts/buildkite.ts
 +++ b/scripts/buildkite.ts
-@@ -532,67 +532,94 @@
+@@ -532,27 +532,93 @@
    const attribute = (attributes: string, name: string) => new RegExp(`\\s${name}="([^"]*)"`).exec(attributes)?.[1];
    const keyOf = (file: string) => unescapeXml(file).replaceAll("\\", "/");
    const files = new Map<string, JunitFileSuite>();
@@ -105,49 +105,9 @@ index 7ead30178e05c361388174d3f1ee0d34bff8455a..f40362e587851087d06da8975c83991f
    }
 +  for (const entry of files.values()) if (entry.failures !== entry.cases.length) invalid();
    return files;
--}
--
--function getTailscale(): string {
--  if (isMacOS) {
--    const tailscaleApp = "/Applications/Tailscale.app/Contents/MacOS/tailscale";
--    if (existsSync(tailscaleApp)) {
--      return tailscaleApp;
--    }
--  }
--
--  if (isWindows) {
--    const tailscaleExe = "C:\\Program Files\\Tailscale\\tailscale.exe";
--    if (existsSync(tailscaleExe)) {
--      return tailscaleExe;
--    }
--  }
--
--  return "tailscale";
--}
--
--function getTailscaleIp(): string | undefined {
--  const tailscale = getTailscale();
--  const stdout = output([tailscale, "ip", "--1"]);
--  if (stdout !== undefined) {
--    return stdout.trim();
--  }
--
--  return undefined;
--}
--
--function getPublicIp(): string | undefined {
--  for (const url of ["https://checkip.amazonaws.com", "https://ipinfo.io/ip"]) {
--    const stdout = output(["curl", url]);
--    if (stdout !== undefined) {
--      return stdout.trim();
--    }
--  }
--
--  return undefined;
  }
  
- export function getBuildMetadata(name: string): string | undefined {
-@@ -752,12 +779,6 @@
+@@ -752,12 +818,6 @@
    });
  
    if (isCI) {

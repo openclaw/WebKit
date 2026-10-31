@@ -24,13 +24,13 @@
       },
       "test": {
         "patch": "harness-adapters/baseline-test.patch",
-        "sha256": "30d0ebf28da3548957c7c9369bf184f07c035ea83a327b00cf53ad56d86132b5",
+        "sha256": "906dd294a43a3bdf4a8e138fd4397fa6dac44facfc7f7b312dd673736e032b70",
         "files": {
           "scripts/buildkite.ts": {
             "before": "6bb50c957cf09fddcffc43b8035ff4a5d29734835fac0891e8b30297714d241d",
-            "after": "a60c58048f15d504c962923248832cf882de7202dc4cef04abe1c409764b4933",
+            "after": "bb63c8e5c7367f188dabd2ecd8323ada93ebefb6ba21f2ca0a646f6cd3402751",
             "base_blob": "7ead30178e05c361388174d3f1ee0d34bff8455a",
-            "adapted_blob": "f40362e587851087d06da8975c83991fd46df4cb",
+            "adapted_blob": "e185710cc08ec7a9a5ba5b3d9829aab9a4705960",
             "mode": "100644"
           },
           "scripts/runner.node.ts": {
