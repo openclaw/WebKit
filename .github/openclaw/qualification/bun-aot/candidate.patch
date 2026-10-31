@@ -1338,6 +1338,40 @@ index ce23d42585dd33dc81d2a0ec7dad909fdecee01c..9780607d5a80f0847fa9dab4f24fc92d
          assert!(matches!(
              spellings.intrinsic("$undefined", IntrinsicPosition::Value),
              Some(Intrinsic::Undefined)
+diff --git a/src/aot/builtins/names.rs b/src/aot/builtins/names.rs
+index cb3f5e02dc1bd14bededcc936e311f570983c4f0..8b60cc3384f3566cf27595cd52f9497717505c8d 100644
+--- a/src/aot/builtins/names.rs
++++ b/src/aot/builtins/names.rs
+@@ -12,6 +12,7 @@ pub struct BuiltinNames {
+     by_atom: FxHashMap<Atom, BuiltinName>,
+     by_private_atom: FxHashMap<Atom, BuiltinName>,
+     by_symbol_key_atom: FxHashMap<Atom, BuiltinName>,
++    texts_of_symbols_for_startup_loads: Box<[Atom]>,
+     atoms: Box<[Option<Atom>]>,
+ }
+ 
+@@ -54,6 +55,10 @@ impl BuiltinNames {
+             by_atom,
+             by_private_atom,
+             by_symbol_key_atom,
++            texts_of_symbols_for_startup_loads: table::NAMES_OF_METHODS_CALLING_STARTUP_LOADS
++                .iter()
++                .map(|&name| atoms.intern(table::text_of_name(name)))
++                .collect(),
+             atoms: name_atoms,
+         }
+     }
+@@ -70,6 +75,10 @@ impl BuiltinNames {
+         self.by_symbol_key_atom.get(&atom).copied()
+     }
+ 
++    pub fn is_text_of_symbol_for_startup_loads(&self, text: Atom) -> bool {
++        self.texts_of_symbols_for_startup_loads.contains(&text)
++    }
++
+     pub fn atom_of(&self, name: BuiltinName) -> Option<Atom> {
+         *self.atoms.get(name.0 as usize)?
+     }
 diff --git a/src/aot/builtins/resolve.rs b/src/aot/builtins/resolve.rs
 index 329dc2b39c07e6187ea6029fa8768e5f89388ea4..1a20b133d6765b2b596fc8948ddd2e3f6d2528c6 100644
 --- a/src/aot/builtins/resolve.rs
@@ -1453,10 +1487,43 @@ index 3c0693b48db51a235f33ac763ecb88ea8624879a..c8a7c2da5b945c6c5cfd0099eb7457a5
  }
  
 diff --git a/src/aot/builtins/resolve/mentions.rs b/src/aot/builtins/resolve/mentions.rs
-index c9faca89b70c70c0360c3da22a41d39ef3c97782..b71a9675c5436a429013609fb1a2f0deee56597b 100644
+index c9faca89b70c70c0360c3da22a41d39ef3c97782..0522c4376b30a76c7419a5167f2730c5f1808712 100644
 --- a/src/aot/builtins/resolve/mentions.rs
 +++ b/src/aot/builtins/resolve/mentions.rs
-@@ -255,7 +255,7 @@ impl Resolver<'_, '_> {
+@@ -143,6 +143,7 @@ impl Resolver<'_, '_> {
+             }
+             match self.classify_use(expr) {
+                 MentionUse::Called(call) if self.is_import_site(call) => {}
++                MentionUse::Called(call) if self.asks_for_symbol_that_host_ignores(call, id) => {}
+                 MentionUse::Called(call) => {
+                     self.output.called.push(id);
+                     if makes_require(id) && self.find_made_require(call).is_none() {
+@@ -186,6 +187,24 @@ impl Resolver<'_, '_> {
+             .is_some_and(|texts| texts.iter().all(is_other))
+     }
+ 
++    // `Symbol.for("mine")`
++    fn asks_for_symbol_that_host_ignores(&self, call: ExprId, id: BuiltinId) -> bool {
++        let hir = self.input.hir;
++        let ExprKind::Call(call) = hir[call].kind else {
++            return false;
++        };
++        let Some(operand) = hir.ids(hir[call].args).next() else {
++            return false;
++        };
++        let names = self.input.names;
++        id == BuiltinId::SymbolFor
++            && !matches!(hir[operand].kind, ExprKind::Spread(_))
++            && self.find_texts_of(operand).is_some_and(|texts| {
++                let mut texts = texts.iter();
++                !texts.any(|&text| names.is_text_of_symbol_for_startup_loads(text))
++            })
++    }
++
+     // `process.on("exit", listener);`: the call itself says that the entry does not call what it calls for some texts alone.
+     fn is_called_with_other_texts(&self, function: ExprId, id: BuiltinId) -> bool {
+         let lists = table::entry(table::canonical_id(id)).calls_for_texts();
+@@ -255,7 +274,7 @@ impl Resolver<'_, '_> {
              let MentionUse::StoredInto(symbol) = self.classify_use(expr) else {
                  continue;
              };
@@ -1517,7 +1584,7 @@ index 1d6d56c4d9c7db546b196f14beb417d54910fe63..bb8b691ebcff94873c472f2f505a0fce
              true => ExprState::Held(member),
              false => ExprState::Builtin(member),
 diff --git a/src/aot/builtins/resolve/resolver.rs b/src/aot/builtins/resolve/resolver.rs
-index 5992063b2a05d41b22d65c2a8909fdd255cb7e3a..9b355d65b9e845f75925f4d398603099df1702be 100644
+index 5992063b2a05d41b22d65c2a8909fdd255cb7e3a..1af2d39e4209b4d5a63363980f03711883685fe4 100644
 --- a/src/aot/builtins/resolve/resolver.rs
 +++ b/src/aot/builtins/resolve/resolver.rs
 @@ -24,6 +24,7 @@ pub(super) enum HolderKind {
@@ -1565,7 +1632,16 @@ index 5992063b2a05d41b22d65c2a8909fdd255cb7e3a..9b355d65b9e845f75925f4d398603099
              }
              ExprKind::Assign { target, .. } => match self.find_held_value(target) {
                  Some(value) => ExprState::Held(value),
-@@ -407,12 +420,19 @@ impl<'a, 's> Resolver<'a, 's> {
+@@ -395,6 +408,8 @@ impl<'a, 's> Resolver<'a, 's> {
+             called_with_other_texts: &called_with_other_texts,
+             exposed: &exposed,
+             linked_functions: &output.linked_functions,
++            called: &output.called,
++            is_of_program: input.dialect == SourceDialect::Program,
+         };
+         let uses = RuntimeUses::of_mentions(mentions, input.platform);
+         let loads_unknown_modules = match input.dialect {
+@@ -407,12 +422,19 @@ impl<'a, 's> Resolver<'a, 's> {
              SourceDialect::Runtime => false,
          };
          let mut exprs = Vec::new();
@@ -1585,7 +1661,7 @@ index 5992063b2a05d41b22d65c2a8909fdd255cb7e3a..9b355d65b9e845f75925f4d398603099
                  }) => Resolved::Builtin(path),
                  ExprState::DynamicGlobal(path) => Resolved::DynamicGlobal(path),
                  ExprState::Intrinsic(intrinsic) => Resolved::Intrinsic(intrinsic),
-@@ -432,6 +452,7 @@ impl<'a, 's> Resolver<'a, 's> {
+@@ -432,6 +454,7 @@ impl<'a, 's> Resolver<'a, 's> {
          ResolvedBuiltins {
              exprs: exprs.into_boxed_slice(),
              expr_bits: expr_bits.into_boxed_slice(),
@@ -1594,7 +1670,7 @@ index 5992063b2a05d41b22d65c2a8909fdd255cb7e3a..9b355d65b9e845f75925f4d398603099
              commonjs,
              evaluated_texts: output.evaluated_texts.into_boxed_slice(),
 diff --git a/src/aot/builtins/resolve/tests.rs b/src/aot/builtins/resolve/tests.rs
-index 2b8f0dd6aa506bbc2e9d4367f10e162991e78965..8bcf0177af7852a477adfb7d3e17116ec1913671 100644
+index 2b8f0dd6aa506bbc2e9d4367f10e162991e78965..50d01ec90497e373ca5263f3c2376bc7ae3e9ea2 100644
 --- a/src/aot/builtins/resolve/tests.rs
 +++ b/src/aot/builtins/resolve/tests.rs
 @@ -263,6 +263,16 @@ impl Case<'_, '_> {
@@ -1614,6 +1690,31 @@ index 2b8f0dd6aa506bbc2e9d4367f10e162991e78965..8bcf0177af7852a477adfb7d3e17116e
      fn resolved_at(&self, expr: ExprId) -> Option<Resolved> {
          self.resolved.of_expr(expr)
      }
+@@ -397,3 +407,24 @@ fn jsc_namespace() -> BuiltinId {
+ fn jsc_heap_stats() -> BuiltinId {
+     find_member(jsc_namespace(), "heapStats").expect("bun:jsc exports heapStats")
+ }
++
++#[test]
++fn symbol_lookups_retain_startup_code_only_when_the_host_can_use_them() {
++    assert!(!table::STARTUP_MODULES.is_empty());
++    for (setup, source, needs_startup) in [
++        (PROGRAM, "Symbol.for('nodejs.util.inspect.custom');", true),
++        (PROGRAM, "Symbol.for('application.symbol');", false),
++        (PROGRAM, "Symbol.for(name);", true),
++        (PROGRAM, "Symbol.for(...names);", true),
++        (PROGRAM, "external(Symbol.for);", true),
++        (PROGRAM, "const lookup = Symbol.for;", false),
++        (RUNTIME, "Symbol.for(name);", false),
++    ] {
++        with_case(setup, source, |case| {
++            let uses = case.resolved.uses();
++            let has_startup = table::STARTUP_MODULES.iter()
++                .all(|module| uses.modules.contains(module));
++            assert_eq!(has_startup, needs_startup, "{source}");
++        });
++    }
++}
 diff --git a/src/aot/builtins/resolve/tests/imports.rs b/src/aot/builtins/resolve/tests/imports.rs
 index 4a8630438b065a0b081727e63b23b6f495b207a8..d9b055c1fe2f9e962de5fa53d44f290be29d21fb 100644
 --- a/src/aot/builtins/resolve/tests/imports.rs
@@ -1722,12 +1823,136 @@ index 10066fa4d65186cab506b54cad1111711da3b410..19e33b543a36da66cf34c527f357f197
          assert_unresolved(case, "Math.#floor");
  }
 diff --git a/src/aot/builtins/runtime_uses.rs b/src/aot/builtins/runtime_uses.rs
-index 582a773834da9fa8d81098a2a597f3a8321cc32e..d390a756890ab93fd2e3a91e8ff9ce7019d81ece 100644
+index 582a773834da9fa8d81098a2a597f3a8321cc32e..6ac810b37071444786d6fa79ce0783d094061884 100644
 --- a/src/aot/builtins/runtime_uses.rs
 +++ b/src/aot/builtins/runtime_uses.rs
-@@ -98,7 +98,12 @@ impl Collector {
-                 None => self.modules_read_whole.set(load.module.to_wire() as usize),
-             }
+@@ -1,6 +1,6 @@
+ use super::table::{
+     self, BuiltinClass, BuiltinFlags, BuiltinId, Origin, Platforms, Prototype, RuntimeFunction,
+-    RuntimeModule,
++    RuntimeFunctionRole, RuntimeModule,
+ };
+ use bun_collections::DynamicBitSet;
+ use bun_core::UnwrapOrOom as _;
+@@ -9,13 +9,17 @@ use bun_sema::util::SharedSort;
+ #[cfg(test)]
+ mod tests;
+ 
+-#[derive(Copy, Clone)]
++#[derive(Copy, Clone, Default)]
+ pub struct Mentions<'a> {
+     pub mentioned: &'a [BuiltinId],
+     /// Those of `mentioned` that are only called, each time with a text that is none of those for which the entry calls more. They ascend.
+     pub called_with_other_texts: &'a [BuiltinId],
+     pub exposed: &'a [BuiltinId],
+     pub linked_functions: &'a [RuntimeFunction],
++    /// Calls and escaped functions, excluding known module loads and unrelated symbol lookups.
++    pub called: &'a [BuiltinId],
++    /// Application source, rather than bundled runtime source.
++    pub is_of_program: bool,
+ }
+ 
+ #[derive(Clone, PartialEq, Eq, Debug, Default)]
+@@ -37,11 +41,26 @@ struct Collector {
+     exports_read: Vec<(RuntimeModule, &'static str)>,
+     functions: DynamicBitSet,
+     has_unknown_module_loader: bool,
++    is_of_program: bool,
++    has_startup_loads: bool,
+ }
+ 
+ const UNKNOWN_MODULE_LOADERS: BuiltinFlags =
+     BuiltinFlags::LOADS_MODULE_BY_NAME.union(BuiltinFlags::RUNS_UNSEEN_CODE);
+ 
++// The host loads startup modules when it finds a method under one of these symbols.
++fn leads_to_startup_loads(id: BuiltinId) -> bool {
++    let is_method = |id: BuiltinId| {
++        table::NAMES_OF_METHODS_CALLING_STARTUP_LOADS.contains(&table::entry(id).name)
++    };
++    let entry = table::entry(id);
++    let prototype = entry.class.and_then(|class| table::class_data(class).prototype);
++    is_method(id)
++        || [Some(id), prototype].into_iter().flatten().any(|holder| {
++            table::members(holder).iter().copied().any(is_method)
++        })
++}
++
+ fn create_id_set(id_count: u32) -> DynamicBitSet {
+     DynamicBitSet::init_empty(id_count as usize).unwrap_or_oom()
+ }
+@@ -57,6 +76,56 @@ impl Collector {
+             exports_read: Vec::new(),
+             functions: create_id_set(RuntimeFunction::COUNT),
+             has_unknown_module_loader: false,
++            is_of_program: false,
++            has_startup_loads: false,
++        }
++    }
++
++    fn add_load(&mut self, module: RuntimeModule, exports_read: Option<&'static [&'static str]>) {
++        self.modules.set(module.to_wire() as usize);
++        match exports_read {
++            Some(names) => self.exports_read.extend(names.iter().map(|&name| (module, name))),
++            None => self.modules_read_whole.set(module.to_wire() as usize),
++        }
++    }
++
++    fn add_functions(&mut self, functions: &[RuntimeFunction]) {
++        for function in functions {
++            self.functions.set(function.to_wire() as usize);
++        }
++    }
++
++    fn add_language(&mut self) {
++        for id in BuiltinId::ALL {
++            let entry = table::entry(id);
++            if entry.origin == Origin::Engine
++                || entry.flags.contains(BuiltinFlags::IS_COMPILER_HELPER)
++            {
++                self.add_entry(id);
++            }
++        }
++        // Reading an accessor calls its getter; the host may also invoke methods on arbitrary objects.
++        self.add_functions(table::ACCESSOR_FUNCTIONS);
++        self.add_functions(table::FUNCTIONS_FOR_ANY_HOST_OBJECT);
++    }
++
++    fn add_startup_loads(&mut self) {
++        if core::mem::replace(&mut self.has_startup_loads, true) {
++            return;
++        }
++        for load in table::STARTUP_LOADS {
++            self.add_load(load.module, load.exports_read);
++        }
++        for module in table::STARTUP_MODULES {
++            self.modules.set(module.to_wire() as usize);
++        }
++        self.add_functions(table::STARTUP_FUNCTIONS);
++        self.add_language();
++        self.add_functions(table::MODULE_LOADER_FUNCTIONS);
++        for data in table::runtime_functions().iter().filter(|data| {
++            matches!(data.role, RuntimeFunctionRole::CompilerFunction | RuntimeFunctionRole::Model)
++        }) {
++            self.functions.set(data.function.to_wire() as usize);
+         }
+     }
+ 
+@@ -89,16 +158,18 @@ impl Collector {
+         }
+         let entry = table::entry(id);
+         self.has_unknown_module_loader |= entry.flags.intersects(UNKNOWN_MODULE_LOADERS);
++        if self.is_of_program && leads_to_startup_loads(id) {
++            self.add_startup_loads();
++        }
+         for load in entry.loads() {
+-            self.modules.set(load.module.to_wire() as usize);
+-            match load.exports_read {
+-                Some(names) => self
+-                    .exports_read
+-                    .extend(names.iter().map(|&name| (load.module, name))),
+-                None => self.modules_read_whole.set(load.module.to_wire() as usize),
+-            }
++            self.add_load(load.module, load.exports_read);
          }
 -        for function in entry.calls().iter().chain(entry.implemented_by()) {
 +        for function in entry
@@ -1739,11 +1964,94 @@ index 582a773834da9fa8d81098a2a597f3a8321cc32e..d390a756890ab93fd2e3a91e8ff9ce70
              self.functions.set(function.to_wire() as usize);
          }
      }
+@@ -195,11 +266,14 @@ impl RuntimeUses {
+             called_with_other_texts,
+             exposed,
+             linked_functions,
++            called,
++            is_of_program,
+         } = mentions;
+-        if mentioned.is_empty() && exposed.is_empty() && linked_functions.is_empty() {
++        if mentioned.is_empty() && exposed.is_empty() && linked_functions.is_empty() && called.is_empty() {
+             return RuntimeUses::default();
+         }
+         let mut collector = Collector::new(platform);
++        collector.is_of_program = is_of_program;
+         for &id in mentioned {
+             match called_with_other_texts.binary_search(&id) {
+                 Ok(_) => collector.add_entry_called_with_other_texts(id),
+@@ -207,6 +281,17 @@ impl RuntimeUses {
+             }
+             collector.expose_class_of(id);
+         }
++        if is_of_program {
++            for &id in called {
++                let id = table::canonical_id(id);
++                let flags = table::entry(id).flags;
++                if id == BuiltinId::SymbolFor
++                    || flags.intersects(BuiltinFlags::EVALUATES_TEXT.union(BuiltinFlags::RUNS_UNSEEN_CODE))
++                {
++                    collector.add_startup_loads();
++                }
++            }
++        }
+         for function in linked_functions {
+             collector.functions.set(function.to_wire() as usize);
+         }
+@@ -215,20 +300,28 @@ impl RuntimeUses {
+         collector.finish()
+     }
+ 
++    /// Runtime source is written with the host and the whole language at hand.
++    pub fn has_code_of_host(&self) -> bool {
++        let has_source = |module: &RuntimeModule| {
++            table::module_data(*module).flags.contains(table::ModuleFlags::HAS_SOURCE)
++        };
++        let is_of_host = |function: &RuntimeFunction| {
++            table::runtime_function(*function)
++                .is_some_and(|data| data.role == RuntimeFunctionRole::HostBuiltin)
++        };
++        self.modules.iter().any(has_source) || self.functions.iter().any(is_of_host)
++    }
++
++    /// What code outside the compiled program may invoke without a name in its source.
++    pub fn of_unseen_code(platform: Platforms) -> RuntimeUses {
++        let mut collector = Collector::new(platform);
++        collector.add_startup_loads();
++        collector.finish()
++    }
++
+     pub fn of_language(platform: Platforms) -> RuntimeUses {
+         let mut collector = Collector::new(platform);
+-        for id in BuiltinId::ALL {
+-            let entry = table::entry(id);
+-            if entry.origin == Origin::Engine
+-                || entry.flags.contains(BuiltinFlags::IS_COMPILER_HELPER)
+-            {
+-                collector.add_entry(id);
+-            }
+-        }
+-        // Reading an accessor is calling its getter, and text that nobody has seen reads what it likes.
+-        for function in table::ACCESSOR_FUNCTIONS {
+-            collector.functions.set(function.to_wire() as usize);
+-        }
++        collector.add_language();
+         collector.finish()
+     }
+ }
 diff --git a/src/aot/builtins/runtime_uses/tests.rs b/src/aot/builtins/runtime_uses/tests.rs
-index 5be60f6ada933b49bb1fb891bacae215b3d2de23..cdfe53ce10e9c066eadb15b41200861b6be7d74b 100644
+index 5be60f6ada933b49bb1fb891bacae215b3d2de23..f11f6af297c1447e1845eb2c21d35ad001b56c0f 100644
 --- a/src/aot/builtins/runtime_uses/tests.rs
 +++ b/src/aot/builtins/runtime_uses/tests.rs
-@@ -34,6 +34,7 @@ fn own_functions(id: BuiltinId) -> impl Iterator<Item = RuntimeFunction> {
+@@ -9,6 +9,7 @@ fn uses_of(mentioned: &[BuiltinId], exposed: &[BuiltinId]) -> RuntimeUses {
+         called_with_other_texts: &[],
+         exposed,
+         linked_functions: &[],
++        ..Mentions::default()
+     };
+     RuntimeUses::of_mentions(mentions, LINUX)
+ }
+@@ -34,6 +35,7 @@ fn own_functions(id: BuiltinId) -> impl Iterator<Item = RuntimeFunction> {
          .calls()
          .iter()
          .chain(entry.implemented_by())
@@ -1751,23 +2059,105 @@ index 5be60f6ada933b49bb1fb891bacae215b3d2de23..cdfe53ce10e9c066eadb15b41200861b
          .chain(for_texts)
          .copied();
      listed.filter(|&function| exists_on_linux(function))
+@@ -203,6 +205,7 @@ fn call_with_another_text_does_without_what_some_texts_need() {
+         called_with_other_texts: &[on],
+         exposed: &[],
+         linked_functions: &[],
++        ..Mentions::default()
+     };
+     assert!(has_none(&RuntimeUses::of_mentions(mentions, LINUX)));
+ }
+@@ -328,7 +331,10 @@ fn language_loads_no_module() {
+ fn language_lists_nothing_else() {
+     let language = RuntimeUses::of_language(LINUX);
+     let functions = language_entries().flat_map(own_functions);
+-    let functions = functions.chain(table::ACCESSOR_FUNCTIONS.iter().copied());
++    let functions = functions
++        .chain(table::ACCESSOR_FUNCTIONS.iter().copied())
++        .chain(table::FUNCTIONS_FOR_ANY_HOST_OBJECT.iter().copied())
++        .filter(|&function| exists_on_linux(function));
+     assert_eq!(*language.functions, *sorted_unique(functions));
+     let modules = language_entries().flat_map(own_modules);
+     assert_eq!(*language.modules, *sorted_unique(modules));
+@@ -346,6 +352,7 @@ fn entry_of_other_platform_needs_nothing() {
+         called_with_other_texts: &[],
+         exposed: &[],
+         linked_functions: &[],
++        ..Mentions::default()
+     };
+     let on_windows = RuntimeUses::of_mentions(mentions, Platforms::WINDOWS);
+     assert_eq!(on_windows, RuntimeUses::default());
+@@ -363,6 +370,7 @@ fn function_of_other_platform_is_excluded() {
+         called_with_other_texts: &[],
+         exposed: &[],
+         linked_functions: &[windows_only],
++        ..Mentions::default()
+     };
+     let on_linux = RuntimeUses::of_mentions(mentions, LINUX);
+     assert_eq!(on_linux, RuntimeUses::default());
+@@ -387,8 +395,41 @@ fn linked_functions_are_needed() {
+         called_with_other_texts: &[],
+         exposed: &[],
+         linked_functions: &[second.function, first.function, second.function],
++        ..Mentions::default()
+     };
+     let uses = RuntimeUses::of_mentions(mentions, LINUX);
+     assert_eq!(*uses.functions, [first.function, second.function]);
+     assert!(uses.modules.is_empty());
+ }
++
++#[test]
++fn program_that_can_have_a_method_for_the_host_to_print_with_gets_what_unseen_code_gets() {
++    let whole = RuntimeUses::of_unseen_code(LINUX);
++    let asks_for_a_symbol = Mentions {
++        mentioned: &[BuiltinId::SymbolFor],
++        called: &[BuiltinId::SymbolFor],
++        ..Mentions::default()
++    };
++    assert!(includes(&RuntimeUses::of_mentions(Mentions { is_of_program: true, ..asks_for_a_symbol }, LINUX), &whole));
++    assert!(!includes(
++        &RuntimeUses::of_mentions(asks_for_a_symbol, LINUX),
++        &whole
++    ));
++    let names_the_function_alone = Mentions {
++        mentioned: &[BuiltinId::SymbolFor],
++        ..Mentions::default()
++    };
++    assert!(!includes(
++        &RuntimeUses::of_mentions(Mentions { is_of_program: true, ..names_the_function_alone }, LINUX),
++        &whole
++    ));
++    let makes_an_object_of_the_host = Mentions {
++        mentioned: &[BuiltinId::URLSearchParams],
++        ..Mentions::default()
++    };
++    assert!(includes(
++        &RuntimeUses::of_mentions(Mentions { is_of_program: true, ..makes_an_object_of_the_host }, LINUX),
++        &whole
++    ));
++}
++
 diff --git a/src/aot/builtins/table.rs b/src/aot/builtins/table.rs
-index afeccb76582f506a698cf9ce421a5f28341832eb..0b441851d54379b0df9a9f78d550e809ff8282a0 100644
+index afeccb76582f506a698cf9ce421a5f28341832eb..bba3dd968f15b42491b99009bf5a445844b7f285 100644
 --- a/src/aot/builtins/table.rs
 +++ b/src/aot/builtins/table.rs
-@@ -18,12 +18,12 @@ pub use ids::{
+@@ -17,13 +17,15 @@ pub use ids::{
+     RuntimeModule,
  };
  pub use lookup::{
-     ACCESSOR_FUNCTIONS, ExportLookup, MODULE_LOADER_FUNCTIONS, MemberLookup, STARTUP_FUNCTIONS,
+-    ACCESSOR_FUNCTIONS, ExportLookup, MODULE_LOADER_FUNCTIONS, MemberLookup, STARTUP_FUNCTIONS,
 -    STARTUP_LOADS, STARTUP_MODULES, canonical_id, class_data, contents_index, entry, exists_on,
 -    find_export, find_name, find_symbol_name, global, host_reads, is_es_module,
 -    is_legal_builtin_constant, is_locked, is_removable_call, is_symbol_name, member, members,
 -    module_by_specifier, module_data, name_of_symbol, namespace_of, object_replacing_namespace,
 -    own_member, removable_calls, root_of, runtime_function, runtime_functions, specifier_of,
 -    symbol_constant, text_of, text_of_name, well_known_symbol,
++    ACCESSOR_FUNCTIONS, FUNCTIONS_FOR_ANY_HOST_OBJECT, ExportLookup, MODULE_LOADER_FUNCTIONS,
++    MemberLookup, NAMES_OF_METHODS_CALLING_STARTUP_LOADS, STARTUP_FUNCTIONS,
 +    STARTUP_LOADS, STARTUP_MODULES, answers_query, canonical_id, class_data, contents_index, entry,
 +    exists_on, find_export, find_name, find_symbol_name, global, host_reads, is_es_module,
-+    is_legal_builtin_constant, is_locked, is_parser, is_removable_call, is_symbol_name, member,
++    is_legal_builtin_constant, is_locked, is_parser, is_removable_call, is_stored_by_native_code,
++    is_symbol_name, member,
 +    members, module_by_specifier, module_data, name_of_symbol, namespace_of,
 +    object_replacing_namespace, own_member, removable_calls, root_of, runtime_function,
 +    runtime_functions, specifier_of, symbol_constant, text_of, text_of_name, well_known_symbol,
@@ -1795,7 +2185,7 @@ index a36627e8bca786cfa0afd5ae98a96834fe559d73..250025fa1de01d762ce48e74ed540a4b
  
  pub struct TypeName {
 diff --git a/src/aot/builtins/table/lookup.rs b/src/aot/builtins/table/lookup.rs
-index cee47827cc07245af48cff4e453209117f4742d0..b61bbf8fd0db15f7dd0684b747cb6b62a7390861 100644
+index cee47827cc07245af48cff4e453209117f4742d0..4f348c2ba721f0a567837788007f9f1f43d54bed 100644
 --- a/src/aot/builtins/table/lookup.rs
 +++ b/src/aot/builtins/table/lookup.rs
 @@ -47,6 +47,10 @@ impl BuiltinEntry {
@@ -1809,7 +2199,20 @@ index cee47827cc07245af48cff4e453209117f4742d0..b61bbf8fd0db15f7dd0684b747cb6b62
  }
  
  pub fn class_data(class: BuiltinClass) -> &'static ClassData {
-@@ -327,6 +331,16 @@ pub fn host_reads(context: HostReadContext) -> impl Iterator<Item = &'static Hos
+@@ -241,6 +245,12 @@ pub fn text_of_name(name: BuiltinName) -> &'static [u8] {
+         [SYMBOL_NAME_TEXT_STARTS[index] as usize..SYMBOL_NAME_TEXT_STARTS[index + 1] as usize]
+ }
+ 
++/// Whether native code puts a property under `name` on some object: a member of a built-in object, or what a constructor or a function defines on a new instance, on its result or on an operand.
++pub fn is_stored_by_native_code(name: BuiltinName) -> bool {
++    let index = name.0 as usize;
++    NAMES_STORED_BY_NATIVE_CODE[index / 8] >> (index % 8) & 1 != 0
++}
++
+ pub fn is_symbol_name(name: BuiltinName) -> bool {
+     name.0 as usize >= TEXT_NAME_COUNT
+ }
+@@ -327,6 +337,16 @@ pub fn host_reads(context: HostReadContext) -> impl Iterator<Item = &'static Hos
          .filter(move |read| read.context == context)
  }
  
@@ -1847,6 +2250,52 @@ index 662d94c180778e5fd96a76eeda018c9390ab6918..896fc9c39ddd10278c4d55a7ec975065
      LinkedFunction(RuntimeFunction),
      Directive(DirectiveKind),
      PrependArgument {
+diff --git a/src/aot/builtins/table/tests/lookup.rs b/src/aot/builtins/table/tests/lookup.rs
+index 89d67d455f5bae541673c6017500ff47adc46af7..235f5be6298b4a33b8debbb1b32076c873ea7acf 100644
+--- a/src/aot/builtins/table/tests/lookup.rs
++++ b/src/aot/builtins/table/tests/lookup.rs
+@@ -190,6 +190,41 @@ fn symbol_members() {
+     assert_eq!(member(BuiltinId::Math, iterator), MemberLookup::Absent);
+ }
+ 
++#[test]
++fn names_stored_by_native_code() {
++    for stored in [
++        // Members of built-in objects.
++        "byteLength",
++        "PI",
++        "readFileSync",
++        // Defined on new instances.
++        "message",
++        "sourceURL",
++        "errors",
++        "suppressed",
++        // Fields of results.
++        "done",
++        "written",
++        "reason",
++        "groups",
++        "indices",
++        // Defined on an operand.
++        "originalLine",
++        "lastIndex",
++        // Fields of an object that the host makes.
++        "headersUrl",
++    ] {
++        assert!(is_stored_by_native_code(name(stored)), "{stored}");
++    }
++    assert!(is_stored_by_native_code(name_of_symbol(
++        WellKnownSymbol::Iterator
++    )));
++    let mut members = all_ids().filter(|&id| entry(id).holder.is_some());
++    assert!(members.all(|id| is_stored_by_native_code(entry(id).name)));
++    // A text that is only ever a value.
++    assert!(!is_stored_by_native_code(name("ERR_INVALID_ARG_TYPE")));
++}
++
+ #[test]
+ fn every_well_known_symbol_has_name() {
+     for symbol in WellKnownSymbol::ALL {
 diff --git a/src/aot/builtins/table/tests/modules.rs b/src/aot/builtins/table/tests/modules.rs
 index 4aa03e7cf573d9b5d999b66672f6994f26986f96..e035d9896e902a80a38f82d601b7f45056b65e66 100644
 --- a/src/aot/builtins/table/tests/modules.rs
@@ -2263,11 +2712,122 @@ index a37e0ea6dcda750a398dd3c65016f92b74de5ea0..eab9d6a170bcc29f32177a68f01812a3
              return true;
          }
          if !self.stack.is_safe_to_recurse() {
+diff --git a/src/aot/compile/runtime_reach.rs b/src/aot/compile/runtime_reach.rs
+index 6fc2a928dc2e7f547394612d11db9d9a88f0da62..b43b6890ab48d0618ccfb7af8036d8e3a61c7fef 100644
+--- a/src/aot/compile/runtime_reach.rs
++++ b/src/aot/compile/runtime_reach.rs
+@@ -17,9 +17,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
+ use smallvec::{SmallVec, smallvec};
+ 
+ use crate::builtins::id::BuiltinId;
+-use crate::builtins::table::{
+-    self, MODULE_LOADER_FUNCTIONS, RuntimeFunctionRole, STARTUP_FUNCTIONS, STARTUP_LOADS,
+-};
++use crate::builtins::table::{self, MODULE_LOADER_FUNCTIONS, RuntimeFunctionRole};
+ use crate::builtins::{
+     BuiltinNames, ImportTargets, Intrinsic, Platforms, ResolveInput, Resolved, RuntimeFunction,
+     RuntimeModule, RuntimeUses, SourceDialect, resolve_within,
+@@ -1076,19 +1074,36 @@ impl<'a, 's> Walk<'a, 's> {
+         read_by_name
+     }
+ 
++    fn needs_unseen_code(&self) -> bool {
++        if self.input.can_load_code_at_run_time || !self.reads_imports_by_name {
++            return true;
++        }
++        let application = self.input.application;
++        let has_source = |module| {
++            table::module_data(module).flags.contains(table::ModuleFlags::HAS_SOURCE)
++        };
++        application.compiled_files().iter().any(|&file| {
++            let answers = application.compiled(file).map_or(&[][..], |it| it.code_answers);
++            let imports_host_code = answers.iter().any(|answer| {
++                matches!(*answer, CodeAnswer::HostModule(id)
++                    if RuntimeModule::from_registry_id(id.0).is_some_and(has_source))
++            });
++            imports_host_code || parsed_source(application, file).is_some_and(|source| {
++                source.builtins.uses().has_code_of_host()
++                    || source.named_modules().iter().any(|named| has_source(named.module))
++            })
++        })
++    }
++
+     fn reach_roots(&mut self) {
+         let application = self.input.application;
+         self.reads_imports_by_name = !self.loads_modules_by_computed_names();
+         self.reach_uses(&RuntimeUses::of_language(self.input.platform));
+-        for load in STARTUP_LOADS {
+-            let module = ModuleRef::Runtime(load.module);
+-            match load.exports_read {
+-                Some(names) => self.reach_exports_named(module, names),
+-                None => self.reach_every_export(module),
+-            }
++        if self.needs_unseen_code() {
++            self.reach_uses(&RuntimeUses::of_unseen_code(self.input.platform));
+         }
+         let platform = self.input.platform;
+-        for &function in STARTUP_FUNCTIONS.iter().chain(MODULE_LOADER_FUNCTIONS) {
++        for &function in MODULE_LOADER_FUNCTIONS {
+             if table::runtime_function(function).is_some_and(|it| it.platforms.contains(platform)) {
+                 self.reach_function(function);
+             }
 diff --git a/src/aot/compile/tests.rs b/src/aot/compile/tests.rs
-index 65e9f4b505be0e4d7236270fc8a7e27c8b313a22..da1f6dfde12941dbb0e214bdd87fbc4c31d0354f 100644
+index 65e9f4b505be0e4d7236270fc8a7e27c8b313a22..f1f2d4695f1ea46542b5a257d2c00e9867ffa04d 100644
 --- a/src/aot/compile/tests.rs
 +++ b/src/aot/compile/tests.rs
-@@ -1088,15 +1088,3 @@ fn build_that_compiles_refuses_the_whole_program() {
+@@ -338,8 +338,13 @@ fn counts_builtin_types_degraded_to_views() {
+     );
+ }
+ 
+-fn link_registered_functions(omits_builtin_modules: bool) -> Vec<RuntimeFunction> {
+-    let project = TestProject::new(&SMALL_PROGRAM, &default_settings());
++fn link_registered_functions(source: &str, omits_builtin_modules: bool) -> Vec<RuntimeFunction> {
++    let files = [
++        ("a.ts", source),
++        GLOBALS,
++        ("modules.d.ts", "declare module \"node:querystring\";"),
++    ];
++    let project = TestProject::new(&files, &default_settings());
+     let mut options = project.options(BUNDLED_LIBS);
+     options.load.omits_builtin_modules = omits_builtin_modules;
+     let mut log = Log::init();
+@@ -356,8 +361,9 @@ fn only_functions_of_loaded_files_are_registered() {
+     };
+     assert!(table::STARTUP_FUNCTIONS.iter().copied().any(exists_on_host));
+ 
+-    let registered = link_registered_functions(false);
+-    let registered_without_modules = link_registered_functions(true);
++    let source = "new Function('return 1')();";
++    let registered = link_registered_functions(source, false);
++    let registered_without_modules = link_registered_functions(source, true);
+     for &function in table::STARTUP_FUNCTIONS {
+         let is_registered = registered.contains(&function);
+         assert_eq!(is_registered, exists_on_host(function), "{function:?}");
+@@ -368,6 +374,23 @@ fn only_functions_of_loaded_files_are_registered() {
+     }
+ }
+ 
++#[test]
++fn startup_retention_falls_back_for_unseen_and_host_code() {
++    let plain = link_registered_functions("console.log(1);", false);
++    let startup: Vec<_> = table::STARTUP_FUNCTIONS.iter().copied().filter(|&function| {
++        table::runtime_function(function).is_some_and(|data| data.platforms.contains(host_platform()))
++    }).collect();
++    assert!(!startup.is_empty());
++    assert!(startup.iter().any(|function| !plain.contains(function)));
++    for source in [
++        "new Function('return ' + String(Date.now()))();",
++        "import { stringify } from 'node:querystring'; console.log(stringify({ a: 1 }));",
++    ] {
++        let registered = link_registered_functions(source, false);
++        assert!(startup.iter().all(|function| registered.contains(function)), "{source}");
++    }
++}
++
+ fn count_folded_strings_over_limit(operand_length: usize) -> u64 {
+     let operand = "a".repeat(operand_length);
+     let text = format!("console.log(\"{operand}\" + \"{operand}\");");
+@@ -1088,15 +1111,3 @@ fn build_that_compiles_refuses_the_whole_program() {
      let (result, _) = link_project(&project, &WithoutServices);
      assert_eq!(expect_failure(result).refused_entry_points, None);
  }
@@ -3216,6 +3776,138 @@ index acddb976e18c73aa41142be5a3de39934b7420e3..eb9e2832f2d73f10986d8f6a9fca6578
          builder.return_value(None);
      }));
      let records = [&own, &shared, &shared, &own, &shared];
+diff --git a/src/aot/link/unused_records.rs b/src/aot/link/unused_records.rs
+index 5bc838f0830b1415c49f6b33c91ae0100a9344a6..13fef7f7226a3c04715f49ed8db1820060302a0a 100644
+--- a/src/aot/link/unused_records.rs
++++ b/src/aot/link/unused_records.rs
+@@ -1,5 +1,6 @@
+ use super::state::{Numbering, UnitIds};
+ use super::unit::LinkUnit;
++use crate::builtins::table;
+ use crate::ir::generated::{
+     FieldFlags, Layout, LayoutFlags, LayoutKind, PropertyKey, PropertyKeyKind,
+ };
+@@ -119,6 +120,14 @@ fn find_written_keys(layouts: &[Layout], input: &UseInput<'_>) -> Vec<AtomicBool
+     is_written
+ }
+ 
++// An error has a message that no compiled code stored: a type that requires one describes what native code makes.
++fn is_stored_by_native_code(input: &UseInput<'_>, key: PropertyKeyId) -> bool {
++    let key = input.property_keys.get(key);
++    let text = key.text.filter(|_| key.kind == PropertyKeyKind::Text);
++    let name = text.and_then(|text| input.strings.builtin_name(text));
++    name.is_some_and(table::is_stored_by_native_code)
++}
++
+ /// Says of a plain record that nothing in the program makes an object with it: it only describes objects.
+ pub(super) fn mark_unused_records(layouts: &mut [Layout], input: &UseInput<'_>) {
+     let is_allocated = find_allocated_layouts(input);
+@@ -131,13 +140,15 @@ pub(super) fn mark_unused_records(layouts: &mut [Layout], input: &UseInput<'_>)
+             layout.flags |= LayoutFlags::IS_NEVER_ALLOCATED;
+         }
+         for field in &mut layout.fields {
+-            if field
+-                .key
+-                .is_some_and(|key| !is_written[key.index()].load(Ordering::Relaxed))
++            let Some(key) = field.key else { continue };
++            let is_required = field.flags.contains(FieldFlags::IS_REQUIRED);
++            if is_written[key.index()].load(Ordering::Relaxed)
++                || (is_required && is_stored_by_native_code(input, key))
+             {
+-                field.flags = field.flags.without(FieldFlags::IS_REQUIRED);
+-                field.flags |= FieldFlags::IS_NEVER_WRITTEN;
++                continue;
+             }
++            field.flags = field.flags.without(FieldFlags::IS_REQUIRED);
++            field.flags |= FieldFlags::IS_NEVER_WRITTEN;
+         }
+     });
+ }
+@@ -146,6 +157,7 @@ pub(super) fn mark_unused_records(layouts: &mut [Layout], input: &UseInput<'_>)
+ mod tests {
+     use super::*;
+     use crate::ir::Program;
++    use crate::ir::generated::Field;
+     use crate::link::testing::link_sources_without_bun_modules;
+ 
+     const MAIN: &str = r#"
+@@ -218,4 +230,76 @@ export function make(id: number): Made { return { id, label: "made" }; }
+             FieldFlags::IS_REQUIRED
+         );
+     }
++
++    // The only names that the program stores are `name` and `level`.
++    const FILLED_BY_NATIVE_CODE: &str = r#"
++/// <reference lib="dom" />
++interface Warning extends Error { level: number }
++interface Failures extends AggregateError { level: number }
++interface Upload extends Blob { level: number }
++interface Step { done: boolean; value: number }
++interface Match { index: number; groups: object }
++interface Traced { originalLine: number }
++interface Branded { __brand: "level"; level: number }
++export function read(warning: Warning, failures: Failures, upload: Upload, branded: Branded): number {
++  return warning.level + failures.level + upload.level + branded.level;
++}
++export function readResults(step: Step, match: Match, traced: Traced): number {
++  return step.value + match.index + traced.originalLine;
++}
++export function make(level: number) { return { name: "made", level }; }
++"#;
++
++    fn required_names(program: &Program, layout: &Layout) -> Vec<String> {
++        let is_required = |field: &&Field| field.flags.contains(FieldFlags::IS_REQUIRED);
++        let fields = layout.fields.iter().filter(is_required);
++        let texts = fields.filter_map(|field| program.property_keys.get(field.key?).text);
++        texts
++            .map(|text| String::from_utf8_lossy(program.strings.get(text)).into_owned())
++            .collect()
++    }
++
++    #[test]
++    fn a_name_that_only_native_code_stores_stays_required() {
++        let linked = link_sources_without_bun_modules(&[("main.ts", FILLED_BY_NATIVE_CODE)]);
++        let program = &linked.expect("the program links").program;
++        for (layout, names) in [
++            ("Warning", &["name", "message", "level"][..]),
++            ("Failures", &["errors", "name", "message", "level"]),
++            ("Upload", &["size", "type", "level"]),
++            ("Step", &["done", "value"]),
++            ("Match", &["index", "groups"]),
++            ("Traced", &["originalLine"]),
++        ] {
++            let layout = find_layout(program, layout);
++            let required = required_names(program, layout);
++            for &name in names {
++                assert!(required.iter().any(|it| it == name), "{name}: {required:?}");
++            }
++        }
++    }
++
++    // An object made with the layout has no place for it, and whoever looks for the name finds nothing at once.
++    #[test]
++    fn an_optional_field_that_only_native_code_stores_is_never_written() {
++        let linked = link_sources_without_bun_modules(&[("main.ts", FILLED_BY_NATIVE_CODE)]);
++        let program = &linked.expect("the program links").program;
++        let warning = find_layout(program, "Warning");
++        assert_eq!(
++            flags_of_field(program, warning, "stack"),
++            FieldFlags::IS_NEVER_WRITTEN
++        );
++    }
++
++    #[test]
++    fn a_brand_that_nothing_stores_is_not_required() {
++        let linked = link_sources_without_bun_modules(&[("main.ts", FILLED_BY_NATIVE_CODE)]);
++        let program = &linked.expect("the program links").program;
++        let branded = find_layout(program, "Branded");
++        assert_eq!(
++            flags_of_field(program, branded, "__brand"),
++            FieldFlags::IS_NEVER_WRITTEN
++        );
++        assert_eq!(required_names(program, branded), ["level"]);
++    }
+ }
 diff --git a/src/aot/linked.rs b/src/aot/linked.rs
 index f1826de4f98f3a8d67702f215430244b2b1a8039..c2e1e31293239dbb55c5615f5b06b16f1f5e9176 100644
 --- a/src/aot/linked.rs

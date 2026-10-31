@@ -317,6 +317,16 @@ rust_cases = [
     ('bun_aot', None, 'engine::used_features::tests::every_engine_cause_maps'),
     ('bun_aot', None, 'report::causes::tests::only_property_accesses_have_property_causes'),
     ('bun_aot', None, 'load::typed_packages::tests::one_rejected_file_is_compiled_from_the_installed_file'),
+    ('bun_aot', None, 'builtins::table::tests::lookup::names_stored_by_native_code'),
+    ('bun_aot', None, 'link::unused_records::tests::a_name_that_only_native_code_stores_stays_required'),
+    ('bun_aot', None, 'link::unused_records::tests::an_optional_field_that_only_native_code_stores_is_never_written'),
+    ('bun_aot', None, 'link::unused_records::tests::a_brand_that_nothing_stores_is_not_required'),
+    ('bun_aot', None, 'builtins::runtime_uses::tests::language_lists_nothing_else'),
+    ('bun_aot', None, 'builtins::runtime_uses::tests::function_of_other_platform_is_excluded'),
+    ('bun_aot', None, 'builtins::runtime_uses::tests::program_that_can_have_a_method_for_the_host_to_print_with_gets_what_unseen_code_gets'),
+    ('bun_aot', None, 'builtins::resolve::tests::symbol_lookups_retain_startup_code_only_when_the_host_can_use_them'),
+    ('bun_aot', None, 'compile::tests::only_functions_of_loaded_files_are_registered'),
+    ('bun_aot', None, 'compile::tests::startup_retention_falls_back_for_unseen_and_host_code'),
     ('bun_trim', None, 'decide::tests::dynamic_import_keeps_what_is_used_and_what_loads_files_from_disk'),
     ('bun_trim', None, 'decide::tests::dynamic_import_of_code_keeps_what_transpiles_and_interprets_a_file'),
 ]
@@ -408,6 +418,27 @@ for part, name in [('calls-of-proxies', 'strict--empty--two'), ('calls-of-proxie
     assert not re.search(r'(?:SKIPPED:|TODO:|SHARE:|NOT THROUGH:)', text), expected
     cases += junit(xml, expected)
     source_state(True)
+startup_names = [
+    'console.write',
+    'process.stdout and process.stderr',
+    'a tick that native code queues',
+    'a warning from native code',
+    'a message with buffers that only arrives',
+    'require of a file',
+    'a custom inspector in what nobody catches',
+    "a host object's own inspector, found by reflection",
+]
+xml = OUT / 'startup-builtins.xml'
+startup_env = dict(ENV, AOT_PROGRAMS_JOBS='1', AOT_SHARE='all', AOT_PROGRAMS='',
+                   AOT_BUILTIN_TABLE=str(table))
+text = run('startup-builtins', [str(binary), 'test', 'test/aot/built-in-functions-by-use.test.ts',
+           '--test-name-pattern=(?:' + '|'.join(re.escape(name) for name in startup_names) + ')$',
+           '--reporter=junit', '--reporter-outfile=' + str(xml)], 1800, env=startup_env)
+assert not re.search(r'(?:SKIPPED:|TODO:|SHARE:|NOT THROUGH:)', text), 'startup native program skipped'
+startup_cases = junit(xml, selected=set(startup_names))
+assert set(startup_cases) == set(startup_names) and len(startup_cases) == 8
+internal_cases['aot/built-in-functions-by-use.test.ts'] = startup_cases
+source_state(True)
 restore_source()
 assert identities == {name: sha(BUILD / name) for name in identities}
 result = json.loads((OUT / 'proof.json').read_text())
