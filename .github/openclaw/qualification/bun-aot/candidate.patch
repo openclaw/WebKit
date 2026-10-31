@@ -1,11 +1,12 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0..277de39f7dab51420caf7290599989aa9b91fa66 100644
+index ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0..6de2486af6b52b60fd08cb8cbb772d2f67ecf191 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,8 @@
+@@ -2,6 +2,9 @@
  
  ## Unreleased
  
++- Align AOT module loading and code admission with the JavaScriptCore module-host interface.
 +- Keep AOT flow-report text and result sections aligned with the JavaScriptCore compiler interface.
 +- Align AOT builtin, parser, module, and retention contracts with the synchronized JavaScriptCore engine.
  - Resolve literal embedded module paths against prepared AOT entry points, including TypeScript and custom output names.
@@ -11547,6 +11548,161 @@ index 1b0f9adefe7424fcc2e4e1a8436f986f01e3c87c..0c33145b5accc54b31883532861d823c
      encodePassTimes(*result);
      result->statistics = result->output->statistics.values();
      result->limitValues = result->output->limitValues;
+diff --git a/src/jsc/bindings/BunCompiledModules.cpp b/src/jsc/bindings/BunCompiledModules.cpp
+index f95186c1160315b8c8f385bf879ec9012e2cff4a..fd023d0093a1b1d051a93d659cfb665da897339b 100644
+--- a/src/jsc/bindings/BunCompiledModules.cpp
++++ b/src/jsc/bindings/BunCompiledModules.cpp
+@@ -87,10 +87,10 @@ static std::optional<AOT::ModuleID> compiledModuleOf(JSCommonJSModule* module)
+     return AOT::ModuleID(module->compiledModule);
+ }
+ 
+-static void requireInto(Zig::GlobalObject* globalObject, JSCommonJSModule* target, AOT::ModuleID module)
++static void requireInto(Zig::GlobalObject* globalObject, JSCommonJSModule* target, AOT::ModuleID module, std::optional<AOT::ModuleID> referrer = std::nullopt)
+ {
+     auto scope = DECLARE_THROW_SCOPE(getVM(globalObject));
+-    JSValue exports = AOT::requireModule(globalObject, module);
++    JSValue exports = AOT::requireModule(globalObject, module, referrer);
+     RETURN_IF_EXCEPTION(scope, void());
+     target->setExportsObject(exports);
+ }
+@@ -105,12 +105,10 @@ bool requireCompiledModule(Zig::GlobalObject* globalObject, JSCommonJSModule* ta
+     JSCommonJSModule* requirer = target->m_parent.get();
+     // `target` is the object that require() under a computed name has made to load the file into.
+     auto referrer = requirer ? compiledModuleOf(requirer) : std::nullopt;
+-    if (referrer && AOT::recordRequire(globalObject, *module, *referrer))
++    if (referrer)
+         target->compiledModule = module->index();
+-    requireInto(globalObject, target, *module);
++    requireInto(globalObject, target, *module, referrer);
+     RETURN_IF_EXCEPTION(scope, false);
+-    if (referrer)
+-        AOT::recordRequire(globalObject, *module, *referrer);
+     // A module of the executable is in no cache. The next require() of the name asks the engine again, which answers what the module exports then.
+     globalObject->requireMap()->remove(globalObject, jsString(vm, path));
+     RETURN_IF_EXCEPTION(scope, false);
+@@ -207,7 +205,7 @@ static void createModuleObject(JSGlobalObject* realm, JSString* path, AOT::Modul
+     auto scope = DECLARE_THROW_SCOPE(vm);
+     // putDirectCustomAccessor() is for a name that the object does not have yet.
+     JSValue exportsAsData = traits.contains(AOT::ModuleObjectTrait::HasExportsVariable) ? JSValue() : jsUndefined();
+-    JSCommonJSModule* module = JSCommonJSModule::create(globalObject, path, exportsAsData, true, JSValue());
++    JSCommonJSModule* module = JSCommonJSModule::create(globalObject, path, exportsAsData, !traits.contains(AOT::ModuleObjectTrait::IsESModule), JSValue());
+     RETURN_IF_EXCEPTION(scope, void());
+     module->compiledModule = compiled.index();
+     if (traits.contains(AOT::ModuleObjectTrait::IsMain))
+@@ -217,6 +215,8 @@ static void createModuleObject(JSGlobalObject* realm, JSString* path, AOT::Modul
+         module->putDirectCustomAccessor(vm, WebCore::clientData(vm)->builtinNames().exportsPublicName(), accessors, PropertyAttribute::CustomValue | 0);
+     }
+     out.module = module;
++    if (traits.contains(AOT::ModuleObjectTrait::IsNoCommonJSFile))
++        return;
+     scope.release();
+     out.require = attachRequireFunction(vm, globalObject, module, path);
+ }
+@@ -267,6 +267,18 @@ bool appendNewChildrenOfCompiledModule(JSGlobalObject* realm, JSCommonJSModule*
+     });
+ }
+ 
++static void showChildren(JSGlobalObject* realm, JSObject* module, JSObject* requiredAgain)
++{
++    auto* parent = dynamicDowncast<JSCommonJSModule>(module);
++    // A list that no code has seen is put together when it is first read.
++    if (!parent || !parent->m_childrenValue)
++        return;
++    if (requiredAgain)
++        pushObservableChild(realm, parent, requiredAgain);
++    else
++        appendNewChildrenOfCompiledModule(realm, parent);
++}
++
+ JSCommonJSModule* parentOfCompiledModule(JSCommonJSModule* module)
+ {
+     auto compiled = compiledModuleOf(module);
+@@ -392,28 +404,24 @@ const AOT::ModuleHost compiledModuleHost = {
+     &requireExtensions,
+     &createAsyncModuleRequiredError,
+     &createEmptyJSONBodyError,
++    nullptr,
++    &showChildren,
+ };
+ 
+-ASCIILiteral adviceToKeepFunctionSource()
+-{
+-    const AOT::Image* image = AOT::Image::current();
+-    return image ? image->header().options.adviceToKeepFunctionSource() : ""_s;
+-}
+-
+ JSValue createNotInExecutableError(JSGlobalObject* globalObject, ErrorCode code, const String& path, NotInExecutable what)
+ {
+     // --disallow-code-generation-from-strings=strict refuses code from the disk in an executable built without --aot too. Whoever set the flag expects its error.
+     if (what == NotInExecutable::Code && isCodeGenerationFromStringsStrictByFlags())
+         return createCodeGenerationFromStringsError(globalObject);
+-    return createError(globalObject, code, makeString("Cannot load '"_s, path, "': it isn't in this executable. Pass it to bun compile as another entry point, or mark it --external."_s, adviceToKeepFunctionSource()));
++    return createError(globalObject, code, makeString("Cannot load '"_s, path, "': it isn't in this executable. Pass it to bun compile as another entry point, or mark it --external."_s));
+ }
+ 
+ JSValue errorIfCodeOutsideImageIsRefused(JSGlobalObject* globalObject, ErrorCode code, const String& path)
+ {
+-    if (!hasCompiledModules() || !AOT::refusesCodeOutsideImage(globalObject))
++    if (!hasCompiledModules() || !AOT::refusesCodeOutsideImage(globalObject, path))
+         return {};
+     if (isCompiledModule(path))
+-        return createError(globalObject, code, makeString("Cannot load '"_s, path, "': it's compiled into this executable, and a compiled module can't be loaded a second time (for example into a Bun.ModuleGraph)."_s, adviceToKeepFunctionSource()));
++        return createError(globalObject, code, makeString("Cannot load '"_s, path, "': it's compiled into this executable, and a compiled module can't be loaded a second time (for example into a Bun.ModuleGraph)."_s));
+     return createNotInExecutableError(globalObject, code, path);
+ }
+ 
+@@ -455,7 +463,7 @@ JSValue errorIfUnseenCodeIsRefused(JSGlobalObject* globalObject, ASCIILiteral bu
+     const AOT::Image* image = AOT::Image::current();
+     if (!image || image->admitsUnknownJavaScript()) [[likely]]
+         return {};
+-    return createCodeNotCompiledError(globalObject, makeString("Cannot use "_s, builtin, ": this executable only runs code that was compiled into it."_s, adviceToKeepFunctionSource()));
++    return createCodeNotCompiledError(globalObject, makeString("Cannot use "_s, builtin, ": this executable only runs code that was compiled into it."_s));
+ }
+ 
+ bool isDebuggerAdmitted()
+@@ -493,7 +501,7 @@ String firstCompiledModuleMatching(JSGlobalObject* globalObject, RegExp* filter)
+ 
+ extern "C" bool Bun__refusesCodeOutsideExecutable(JSC::JSGlobalObject* globalObject)
+ {
+-    return Bun::hasCompiledModules() && JSC::AOT::refusesCodeOutsideImage(globalObject);
++    return Bun::hasCompiledModules() && JSC::AOT::refusesCodeOutsideImage(globalObject, {});
+ }
+ 
+ extern "C" bool Bun__isCompiledProgramFile(const BunString* path)
+@@ -540,7 +548,6 @@ bool requireCompiledModule(Zig::GlobalObject*, JSCommonJSModule*, const String&,
+ JSValue loadCompiledModuleNamespace(Zig::GlobalObject*, const String&) { return {}; }
+ bool evaluateCompiledFileForDefaultLoader(Zig::GlobalObject*, JSCommonJSModule*, const String&, bool) { return false; }
+ String firstCompiledModuleMatching(JSGlobalObject*, RegExp*) { return {}; }
+-ASCIILiteral adviceToKeepFunctionSource() { return ""_s; }
+ JSValue createNotInExecutableError(JSGlobalObject* globalObject, ErrorCode code, const String& path, NotInExecutable)
+ {
+     return createError(globalObject, code, makeString("Cannot load '"_s, path, "': it isn't in this executable."_s));
+diff --git a/src/jsc/bindings/BunCompiledModules.h b/src/jsc/bindings/BunCompiledModules.h
+index 2a5c6718e708ec71b47c765e7957fefc3a1adc65..7dfc3e979a245f895871802e9dc90e9c30023434 100644
+--- a/src/jsc/bindings/BunCompiledModules.h
++++ b/src/jsc/bindings/BunCompiledModules.h
+@@ -40,8 +40,6 @@ bool requireCompiledModule(Zig::GlobalObject*, JSCommonJSModule* target, const W
+ JSC::JSValue loadCompiledModuleNamespace(Zig::GlobalObject*, const WTF::String& path);
+ bool evaluateCompiledFileForDefaultLoader(Zig::GlobalObject*, JSCommonJSModule* target, const WTF::String& path, bool isTypeScriptLoader);
+ WTF::String firstCompiledModuleMatching(JSC::JSGlobalObject*, JSC::RegExp* filter);
+-// The end of every message about code that is not in the executable: what to do in one that was built with --no-compile-function-source, and nothing in any other.
+-ASCIILiteral adviceToKeepFunctionSource();
+ // Empty unless `path`, which names JavaScript, TypeScript, WebAssembly or a native addon that is not compiled into the executable, may not be loaded.
+ enum class NotInExecutable : bool { Code,
+     HostObject };
+diff --git a/src/jsc/bindings/InternalModuleRegistry.cpp b/src/jsc/bindings/InternalModuleRegistry.cpp
+index 417bea38c8663d51241594ff84ab8aa10a429121..175e6ecd1ea2f76a8f21ac459ef1d021c583743f 100644
+--- a/src/jsc/bindings/InternalModuleRegistry.cpp
++++ b/src/jsc/bindings/InternalModuleRegistry.cpp
+@@ -259,7 +259,7 @@ static void throwModuleNotCompiledError(JSC::JSGlobalObject* globalObject, uint3
+ {
+     auto scope = DECLARE_THROW_SCOPE(JSC::getVM(globalObject));
+     const char* name = publicModuleName(id);
+-    auto message = WTF::makeString("Cannot load '"_s, WTF::String::fromUTF8(*name ? name : "(internal)"), "': it isn't in this executable. Import it by name somewhere in your program to keep it."_s, Bun::adviceToKeepFunctionSource());
++    auto message = WTF::makeString("Cannot load '"_s, WTF::String::fromUTF8(*name ? name : "(internal)"), "': it isn't in this executable. Import it by name somewhere in your program to keep it."_s);
+     JSC::throwException(globalObject, scope, Bun::createError(globalObject, code, JSC::withAOTErrorNote(message)));
+ }
+ 
 diff --git a/src/jsc/bindings/ZigGlobalObject.cpp b/src/jsc/bindings/ZigGlobalObject.cpp
 index f8b13cf1ac2723adb6908b5095eacfa462c3b863..b7fd10726d8879ca59c0cb2da4b669e75b18ff4f 100644
 --- a/src/jsc/bindings/ZigGlobalObject.cpp
@@ -15414,6 +15570,84 @@ index 0000000000000000000000000000000000000000..5caea5c9679a4179503e02879f84005f
 +  for await (const step of slow()) sink += step;
 +}
 +await waitsInStep();
+diff --git a/test/aot/programs/commonjs/stands-place-list-children-every-returns.json b/test/aot/programs/commonjs/stands-place-list-children-every-returns.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..9f55325efe36d6e2b30ab0afb5f70860b6479e9d
+--- /dev/null
++++ b/test/aot/programs/commonjs/stands-place-list-children-every-returns.json
+@@ -0,0 +1,5 @@
++{
++  "entryPoints": [
++    "./child.cjs"
++  ]
++}
+diff --git a/test/aot/programs/commonjs/stands-place-list-children-every-returns/child.cjs b/test/aot/programs/commonjs/stands-place-list-children-every-returns/child.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c4877c2596fe4ba2947d46d12c64d9c9f0c703ab
+--- /dev/null
++++ b/test/aot/programs/commonjs/stands-place-list-children-every-returns/child.cjs
+@@ -0,0 +1 @@
++module.exports = { name: "child" };
+diff --git a/test/aot/programs/commonjs/stands-place-list-children-every-returns/main.cjs b/test/aot/programs/commonjs/stands-place-list-children-every-returns/main.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..17652973b1b433254ea3a455b4b1de98b871d87f
+--- /dev/null
++++ b/test/aot/programs/commonjs/stands-place-list-children-every-returns/main.cjs
+@@ -0,0 +1,33 @@
++// What stands in the place of the list is asked about a file at every `require` of it that returns, not only at the first. Where its `push` throws, the call throws, and the next call asks again.
++const seen = [];
++let throws = false;
++module.children = {
++  indexOf(child) {
++    seen.push("indexOf " + child.exports.name);
++    return -1;
++  },
++  push(child) {
++    seen.push("push " + child.exports.name);
++    if (throws) throw new RangeError("from push");
++  },
++};
++function load(name) {
++  try {
++    return typeof (name === "child" ? require("./child.cjs") : require("./other.cjs"));
++  } catch (error) {
++    return error.name + ": " + error.message;
++  }
++}
++for (const name of ["child", "child", "other", "child"]) seen.push(load(name));
++throws = true;
++for (const name of ["child", "other", "other"]) seen.push(load(name));
++throws = false;
++seen.push(load("child"), typeof require("./other.cjs"));
++const computed = ["./chi", "ld.cjs"].join("");
++seen.push(typeof require(computed), typeof require(computed));
++console.log(seen.join("\n"));
++module.children = [];
++require("./value.mjs");
++require("./value.mjs");
++require("./value.json");
++for (const child of module.children) console.log(child.loaded, typeof child.require, Object.hasOwn(child, "require"));
+diff --git a/test/aot/programs/commonjs/stands-place-list-children-every-returns/other.cjs b/test/aot/programs/commonjs/stands-place-list-children-every-returns/other.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d67aeca04bae0ddfa192e3e3997eb6f74dc93866
+--- /dev/null
++++ b/test/aot/programs/commonjs/stands-place-list-children-every-returns/other.cjs
+@@ -0,0 +1 @@
++module.exports = { name: "other" };
+diff --git a/test/aot/programs/commonjs/stands-place-list-children-every-returns/value.json b/test/aot/programs/commonjs/stands-place-list-children-every-returns/value.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..00dfcb7f4367d7ac2ebffee97b055be41ecfe35e
+--- /dev/null
++++ b/test/aot/programs/commonjs/stands-place-list-children-every-returns/value.json
+@@ -0,0 +1 @@
++{ "value": 42 }
+diff --git a/test/aot/programs/commonjs/stands-place-list-children-every-returns/value.mjs b/test/aot/programs/commonjs/stands-place-list-children-every-returns/value.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..46d3ca8c61fbea008e9cfcb3f10abf5d228f62be
+--- /dev/null
++++ b/test/aot/programs/commonjs/stands-place-list-children-every-returns/value.mjs
+@@ -0,0 +1 @@
++export const value = 42;
 diff --git a/test/aot/programs/data-from-outside/async-function-returns-json-parse.ts b/test/aot/programs/data-from-outside/async-function-returns-json-parse.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..07fdb3e02bec1a97f1add82d1d931205e645f7e5

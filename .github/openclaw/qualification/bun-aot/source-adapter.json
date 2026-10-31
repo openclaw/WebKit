@@ -2,13 +2,13 @@
   "bun": "fd40ba44187c721ee023062fa153a6a27560e6b1",
   "webkit": "5ec9ac8557722128588184ed9cf77347d9a30cf1",
   "prepare_only": false,
-  "patch_sha256": "35286f32f850bb0845d407604ee69d484c0252df738493a342b09dd62c73909f",
+  "patch_sha256": "43618fa03fa36f506dcb45d72405ec60a3b2619782104fea2654dc0ddb881e91",
   "files": {
     "CHANGELOG.md": {
       "before": "aa3d183726734a0c1dd7f255d783b7e7b1946e4ff88e9432623e31556c206308",
-      "after": "0ccec7ae23479479b1bd114b7d4177828f31091f816db1acb33c6e38ec5726d6",
+      "after": "71386bd0bd5cfd9b580d163c207343e4d6a6fa95f1a09e2209cc9849338b6121",
       "base_blob": "ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0",
-      "adapted_blob": "277de39f7dab51420caf7290599989aa9b91fa66",
+      "adapted_blob": "6de2486af6b52b60fd08cb8cbb772d2f67ecf191",
       "mode": "100644"
     },
     "Cargo.lock": {
@@ -1201,6 +1201,27 @@
       "adapted_blob": "0c33145b5accc54b31883532861d823ca864531d",
       "mode": "100644"
     },
+    "src/jsc/bindings/BunCompiledModules.cpp": {
+      "before": "e20002c3a2bffba1de8b2e5c3d6f71090df09a18291f3f45d28a27959319e4ca",
+      "after": "a8c16950d0e6cb42ff63d69487eff59c9306605fc17ef2b72a6792570f6cefdb",
+      "base_blob": "f95186c1160315b8c8f385bf879ec9012e2cff4a",
+      "adapted_blob": "fd023d0093a1b1d051a93d659cfb665da897339b",
+      "mode": "100644"
+    },
+    "src/jsc/bindings/BunCompiledModules.h": {
+      "before": "37f59c086cceec4ffb6badd3b38901a648c9ec8e29dbd545bc10d969c294173c",
+      "after": "1c9cf1688228dea18dac3faab2c040e394136080e10d72c672fd2f8fbb65a50d",
+      "base_blob": "2a5c6718e708ec71b47c765e7957fefc3a1adc65",
+      "adapted_blob": "7dfc3e979a245f895871802e9dc90e9c30023434",
+      "mode": "100644"
+    },
+    "src/jsc/bindings/InternalModuleRegistry.cpp": {
+      "before": "9098653fa6e15c24ab2aeb6759b2143a0cb9b461eb53a30c276f3167649bf46c",
+      "after": "b045c5d2800461b6fa049fa4eb7517209b26864a589a13487b3226291f8ef6fe",
+      "base_blob": "417bea38c8663d51241594ff84ab8aa10a429121",
+      "adapted_blob": "175e6ecd1ea2f76a8f21ac459ef1d021c583743f",
+      "mode": "100644"
+    },
     "src/jsc/bindings/ZigGlobalObject.cpp": {
       "before": "8584a3b992a9e930eb7dbda1a4ef6c8986e10e09e9bd76819fead2a9110baa57",
       "after": "55f8ce0aaa4866e131713def9bd0e16693af344a29109c4dc265c37a339ad6d5",
@@ -1836,6 +1857,48 @@
       "after": "32a0a3590e5b4e2dfb5cda99278b53344c009e087ec2e8ebce68a47b72aad854",
       "base_blob": null,
       "adapted_blob": "5caea5c9679a4179503e02879f84005f49c22714",
+      "mode": "100644"
+    },
+    "test/aot/programs/commonjs/stands-place-list-children-every-returns.json": {
+      "before": null,
+      "after": "150e8856c17c427972078e5d25d1b1a875c2c26f5ae4d2c2183bf7f9f15b3b45",
+      "base_blob": null,
+      "adapted_blob": "9f55325efe36d6e2b30ab0afb5f70860b6479e9d",
+      "mode": "100644"
+    },
+    "test/aot/programs/commonjs/stands-place-list-children-every-returns/child.cjs": {
+      "before": null,
+      "after": "1150afe5529114015b26f7c9d5e7b28da1700c47793fc1cd32543f28ceb1fbd5",
+      "base_blob": null,
+      "adapted_blob": "c4877c2596fe4ba2947d46d12c64d9c9f0c703ab",
+      "mode": "100644"
+    },
+    "test/aot/programs/commonjs/stands-place-list-children-every-returns/main.cjs": {
+      "before": null,
+      "after": "6762bb02d9e01b31bc6bbed6571234181f4dec966de624767bf06b35adc2262b",
+      "base_blob": null,
+      "adapted_blob": "17652973b1b433254ea3a455b4b1de98b871d87f",
+      "mode": "100644"
+    },
+    "test/aot/programs/commonjs/stands-place-list-children-every-returns/other.cjs": {
+      "before": null,
+      "after": "e36d7ab2b8be4e896d992183d30b4554ede758c602824ea5c4c0147f0f2e72da",
+      "base_blob": null,
+      "adapted_blob": "d67aeca04bae0ddfa192e3e3997eb6f74dc93866",
+      "mode": "100644"
+    },
+    "test/aot/programs/commonjs/stands-place-list-children-every-returns/value.json": {
+      "before": null,
+      "after": "4a421daa81852b3fc555af5110f6f445b526186b8b11b32a58fe54b7fa4f1f16",
+      "base_blob": null,
+      "adapted_blob": "00dfcb7f4367d7ac2ebffee97b055be41ecfe35e",
+      "mode": "100644"
+    },
+    "test/aot/programs/commonjs/stands-place-list-children-every-returns/value.mjs": {
+      "before": null,
+      "after": "2496df5f88b82a3a0dcd34e29ce9bdafe95fd15da04695c3cd99f74fac55e761",
+      "base_blob": null,
+      "adapted_blob": "46d3ca8c61fbea008e9cfcb3f10abf5d228f62be",
       "mode": "100644"
     },
     "test/aot/programs/data-from-outside/async-function-returns-json-parse.ts": {

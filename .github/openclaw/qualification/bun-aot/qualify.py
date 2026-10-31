@@ -407,6 +407,9 @@ for part, name in [('calls-of-proxies', 'strict--empty--two'), ('calls-of-proxie
                    ('parsed-records', 'nested-objects-and-arrays'),
                    ('builtin-modules', 'sqlite-in-memory-with-no-optional-pass'),
                    ('modules', 'names-known-at-link'),
+                   ('commonjs', 'computed-require-parent-and-children'),
+                   ('commonjs', 'stands-place-list-children-every-returns'),
+                   ('modules', 'code-outside-the-image-is-refused'),
                    ('symbol-fields', 'two-symbols-with-one-description'),
                    ('symbol-fields', 'one-place-in-the-text-makes-several-symbols')]:
     expected = part + '/' + name
