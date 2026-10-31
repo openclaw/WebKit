@@ -83,7 +83,11 @@ Condition StringEmitter::areBoth8Bit(CellPointer a, CellPointer b)
     auto flagsOf = [&](CellPointer string) {
         return Word32(m_out.load32(loadField<Pointer>(string, m_heaps.JSString_value).value(), m_heaps.StringImpl_hashAndFlags));
     };
-    return isNotZero(bitAnd(bitAnd(flagsOf(a), flagsOf(b)), word32(StringImpl::flagIs8Bit())));
+    Word32 flagsOfA = flagsOf(a);
+    Word32 flagsOfB = flagsOf(b);
+    Word32 flags = bitAnd(flagsOfA, flagsOfB);
+    Word32 is8Bit = word32(StringImpl::flagIs8Bit());
+    return isNotZero(bitAnd(flags, is8Bit));
 }
 
 Word32 StringEmitter::order(const OperationContext& context, CellPointer a, CellPointer b)

@@ -56,7 +56,8 @@ void ForInEmitter::generateForInOpen(const ValueContext& value)
     branch(isUndefinedOrNull(object, typeOf(value->objectOperand()).primitives), { unlikelyEdge(isNullish), normalEdge(isNotNullish) });
 
     m_out.appendTo(isNullish);
-    join.add(CellPointer(loadImmutablePointer(AOT_INSTANCE_OFFSET(iteration.emptyEnumerator)).value()), integer(0));
+    CellPointer emptyEnumerator(loadImmutablePointer(AOT_INSTANCE_OFFSET(iteration.emptyEnumerator)).value());
+    join.add(emptyEnumerator, integer(0));
 
     m_out.appendTo(isNotNullish);
     takeSlowPathUnless(m_out, isCell(object), slowPath);
@@ -87,7 +88,8 @@ void ForInEmitter::generateForInOpen(const ValueContext& value)
     addCurrent(CellPointer(cachedEnumeratorAndFlag.value()));
 
     m_out.appendTo(slowPath);
-    join.add(callOperation<CellPointer>(value, RuntimeOperation::GetPropertyEnumerator, { object }), integer(0));
+    CellPointer slowEnumerator = callOperation<CellPointer>(value, RuntimeOperation::GetPropertyEnumerator, { object });
+    join.add(slowEnumerator, integer(0));
 
     auto [enumerator, numberOfCurrentNames] = join.finish();
     define(value, enumerator.as<CellPointer>());

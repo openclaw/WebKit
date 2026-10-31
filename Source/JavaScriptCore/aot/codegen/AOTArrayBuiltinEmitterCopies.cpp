@@ -49,7 +49,9 @@ void ArrayBuiltinEmitter::copyElements(const ArrayStorageForm& form, const Array
     if (formOfTarget.kind != form.kind) {
         RELEASE_ASSERT(form.kind == ArrayStorage::Int32 && formOfTarget.kind == ArrayStorage::Double);
         Number number = toNumber(unboxInt32Element(rawElement.as<Boxed>()));
-        rawElement = select(elements().isHole(form, rawElement), elements().rawHole(formOfTarget).as<Number>(), number);
+        Condition isHole = elements().isHole(form, rawElement);
+        Number hole = elements().rawHole(formOfTarget).as<Number>();
+        rawElement = select(isHole, hole, number);
     }
     elements().storeRawElement(formOfTarget, target.elements, add(target.first, index), rawElement);
     m_out.addIncomingToPhi(position.value(), m_out.anchor((isBackward ? index : add(position, integer(1))).value()));

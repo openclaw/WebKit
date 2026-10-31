@@ -50,7 +50,9 @@ void ArrayIntrinsicEmitter::generateArrayStorageKind(const ValueContext& value)
     static_assert(!static_cast<int32_t>(ArrayStorage::Other) && static_cast<int32_t>(ArrayStorage::Int32) == 1 && static_cast<int32_t>(ArrayStorage::Double) == 2 && static_cast<int32_t>(ArrayStorage::Contiguous) == 3);
     Word32 shape = elements().indexingMode(in<CellPointer>(value->arrayOperand()), arrayStorageTestMask);
     Word32 number = shiftRightUnsigned(sub(shape, int32s.shape - 2), 1);
-    define(value, select(belowOrEqual(number, static_cast<int32_t>(ArrayStorage::Contiguous)), number, word32(static_cast<int32_t>(ArrayStorage::Other))));
+    Condition isKnown = belowOrEqual(number, static_cast<int32_t>(ArrayStorage::Contiguous));
+    Word32 other = word32(static_cast<int32_t>(ArrayStorage::Other));
+    define(value, select(isKnown, number, other));
 }
 
 void ArrayIntrinsicEmitter::generateGetDoubleIndex(const ValueContext& value)
@@ -126,14 +128,19 @@ void ArrayIntrinsicEmitter::generatePutOwnContiguousIndex(const ValueContext& va
     CellPointer array = in<CellPointer>(value->arrayOperand());
     ValueID stored = value->valueOperand();
     Operand rawElement = get(stored);
-    elements().storeRawElement(contiguous, elements().elementsOf(array), integerOperand(value->positionOperand()), rawElement);
+    ArrayElements storage = elements().elementsOf(array);
+    Integer index = integerOperand(value->positionOperand());
+    elements().storeRawElement(contiguous, storage, index, rawElement);
     barrierAfterStore(value, array, rawElement, typeOf(stored));
 }
 
 void ArrayIntrinsicEmitter::generatePutOwnDoubleIndex(const ValueContext& value)
 {
     CellPointer array = in<CellPointer>(value->arrayOperand());
-    elements().storeRawElement(doubles, elements().elementsOf(array), integerOperand(value->positionOperand()), get(value->valueOperand()));
+    ArrayElements storage = elements().elementsOf(array);
+    Integer index = integerOperand(value->positionOperand());
+    Operand rawElement = get(value->valueOperand());
+    elements().storeRawElement(doubles, storage, index, rawElement);
 }
 
 void ArrayIntrinsicEmitter::putInBounds(const ValueContext& value, const ArrayStorageForm& form)
@@ -383,7 +390,9 @@ void ArrayIntrinsicEmitter::generateTryCopyFilledElements(const ValueContext& va
             Number number = elements().loadRawElement(doubles, from, position).as<Number>();
             // In this storage NaN means a hole.
             branchUnless(equal(number, number), otherwise);
-            m_out.store64(elements().boxRawElement(doubles, number).value(), elements().elementOfUnknownForm(to, position));
+            Boxed word = elements().boxRawElement(doubles, number);
+            auto target = elements().elementOfUnknownForm(to, position);
+            m_out.store64(word.value(), target);
         });
         m_out.jump(copied);
     }
@@ -393,7 +402,9 @@ void ArrayIntrinsicEmitter::generateTryCopyFilledElements(const ValueContext& va
     join.add(boolean(true));
 
     m_out.appendTo(otherwise);
-    elements().setPublicLength(elements().elementsOf(array), integer(0));
+    ArrayElements to = elements().elementsOf(array);
+    Integer zero = integer(0);
+    elements().setPublicLength(to, zero);
     join.add(boolean(false));
     define(value, join.finish());
 }
@@ -418,7 +429,9 @@ void ArrayIntrinsicEmitter::generateTryPutElements(const ValueContext& value)
         ArrayElements to = elements().elementsOf(array);
         branchUnless(belowOrEqual(count, elements().publicLength(to)), otherwise);
         forEachPositionBelow(count, [&](Integer position) {
-            m_out.store64(m_out.load64(elements().elementOfUnknownForm(from, position)), elements().elementOfUnknownForm(to, position));
+            auto word = m_out.load64(elements().elementOfUnknownForm(from, position));
+            auto target = elements().elementOfUnknownForm(to, position);
+            m_out.store64(word, target);
         });
         ensureStillAliveHere(source);
         emitter<BarrierEmitter>().barrier(value, array);
@@ -433,7 +446,10 @@ void ArrayIntrinsicEmitter::generateTryPutElements(const ValueContext& value)
         branchUnless(belowOrEqual(count, elements().publicLength(to)), otherwise);
         forEachPositionBelow(count, [&](Integer position) {
             Boxed word(m_out.load64(elements().elementOfUnknownForm(from, position)));
-            Number number = select(isInt32(word), toNumber(unboxInt32(word)), unboxDouble(word));
+            Condition isInteger = isInt32(word);
+            Number integerValue = toNumber(unboxInt32(word));
+            Number doubleValue = unboxDouble(word);
+            Number number = select(isInteger, integerValue, doubleValue);
             elements().storeRawElement(doubles, to, position, number);
         });
         ensureStillAliveHere(source);

@@ -107,8 +107,10 @@ void HintEmitter::generateReleaseHint(const ValueContext& value)
     if (entryConventionOf(m_function) == EntryConvention::Direct) {
         if (std::optional<uint32_t> parameter = entryParameterIndexOf(m_function, value->valueOperand())) {
             ArgumentLocation location = inputs().conventions.locationsOf(m_program, m_id).parameters[*parameter];
-            if (location.kind == ArgumentLocation::Kind::Stack)
-                m_out.store64(m_out.constInt64(0), m_out.address(m_heaps.argumentBuffer, m_out.framePointer(), offsetOfStackWordFromFrame(location.stackIndex)));
+            if (location.kind == ArgumentLocation::Kind::Stack) {
+                LValue zero = m_out.constInt64(0);
+                m_out.store64(zero, m_out.address(m_heaps.argumentBuffer, m_out.framePointer(), offsetOfStackWordFromFrame(location.stackIndex)));
+            }
         }
     }
     B3::PatchpointValue* patchpoint = m_out.patchpoint(B3::Void);
