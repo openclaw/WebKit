@@ -6,6 +6,7 @@ on:
       - .github/openclaw/qualification/node-session/**
   workflow_dispatch:
 permissions:
+  actions: read
   contents: read
 concurrency:
   group: openclaw-node-session-${{ github.ref }}
@@ -34,11 +35,21 @@ jobs:
           ref: d44625a4b80c672215b469906ce583ce7eeeebaf
           path: node-source
           persist-credentials: false
-      - name: Prove the constructor fix on real Node builds
+      - name: Fetch the frozen successful baseline-build evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/openclaw/WebKit/actions/runs/41183895846 --jq '.head_sha')" = e1fd554b61300f5853c9ce6f9629a6205de8ec0e
+          test "$(gh api repos/openclaw/WebKit/actions/artifacts/13039247663 --jq '.workflow_run.id')" = 41183895846
+          gh api repos/openclaw/WebKit/actions/artifacts/13039247663/zip > "$RUNNER_TEMP/node-baseline.zip"
+      - name: Prove the constructor fix on a fresh patched Node build
         shell: bash
         run: >-
           python3 carrier/.github/openclaw/qualification/node-session/qualify.py
           "$GITHUB_WORKSPACE/node-source" "$RUNNER_TEMP/node-session-proof"
+          "$RUNNER_TEMP/node-baseline.zip"
       - name: Pack bounded evidence after either outcome
         if: always()
         shell: bash

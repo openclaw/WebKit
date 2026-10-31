@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import zipfile
 
 # This path also runs after build/test failures; only its bounded final archive is uploaded.
 if len(sys.argv) == 4 and sys.argv[1] == '--pack':
@@ -40,13 +41,15 @@ if len(sys.argv) == 4 and sys.argv[1] == '--pack':
 
 PIN = 'd44625a4b80c672215b469906ce583ce7eeeebaf'
 WRAP = 'lib/internal/tls/wrap.js'
-BASE_BLOB = '82f343de726023a1ed85c98340235c372b3d1089'
+BASE_BLOBS = {WRAP: '82f343de726023a1ed85c98340235c372b3d1089',
+              'src/crypto/crypto_common.cc': '759353f08f035f3a805f01cecfad3e2aee6d21f7'}
 INPUTS = Path(__file__).resolve().parent
 SOURCE = Path(sys.argv[1]).resolve()
 OUTPUT = Path(sys.argv[2]).resolve()
+BASELINE = Path(sys.argv[3]).resolve()
 OUTPUT.mkdir(parents=True, exist_ok=False)
 GIB = 1024 ** 3
-BUILD_TIMEOUTS = {'base': 10800, 'patched': 1800}
+BUILD_TIMEOUTS = {'patched': 10800}
 memory = int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines()
                   if line.startswith('MemTotal:'))) * 1024
 cgroup_limit = Path('/sys/fs/cgroup/memory.max')
@@ -114,11 +117,15 @@ def probe(executable, arm):
         result = subprocess.run([str(executable), '--expose-internals', 'test/parallel/test-tls-session-constructor.js'],
                                 cwd=SOURCE, env=env, stdout=stream,
                                 stderr=subprocess.STDOUT, timeout=120)
+    return check_probe(arm, result.returncode)
+
+
+def check_probe(arm, exit_code):
     lines = (OUTPUT / (arm + '-test.log')).read_text().splitlines()
     rows = [json.loads(line.removeprefix('SESSION_CASE ')) for line in lines
             if line.startswith('SESSION_CASE ')]
     if arm == 'base':
-        if not (result.returncode == 1 and len(rows) == 1
+        if not (exit_code == 1 and len(rows) == 1
                 and rows[0] == {'label': 'TLSv1.2/buffer/connected/explicit SNI',
                                 'version': 'TLSv1.2', 'connected': True,
                                 'expectedReuse': True, 'reused': False}):
@@ -128,21 +135,66 @@ def probe(executable, arm):
                      if line.startswith('SESSION_RESULT ')]
         fallback = [line for line in lines if line.startswith('SESSION_FALLBACK ')]
         keys = {(row['label'], row['version'], row['connected']) for row in rows}
-        if not (result.returncode == 0 and len(rows) == len(keys) == 80
+        if not (exit_code == 0 and len(rows) == len(keys) == 80
                 and all(row['reused'] is row['expectedReuse'] for row in rows)
                 and summaries == [{'passed': True, 'cases': 82}]
                 and set(fallback) == {'SESSION_FALLBACK TLSv1.2', 'SESSION_FALLBACK TLSv1.3'}
                 and len(fallback) == 2):
             raise ValueError('patched Node constructor/identity/handle-swap matrix incomplete')
-    return {'exit_code': result.returncode, 'reported_cases': len(rows)}
+    return {'exit_code': exit_code, 'reported_cases': len(rows)}
 
 
 if git('rev-parse', 'HEAD') != PIN or git('status', '--porcelain'):
     raise ValueError('Node source checkout is not the pristine frozen revision')
-if git('rev-parse', 'HEAD:' + WRAP) != BASE_BLOB:
+if any(git('rev-parse', 'HEAD:' + name) != blob for name, blob in BASE_BLOBS.items()):
     raise ValueError('Node TLS source blob drift')
 patch = INPUTS / 'constructor-session.patch'
 fixture = INPUTS / 'test-tls-session-constructor.js'
+# Reuse the already observed red baseline; its native build and fixture inputs are frozen.
+if digest(BASELINE) != 'e7b9f513cfc578c97a1462d9762187a3968f0c17e7aff20ec6ed8d83f16ddcf2':
+    raise ValueError('baseline ZIP digest mismatch')
+with zipfile.ZipFile(BASELINE) as archive:
+    if archive.namelist() != ['node-session-proof.tar.gz']:
+        raise ValueError('unexpected baseline ZIP entries')
+    info = archive.getinfo('node-session-proof.tar.gz')
+    if info.file_size > 32 * 1024**2:
+        raise ValueError('baseline archive exceeds size budget')
+    data = archive.read(info)
+if hashlib.sha256(data).hexdigest() != 'bd4aded401d008b538e669af6b1403ef8e50c5dbc58566f11810f0da847c000f':
+    raise ValueError('baseline TAR digest mismatch')
+with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as archive:
+    entries = archive.getmembers()
+    expected = {'archive-manifest.json', 'inputs.json', 'tools.log', 'configure.log',
+                'base-build.log', 'base-identity.json', 'base-test.log',
+                'patched-build.log', 'patched-identity.json', 'patched-test.log'}
+    if (len(entries) != len(expected) or {entry.name for entry in entries} != expected
+            or any(not entry.isfile() for entry in entries)
+            or sum(entry.size for entry in entries) > 256 * 1024**2):
+        raise ValueError('unexpected baseline TAR inventory')
+    contents = {entry.name: archive.extractfile(entry).read() for entry in entries}
+manifest = json.loads(contents.pop('archive-manifest.json'))
+if set(manifest) != set(contents):
+    raise ValueError('baseline manifest inventory mismatch')
+for name, content in contents.items():
+    if (len(content) != manifest[name]['size']
+            or hashlib.sha256(content).hexdigest() != manifest[name]['sha256']):
+        raise ValueError('baseline manifest mismatch: ' + name)
+prior_inputs = json.loads(contents['inputs.json'])
+base_identity = json.loads(contents['base-identity.json'])
+if (prior_inputs['source'] != PIN or prior_inputs['fixture_sha256'] != digest(fixture)
+        or base_identity['source'] != PIN
+        or base_identity['builtin_sha256'] != digest(SOURCE / WRAP)
+        or '\tExit status: 0' not in contents['base-build.log'].decode()):
+    raise ValueError('baseline source, embedded wrapper, fixture or successful build mismatch')
+for name in ('base-build.log', 'base-identity.json', 'base-test.log'):
+    (OUTPUT / name).write_bytes(contents[name])
+base_result = check_probe('base', 1)
+write('baseline-provenance.json', {
+    'kind': 'prior-run-baseline', 'run': 41183895846, 'artifact': 13039247663,
+    'producer': 'e1fd554b61300f5853c9ce6f9629a6205de8ec0e',
+    'zip_sha256': digest(BASELINE), 'tar_sha256': hashlib.sha256(data).hexdigest(),
+    'inputs': prior_inputs, 'files': {name: manifest[name] for name in
+        ('base-build.log', 'base-identity.json', 'base-test.log')}})
 destination = SOURCE / 'test/parallel' / fixture.name
 if destination.exists():
     raise ValueError('refusing to replace an existing Node test')
@@ -157,17 +209,13 @@ with (OUTPUT / 'tools.log').open('x') as stream:
     for argv in (['gcc', '--version'], ['g++', '--version'], ['python3', '--version'],
                  ['make', '--version'], ['rustc', '--version']):
         command(argv, stdout=stream, stderr=subprocess.STDOUT)
-with (OUTPUT / 'configure.log').open('x') as stream:
-    command(['./configure', '--without-npm'], stdout=stream, stderr=subprocess.STDOUT)
-base, base_identity = build('base')
-base_result = probe(base, 'base')
-if git('diff', '--name-only'):
-    raise ValueError('base probe changed tracked Node source')
 command(['git', 'apply', '--check', str(patch)])
 command(['git', 'apply', str(patch)])
-if git('diff', '--name-only') != WRAP:
+if git('diff', '--name-only').splitlines() != sorted(BASE_BLOBS):
     raise ValueError('Node patch changed an unexpected tracked source')
-patched_source_sha256 = digest(SOURCE / WRAP)
+patched_source_sha256 = {name: digest(SOURCE / name) for name in BASE_BLOBS}
+with (OUTPUT / 'configure.log').open('x') as stream:
+    command(['./configure', '--without-npm'], stdout=stream, stderr=subprocess.STDOUT)
 patched, patched_identity = build('patched')
 if patched_identity['executable_sha256'] == base_identity['executable_sha256']:
     raise ValueError('patched Node executable did not change')
@@ -180,15 +228,20 @@ with (OUTPUT / 'siblings.log').open('x') as stream:
              'parallel/test-tls-session-reuse-different-servername',
              'parallel/test-tls-session-reuse-provided-socket',
              'parallel/test-tls-secure-session',
-             'parallel/test-tls-session-constructor'],
+             'parallel/test-tls-session-constructor',
+             'parallel/test-tls-peer-certificate-repeated-reads'],
             stdout=stream, stderr=subprocess.STDOUT, timeout=600)
 if digest(destination) != digest(fixture):
     raise ValueError('Node test fixture changed during qualification')
-if git('diff', '--name-only') != WRAP or digest(SOURCE / WRAP) != patched_source_sha256:
+if (git('diff', '--name-only').splitlines() != sorted(BASE_BLOBS)
+        or {name: digest(SOURCE / name) for name in BASE_BLOBS} != patched_source_sha256):
     raise ValueError('Node source changed during qualification')
 write('gate.json', {'passed': True, 'source': PIN, 'base': base_result,
-                    'patched': patched_result, 'sibling_files': 4,
+                    'patched': patched_result, 'sibling_files': 5,
+                    'patched_sources': patched_source_sha256,
+                    'baseline_kind': 'prior-run-baseline',
+                    'baseline_provenance_sha256': digest(OUTPUT / 'baseline-provenance.json'),
                     'inputs_sha256': digest(OUTPUT / 'inputs.json'),
                     'base_identity_sha256': digest(OUTPUT / 'base-identity.json'),
                     'patched_identity_sha256': digest(OUTPUT / 'patched-identity.json')})
-print('native constructor-session red/green and sibling proof passed')
+print('native constructor-session prior baseline/fresh patched and sibling proof passed')
