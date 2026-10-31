@@ -1,7 +1,7 @@
 {
   "bun": "fd40ba44187c721ee023062fa153a6a27560e6b1",
   "webkit": "5ec9ac8557722128588184ed9cf77347d9a30cf1",
-  "patch_sha256": "70cc9ae5b45fd29cdd9b12c3ba81674aaccd92849708d7abdd2487765f44c287",
+  "patch_sha256": "31dd4e27e8dc7a6868284eea45b6d77a44e8fa2ac792440655bde90b7d67c2a9",
   "files": {
     "scripts/build/aot-source-lists.ts": {
       "before": "881654b517a593c56bf65ca3f84a238a8825b43c9ad92b1bd3587cb78a579ffa",
@@ -17,11 +17,18 @@
       "adapted_blob": "16d3e7736a43c90fedb249c95cf8ead3fad09ae6",
       "mode": "100644"
     },
+    "scripts/build/bun.ts": {
+      "before": "c62e14bcff8fd64619df3be99177ac88f0a0c489e758952aeab09745ffcdfc07",
+      "after": "2280ad754a0846a50e6fefc80f495f7685301b68c59b1ad8f3016a22edce2f37",
+      "base_blob": "747ed9ef4c8d3a2dd9d784c099a91da4b4477df6",
+      "adapted_blob": "d741a7b0e74bc68f106d9888471b7d3f6fb9426f",
+      "mode": "100644"
+    },
     "scripts/build/deps/webkit.ts": {
       "before": "12933600404cf33f4d23a59f6336dec2546ad95eecca6d036165b2a1b52b7c33",
-      "after": "851e23605aceb4595eee24c99c776510d141adf3bc5cf507ce5d376f5c90b415",
+      "after": "1f416f1a947cd473bc4a3a9e88588b6da6d79453b90ed510cf4fbb59b8deccfa",
       "base_blob": "4fc1df1f0bf8bbb865505a995fcd7c32e8646223",
-      "adapted_blob": "8b196120beecd8724adc10f63a15e1cdaf7e5375",
+      "adapted_blob": "cac003a7a9c9f85dbf768277fcdd17f2c5604a9f",
       "mode": "100644"
     },
     "scripts/build/ninja.ts": {

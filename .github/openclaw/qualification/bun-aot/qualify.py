@@ -5,8 +5,10 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
+import tarfile
 import time
 from xml.etree import ElementTree
 
@@ -104,11 +106,65 @@ def junit(path, expected=None, selected=None):
     return names
 
 
+def target_icu():
+    # Provisioner ICU70 serves LLVM, not this isolated target's ICU79.1 development inputs.
+    directory = Path('/work/aot-icu')
+    directory.mkdir()
+    archive = directory / 'icu.tar.gz'
+    upstream = 'e66916298091dd12469076fd854e135b03fb16ff'
+    digest = '6646a34d74a096453fd9b33f797db6d1c24f49f0e978277046f8380379e0b815'
+    url = 'https://github.com/oven-sh/WebKit/releases/download/autobuild-' + upstream + '/bun-webkit-linux-arm64.tar.gz'
+    run('icu-download', ['curl', '--fail', '--location', '--retry', '3', '--max-time', '600',
+                         '--output', str(archive), url], 660)
+    assert archive.stat().st_size == 254968780 and sha(archive) == digest
+    prefix = directory / 'root'
+    libraries = {'lib/libicui18n.a', 'lib/libicuuc.a', 'lib/libicudata.a'}
+    files = {}
+    total = 0
+    with tarfile.open(archive, 'r:gz') as stream:
+        for member in stream:
+            name = Path(member.name)
+            assert not name.is_absolute() and '..' not in name.parts
+            if not member.name.startswith('bun-webkit/'):
+                continue
+            relative = member.name.removeprefix('bun-webkit/')
+            if relative not in libraries and not relative.startswith('include/unicode/'):
+                continue
+            if member.isdir():
+                continue
+            assert member.isfile() and relative not in files and len(files) < 512
+            total += member.size
+            assert total <= 512 * 1024**2
+            path = prefix / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with stream.extractfile(member) as source, path.open('xb') as output:
+                shutil.copyfileobj(source, output)
+            files[relative] = {'bytes': path.stat().st_size, 'sha256': sha(path)}
+    assert libraries <= files.keys() and 'include/unicode/utypes.h' in files
+    version = (prefix / 'include/unicode/uvernum.h').read_text()
+    assert re.search(r'^#define U_ICU_VERSION_MAJOR_NUM\s+79\s*$', version, re.M)
+    assert re.search(r'^#define U_ICU_VERSION_MINOR_NUM\s+1\s*$', version, re.M)
+    for relative in sorted(libraries):
+        path = str(prefix / relative)
+        members = subprocess.check_output(['llvm-ar', 't', path], timeout=60, text=True).splitlines()
+        headers = run('icu-elf-' + Path(relative).stem, ['llvm-readelf', '--file-header', path], 60)
+        machines = re.findall(r'^\s*Machine:\s*(\S+)\s*$', headers, re.M)
+        assert members and len(machines) == len(members) and set(machines) == {'AArch64'}
+    symbols = run('icu-data-symbols', ['llvm-nm', '--defined-only', str(prefix / 'lib/libicudata.a')], 60)
+    for symbol in ('icudt79_dat', 'bun_icu_zstd_dict', 'bun_icu_zstd_dict_size'):
+        assert re.search(r'\b[BDR]\s+' + symbol + r'\s*$', symbols, re.M), symbol
+    receipt = {'upstream': upstream, 'asset_id': 693843702, 'archive_bytes': archive.stat().st_size,
+               'archive_sha256': digest, 'version': '79.1', 'files': files}
+    (OUT / 'icu.json').write_text(json.dumps(receipt, indent=2) + '\n')
+    ENV['BUN_ICU_ROOT'] = str(prefix)
+    return receipt
+
+
 OUT.mkdir(exist_ok=True)
 assert git(Path('/work/pipeline'), 'rev-parse', 'HEAD') == PIPELINE
 spec = json.loads((INPUTS / 'source-adapter.json').read_text())
 assert spec['bun'] == BUN and spec['webkit'] == WEBKIT
-assert len(spec['files']) == 20
+assert len(spec['files']) == 21
 assert sha(INPUTS / 'candidate.patch') == spec['patch_sha256']
 original_tree = git(SOURCE, 'rev-parse', 'HEAD^{tree}')
 source_state(False)
@@ -125,6 +181,7 @@ source_state(False)
 run('apply-adapter', ['git', 'apply', '--check', str(INPUTS / 'candidate.patch')], 120)
 run('apply-adapter-write', ['git', 'apply', str(INPUTS / 'candidate.patch')], 120)
 source_state(True)
+icu = target_icu()
 build_command = ['bun', 'scripts/build.ts', '--profile=release-local', '--webkit=local',
                  '--webkit-version=' + WEBKIT, '--aot=on', '--ci=on', '--buildkite=off',
                  '--os=linux', '--arch=aarch64', '--abi=gnu', '--build-dir=build/aot-linux-arm64', '-j2']
@@ -139,6 +196,9 @@ table = BUILD / 'codegen/aot_builtin_table.json'
 assert all(p.is_file() and os.access(p, os.X_OK) for p in (binary, BUILD / 'jsc', BUILD / 'testaot'))
 assert table.stat().st_size > 0
 identities = {name: sha(BUILD / name) for name in ['bun', 'jsc', 'testaot', 'codegen/aot_builtin_table.json', 'build.ninja']}
+smoke = "if(new Intl.DisplayNames(['fr'],{type:'region'}).of('DE')!=='Allemagne')throw Error('ICU compressed region data');(typeof print==='function'?print:console.log)('ICU79.1 French region data passed')"
+for name in ['bun', 'jsc']:
+    assert run('icu-smoke-' + name, [str(BUILD / name), '-e', smoke], 60).strip() == 'ICU79.1 French region data passed'
 internal_cases = {}
 for name, file in [('build-contracts', 'build-aot-codegen-declared-outputs.test.ts'),
                    ('local-webkit-contracts', 'build-local-webkit.test.ts')]:
@@ -187,5 +247,5 @@ for part, name in [('calls-of-proxies', 'strict--empty--two'), ('calls-of-proxie
 assert identities == {name: sha(BUILD / name) for name in identities}
 result = json.loads((OUT / 'proof.json').read_text())
 result.update(passed=True, binary_sha256=identities, program_cases=cases, build_contract_cases=internal_cases,
-              patch_sha256=spec['patch_sha256'], source_tree=original_tree)
+              patch_sha256=spec['patch_sha256'], source_tree=original_tree, icu=icu)
 (OUT / 'proof.json').write_text(json.dumps(result, indent=2) + '\n')
