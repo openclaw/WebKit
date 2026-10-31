@@ -103,7 +103,7 @@ OUT.mkdir(exist_ok=True)
 assert git(Path('/work/pipeline'), 'rev-parse', 'HEAD') == PIPELINE
 spec = json.loads((INPUTS / 'source-adapter.json').read_text())
 assert spec['bun'] == BUN and spec['webkit'] == WEBKIT
-assert len(spec['files']) == 8
+assert len(spec['files']) == 15
 assert sha(INPUTS / 'candidate.patch') == spec['patch_sha256']
 original_tree = git(SOURCE, 'rev-parse', 'HEAD^{tree}')
 source_state(False)
@@ -125,6 +125,8 @@ build_command = ['bun', 'scripts/build.ts', '--profile=release-local', '--webkit
                  '--os=linux', '--arch=aarch64', '--abi=gnu', '--build-dir=build/aot-linux-arm64', '-j2']
 run('configure', [*build_command, '--configure-only'], 600)
 source_state(True)
+run('generate-builtin-table', [*build_command, '--target=codegen/aot_builtin_table.json'], 600)
+source_state(True)
 run('build', build_command, 14400)
 source_state(True)
 binary = BUILD / 'bun'
@@ -140,6 +142,17 @@ for name, file in [('build-contracts', 'build-aot-codegen-declared-outputs.test.
                '--reporter=junit', '--reporter-outfile=' + str(xml)], 600)
     internal_cases[file] = junit(xml)
     assert len(internal_cases[file]) >= 10
+xml = OUT / 'callback-contracts.xml'
+run('callback-contracts', [str(binary), 'test', 'test/internal/builtins-table/places-of-callbacks.test.ts',
+                           '--reporter=junit', '--reporter-outfile=' + str(xml)], 600)
+callback_cases = junit(xml)
+assert set(callback_cases) == {
+    'what a constructed callback sees as new.target is written as a place',
+    'a bare name is no place',
+    'a called function is told its `this` and its arguments',
+    'a called function says what native code does afterwards',
+} and len(callback_cases) == 4
+internal_cases['builtins-table/places-of-callbacks.test.ts'] = callback_cases
 source_state(True)
 run('restore-source', ['git', 'restore', '--source=' + BUN, '--worktree', '--', *spec['files']], 120)
 source_state(False)

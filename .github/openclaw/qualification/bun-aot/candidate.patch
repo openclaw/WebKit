@@ -425,6 +425,395 @@ index c017df06e1d7cc94bec31b03292fde4820b8dab6..952c8081f92e4f033ca592f8931b57b9
    codegen: "codegen",
    codegen_bun: "codegen",
    esbuild: "codegen",
+diff --git a/src/codegen/builtins/host/compiler-helpers.builtins.ts b/src/codegen/builtins/host/compiler-helpers.builtins.ts
+index da639ebf279ac88cc5146b5eb5dcf0a5988c3c44..fe9a0703bd1979a7e886ef3c5b012c557e434800 100644
+--- a/src/codegen/builtins/host/compiler-helpers.builtins.ts
++++ b/src/codegen/builtins/host/compiler-helpers.builtins.ts
+@@ -29,7 +29,9 @@ const newArrayOf = (elements: b.TableType) => b.instance("Array").holding({ elem
+ const lengthOfNewArray = [b.runs("ToPrimitive")];
+ const calledForEachIndex = (element: b.PlaceLike, ...others: readonly b.PlaceLike[]) => [
+   b.called({
++    afterwards: "TouchesOnlyWhatRowNames",
+     times: "Repeatedly",
++    this: b.undefined,
+     args: [element, b.length, ...others],
+     result: "Stored",
+     resultTo: b.resultSlot("element"),
+@@ -306,7 +308,17 @@ export default b.declarations(
+       decorateProperty: { decorators: calledOrChanged, target: calledOrChanged, key: usedAsKey },
+       decorateParameter: {
+         index: kept,
+-        decorator: [b.retained, b.called({ times: "Later", spreadArgs: b.any, result: "Escapes" })],
++        decorator: [
++          b.retained,
++          b.called({
++            afterwards: "TouchesOnlyWhatRowNames",
++            times: "Later",
++            this: b.undefined,
++            args: [],
++            spreadArgs: b.any,
++            result: "Escapes",
++          }),
++        ],
+       },
+       defineMetadata: { key: kept, value: kept },
+       createDecoratorMetadata: { base: calledOrChanged },
+diff --git a/src/codegen/builtins/host/globals.builtins.ts b/src/codegen/builtins/host/globals.builtins.ts
+index 7a2b3e4b1f541f9686af823fb7006baf2c1b564d..f9d9e223c51da321f02dc3b8b59c6dcfaf91e741 100644
+--- a/src/codegen/builtins/host/globals.builtins.ts
++++ b/src/codegen/builtins/host/globals.builtins.ts
+@@ -31,7 +31,14 @@ const widestString = 2 ** 32;
+ const scheduled = (times: b.CallbackTimes) => ({
+   callback: [
+     b.storedIn(b.nativeCell(timerCallbackCell)),
+-    b.called({ times, this: b.result, spreadArgs: b.operand("passed"), result: "Ignored" }),
++    b.called({
++      afterwards: "TouchesOnlyWhatRowNames",
++      times,
++      this: b.result,
++      args: [],
++      spreadArgs: b.operand("passed"),
++      result: "Ignored",
++    }),
+   ],
+   passed: [b.storedIn(b.nativeCell(timerArgumentsCell))],
+ });
+@@ -153,7 +160,13 @@ const listenerRegistration = (eventTarget: b.TableType) =>
+       listener: [
+         b.retained,
+         // dispatchEvent hands the listener the event that it was handed.
+-        b.called({ times: "PerEvent", this: eventTarget, args: [b.object], result: "Escapes" }),
++        b.called({
++          afterwards: "TouchesOnlyWhatRowNames",
++          times: "PerEvent",
++          this: eventTarget,
++          args: [b.object],
++          result: "Escapes",
++        }),
+         b.runs(b.calls("handleEvent")),
+       ],
+       options: [b.runs(b.named("capture", "once", "passive", "signal")), b.contentsStoredIn(b.nativeMemory)],
+@@ -186,7 +199,17 @@ const eventHandlerAttribute = (eventTarget: b.TableType) =>
+       capability: "heap",
+       uses: {
+         this: [b.retained],
+-        value: [b.retained, b.called({ times: "PerEvent", this: eventTarget, spreadArgs: b.any, result: "Escapes" })],
++        value: [
++          b.retained,
++          b.called({
++            afterwards: "TouchesOnlyWhatRowNames",
++            times: "PerEvent",
++            this: eventTarget,
++            args: [],
++            spreadArgs: b.any,
++            result: "Escapes",
++          }),
++        ],
+       },
+       writes: externalState,
+       implementation: b.generic,
+@@ -624,7 +647,7 @@ const webSocketHandlersCalledByMethods = ["open", "close", "error"];
+ 
+ const webSocketHandlersUnder = (options: string) =>
+   Object.entries(webSocketHandlerArguments).flatMap(([handler, args]) => [
+-    b.memberCalled([options, handler], { times: "PerEvent", args, result: "Ignored" }),
++    b.memberCalled([options, handler], { times: "PerEvent", this: b.undefined, args, result: "Ignored" }),
+     ...(webSocketHandlersCalledByMethods.includes(handler)
+       ? [b.memberStoredIn([options, handler], b.nativeCell(webSocketHandlerCell(handler)))]
+       : []),
+@@ -649,7 +672,12 @@ const serverOptions = (server: b.PlaceLike) => {
+     b.createdIn(b.instance("ServerWebSocket").fresh, webSocket),
+     b.memberCalled(["fetch"], calledWith(b.instance("Request").fresh)),
+     b.memberStoredIn(["fetch"], b.nativeCell(requestHandlerCell)),
+-    b.memberCalled(["onNodeHTTPRequest"], { times: "PerEvent", args: nodeRequestHandlerArguments, result: "Escapes" }),
++    b.memberCalled(["onNodeHTTPRequest"], {
++      times: "PerEvent",
++      this: b.undefined,
++      args: nodeRequestHandlerArguments,
++      result: "Escapes",
++    }),
+     // `this` is undefined once the server object has been collected.
+     b.memberCalled(["error"], { times: "PerEvent", this: b.any, args: [b.any], result: "Escapes" }),
+     ...routeHandlersUnder("routes", routed),
+@@ -835,6 +863,7 @@ const closesConnections = [
+   ...serverState,
+   b.keptCalled(webSocketHandlerCell("close"), {
+     times: "Repeatedly",
++    this: b.undefined,
+     args: webSocketHandlerArguments.close,
+     result: "Ignored",
+   }),
+@@ -864,8 +893,18 @@ const serverMembers = {
+     uses: {
+       this: [
+         ...serverState,
+-        b.keptCalled(webSocketHandlerCell("open"), { times: "Once", args: [webSocket], result: "Ignored" }),
+-        b.keptCalled(webSocketHandlerCell("error"), { times: "Once", args: [b.any, webSocket], result: "Ignored" }),
++        b.keptCalled(webSocketHandlerCell("open"), {
++          times: "Once",
++          this: b.undefined,
++          args: [webSocket],
++          result: "Ignored",
++        }),
++        b.keptCalled(webSocketHandlerCell("error"), {
++          times: "Once",
++          this: b.undefined,
++          args: [b.any, webSocket],
++          result: "Ignored",
++        }),
+       ],
+       request: [b.readsContents(), b.writesContents()],
+       options: [
+@@ -1011,7 +1050,15 @@ const cron: b.FunctionField[] = [
+     returns: b.instance("CronJob").fresh,
+     throws: true,
+     uses: {
+-      handler: [b.called({ times: "PerEvent", this: b.result, result: "Escapes" })],
++      handler: [
++        b.called({
++          afterwards: "TouchesOnlyWhatRowNames",
++          times: "PerEvent",
++          this: b.result,
++          args: [],
++          result: "Escapes",
++        }),
++      ],
+       options: membersInspected("tz"),
+     },
+     reads: externalState,
+@@ -1505,7 +1552,13 @@ export default b.declarations(
+         uses: {
+           value: [
+             b.retained,
+-            b.called({ times: "Later", this: b.builtin("Error"), args: [b.any, b.any], result: "Escapes" }),
++            b.called({
++              afterwards: "TouchesOnlyWhatRowNames",
++              times: "Later",
++              this: b.builtin("Error"),
++              args: [b.any, b.any],
++              result: "Escapes",
++            }),
+           ],
+         },
+         implementation: b.generic,
+@@ -1636,8 +1689,10 @@ export default b.declarations(
+         value: [
+           b.storedIn(b.nativeCell(timerCallbackCell)),
+           b.called({
++            afterwards: "TouchesOnlyWhatRowNames",
+             times: "PerEvent",
+             this: b.operand("this"),
++            args: [],
+             spreadArgs: b.nativeCell(timerArgumentsCell),
+             result: "Ignored",
+           }),
+@@ -1678,7 +1733,17 @@ export default b.declarations(
+   b.fn("queueMicrotask", {
+     args: { callback: b.callable },
+     capability: "heap",
+-    uses: { callback: [b.called({ times: "Later", result: "Ignored" })] },
++    uses: {
++      callback: [
++        b.called({
++          afterwards: "TouchesOnlyWhatRowNames",
++          times: "Later",
++          this: b.undefined,
++          args: [],
++          result: "Ignored",
++        }),
++      ],
++    },
+     reads: externalState,
+     writes: externalState,
+     implementation: b.hostCall,
+diff --git a/src/codegen/builtins/host/operand-changes.builtins.ts b/src/codegen/builtins/host/operand-changes.builtins.ts
+index 16ccb715349687f659f9a94fdb77c1c990478e73..64ad526674e7810f76797ad7452f4b1ab3ae6420 100644
+--- a/src/codegen/builtins/host/operand-changes.builtins.ts
++++ b/src/codegen/builtins/host/operand-changes.builtins.ts
+@@ -179,7 +179,7 @@ const addressNames = b.keysNamed("family", "address", "port");
+ 
+ const keepsDataOfSocket = b.memberStoredIn(["data"], b.nativeCell(socketDataCell));
+ 
+-type HandlerCall = Pick<b.CallbackOptions, "this" | "args">;
++type HandlerCall = Pick<b.HandlerOptions, "this" | "args">;
+ 
+ // Native code keeps what is stored under the name and calls it for each event. The getter answers what is kept.
+ const keptHandler = (path: b.BuiltinPath, cell: string, call: HandlerCall) =>
+@@ -193,7 +193,10 @@ const keptHandler = (path: b.BuiltinPath, cell: string, call: HandlerCall) =>
+       capability: "js",
+       uses: {
+         this: handedOver,
+-        value: [b.storedIn(b.nativeCell(cell)), b.called({ times: "PerEvent", ...call, result: "Ignored" })],
++        value: [
++          b.storedIn(b.nativeCell(cell)),
++          b.called({ afterwards: "TouchesOnlyWhatRowNames", times: "PerEvent", ...call, result: "Ignored" }),
++        ],
+       },
+       implementation: b.hostCall,
+     },
+@@ -288,7 +291,10 @@ export default b.declarations(
+       implementation: b.hostCall,
+     }),
+   ),
+-  responseHandler("ondata", { args: [b.union(b.instance("Buffer").fresh, b.undefined), b.bool, b.i32] }),
++  responseHandler("ondata", {
++    this: b.undefined,
++    args: [b.union(b.instance("Buffer").fresh, b.undefined), b.bool, b.i32],
++  }),
+   responseHandler("onabort", { this: b.operand("this"), args: [b.i32] }),
+   // node_zlib_binding.rs emit_error: the message, the number of the error and its code. Only a function is kept.
+   compressors.flatMap(className =>
+@@ -300,14 +306,25 @@ export default b.declarations(
+   handlerOf("Bun.RedisClient.prototype.onconnect", { this: b.undefined, args: [b.operand("this"), b.any] }),
+   handlerOf("Bun.RedisClient.prototype.onclose", { this: b.operand("this"), args: [b.any] }),
+   // It also answers the callback of a write that has not gone out whole, which was handed over like any operand.
+-  responseHandler("onwritable", { args: [b.f64] }),
++  responseHandler("onwritable", { this: b.undefined, args: [b.f64] }),
+   // What the callback writes goes out in one piece when it returns.
+   b.method("%NodeHTTPResponse%.prototype.cork", {
+     args: { callback: b.callable },
+     returns: b.callbackResult("callback"),
+     capability: "js",
+     throws: true,
+-    uses: { this: handedOver, callback: [b.called({ times: "Once", args: [], result: "Returned" })] },
++    uses: {
++      this: handedOver,
++      callback: [
++        b.called({
++          afterwards: "TouchesOnlyWhatRowNames",
++          times: "Once",
++          this: b.undefined,
++          args: [],
++          result: "Returned",
++        }),
++      ],
++    },
+     implementation: b.hostCall,
+   }),
+ 
+diff --git a/src/codegen/builtins/host/process.builtins.ts b/src/codegen/builtins/host/process.builtins.ts
+index 3c937ec37b23fea8867a74b6ed24cc04b2ba4d91..3b0ccf4b09dab990e61898c4ee0540fec22dee77 100644
+--- a/src/codegen/builtins/host/process.builtins.ts
++++ b/src/codegen/builtins/host/process.builtins.ts
+@@ -13,16 +13,43 @@ import { handedOver } from "./native-code.ts";
+ 
+ const self = b.operand("this");
+ 
+-const calledWithEvents = b.called({ times: "PerEvent", this: self, spreadArgs: b.any, result: "Ignored" });
+-const calledWithExitCode = b.called({ times: "Later", this: self, args: [b.f64], result: "Ignored" });
++const calledWithEvents = b.called({
++  afterwards: "TouchesOnlyWhatRowNames",
++  times: "PerEvent",
++  this: self,
++  args: [],
++  spreadArgs: b.any,
++  result: "Ignored",
++});
++const calledWithExitCode = b.called({
++  afterwards: "TouchesOnlyWhatRowNames",
++  times: "Later",
++  this: self,
++  args: [b.f64],
++  result: "Ignored",
++});
+ const calledWithSignal = b.called({
++  afterwards: "TouchesOnlyWhatRowNames",
+   times: "Later",
+   this: b.builtin("globalThis"),
+   args: [b.f64, b.f64],
+   result: "Escapes",
+ });
+-const calledWithUncaughtException = b.called({ times: "PerEvent", args: [b.any, b.string], result: "Ignored" });
+-const calledOnNextTick = b.called({ times: "Later", spreadArgs: b.operand("passed"), result: "Ignored" });
++const calledWithUncaughtException = b.called({
++  afterwards: "TouchesOnlyWhatRowNames",
++  times: "PerEvent",
++  this: b.any,
++  args: [b.any, b.string],
++  result: "Ignored",
++});
++const calledOnNextTick = b.called({
++  afterwards: "TouchesOnlyWhatRowNames",
++  times: "Later",
++  this: b.undefined,
++  args: [],
++  spreadArgs: b.operand("passed"),
++  result: "Ignored",
++});
+ 
+ const listenerLists = ["ExternalState"];
+ const externalState = ["ExternalState"];
+@@ -238,6 +265,7 @@ const highResolutionTimeSince = [
+ // While an init hook of node:async_hooks is enabled, the callback and its arguments go to the function of the library that shows them to the hooks. node:async_hooks hands that function over with the first hook.
+ const shownToInitHooks = b.keptCalled(tickShownToHooksCell, {
+   times: "Once",
++  this: b.undefined,
+   args: [b.operand("callback"), newArrayOf(b.operand("passed")).or(b.undefined), b.nativeMemory],
+   result: "Ignored",
+ });
+diff --git a/src/codegen/builtins/host/web-classes.builtins.ts b/src/codegen/builtins/host/web-classes.builtins.ts
+index 5ca240781809111a43bc2d8956aaf74e238723ee..2a6ef6d6984449c3c76d21ce6f7e151965cf7e20 100644
+--- a/src/codegen/builtins/host/web-classes.builtins.ts
++++ b/src/codegen/builtins/host/web-classes.builtins.ts
+@@ -65,7 +65,7 @@ const bodyOfAnyKind = [
+   b.reachableValuesStoredIn(b.nativeMemory),
+   b.readsContents(),
+   b.writesContents(),
+-  b.called({ times: "Once", result: "Escapes" }),
++  b.called({ afterwards: "TouchesOnlyWhatRowNames", times: "Once", this: b.undefined, args: [], result: "Escapes" }),
+   b.runsTransitively(
+     "OwnValues",
+     "PrototypeChain",
+diff --git a/src/codegen/builtins/host/web-values.builtins.ts b/src/codegen/builtins/host/web-values.builtins.ts
+index 3ab839d0de2809788401da73485fe6d98456c46c..ed21af3e02c1de2cc2741e524c303e0502278503 100644
+--- a/src/codegen/builtins/host/web-values.builtins.ts
++++ b/src/codegen/builtins/host/web-values.builtins.ts
+@@ -80,6 +80,7 @@ const forEachPair = {
+     this: readsState,
+     callback: [
+       b.called({
++        afterwards: "TouchesOnlyWhatRowNames",
+         times: "PerElement",
+         this: b.operand("thisArg"),
+         args: [b.string, b.string, b.operand("this")],
+@@ -235,8 +236,18 @@ const binaryMessage = readsState;
+ 
+ // A socket that is closed inside a call has its close handler called before the call returns, and the error handler with what that one throws. close and terminate close this socket.
+ const mayClose = (socket: b.PlaceLike) => [
+-  b.keptCalled(webSocketHandlerCell("close"), { times: "Once", args: [socket, b.f64, b.string], result: "Ignored" }),
+-  b.keptCalled(webSocketHandlerCell("error"), { times: "Once", args: [b.any, socket], result: "Ignored" }),
++  b.keptCalled(webSocketHandlerCell("close"), {
++    times: "Once",
++    this: b.undefined,
++    args: [socket, b.f64, b.string],
++    result: "Ignored",
++  }),
++  b.keptCalled(webSocketHandlerCell("error"), {
++    times: "Once",
++    this: b.undefined,
++    args: [b.any, socket],
++    result: "Ignored",
++  }),
+ ];
+ const writesToSocket = [...changesState, ...mayClose(b.operand("this"))];
+ const writesToSubscribers = [...writesToSocket, ...mayClose(b.nativeCell(webSocketsCell))];
+@@ -523,7 +534,15 @@ export default b.declarations(
+       throws: true,
+       uses: {
+         this: writesToSubscribers,
+-        callback: [b.called({ times: "Once", this: b.operand("this"), args: [b.operand("this")], result: "Returned" })],
++        callback: [
++          b.called({
++            afterwards: "TouchesOnlyWhatRowNames",
++            times: "Once",
++            this: b.operand("this"),
++            args: [b.operand("this")],
++            result: "Returned",
++          }),
++        ],
+       },
+       implementation: b.hostCall,
+     },
 diff --git a/test/internal/build-aot-codegen-declared-outputs.test.ts b/test/internal/build-aot-codegen-declared-outputs.test.ts
 index b9b6a5353d4572e45a514d16b41ba84dc3a66f25..db4ea4bf79b52e27196a65582774eab455078ff6 100644
 --- a/test/internal/build-aot-codegen-declared-outputs.test.ts
@@ -626,3 +1015,57 @@ index 813be511cb68422034d0567ce65f59733b257fb4..56bee5f41c7552a173ca0d929fd861be
        [
          "a folder of headers that is no include directory",
          { "aot/flow/AOTFlowGraph.h": "" },
+diff --git a/test/internal/builtins-table/places-of-callbacks.test.ts b/test/internal/builtins-table/places-of-callbacks.test.ts
+index 94235181ac80d7003a771321b3892b5bae45436f..cef51b3eed29c0e5f366964b7c4e6a0d5da67cbd 100644
+--- a/test/internal/builtins-table/places-of-callbacks.test.ts
++++ b/test/internal/builtins-table/places-of-callbacks.test.ts
+@@ -1,11 +1,15 @@
+ import { expect, test } from "bun:test";
+ import * as b from "../../../src/codegen/builtins/lib.ts";
+ 
++const once = { afterwards: "TouchesOnlyWhatRowNames", times: "Once" } as const;
++
+ test("what a constructed callback sees as new.target is written as a place", () => {
+   const use = b.called({
++    afterwards: "TouchesOnlyWhatRowNames",
+     times: "Once",
+     constructs: true,
+     newTarget: b.operand("newTarget"),
++    args: [],
+     spreadArgs: b.ownValues("list"),
+   });
+   expect(use).toMatchObject({
+@@ -18,11 +22,30 @@ test("what a constructed callback sees as new.target is written as a place", ()
+ 
+ test("a bare name is no place", () => {
+   // @ts-expect-error A declaration file runs without a type check.
+-  expect(() => b.called({ times: "Once", constructs: true, newTarget: "newTarget" })).toThrow(
++  expect(() => b.called({ ...once, constructs: true, newTarget: "newTarget", args: [] })).toThrow(
+     '"newTarget" is no place',
+   );
+   // @ts-expect-error
+-  expect(() => b.called({ times: "Once", this: "thisArgument" })).toThrow('"thisArgument" is no place');
++  expect(() => b.called({ ...once, this: "thisArgument", args: [] })).toThrow('"thisArgument" is no place');
++  // @ts-expect-error
++  expect(() => b.called({ ...once, this: b.undefined, args: ["element"] })).toThrow('"element" is no place');
++});
++
++test("a called function is told its `this` and its arguments", () => {
++  // @ts-expect-error A declaration file runs without a type check.
++  expect(() => b.called({ ...once, args: [] })).toThrow("a called function is told its `this`");
++  // @ts-expect-error
++  expect(() => b.called({ ...once, this: b.undefined })).toThrow("a called function is told its arguments");
+   // @ts-expect-error
+-  expect(() => b.called({ times: "PerElement", args: ["element"] })).toThrow('"element" is no place');
++  expect(() => b.called({ ...once, constructs: true, this: b.any, args: [] })).toThrow("a constructed one is not");
++  // @ts-expect-error
++  expect(() => b.memberCalled(["fetch"], { times: "PerEvent", args: [] })).toThrow("is told its `this`");
++  // @ts-expect-error
++  expect(() => b.keptCalled("Realm.cell", { times: "PerEvent", this: b.any })).toThrow("is told its arguments");
++  expect(b.called({ ...once, this: b.undefined, args: [] })).toMatchObject({ thisValue: undefined, arguments: [] });
++});
++
++test("a called function says what native code does afterwards", () => {
++  // @ts-expect-error A declaration file runs without a type check.
++  expect(() => b.called({ times: "Once" })).toThrow("a called function says what native code does afterwards");
+ });

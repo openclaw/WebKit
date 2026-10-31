@@ -1,7 +1,7 @@
 {
   "bun": "fd40ba44187c721ee023062fa153a6a27560e6b1",
   "webkit": "5ec9ac8557722128588184ed9cf77347d9a30cf1",
-  "patch_sha256": "0c0587414742ab4bd9787cb3110f061456d5ca78351f738c95bb1f0aa291641d",
+  "patch_sha256": "a9446f7bc696d5bd65f0861735b59a581be35d173726c816914943f4fb4df08a",
   "files": {
     "scripts/build/aot-source-lists.ts": {
       "before": "881654b517a593c56bf65ca3f84a238a8825b43c9ad92b1bd3587cb78a579ffa",
@@ -45,6 +45,48 @@
       "adapted_blob": "952c8081f92e4f033ca592f8931b57b921865869",
       "mode": "100644"
     },
+    "src/codegen/builtins/host/compiler-helpers.builtins.ts": {
+      "before": "824338e5b74c3a6a86aba2cab776dd43bf0e35490b8e87864a656102a20245a9",
+      "after": "276b5d69572226af8c179242ac302c91a2e426cd35bc0b9f35c59ff3b8861131",
+      "base_blob": "da639ebf279ac88cc5146b5eb5dcf0a5988c3c44",
+      "adapted_blob": "fe9a0703bd1979a7e886ef3c5b012c557e434800",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/host/globals.builtins.ts": {
+      "before": "de02630e93c9ca93b474a6e0f15dbdb4cc4c31a7c46ee3a6e2936060cc326379",
+      "after": "585f05b293708980f38f02669235538babe5fd696641adde15f0f5c737c8aa0d",
+      "base_blob": "7a2b3e4b1f541f9686af823fb7006baf2c1b564d",
+      "adapted_blob": "f9d9e223c51da321f02dc3b8b59c6dcfaf91e741",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/host/operand-changes.builtins.ts": {
+      "before": "9b2bbfd86575513bc597d87f40999d5b1e4bbb6f49898ef4791c3a766aa47a52",
+      "after": "91ffa02c5d9ad0558cf00ed8845737bfe6956eaaec5e6ecf60cdca49228922d5",
+      "base_blob": "16ccb715349687f659f9a94fdb77c1c990478e73",
+      "adapted_blob": "64ad526674e7810f76797ad7452f4b1ab3ae6420",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/host/process.builtins.ts": {
+      "before": "04455f8fef0134b4cf102bc467ed3d69776b93c201c280823e2a49e8e5f33896",
+      "after": "33dc5374aba6db635b90098781b1b1b1e7db672972312c762213fc9ad65f352e",
+      "base_blob": "3c937ec37b23fea8867a74b6ed24cc04b2ba4d91",
+      "adapted_blob": "3b0ccf4b09dab990e61898c4ee0540fec22dee77",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/host/web-classes.builtins.ts": {
+      "before": "8c3aacf47c824e625f0a5d635c3b9220f7bac84c0b2de4c74ae3061ae98602fa",
+      "after": "7b5879f7a62ce6745ba5540307958931b8ba0ff66c7f9d8868f157e0f71e36f8",
+      "base_blob": "5ca240781809111a43bc2d8956aaf74e238723ee",
+      "adapted_blob": "2a6ef6d6984449c3c76d21ce6f7e151965cf7e20",
+      "mode": "100644"
+    },
+    "src/codegen/builtins/host/web-values.builtins.ts": {
+      "before": "9dcde1a9147855a1c30148571c26549e3fec14b024b552ed0d2218c923c098b3",
+      "after": "81fb34f1205963eed30d3544889f4fecd2a80ecd82982c366732f55303543957",
+      "base_blob": "3ab839d0de2809788401da73485fe6d98456c46c",
+      "adapted_blob": "ed21af3e02c1de2cc2741e524c303e0502278503",
+      "mode": "100644"
+    },
     "test/internal/build-aot-codegen-declared-outputs.test.ts": {
       "before": "9f6e8e2256481c73873de7e5341f383e12f3356f9967681ca4d6f22f9ec0d572",
       "after": "d33a41f49be51f00253b52af498a45258c7cb1b1ed67259c0566d069a43f598b",
@@ -57,6 +99,13 @@
       "after": "c9225b71e8d12e8b116600fff79d8bbdb9eb8d7862027a038f8a6a0e81fa38b4",
       "base_blob": "813be511cb68422034d0567ce65f59733b257fb4",
       "adapted_blob": "56bee5f41c7552a173ca0d929fd861be7243fb65",
+      "mode": "100644"
+    },
+    "test/internal/builtins-table/places-of-callbacks.test.ts": {
+      "before": "a1378f8448ba71936d41fdcb499cbdf1195f93088e03668497eb1da493bf8b44",
+      "after": "e097de469c3a00f27f8b678b6f43201ff80b507daab7f93a0f604fc0892c2f82",
+      "base_blob": "94235181ac80d7003a771321b3892b5bae45436f",
+      "adapted_blob": "cef51b3eed29c0e5f366964b7c4e6a0d5da67cbd",
       "mode": "100644"
     }
   }
