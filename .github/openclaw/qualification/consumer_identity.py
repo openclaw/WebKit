@@ -163,6 +163,11 @@ def adapter_spec(arm, phase):
     spec = ADAPTERS['arms'][arm]
     require(spec['pin'] == CONFIG[arm]['commit'], 'harness adapter source pin drift')
     selected = spec[phase]
+    if selected['patch'] is None:
+        require(arm == 'candidate' and phase == 'build'
+                and selected == {'patch': None, 'sha256': None, 'files': {}},
+                'invalid native candidate build specification')
+        return selected
     require(sha(INPUTS / selected['patch']) == selected['sha256'], 'harness adapter bytes drift')
     return selected
 

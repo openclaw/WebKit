@@ -1,8 +1,8 @@
 diff --git a/scripts/buildkite.ts b/scripts/buildkite.ts
-index c31bf247ea334395250f9925ee605af72096e79a..86062fa3c475ac22c1f4d3a6d6182ddab80c0037 100644
+index 401d5e02728b1966552d6a6357076e50f8203ce9..bdc41d6881b43969d053381afed744a1d907e657 100644
 --- a/scripts/buildkite.ts
 +++ b/scripts/buildkite.ts
-@@ -784,22 +784,75 @@
+@@ -619,27 +619,93 @@ export function parseJunitFileSuites(xml: string): Map<string, JunitFileSuite> {
    const attribute = (attributes: string, name: string) => new RegExp(`\\s${name}="([^"]*)"`).exec(attributes)?.[1];
    const keyOf = (file: string) => unescapeXml(file).replaceAll("\\", "/");
    const files = new Map<string, JunitFileSuite>();
@@ -16,6 +16,8 @@ index c31bf247ea334395250f9925ee605af72096e79a..86062fa3c475ac22c1f4d3a6d6182dda
 -      cases: [],
 -    });
 -  }
++  const counts = new Map<string, { declared: number; observed: number }>();
++  let currentFile: string | undefined;
 +  if (!xml.trim()) return files;
 +  const document = xml.replace(/^\s*<\?xml[^?]*\?>/, "");
 +  const stack: string[] = [];
@@ -41,6 +43,7 @@ index c31bf247ea334395250f9925ee605af72096e79a..86062fa3c475ac22c1f4d3a6d6182dda
 +    end = match.index! + match[0].length;
 +    if (closing) {
 +      if (attributes!.trim() || selfClosing || stack.pop() !== tag) invalid();
++      if (tag === "testsuite" && stack.length === 1) currentFile = undefined;
 +      continue;
 +    }
 +    const names = [...attributes!.matchAll(/\s([\w-]+)="[^"]*"/g)].map(match => match[1]);
@@ -75,10 +78,19 @@ index c31bf247ea334395250f9925ee605af72096e79a..86062fa3c475ac22c1f4d3a6d6182dda
 +      )
 +        invalid();
 +      files.set(keyOf(file!), { failures: Number(failures), seconds: Number(seconds), cases: [] });
++      currentFile = keyOf(file!);
++      counts.set(currentFile, { declared: Number(tests), observed: 0 });
 +    }
++    if (tag === "testcase") {
++      const file = attribute(attributes!, "file");
++      if (!file || currentFile === undefined || keyOf(file) !== currentFile) invalid();
++      counts.get(currentFile!)!.observed++;
++    }
++    if (selfClosing && tag === "testsuite" && stack.length === 1) currentFile = undefined;
 +    if (!selfClosing) stack.push(tag!);
 +  }
 +  if (!root || stack.length || document.slice(end).trim()) invalid();
++  for (const { declared, observed } of counts.values()) if (declared !== observed) invalid();
    for (const match of xml.matchAll(/<testcase\b([^>]*)>\s*<failure\b([^>]*)>/g)) {
      const caseAttributes = match[1]!;
      const failureAttributes = match[2]!;
@@ -89,24 +101,84 @@ index c31bf247ea334395250f9925ee605af72096e79a..86062fa3c475ac22c1f4d3a6d6182dda
      entry.cases.push({
        name: unescapeXml(attribute(caseAttributes, "name") ?? "(unnamed)"),
        message: unescapeXml(attribute(failureAttributes, "message") ?? ""),
-@@ -1004,12 +1057,6 @@
-   });
+     });
+   }
++  for (const entry of files.values()) if (entry.failures !== entry.cases.length) invalid();
+   return files;
+ }
  
-   if (isCI) {
--    startGroup("Environment", () => {
--      for (const [key, value] of Object.entries(process.env).sort()) {
--        console.log(`${key}:`, value);
--      }
--    });
--
-     const show = (title: string, shells: string[], ...scripts: string[]) =>
-       startGroup(title, () => {
-         const shell = which(shells);
+diff --git a/scripts/openclaw-ci/tests.ts b/scripts/openclaw-ci/tests.ts
+index 6507f885c1cdfdf8937574946d6959fa898a4345..5ce950bee35def7156a1ee7f5d1ac6230c812d2f 100644
+--- a/scripts/openclaw-ci/tests.ts
++++ b/scripts/openclaw-ci/tests.ts
+@@ -1,5 +1,5 @@
+ import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+-import { appendFileSync, existsSync, mkdirSync, readFileSync, statfsSync, writeFileSync } from "node:fs";
++import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statfsSync, writeFileSync } from "node:fs";
+ import { homedir } from "node:os";
+ import { basename, dirname, resolve } from "node:path";
+ 
+@@ -275,6 +275,7 @@ if (import.meta.main) {
+   const command = process.argv[2];
+   const selectionPath = "build/openclaw-ci/selected.json";
+   const resultsPath = "build/openclaw-ci/results.json";
++  const terminalPath = "build/openclaw-ci/runner-terminal.json";
+   if (command === "select-windows") {
+     const selected = selectTests([], git("ls-files", "-z", "test"), false, "windows");
+     mkdirSync(dirname(selectionPath), { recursive: true });
+@@ -308,6 +309,20 @@ if (import.meta.main) {
+   } else if (command === "test") {
+     const selected: string[] = JSON.parse(readFileSync(selectionPath, "utf8"));
+     if (!selected.length) throw new Error("Refusing an empty test selection");
++    const reporting = process.argv.slice(3);
++    const junitArgs: string[] = [];
++    if (reporting.length) {
++      if (
++        reporting.length !== 2 ||
++        reporting[0] !== "--junit-prefix" ||
++        !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(reporting[1]!)
++      ) {
++        throw new Error("Usage: tests.ts test [--junit-prefix <filename-prefix>]");
++      }
++      // The native runner uploads by default only on Buildkite; this opt-in keeps reports local.
++      if (process.env.BUILDKITE === "true") throw new Error("Local JUnit reporting does not permit Buildkite uploads");
++      junitArgs.push("--junit", "--junit-temp-dir", reporting[1]!);
++    }
+     reportDiskUsage("before");
+     // Fresh processes preserve the original owner's GC sequence and expose late frees.
+     let ownerExitFailed = false;
+@@ -340,6 +355,7 @@ if (import.meta.main) {
+       console.log(`Owner-exit: ${failures}/50 failed`);
+     }
+     // CI invokes this script with the built executable; the upstream runner uses it for every test.
++    rmSync(terminalPath, { force: true });
+     const result = spawnSync(
+       "node",
+       [
+@@ -350,6 +366,7 @@ if (import.meta.main) {
+         "--retries=0",
+         "--results-json",
+         resultsPath,
++        ...junitArgs,
+         ...selected.flatMap(test => ["--include", test.replace(/^test\//, "")]),
+       ],
+       { stdio: "inherit" },
+@@ -382,6 +399,10 @@ if (import.meta.main) {
+       if (direct.stderr) process.stderr.write(direct.stderr);
+     }
+     reportDiskUsage("after");
++    writeFileSync(
++      terminalPath,
++      JSON.stringify({ status: result.status, signal: result.signal, spawnError: !!result.error }) + "\n",
++    );
+     if (ownerExitFailed) throw new Error("Owner-exit stress exceeded the Windows ARM64 limit");
+     if (result.error) throw result.error;
+     if (result.status !== 0) process.exit(result.status ?? 1);
 diff --git a/scripts/runner.node.ts b/scripts/runner.node.ts
-index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1c6c671fc 100755
+index c9ff165f351dd1345732d8426f2013d1bd8d27fc..11f00085169a54bcc16d241993ec5bc96ff63cdf 100755
 --- a/scripts/runner.node.ts
 +++ b/scripts/runner.node.ts
-@@ -765,6 +765,7 @@
+@@ -764,6 +764,7 @@ async function runTests(): Promise<TestResult[]> {
      title: string,
      fn: (index: number) => Promise<TestResult>,
      concurrent = parallelism > 1,
@@ -114,7 +186,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
    ): Promise<TestResult | undefined> => {
      const index = ++i;
  
-@@ -778,11 +779,13 @@
+@@ -777,11 +778,13 @@ async function runTests(): Promise<TestResult[]> {
        let grouptitle = `${getAnsi("gray")}[${index}/${total}]${getAnsi("reset")} ${title}`;
        if (attempt > 1) grouptitle += ` ${getAnsi("gray")}[attempt #${attempt}]${getAnsi("reset")}`;
  
@@ -130,7 +202,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
        }
  
        const { ok, stdoutPreview, error } = result;
-@@ -933,7 +936,7 @@
+@@ -932,7 +935,7 @@ async function runTests(): Promise<TestResult[]> {
        }
      }
  
@@ -139,7 +211,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
        await awaitNapiPrebuild(testPath);
        const absoluteTestPath = join(testsPath, testPath);
        const title = relative(cwd, absoluteTestPath).replaceAll(sep, "/");
-@@ -1015,25 +1018,26 @@
+@@ -1014,25 +1017,26 @@ async function runTests(): Promise<TestResult[]> {
          return runTest(
            title,
            async index => {
@@ -185,7 +257,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
              const mb = 1024 ** 3;
              let stdoutPreview = stdout.slice(0, mb).split("\n").slice(0, 50).join("\n");
              if (crashes) stdoutPreview += crashes;
-@@ -1048,10 +1052,14 @@
+@@ -1047,10 +1051,14 @@ async function runTests(): Promise<TestResult[]> {
                stdoutPreview: stdoutPreview,
                exitCode,
                signalCode,
@@ -200,7 +272,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
          );
        } else {
          return runTest(
-@@ -1063,6 +1071,7 @@
+@@ -1062,6 +1070,7 @@ async function runTests(): Promise<TestResult[]> {
                stderr: concurrent ? () => {} : pipeTestStdout(process.stderr),
              }),
            concurrent,
@@ -208,7 +280,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
          );
        }
      };
-@@ -1088,17 +1097,20 @@
+@@ -1087,17 +1096,20 @@ async function runTests(): Promise<TestResult[]> {
        }
        if (isAsan) env.BUN_FEATURE_FLAG_NO_ORPHANS = "1";
  
@@ -240,7 +312,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
          spawnBun(execPath, {
            args: [
              "test",
-@@ -1123,107 +1135,65 @@
+@@ -1122,108 +1134,66 @@ async function runTests(): Promise<TestResult[]> {
        );
        if (crashes) process.stderr.write(crashes);
  
@@ -349,7 +421,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
 +          groupedProcess,
 +          groupedReport: { error: reportError, suite: suite ?? null },
          });
--      }
+       }
 -      for (const t of bucketFiles) {
 -        if (!failed.has(t)) continue;
 -        const title = join("test", t).replaceAll("\\", "/");
@@ -392,10 +464,19 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
 -            });
 -          }
 -        }
-       }
+-      }
      };
  
-@@ -1505,6 +1475,11 @@
+     const modifiedTests = new Set(
+@@ -1231,6 +1201,7 @@ async function runTests(): Promise<TestResult[]> {
+     );
+     const isModified = (t: string) => modifiedTests.has(t.replaceAll("\\", "/"));
+     const isBucketCandidate = (t: string) =>
++      !cliOptions.junit &&
+       parallelism === 1 &&
+       isTestStrict(t) &&
+       !isNodeTest(t) &&
+@@ -1503,6 +1474,11 @@ async function runTests(): Promise<TestResult[]> {
        error: r.error,
        exitCode: r.exitCode,
        signalCode: r.signalCode,
@@ -407,7 +488,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
        duration: r.duration,
        stdoutPreview: r.stdoutPreview?.slice?.(-4000),
      }));
-@@ -1537,12 +1512,17 @@
+@@ -1535,12 +1511,17 @@ interface SpawnOptions {
    retries?: number;
  }
  
@@ -429,7 +510,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
    timestamp: number;
    duration: number;
    stdout: string;
-@@ -1566,9 +1546,9 @@
+@@ -1564,9 +1545,9 @@ async function spawnWithTimeout(options: SpawnOptions): Promise<SpawnResult> {
      stderr = process.stderr.write.bind(process.stderr),
      retries = 0,
    }: SpawnOptions = options;
@@ -442,7 +523,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
    let timestamp: number | undefined;
    let timedOut = false;
    let idledOut = false;
-@@ -1826,11 +1806,13 @@
+@@ -1824,11 +1805,13 @@ async function spawnWithTimeout(options: SpawnOptions): Promise<SpawnResult> {
    if (timedOut && (!error || error === signalCode || /^code \d+$/.test(error)))
      error = idledOut ? "stalled" : "timeout";
    return {
@@ -460,7 +541,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
      stdout: buffer,
      timestamp: timestamp || Date.now(),
      duration: duration || 0,
-@@ -2028,7 +2010,7 @@
+@@ -2029,7 +2012,7 @@ async function spawnBun(
    }
  }
  
@@ -469,7 +550,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
    testPath: string;
    ok: boolean;
    status: string;
-@@ -2038,8 +2020,8 @@
+@@ -2039,8 +2022,8 @@ interface TestResult {
    stdout: string;
    stdoutPreview: string;
    // For --results-json and the JUnit report.
@@ -480,7 +561,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
    duration?: number;
  }
  
-@@ -2107,19 +2089,22 @@
+@@ -2129,19 +2112,22 @@ async function spawnBunTest(
      env.BUN_FEATURE_FLAG_NO_ORPHANS = "1";
    }
  
@@ -516,7 +597,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
    let { tests, errors, stdout: stdoutPreview } = parseTestStdout(stdout, testPath);
    if (crashes) stdoutPreview += crashes;
  
-@@ -2142,6 +2127,9 @@
+@@ -2164,6 +2150,9 @@ async function spawnBunTest(
      stdoutPreview,
      exitCode,
      signalCode,
@@ -526,7 +607,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
      duration,
    };
  }
-@@ -2185,20 +2173,23 @@
+@@ -2320,20 +2309,23 @@ async function spawnBunInstall(
    // image's baked cache when one exists (the `prefetch` tool of
    // scripts/build/ci-images/spec.ts sets BUN_INSTALL_CACHE_DIR machine-wide).
    const cacheDir = process.env.BUN_INSTALL_CACHE_DIR;
@@ -563,7 +644,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
    if (crashes) stdout += crashes;
    const relativePath = relative(cwd, options.cwd);
    const testPath = join(relativePath, "package.json");
-@@ -2219,6 +2210,11 @@
+@@ -2354,6 +2346,11 @@ async function spawnBunInstall(
      ],
      stdout,
      stdoutPreview: stdout,
@@ -575,7 +656,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
      duration,
    };
  }
-@@ -2233,7 +2229,9 @@
+@@ -2368,7 +2365,9 @@ async function spawnBunInstall(
   */
  async function installCiRemapServer(execPath: string): Promise<boolean> {
    const title = relative(cwd, join(ciRemapServerPath, "package.json")).replaceAll(sep, "/");
@@ -586,7 +667,7 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
    if (!ok) console.warn(`ci-remap server not installed (${title}: ${error}), crash reports will not be remapped`);
    return ok;
  }
-@@ -2855,11 +2853,8 @@
+@@ -3018,11 +3017,8 @@ function getExitCode(outcome?: "pass" | "fail" | "cancel"): number {
    if (outcome === "pass") {
      return 0;
    }
@@ -600,42 +681,3 @@ index 30fc1930e72e8b50a7611fa0fe871e798295ce62..1fdc71cc9ee6145cbfac4a2dc53886e1
    if (outcome === "fail") {
      return 2;
    }
-diff --git a/scripts/openclaw-ci/tests.ts b/scripts/openclaw-ci/tests.ts
-index 029e7ad6c3afc97130962250f2cfbc6452f40a6a..bcbbc12cc6fc0535ad7ec7ce9ab9a8dba1b79eee 100644
---- a/scripts/openclaw-ci/tests.ts
-+++ b/scripts/openclaw-ci/tests.ts
-@@ -1,6 +1,6 @@
- import { $ } from "bun";
- import { spawnSync, type SpawnSyncReturns } from "node:child_process";
--import { appendFileSync, existsSync, mkdirSync, readFileSync, statfsSync, writeFileSync } from "node:fs";
-+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statfsSync, writeFileSync } from "node:fs";
- import { homedir } from "node:os";
- import { basename, dirname, resolve } from "node:path";
- 
-@@ -242,6 +242,7 @@
-   const command = process.argv[2];
-   const selectionPath = "build/openclaw-ci/selected.json";
-   const resultsPath = "build/openclaw-ci/results.json";
-+  const terminalPath = "build/openclaw-ci/runner-terminal.json";
-   if (command === "select-windows") {
-     const selected = selectTests([], await git("ls-files", "-z", "test"), false, "windows");
-     mkdirSync(dirname(selectionPath), { recursive: true });
-@@ -278,6 +279,7 @@
-     }
-     reportDiskUsage("before");
-     // CI invokes this script with the built executable; the upstream runner uses it for every test.
-+    rmSync(terminalPath, { force: true });
-     const result = spawnSync(
-       "node",
-       [
-@@ -321,6 +323,10 @@
-       if (direct.stderr) process.stderr.write(direct.stderr);
-     }
-     reportDiskUsage("after");
-+    writeFileSync(
-+      terminalPath,
-+      JSON.stringify({ status: result.status, signal: result.signal, spawnError: !!result.error }) + "\n",
-+    );
-     if (result.error) throw result.error;
-     if (result.status !== 0) process.exit(result.status ?? 1);
-     const results: { testPath: string; ok: boolean }[] = JSON.parse(readFileSync(resultsPath, "utf8"));

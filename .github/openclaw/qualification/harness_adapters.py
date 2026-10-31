@@ -86,7 +86,8 @@ def prepare(root, name, phase, engine, inspector, command, prefix=None):
                          or (name != 'sync' and prefix is None), 'invalid invocation reporting mode')
         for filename in ('results.json', 'runner-terminal.json', 'wrapper-terminal.json', 'net-direct.json'):
             identity.require(not (root / name / filename).exists(), 'stale invocation evidence: ' + filename)
-    subprocess.run(['git', '-C', str(repo), 'apply', '--check', str(identity.INPUTS / spec['patch'])], check=True)
+    if spec['patch'] is not None:
+        subprocess.run(['git', '-C', str(repo), 'apply', '--check', str(identity.INPUTS / spec['patch'])], check=True)
     # A non-restored receipt is never accepted as evidence, including after interruption.
     identity.write_once(pending, record)
     return record, identity.sha(pending), pending.stat().st_ino
@@ -117,7 +118,7 @@ def restore(root, name, phase, engine, inspector, status, active, completed):
     identity.require(state(repo, arm, spec) == record['before'], 'source changed during adapted phase')
     identity.require(excluded_inputs(repo, spec, inspector) == record['compiled_inputs_sha256'],
                      'compiled source inventory changed during adapted phase')
-    if adapted:
+    if adapted and spec['patch'] is not None:
         subprocess.run(['git', '-C', str(repo), 'apply', '--reverse', '--check', str(identity.INPUTS / spec['patch'])], check=True)
         subprocess.run(['git', '-C', str(repo), 'apply', '--reverse', str(identity.INPUTS / spec['patch'])], check=True)
     files(repo, spec, 'before')
@@ -174,13 +175,18 @@ def run(root, name, phase, engine, inspector, prefix=None):
     status, completed = None, False
     try:
         spec = active[0]['adapter']
-        subprocess.run(['git', '-C', str(repo), 'apply', str(identity.INPUTS / spec['patch'])], check=True)
+        if spec['patch'] is not None:
+            subprocess.run(['git', '-C', str(repo), 'apply', str(identity.INPUTS / spec['patch'])], check=True)
         files(repo, spec, 'after')
         identity.require(state(repo, arm, spec) == active[0]['before'], 'source changed while applying adapter')
         if phase == 'test':
             for filename in ('results.json', 'runner-terminal.json', 'net-direct.json'):
                 (repo / 'build/openclaw-ci' / filename).unlink(missing_ok=True)
         with log.open('x') as stream:
+            if phase == 'test':
+                subprocess.run(['node', str(identity.INPUTS / 'check-harness-reporting.mjs'),
+                                str(repo / 'scripts/buildkite.ts')], cwd=repo, env=env,
+                               stdout=stream, stderr=subprocess.STDOUT, check=True)
             try:
                 status = subprocess.run(command, cwd=repo, env=env, stdout=stream, stderr=subprocess.STDOUT).returncode
             except OSError as error:

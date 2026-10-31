@@ -395,6 +395,8 @@ class HarnessAdapters(unittest.TestCase):
         self.final=directory/'invocation.json';self.pending=directory/'invocation.pending.json'
         self.calls=[];self.child=None;self.real_run=subprocess.run
         def dispatch(argv,*args,**kwargs):
+            if len(argv)>1 and Path(argv[1]).name=='check-harness-reporting.mjs':
+                return subprocess.CompletedProcess(argv,0)
             if len(argv)>1 and argv[1] in ('scripts/openclaw-ci/tests.ts','run'):
                 self.calls.append((list(argv),kwargs))
                 if self.child:return self.child(argv,kwargs)
@@ -536,6 +538,70 @@ class HarnessAdapters(unittest.TestCase):
         with patch.object(consumer,'write_once',side_effect=write):
             with self.assertRaisesRegex(OSError,'final receipt fixture failure'):self.run_owner()
         self.assert_restored()
+
+    def test_reporting_control_failure_restores_without_running_tests(self):
+        def dispatch(argv,*args,**kwargs):
+            if len(argv)>1 and Path(argv[1]).name=='check-harness-reporting.mjs':
+                raise subprocess.CalledProcessError(1,argv)
+            return self.dispatch(argv,*args,**kwargs)
+        with patch.object(harness.subprocess,'run',side_effect=dispatch):
+            with self.assertRaises(subprocess.CalledProcessError):
+                harness.run(self.root,'candidate','test',self.engine,self.inspector)
+        self.assertEqual(self.calls,[]);self.assert_restored()
+
+    def test_native_candidate_build_preserves_source_and_measured_receipt(self):
+        spec={'patch':None,'sha256':None,'files':{}}
+        consumer.ADAPTERS['arms']['candidate']['build']=spec
+        receipt=self.root/'candidate-build-tools.json';receipt.unlink()
+        def child(argv,options):
+            self.assertEqual(self.file.read_text(),'original harness\n')
+            return subprocess.CompletedProcess(argv,0)
+        self.child=child
+        self.assertEqual(self.run_owner('build'),0);self.assertEqual(len(self.calls),1)
+        record=json.loads(receipt.read_text())
+        self.assertEqual(record['adapter'],spec);self.assertEqual(record['argv'],self.calls[0][0])
+        self.assertTrue(record['restored']);self.assertEqual(record['before'],record['after'])
+        consumer.validate_build_tools(record,'candidate',consumer.file_record(self.root,consumer.EXECUTABLE))
+        self.assertFalse(receipt.with_suffix('.pending.json').exists());self.assert_restored()
+
+    def test_nonzero_native_candidate_build_is_not_accepted_proof(self):
+        consumer.ADAPTERS['arms']['candidate']['build']={'patch':None,'sha256':None,'files':{}}
+        receipt=self.root/'candidate-build-tools.json';receipt.unlink()
+        self.child=lambda argv,options:subprocess.CompletedProcess(argv,7)
+        self.assertEqual(self.run_owner('build'),7)
+        record=json.loads(receipt.read_text());self.assertEqual(record['status'],7);self.assertTrue(record['restored'])
+        with self.assertRaisesRegex(ValueError,'invalid restored build-tool provenance'):
+            consumer.validate_build_tools(record,'candidate',consumer.file_record(self.root,consumer.EXECUTABLE))
+        self.assertFalse(receipt.with_suffix('.pending.json').exists());self.assert_restored()
+
+    def test_native_candidate_build_cannot_hide_source_drift(self):
+        consumer.ADAPTERS['arms']['candidate']['build']={'patch':None,'sha256':None,'files':{}}
+        receipt=self.root/'candidate-build-tools.json';receipt.unlink()
+        def child(argv,options):
+            (self.repo/'source.js').write_text('unexpected native-build edit\n')
+            return subprocess.CompletedProcess(argv,0)
+        self.child=child
+        with self.assertRaisesRegex(ValueError,'source changed during adapted phase'):self.run_owner('build')
+        self.assertEqual(len(self.calls),1)
+        self.assertEqual((self.repo/'source.js').read_text(),'unexpected native-build edit\n')
+        self.assertEqual(self.file.read_text(),'original harness\n')
+        self.assertTrue(receipt.with_suffix('.pending.json').exists());self.assertFalse(receipt.exists())
+
+    def test_null_adapter_is_only_valid_for_native_candidate_build(self):
+        original=copy.deepcopy(consumer.ADAPTERS)
+        valid={'patch':None,'sha256':None,'files':{}}
+        cases=[('candidate','build',{**valid,'sha256':'0'*64}),
+               ('candidate','build',{**valid,'files':original['arms']['candidate']['build']['files']}),
+               ('candidate','build',{**valid,'extra':True}),
+               ('candidate','build',{'patch':None,'sha256':None}),
+               ('candidate','test',valid),('baseline','build',valid)]
+        for arm,phase,spec in cases:
+            with self.subTest(arm=arm,phase=phase,spec=spec):
+                adapters=copy.deepcopy(original);adapters['arms'][arm][phase]=spec
+                with patch.object(consumer,'ADAPTERS',adapters):
+                    with self.assertRaisesRegex(ValueError,'invalid native candidate build specification'):
+                        consumer.adapter_spec(arm,phase)
+        self.assertEqual(self.calls,[])
 
     def test_package_and_cli_import_entrypoints(self):
         result=subprocess.run([sys.executable,str(Path(harness.__file__)),'--help'],capture_output=True,text=True)

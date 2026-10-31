@@ -46,8 +46,8 @@ dependencies, build directories and caches. The historical baseline is Bun
 `b83b544ef744b6ab0dc1feadb59652261d64291d` with engine
 `1600131e46b5af48bbda3559af8d8a3327230b6e` and the recorded checksum/VM fixture
 patches 000 and 012. The candidate is Bun
-`ac9a670feaafe7623564b51e0257c3de583fe9ef`, tree
-`77decc869e3e0da3305e11cb3059e0e35a3a8be3`, with only its tracked WebKit
+`7b573c05d0c52dffc67d4d25daf108bed5930cf2`, tree
+`50dbaef36882f6185b619ecf08b0663590cd0e5b`, with only its tracked WebKit
 manifest replaced by the measured candidate Linux archive. This is a Bun-plus-engine
 upgrade comparison, not an isolated engine measurement. The job runs the original 44-file
 fork selector output plus its two dependency checks, requires identical all-pass
@@ -176,6 +176,10 @@ for process, V8 and worker statistics. Qualification retains ownership, transfer
 worker inspection and external-buffer cases alongside the fork selection.
 
 ## Unreleased
+
+- Reject incomplete native JUnit file suites in both frozen reporting adapters by checking descendant testcase counts, file ownership and failure counts before accepting test evidence.
+
+- Qualify the upstream sync against frozen Bun `7b573c05d0c52dffc67d4d25daf108bed5930cf2`, whose Latin1 bridge matches the current engine API. Keep the historical baseline unchanged, require cache format 45 and the eleven current WebKit upgrade regressions, and forward-port strict test reporting without changing compiled sources. The candidate build uses its native logger without an adapter; source and build-tool receipts remain mandatory.
 
 - Restore standalone regression linking after the upstream removable-feature API change and require the async resume-location fixture in both native test lanes.
 - Permit the reviewed sync branch to run the full artifact matrix without publication, preserving existing release-branch restrictions.
