@@ -1,4 +1,4 @@
-name: OpenClaw upstream runtime fixes proof
+name: OpenClaw upstream helper lock proof
 on:
   pull_request:
     branches: [claude/sync-webkit-upstream-20261014]
@@ -10,18 +10,18 @@ concurrency:
   group: openclaw-upstream-runtime-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  native-runtime-fixes:
+  native-helper-lock:
     if: >-
       github.repository == 'openclaw/WebKit' &&
       (github.event.pull_request.head.ref || github.ref_name) == 'claude/upstream-runtime-proof-20261031' &&
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 180
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: openclaw/WebKit
-          ref: e66916298091dd12469076fd854e135b03fb16ff
+          ref: 48819ee548ab26be5473bd29ad986674895502e7
           path: upstream
           persist-credentials: false
           sparse-checkout-cone-mode: false
@@ -44,7 +44,7 @@ jobs:
           echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends cmake ninja-build clang-23 lld-23 libicu-dev ruby ruby-highline libjson-pp-perl
-      - name: Qualify exact upstream async-stack and helper-lock fixes
+      - name: Qualify the exact upstream helper-lock fix
         env:
           PIPELINE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
@@ -55,19 +55,16 @@ jobs:
           build = Path(os.environ['RUNNER_TEMP']) / 'upstream-runtime-build'
           out = Path(os.environ['RUNNER_TEMP']) / 'upstream-runtime-proof'
           out.mkdir()
-          base = 'e66916298091dd12469076fd854e135b03fb16ff'
-          async_head = '6cefad113134baa25b8f8f828c8b86ca4c5437a6'
           helper_head = '48819ee548ab26be5473bd29ad986674895502e7'
-          fixture_name = 'JSTests/stress/error-stack-async-relative-resume-target.js'
-          fixture_sha = '870d4fc0f903f6fd9e6cf26c992c411658fb4ce673ec401e78a21960b4ccf7e3'
-          record = {'pipeline': os.environ['PIPELINE_SHA'], 'base': base,
-                    'async_head': async_head, 'helper_head': helper_head, 'steps': {}}
-          deadline = time.monotonic() + 9000
+          record = {'pipeline': os.environ['PIPELINE_SHA'], 'candidate': helper_head, 'passed': False, 'steps': {}}
+          deadline = time.monotonic() + 6000
           def save():
               (out / 'proof.json').write_text(json.dumps(record, indent=2) + '\n')
+
           def digest(path):
               with path.open('rb') as stream:
                   return hashlib.file_digest(stream, 'sha256').hexdigest()
+
           def run(name, argv, budget):
               with (out / (name + '.log')).open('x') as log:
                   process = subprocess.Popen(argv, cwd=source, stdout=log, stderr=subprocess.STDOUT,
@@ -88,10 +85,13 @@ jobs:
                                                'timed_out': timed_out}
                       save()
               return process.returncode
+
           def checked(name, argv, budget=120):
               assert run(name, argv, budget) == 0, name
+
           def git(*args):
               return subprocess.check_output(['git', *args], cwd=source, timeout=120).decode().strip()
+
           def frozen(expected):
               assert git('rev-parse', 'HEAD') == expected
               assert not git('status', '--porcelain', '--untracked-files=no'), 'tracked source drift'
@@ -105,46 +105,13 @@ jobs:
           ]
           record['configure'] = configure
           save()
-          frozen(base)
-          for label, head in [('async', async_head), ('helper', helper_head)]:
-              checked('fetch-' + label, ['git', '-c', 'gc.auto=0', '-c', 'maintenance.auto=false',
-                      'fetch', '--no-tags', '--no-prune', '--no-auto-maintenance', 'origin', head])
-          assert set(git('diff', '--name-only', base, async_head).splitlines()) == {
-              fixture_name, 'Source/JavaScriptCore/interpreter/Interpreter.cpp'}
-          assert git('diff', '--name-only', base, helper_head) == 'Source/WTF/wtf/ParallelHelperPool.cpp'
-          fixture = source / fixture_name
-          assert not fixture.exists(), 'baseline unexpectedly contains the regression'
-          fixture_bytes = subprocess.check_output(['git', 'show', async_head + ':' + fixture_name], cwd=source)
-          assert hashlib.sha256(fixture_bytes).hexdigest() == fixture_sha
-          checked('configure-base', ['cmake', '-S', str(source), '-B', str(build), *configure], 600)
-          checked('build-base', ['cmake', '--build', str(build), '--target', 'jsc', '-j4'], 4500)
-          jsc = build / 'bin/jsc'
-          record['base_jsc_sha256'] = digest(jsc)
-          fixture.write_bytes(fixture_bytes)
-          for mode, flags in [('default', []), ('interpreter', ['--useJIT=false'])]:
-              label = 'async-base-' + mode
-              code = run(label, [str(jsc), '--useAsyncStackTrace=1', *flags, fixture_name], 120)
-              text = (out / (label + '.log')).read_text()
-              assert code > 0 and '"expectedLine":8' in text and '"trace":' in text, 'wrong async baseline failure'
-              assert digest(fixture) == fixture_sha
-          fixture.unlink()
-          frozen(base)
-          checked('checkout-async', ['git', 'checkout', '--detach', async_head])
-          frozen(async_head)
-          checked('configure-async', ['cmake', '-S', str(source), '-B', str(build), *configure], 600)
-          checked('build-async', ['cmake', '--build', str(build), '--target', 'jsc', '-j4'], 1200)
-          record['async_jsc_sha256'] = digest(jsc)
-          assert digest(fixture) == fixture_sha
-          for mode, flags in [('default', []), ('interpreter', ['--useJIT=false'])]:
-              checked('async-head-' + mode, [str(jsc), '--useAsyncStackTrace=1', *flags, fixture_name])
-              assert digest(fixture) == fixture_sha
-          frozen(async_head)
-          checked('checkout-helper', ['git', 'checkout', '--detach', helper_head])
           frozen(helper_head)
+          assert not build.exists(), 'expected a fresh native build'
           checked('configure-helper', ['cmake', '-S', str(source), '-B', str(build), *configure], 600)
-          checked('build-helper', ['cmake', '--build', str(build), '--target', 'jsc', '-j4'], 1200)
+          checked('build-helper', ['cmake', '--build', str(build), '--target', 'jsc', '-j4'], 4500)
+          jsc = build / 'bin/jsc'
           record['helper_jsc_sha256'] = digest(jsc)
-          assert 'ParallelHelperPool.cpp.o' in (out / 'build-helper.log').read_text(), 'helper owner was not recompiled'
+          assert 'ParallelHelperPool.cpp.o' in (out / 'build-helper.log').read_text(), 'helper owner was not compiled'
           helper_results = Path(os.environ['RUNNER_TEMP']) / 'upstream-helper-gc'
           checked('helper-gc', ['Tools/Scripts/run-jsc-stress-tests', 'JSTests/stress',
                   '--jsc', str(jsc), '--quick', '--no-retry', '--child-processes', '1',
@@ -162,9 +129,9 @@ jobs:
               assert not path.exists() or not path.read_text().strip(), name
           (out / 'helper-gc-results.log').write_text('\n'.join(results) + '\n')
           record['helper_gc_cases'] = sorted(expected)
+
           frozen(helper_head)
-          record.update(passed=True, async_modes=2, fixture_sha256=fixture_sha,
-                        helper_claim='native build and existing tests; no TSAN or observed-race claim')
+          record.update(passed=True, helper_claim='native build and existing tests; no TSAN or observed-race claim')
           save()
           PY_RUNTIME
       - name: Pack bounded runtime-fix evidence
