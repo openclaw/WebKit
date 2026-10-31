@@ -170,6 +170,8 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+- Release class-field identifier references when parser arenas are destroyed, preventing native string leaks during class initialization and Worker churn.
+
 - Use the all-dead sweep specialization during VM destruction while preserving weak finalization and every cell destructor.
 
 ## Stack retention and Linux suspension (2026-10-09)
