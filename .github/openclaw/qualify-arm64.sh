@@ -11,6 +11,10 @@ jsc="$ENGINE_BUILD_DIR/bin/jsc"
 "$ENGINE_BUILD_DIR/bin/testMimallocExitInFlight" > "$QUALIFICATION_DIR/mimalloc-exit-in-flight.log" 2>&1
 "$ENGINE_BUILD_DIR/bin/testVMEntryScope" > "$QUALIFICATION_DIR/vm-entry-scope.log" 2>&1
 "$ENGINE_BUILD_DIR/bin/testForeignStackSuspension" > "$QUALIFICATION_DIR/foreign-stack-suspension.log" 2>&1
+"$ENGINE_BUILD_DIR/bin/TestWebKitAPI/TestJavaScriptCore" \
+  --gtest_filter='JavaScriptCore_ParserArena.DefineFieldReleasesIdentifier:JavaScriptCore_HeapTeardown.FinalizesNewCellsWithoutLiveBitmaps:JavaScriptCore_HeapTeardown.FinalizesMarkedCellsWithoutLiveBitmaps' \
+  --gtest_output="xml:$QUALIFICATION_DIR/api-regressions.xml" \
+  > "$QUALIFICATION_DIR/api-regressions.log" 2>&1
 Tools/Scripts/run-jsc-stress-tests JSTests/stress --jsc "$jsc" --child-processes "${ENGINE_TEST_JOBS:-4}" \
   --filter 'promise|microtask|dynamic-import|bun-async-context|module-loader|top-level-await|async-module|module-namespace|intl-segmenter|callsite-syntax-positions|stack-position-regressions|error-stack|worker-heap-generational-cadence|array-buffer-allocation-should-trigger-gc|extra-memory-allocation-should-trigger-gc|array-buffer-extra-memory-classification' \
   --output-dir "$QUALIFICATION_DIR/jsc-stress" --no-retry > "$QUALIFICATION_DIR/jsc-stress.log" 2>&1
@@ -34,13 +38,29 @@ for fixture in array-buffer-accounting heap-allocation-sampling; do
 done
 python3 - "$QUALIFICATION_DIR" "$(git rev-parse HEAD)" <<'PY'
 import json, platform, sys
+from xml.etree import ElementTree
 from pathlib import Path
 out = Path(sys.argv[1])
+expected = {
+    ('JavaScriptCore_ParserArena', 'DefineFieldReleasesIdentifier'),
+    ('JavaScriptCore_HeapTeardown', 'FinalizesNewCellsWithoutLiveBitmaps'),
+    ('JavaScriptCore_HeapTeardown', 'FinalizesMarkedCellsWithoutLiveBitmaps'),
+}
+cases = ElementTree.parse(out / 'api-regressions.xml').getroot().findall('.//testcase')
+assert len(cases) == len(expected), 'API regression case count'
+seen = set()
+for case in cases:
+    key = (case.get('classname'), case.get('name'))
+    assert key in expected and key not in seen, key
+    assert case.get('status') == 'run' and case.get('result') == 'completed', key
+    assert not any(case.find(tag) is not None for tag in ('failure', 'error', 'skipped')), key
+    seen.add(key)
+assert seen == expected, 'missing API regression case'
 counts = {}
 for suite, minimum in [('jsc-stress', 1400), ('jsc-modules', 1600)]:
     lines = (out / suite / 'results').read_text().splitlines()
     assert len(lines) >= minimum and all(line.endswith(': PASS') for line in lines), suite
     counts[suite] = len(lines)
 assert 'testAdd64RegisterAddress()' in (out / 'testmasm.log').read_text()
-(out / 'arm64-gate.json').write_text(json.dumps({'passed': True, 'source': sys.argv[2], 'machine': platform.machine(), 'system': platform.system(), 'counts': counts, 'accounting_modes': 5, 'sampling_modes': 5, 'testmasm': True, 'testffi': True, 'vm_entry_scope': True, 'foreign_stack_suspension': True, 'stack_execution_modes': 7, 'stack_cache': json.loads((out / 'jsc-stack/cache-files.json').read_text())}, indent=2) + '\n')
+(out / 'arm64-gate.json').write_text(json.dumps({'passed': True, 'source': sys.argv[2], 'machine': platform.machine(), 'system': platform.system(), 'counts': counts, 'api_regressions': len(seen), 'accounting_modes': 5, 'sampling_modes': 5, 'testmasm': True, 'testffi': True, 'vm_entry_scope': True, 'foreign_stack_suspension': True, 'stack_execution_modes': 7, 'stack_cache': json.loads((out / 'jsc-stack/cache-files.json').read_text())}, indent=2) + '\n')
 PY

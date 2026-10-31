@@ -180,6 +180,7 @@ worker inspection and external-buffer cases alongside the fork selection.
 - Reject incomplete native JUnit file suites in both frozen reporting adapters by checking descendant testcase counts, file ownership and failure counts before accepting test evidence.
 
 - Qualify the upstream sync against frozen Bun `7b573c05d0c52dffc67d4d25daf108bed5930cf2`, whose Latin1 bridge matches the current engine API. Keep the historical baseline unchanged, require cache format 45 and the eleven current WebKit upgrade regressions, and forward-port strict test reporting without changing compiled sources. The candidate build uses its native logger without an adapter; source and build-tool receipts remain mandatory.
+- Run the parser-arena and both heap-teardown API regressions through the native ARM64 TestJavaScriptCore target and require three complete passing JUnit cases.
 
 - Restore standalone regression linking after the upstream removable-feature API change and require the async resume-location fixture in both native test lanes.
 - Permit the reviewed sync branch to run the full artifact matrix without publication, preserving existing release-branch restrictions.
