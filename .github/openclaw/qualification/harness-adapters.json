@@ -55,7 +55,7 @@
       "build": {
         "kind": "source-compatibility",
         "patch": "harness-adapters/candidate-build.patch",
-        "sha256": "a9a9233abf623a17d8cad4a2b711b41bf26374818b1fd4161439c50b67d85b56",
+        "sha256": "0482c437365d3606b14c9b35222515a6cf3ad95fa0b16d71e4829280e7c1bf53",
         "compiled_inputs": [
           "src/codegen/bindgen-lib-internal.ts",
           "src/codegen/bundle-functions.ts",
@@ -122,9 +122,9 @@
           },
           "src/jsc/bindings/bindings.cpp": {
             "before": "dbd09c9c614849925997140020afefd85489e57c03fb2a7bb9953bba07a3da6e",
-            "after": "81760bbb80dea0c60dd7284333496cd80cc96b493426fd6d3c776f1543a8499e",
+            "after": "2ab1e2b0627488885fea15c5cfd6c9e1c5d25d8b017e2ddda5406f8b82a2bdda",
             "base_blob": "2e3ef553730ced0200b12c0f21ce9b59e97bd262",
-            "adapted_blob": "24cf9576ab95a18b29be8e0cfe425c032378f4b7",
+            "adapted_blob": "073457e39431ed1c1ed290e882566feedc405325",
             "mode": "100644"
           },
           "src/jsc/bindings/headers.h": {

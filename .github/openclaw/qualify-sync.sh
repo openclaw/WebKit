@@ -45,6 +45,10 @@ if test "$selection_exit" -ne 0; then exit "$selection_exit"; fi
   > "$results/lazy-process-builtins.log" 2>&1
 "$candidate" test test/js/web/workers/structured-clone.test.ts -t 'primitive BigInt|Array with primitives|Object with primitives' \
   > "$results/bigint-serialization.log" 2>&1
+"$candidate" test test/js/web/intl/intl.test.ts -t 'Intl\.Collator.*sensitivity' \
+  > "$results/untrimmed-collator.log" 2>&1
+"$candidate" -e 'const url=new URL("https://example.test/path?key=value");if(url.pathname!=="/path"||url.searchParams.get("key")!=="value")throw Error("native URL getters");console.log("native URL getters passed")' \
+  > "$results/untrimmed-getters.log" 2>&1
 # The native runner uses agent.tmpdir(), which selects /tmp on this Linux lane.
 python3 "$inputs/compile_cache.py" /tmp "$junit_prefix" "$results/module-junit.xml"
 # Run these unchanged upstream tests explicitly as well, so skips cannot satisfy the gate.
@@ -71,13 +75,15 @@ BUN_JSC_collectContinuously=1 "$candidate" "$inputs/module-context.mjs" matrix >
 "$candidate" "$inputs/als/retention.mjs" > "$results/als-retention.json" 2>&1
 WK="$QUALIFICATION_DIR/engine/bun-webkit"
 clang++-23 -std=c++23 -O2 -DNDEBUG -DBUILDING_WITH_CMAKE=1 -DHAVE_CONFIG_H=1 \
-  -I"$WK/include" -I"$WK/include/JavaScriptCore" -I"$WK/include/wtf" \
+  -I"$WK/include" -I"$WK/include/JavaScriptCore" -I"$WK/include/wtf" -I"$pipeline/Source/JavaScriptCore" \
+  "$pipeline/Source/JavaScriptCore/aot/runtime/AOTNoFeatureRemoved.cpp" \
   "$inputs/engine-limit-probe.cpp" "$repo/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o" \
   -Wl,--start-group "$WK"/lib/*.a -Wl,--end-group -lpthread -ldl -lm -latomic \
   -o "$results/engine-limit-probe" > "$results/engine-limit-build.log" 2>&1
 "$results/engine-limit-probe" > "$results/engine-limits.log" 2>&1
 clang++-23 -std=c++23 -O2 -DNDEBUG -DBUILDING_WITH_CMAKE=1 -DHAVE_CONFIG_H=1 \
-  -I"$WK/include" -I"$WK/include/JavaScriptCore" -I"$WK/include/wtf" \
+  -I"$WK/include" -I"$WK/include/JavaScriptCore" -I"$WK/include/wtf" -I"$pipeline/Source/JavaScriptCore" \
+  "$pipeline/Source/JavaScriptCore/aot/runtime/AOTNoFeatureRemoved.cpp" \
   "$inputs/engine-gc-progress-probe.cpp" "$repo/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o" \
   -Wl,--start-group "$WK"/lib/*.a -Wl,--end-group -lpthread -ldl -lm -latomic \
   -o "$results/engine-gc-progress-probe" > "$results/engine-gc-progress-build.log" 2>&1

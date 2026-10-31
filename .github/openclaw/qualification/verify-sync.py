@@ -14,14 +14,16 @@ observed=validate_arm(out,selected)
 assert observed['all_passed'],'sync CI failures'
 assert {'test/js/web/atomics.test.ts','test/js/bun/wasm/compile-rss.test.ts'}<=set(selected)
 counts={}
-for name,minimum in [('memory-release',3),('webkit-upgrade',11),('proxy',4),('resource-limits',16),('namespace',41),('inspector',78),('als-suites',223),('stack-positions',343),('stack-minifier',68),('arraybuffer',19),('worker-statistics',7),('arraybuffer-native',1),('arraybuffer-serializer',60),('inspection-idle',1),('sqlite-bigint',6),('bake-builtin',1),('bigint-matchers',2),('lazy-process-builtins',3),('bigint-serialization',18)]:
+for name,minimum in [('memory-release',3),('webkit-upgrade',11),('proxy',4),('resource-limits',16),('namespace',41),('inspector',78),('als-suites',223),('stack-positions',343),('stack-minifier',68),('arraybuffer',19),('worker-statistics',7),('arraybuffer-native',1),('arraybuffer-serializer',60),('inspection-idle',1),('sqlite-bigint',6),('bake-builtin',1),('bigint-matchers',2),('lazy-process-builtins',3),('bigint-serialization',18),('untrimmed-collator',1)]:
     text=(out/(name+'.log')).read_text()
     passes=re.findall(r'(\d+) pass',text)
     assert passes and int(passes[-1])>=minimum,name+' incomplete'
     assert re.search(r'\b0 fail\b',text),name+' failed'
     if name=='webkit-upgrade':assert int(passes[-1])==11,'WebKit upgrade selection drift'
-    if name in ('memory-release','webkit-upgrade','bigint-matchers','bigint-serialization','lazy-process-builtins'):assert not re.search(r'\b[1-9]\d* skip\b',text),name+' tests skipped'
+    if name=='untrimmed-collator':assert int(passes[-1])==1,'collator selection drift'
+    if name in ('memory-release','webkit-upgrade','bigint-matchers','bigint-serialization','lazy-process-builtins','untrimmed-collator'):assert not re.search(r'\b[1-9]\d* skip\b',text),name+' tests skipped'
     counts[name]=int(passes[-1])
+assert (out/'untrimmed-getters.log').read_text().strip()=='native URL getters passed','native URL getter smoke incomplete'
 for name in ['als-plugin','als-native','als-gc']:
     matrix=json.loads((out/(name+'.json')).read_text())['results']
     assert len(matrix)==14 and all(r['exitCode']==0 for r in matrix),name

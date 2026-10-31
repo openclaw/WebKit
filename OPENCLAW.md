@@ -50,7 +50,8 @@ patches 000 and 012. The candidate is Bun
 `50dbaef36882f6185b619ecf08b0663590cd0e5b`, with its tracked WebKit
 manifest replaced by the measured candidate Linux archive and an explicit
 source compatibility patch for `BuiltinCode` generators, their source-provider
-IDs and lazy process builders, `JSBigInt::createFrom` callers and the retired private BigInt32 paths. The build receipt records the patch and each
+IDs and lazy process builders, `JSBigInt::createFrom` callers and the retired private BigInt32 paths. The ordinary runtime also implements
+the engine removable-feature hooks with every feature retained. The build receipt records the patch and each
 file's original/adapted digest, including the exact compiled source paths.
 The patch is applied only during the build; the frozen source and index must
 be restored before runtime evidence is accepted. Baseline and test harness

@@ -146,10 +146,57 @@ index 1ec73a62de1bbf9f0b9b8ec614541e0a7fbe1e06..ed62e231dbe67676a5a00ec977423dc9
  
  JSC_DEFINE_HOST_FUNCTION(jsFunctionIsLiveCellAtRawAddress, (JSGlobalObject * globalObject, CallFrame* callframe))
 diff --git a/src/jsc/bindings/bindings.cpp b/src/jsc/bindings/bindings.cpp
-index 2e3ef553730ced0200b12c0f21ce9b59e97bd262..24cf9576ab95a18b29be8e0cfe425c032378f4b7 100644
+index 2e3ef553730ced0200b12c0f21ce9b59e97bd262..073457e39431ed1c1ed290e882566feedc405325 100644
 --- a/src/jsc/bindings/bindings.cpp
 +++ b/src/jsc/bindings/bindings.cpp
-@@ -4173,10 +4173,6 @@ bool JSC__JSValue__isException(JSC::EncodedJSValue JSValue0, JSC::VM* arg1)
+@@ -9,6 +9,7 @@
+  */
+ #include "root.h"
+ 
++#include <JavaScriptCore/AOTRemovableFeature.h>
+ #include "JavaScriptCore/ErrorType.h"
+ #include "JavaScriptCore/TopExceptionScope.h"
+ #include "JavaScriptCore/Exception.h"
+@@ -209,6 +210,38 @@
+ #include <JavaScriptCore/IntegrityInlines.h>
+ #endif
+ 
++// The regular runtime retains every engine feature.
++namespace JSC {
++
++extern "C" const RemovableFeatureState Bun__removableFeatureState { };
++
++extern "C" [[noreturn]] void Bun__abortForRemovedFeature(uint16_t)
++{
++    CRASH();
++}
++
++extern "C" EncodedJSValue Bun__throwForRemovedFeature(JSGlobalObject*, uint16_t)
++{
++    CRASH();
++}
++
++extern "C" EncodedJSValue Bun__throwForRemovedBuiltin(JSGlobalObject*, uint16_t, uint32_t)
++{
++    CRASH();
++}
++
++extern "C" EncodedJSValue Bun__throwForRemovedFunction(JSGlobalObject*, uint16_t, StringImpl*)
++{
++    CRASH();
++}
++
++extern "C" const char* Bun__removableFeatureName(uint16_t)
++{
++    return nullptr;
++}
++
++} // namespace JSC
++
+ extern "C" size_t Bun__Feature__heap_snapshot;
+ 
+ #if OS(DARWIN)
+@@ -4173,10 +4206,6 @@ bool JSC__JSValue__isException(JSC::EncodedJSValue JSValue0, JSC::VM* arg1)
  {
      return JSC::JSValue::decode(JSValue0).isBigInt();
  }
@@ -160,7 +207,7 @@ index 2e3ef553730ced0200b12c0f21ce9b59e97bd262..24cf9576ab95a18b29be8e0cfe425c03
  
  [[ZIG_EXPORT(nothrow)]] bool JSC__JSValue__isLiveCell(JSC::EncodedJSValue JSValue0)
  {
-@@ -4350,28 +4346,7 @@ uint8_t JSC__JSValue__asBigIntCompare(JSC::EncodedJSValue JSValue0, JSC::JSGloba
+@@ -4350,28 +4379,7 @@ uint8_t JSC__JSValue__asBigIntCompare(JSC::EncodedJSValue JSValue0, JSC::JSGloba
  {
      JSValue v1 = JSValue::decode(JSValue0);
      JSValue v2 = JSValue::decode(JSValue1);
@@ -190,7 +237,7 @@ index 2e3ef553730ced0200b12c0f21ce9b59e97bd262..24cf9576ab95a18b29be8e0cfe425c03
  
      if (v1.isHeapBigInt()) {
          JSBigInt* v1BigInt = v1.asHeapBigInt();
-@@ -4379,12 +4354,6 @@ uint8_t JSC__JSValue__asBigIntCompare(JSC::EncodedJSValue JSValue0, JSC::JSGloba
+@@ -4379,12 +4387,6 @@ uint8_t JSC__JSValue__asBigIntCompare(JSC::EncodedJSValue JSValue0, JSC::JSGloba
              return static_cast<uint8_t>(JSBigInt::compare(v1BigInt, v2.asHeapBigInt()));
          }
  
