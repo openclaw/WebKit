@@ -1,0 +1,198 @@
+name: OpenClaw hosted Linux consumer qualification
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/openclaw-hosted-linux-consumer.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: openclaw-hosted-linux-consumer-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  SYNC_COMMIT: 42e4245f4180941634b482a7e8ef7fca47467de5
+  CARRIER_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  linux-native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 42e4245f4180941634b482a7e8ef7fca47467de5
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/LayoutTests/
+            !/JSTests/*
+            !/PerformanceTests/
+            !/Websites/
+            !/ManualTests/
+            !/WebDriverTests/
+            /JSTests/stress/
+            /JSTests/modules/
+            /JSTests/*.yaml
+            /JSTests/BUN-TEST-DIFFERENCES.md
+      - name: Make room for both independent cold builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          export ARTIFACT_DIR="$RUNNER_TEMP/linux-artifact" QUALIFICATION_DIR="$RUNNER_TEMP/qualification"
+          echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> "$GITHUB_ENV"
+          echo "QUALIFICATION_DIR=$QUALIFICATION_DIR" >> "$GITHUB_ENV"
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /opt/microsoft
+          df -h /
+          python3 - <<'PY'
+          import json, os, shutil
+          from pathlib import Path
+          capacity = dict(cpus=os.cpu_count(), disk_free_bytes=shutil.disk_usage('.').free)
+          assert capacity['disk_free_bytes'] >= 40 * 1024**3, 'paired cold builds need 40 GiB free'
+          Path(os.environ['QUALIFICATION_DIR']).mkdir()
+          Path(os.environ['QUALIFICATION_DIR'], 'carrier.json').write_text(json.dumps(dict(
+              carrier=os.environ['CARRIER_COMMIT'], sync=os.environ['SYNC_COMMIT'],
+              engine_artifact=13050907884, engine_run=41213533216, engine_attempt=2,
+              capacity=capacity), indent=2) + '\n')
+          PY
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.3.0'
+      - name: Admit the exact retained engine artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api repos/openclaw/WebKit/actions/artifacts/13050907884 > "$RUNNER_TEMP/engine-artifact.json"
+          gh api repos/openclaw/WebKit/actions/artifacts/13050907884/zip > "$RUNNER_TEMP/engine.zip"
+          python3 - <<'PY'
+          import hashlib, json, os, shutil, stat, zipfile
+          from pathlib import Path, PurePosixPath
+          root = Path(os.environ['RUNNER_TEMP'])
+          artifact = json.loads((root / 'engine-artifact.json').read_text())
+          digest = 'da8bbf2a08a5bff8d566b213a7e329f4103da4e627e05ff5c64c1576e9c06385'
+          assert artifact['id'] == 13050907884 and not artifact['expired']
+          assert artifact['name'] == 'bun-webkit-linux-amd64'
+          assert artifact['workflow_run']['id'] == 41213533216
+          assert artifact['workflow_run']['head_sha'] == os.environ['SYNC_COMMIT']
+          assert artifact['size_in_bytes'] == (root / 'engine.zip').stat().st_size == 709332920
+          assert artifact['digest'] == 'sha256:' + digest
+          with (root / 'engine.zip').open('rb') as stream:
+              assert hashlib.file_digest(stream, 'sha256').hexdigest() == digest
+          target = Path(os.environ['ARTIFACT_DIR'])
+          target.mkdir()
+          with zipfile.ZipFile(root / 'engine.zip') as archive:
+              entries = archive.infolist()
+              assert 0 < len(entries) <= 32 and sum(e.file_size for e in entries) <= 8 * 1024**3
+              (Path(os.environ['QUALIFICATION_DIR']) / 'engine-zip-entries.json').write_text(json.dumps([
+                  {'path': e.filename, 'bytes': e.file_size, 'mode': e.external_attr >> 16, 'directory': e.is_dir()}
+                  for e in entries
+              ], indent=2) + '\n')
+              seen_paths, seen_files = set(), set()
+              for entry in entries:
+                  name = PurePosixPath(entry.filename)
+                  parts = entry.filename.rstrip('/').split('/')
+                  assert not name.is_absolute() and not any(p in ('', '.', '..') for p in parts)
+                  assert '\\' not in entry.filename and '\x00' not in entry.filename and name not in seen_paths
+                  seen_paths.add(name)
+                  mode = stat.S_IFMT(entry.external_attr >> 16)
+                  if entry.is_dir():
+                      assert mode in (0, stat.S_IFDIR) and entry.file_size == 0
+                      continue
+                  assert mode in (0, stat.S_IFREG) and name.name not in seen_files
+                  seen_files.add(name.name)
+                  with archive.open(entry) as source, (target / name.name).open('xb') as output:
+                      shutil.copyfileobj(source, output)
+          from sys import path
+          path.insert(0, '.github/openclaw/qualification')
+          from consumer_identity import engine_input
+          engine_input(target / 'bun-webkit-linux-amd64.tar.gz', target / 'bun-webkit-linux-amd64.manifest.json', os.environ['SYNC_COMMIT'])
+          shutil.copyfile(root / 'engine-artifact.json', Path(os.environ['QUALIFICATION_DIR']) / 'engine-artifact.json')
+          (root / 'engine.zip').unlink()
+          PY
+      - name: Install the frozen Bun and JSC test tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake ninja-build nasm ccache golang-go clang-23 lld-23 llvm-23 unzip ruby ruby-highline libjson-pp-perl
+          rustup toolchain install nightly-2026-09-15 --profile minimal --component rust-src
+          echo 'RUSTUP_TOOLCHAIN=nightly-2026-09-15' >> "$GITHUB_ENV"
+          echo '/usr/lib/llvm-23/bin' >> "$GITHUB_PATH"
+          curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o "$RUNNER_TEMP/bun.zip"
+          unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bootstrap"
+          echo "$RUNNER_TEMP/bootstrap/bun-linux-x64" >> "$GITHUB_PATH"
+      - name: Verify the unchanged pipeline contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SYNC_COMMIT"
+          python3 .github/openclaw/test_artifacts.py
+          python3 .github/openclaw/test_compare_fork_ci.py
+          python3 .github/openclaw/test_release.py
+          python3 .github/openclaw/test_consumer_identity.py
+          python3 .github/openclaw/test_verify_jsc_results.py
+          bash .github/openclaw/preflight.sh
+      - name: Qualify the exact frozen Bun pair with live build progress
+        shell: bash
+        run: |
+          set -euo pipefail
+          export INSPECTOR_RUNTIME="$(realpath "$(command -v bun)")"
+          tail -n +1 -F "$QUALIFICATION_DIR/build-baseline.log" "$QUALIFICATION_DIR/build-candidate.log" &
+          tail_pid=$!
+          (while sleep 60; do date -u; free -m; df -h /; done) &
+          monitor_pid=$!
+          trap 'kill "$tail_pid" "$monitor_pid" 2>/dev/null || true' EXIT
+          bash .github/openclaw/qualify-engine.sh
+          bash .github/openclaw/qualify.sh
+          export CANDIDATE_BUN="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
+          export CANDIDATE_RECEIPT="$QUALIFICATION_DIR/candidate-identity.json"
+          bash .github/openclaw/qualify-sync-compatibility.sh
+          bash .github/openclaw/qualify-sync.sh
+      - name: Retain the exact qualified Bun executables
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: hosted-linux-bun-executables
+          path: |
+            ${{ runner.temp }}/qualification/bun-baseline/build/qualify-baseline/bun
+            ${{ runner.temp }}/qualification/bun/build/qualify-candidate/bun
+            ${{ runner.temp }}/qualification/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
+            ${{ runner.temp }}/qualification/*.sha256
+          compression-level: 0
+          if-no-files-found: warn
+          retention-days: 3
+      - name: Retain terminal or partial qualification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: hosted-linux-native-proof
+          path: |
+            ${{ runner.temp }}/qualification/*.json
+            ${{ runner.temp }}/qualification/*.log
+            ${{ runner.temp }}/qualification/*.sha256
+            ${{ runner.temp }}/qualification/*.patch
+            ${{ runner.temp }}/qualification/candidate-input/artifacts.json
+            ${{ runner.temp }}/qualification/baseline/*.json
+            ${{ runner.temp }}/qualification/baseline/*.log
+            ${{ runner.temp }}/qualification/candidate/*.json
+            ${{ runner.temp }}/qualification/candidate/*.log
+            ${{ runner.temp }}/qualification/compatibility/*.log
+            ${{ runner.temp }}/qualification/sync/*.json
+            ${{ runner.temp }}/qualification/sync/*.xml
+            ${{ runner.temp }}/qualification/sync/*.log
+            ${{ runner.temp }}/qualification/jsc-*/results
+            ${{ runner.temp }}/qualification/jsc-stack/*.log
+            ${{ runner.temp }}/qualification/jsc-stack/*.json
+            ${{ runner.temp }}/qualification/sync/runtime-cache/*.json
+          if-no-files-found: error
+          retention-days: 7
