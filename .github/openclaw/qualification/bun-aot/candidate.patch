@@ -1,5 +1,5 @@
 diff --git a/scripts/build/aot-source-lists.ts b/scripts/build/aot-source-lists.ts
-index 3a340c0ec58bf172926ab963c38364363e23c9ea..2eea08b824cc83e18b086845efa9a616ddbd9c54 100644
+index 3a340c0ec5..2eea08b824 100644
 --- a/scripts/build/aot-source-lists.ts
 +++ b/scripts/build/aot-source-lists.ts
 @@ -6,7 +6,7 @@ import { writeIfChanged } from "./fs.ts";
@@ -120,7 +120,7 @@ index 3a340c0ec58bf172926ab963c38364363e23c9ea..2eea08b824cc83e18b086845efa9a616
    const librarySources = sources.filter(path => !isTestSource(path));
    if (
 diff --git a/scripts/build/aot.ts b/scripts/build/aot.ts
-index 5ae4884d3402dd1627375d888b2c8eca98733229..16d3e7736a43c90fedb249c95cf8ead3fad09ae6 100644
+index 5ae4884d34..16d3e7736a 100644
 --- a/scripts/build/aot.ts
 +++ b/scripts/build/aot.ts
 @@ -2,9 +2,6 @@ import { resolve } from "node:path";
@@ -236,7 +236,7 @@ index 5ae4884d3402dd1627375d888b2c8eca98733229..16d3e7736a43c90fedb249c95cf8ead3
    emitBuiltinSources(ctx);
  }
 diff --git a/scripts/build/deps/webkit.ts b/scripts/build/deps/webkit.ts
-index 4fc1df1f0bf8bbb865505a995fcd7c32e8646223..8b196120beecd8724adc10f63a15e1cdaf7e5375 100644
+index 4fc1df1f0b..8b196120be 100644
 --- a/scripts/build/deps/webkit.ts
 +++ b/scripts/build/deps/webkit.ts
 @@ -192,7 +192,6 @@ export function webkitEngineSources(cfg: Config): EngineSources {
@@ -379,7 +379,7 @@ index 4fc1df1f0bf8bbb865505a995fcd7c32e8646223..8b196120beecd8724adc10f63a15e1cd
          const bundled = bundledAotSources.get(path);
          if (prefix !== undefined) {
 diff --git a/scripts/build/ninja.ts b/scripts/build/ninja.ts
-index 6d0eb950721760a5bbe426b94bab7d6413edb4cc..89f4ab89a2c47fbac710a8ab426401eb8a07d590 100644
+index 6d0eb95072..89f4ab89a2 100644
 --- a/scripts/build/ninja.ts
 +++ b/scripts/build/ninja.ts
 @@ -26,8 +26,6 @@ import { writeIfChanged } from "./fs.ts";
@@ -392,7 +392,7 @@ index 6d0eb950721760a5bbe426b94bab7d6413edb4cc..89f4ab89a2c47fbac710a8ab426401eb
    // bun.ts
    binary_verify: ["spec"],
 diff --git a/scripts/build/rules.ts b/scripts/build/rules.ts
-index 4f2b1ce576424e75d93d1d6ccf65a073805c57e9..1c2173c5647ac4acfe5e0dc947ccb2384ef56e20 100644
+index 4f2b1ce576..1c2173c564 100644
 --- a/scripts/build/rules.ts
 +++ b/scripts/build/rules.ts
 @@ -19,7 +19,6 @@
@@ -414,7 +414,7 @@ index 4f2b1ce576424e75d93d1d6ccf65a073805c57e9..1c2173c5647ac4acfe5e0dc947ccb238
    registerRustRules(n, cfg);
  
 diff --git a/scripts/build/timings.ts b/scripts/build/timings.ts
-index c017df06e1d7cc94bec31b03292fde4820b8dab6..952c8081f92e4f033ca592f8931b57b921865869 100644
+index c017df06e1..952c8081f9 100644
 --- a/scripts/build/timings.ts
 +++ b/scripts/build/timings.ts
 @@ -818,7 +818,6 @@ const ruleLane: Record<RuleName, Lane> = {
@@ -425,8 +425,30 @@ index c017df06e1d7cc94bec31b03292fde4820b8dab6..952c8081f92e4f033ca592f8931b57b9
    codegen: "codegen",
    codegen_bun: "codegen",
    esbuild: "codegen",
+diff --git a/src/codegen/builtins/data/own-properties.txt b/src/codegen/builtins/data/own-properties.txt
+index 7eea973220..507d48de0f 100644
+--- a/src/codegen/builtins/data/own-properties.txt
++++ b/src/codegen/builtins/data/own-properties.txt
+@@ -124,8 +124,6 @@ Response : error/w json/w length/c name/c prototype/- redirect/w
+ Response.prototype : @@toStringTag/c arrayBuffer/w blob/w body/a bodyUsed/a bytes/w clone/w constructor/wc formData/w headers/a json/w ok/a redirected/a status/a statusText/a text/w textStream/w type/a url/a
+ Set : @@species/ac length/? name/? prototype/-
+ Set.prototype : @@iterator/wc @@toStringTag/c add/wc clear/wc constructor/wc delete/wc difference/wc entries/wc forEach/wc has/wc intersection/wc isDisjointFrom/wc isSubsetOf/wc isSupersetOf/wc keys/wc size/ac symmetricDifference/wc union/wc values/wc
+-ShadowRealm : length/? name/? prototype/-
+-ShadowRealm.prototype : @@toStringTag/c constructor/wc evaluate/wc importValue/wc
+ SharedArrayBuffer : @@species/ac length/? name/? prototype/-
+ SharedArrayBuffer.prototype : @@toStringTag/c byteLength/ac constructor/wc grow/wc growable/ac maxByteLength/ac slice/wc
+ String : fromCharCode/wc fromCodePoint/wc length/? name/? prototype/- raw/wc
+@@ -205,7 +203,7 @@ encodeURI : length/? name/?
+ encodeURIComponent : length/? name/?
+ escape : length/? name/?
+ eval : length/? name/?
+-globalThis open : $vm/? AggregateError/wc Array/wc ArrayBuffer/wc AsyncDisposableStack/wc Atomics/wc BigInt/wc BigInt64Array/wc BigUint64Array/wc Boolean/wc DataView/wc Date/wc DisposableStack/wc Error/wc EvalError/wc FinalizationRegistry/wc Float16Array/wc Float32Array/wc Float64Array/wc Function/wc Infinity/- Int16Array/wc Int32Array/wc Int8Array/wc Intl/wc Iterator/wc JSON/wc Loader/? Map/wc Math/wc NaN/- Number/wc Object/wc Promise/wc Proxy/wc RangeError/wc ReferenceError/wc Reflect/wc RegExp/wc Set/wc ShadowRealm/wc SharedArrayBuffer/wc String/wc SuppressedError/wc Symbol/wc SyntaxError/wc Temporal/wc TypeError/wc URIError/wc Uint16Array/wc Uint32Array/wc Uint8Array/wc Uint8ClampedArray/wc WeakMap/wc WeakRef/wc WeakSet/wc WebAssembly/wc __disableSamplingProfiler/? __disableSuperSampler/? __dumpAndClearSamplingProfilerSamples/? __enableSamplingProfiler/? __enableSuperSampler/? __signpostStart/? __signpostStop/? __tracePointStart/? __tracePointStop/? decodeURI/wc decodeURIComponent/wc encodeURI/wc encodeURIComponent/wc escape/wc eval/wc gc/wc globalThis/wc isFinite/wc isNaN/wc parseFloat/wc parseInt/wc undefined/- unescape/wc
++globalThis open : $vm/? AggregateError/wc Array/wc ArrayBuffer/wc AsyncDisposableStack/wc Atomics/wc BigInt/wc BigInt64Array/wc BigUint64Array/wc Boolean/wc DataView/wc Date/wc DisposableStack/wc Error/wc EvalError/wc FinalizationRegistry/wc Float16Array/wc Float32Array/wc Float64Array/wc Function/wc Infinity/- Int16Array/wc Int32Array/wc Int8Array/wc Intl/wc Iterator/wc JSON/wc Loader/? Map/wc Math/wc NaN/- Number/wc Object/wc Promise/wc Proxy/wc RangeError/wc ReferenceError/wc Reflect/wc RegExp/wc Set/wc SharedArrayBuffer/wc String/wc SuppressedError/wc Symbol/wc SyntaxError/wc Temporal/wc TypeError/wc URIError/wc Uint16Array/wc Uint32Array/wc Uint8Array/wc Uint8ClampedArray/wc WeakMap/wc WeakRef/wc WeakSet/wc WebAssembly/wc __disableSamplingProfiler/? __disableSuperSampler/? __dumpAndClearSamplingProfilerSamples/? __enableSamplingProfiler/? __enableSuperSampler/? __signpostStart/? __signpostStop/? __tracePointStart/? __tracePointStop/? decodeURI/wc decodeURIComponent/wc encodeURI/wc encodeURIComponent/wc escape/wc eval/wc gc/wc globalThis/wc isFinite/wc isNaN/wc parseFloat/wc parseInt/wc undefined/- unescape/wc
+ isFinite : length/? name/?
+ isNaN : length/? name/?
+ parseFloat : length/? name/?
 diff --git a/src/codegen/builtins/host/compiler-helpers.builtins.ts b/src/codegen/builtins/host/compiler-helpers.builtins.ts
-index da639ebf279ac88cc5146b5eb5dcf0a5988c3c44..fe9a0703bd1979a7e886ef3c5b012c557e434800 100644
+index da639ebf27..fe9a0703bd 100644
 --- a/src/codegen/builtins/host/compiler-helpers.builtins.ts
 +++ b/src/codegen/builtins/host/compiler-helpers.builtins.ts
 @@ -29,7 +29,9 @@ const newArrayOf = (elements: b.TableType) => b.instance("Array").holding({ elem
@@ -459,7 +481,7 @@ index da639ebf279ac88cc5146b5eb5dcf0a5988c3c44..fe9a0703bd1979a7e886ef3c5b012c55
        defineMetadata: { key: kept, value: kept },
        createDecoratorMetadata: { base: calledOrChanged },
 diff --git a/src/codegen/builtins/host/globals.builtins.ts b/src/codegen/builtins/host/globals.builtins.ts
-index 7a2b3e4b1f541f9686af823fb7006baf2c1b564d..f9d9e223c51da321f02dc3b8b59c6dcfaf91e741 100644
+index 7a2b3e4b1f..f9d9e223c5 100644
 --- a/src/codegen/builtins/host/globals.builtins.ts
 +++ b/src/codegen/builtins/host/globals.builtins.ts
 @@ -31,7 +31,14 @@ const widestString = 2 ** 32;
@@ -627,7 +649,7 @@ index 7a2b3e4b1f541f9686af823fb7006baf2c1b564d..f9d9e223c51da321f02dc3b8b59c6dcf
      writes: externalState,
      implementation: b.hostCall,
 diff --git a/src/codegen/builtins/host/operand-changes.builtins.ts b/src/codegen/builtins/host/operand-changes.builtins.ts
-index 16ccb715349687f659f9a94fdb77c1c990478e73..64ad526674e7810f76797ad7452f4b1ab3ae6420 100644
+index 16ccb71534..64ad526674 100644
 --- a/src/codegen/builtins/host/operand-changes.builtins.ts
 +++ b/src/codegen/builtins/host/operand-changes.builtins.ts
 @@ -179,7 +179,7 @@ const addressNames = b.keysNamed("family", "address", "port");
@@ -692,7 +714,7 @@ index 16ccb715349687f659f9a94fdb77c1c990478e73..64ad526674e7810f76797ad7452f4b1a
    }),
  
 diff --git a/src/codegen/builtins/host/process.builtins.ts b/src/codegen/builtins/host/process.builtins.ts
-index 3c937ec37b23fea8867a74b6ed24cc04b2ba4d91..3b0ccf4b09dab990e61898c4ee0540fec22dee77 100644
+index 3c937ec37b..3b0ccf4b09 100644
 --- a/src/codegen/builtins/host/process.builtins.ts
 +++ b/src/codegen/builtins/host/process.builtins.ts
 @@ -13,16 +13,43 @@ import { handedOver } from "./native-code.ts";
@@ -751,8 +773,28 @@ index 3c937ec37b23fea8867a74b6ed24cc04b2ba4d91..3b0ccf4b09dab990e61898c4ee0540fe
    args: [b.operand("callback"), newArrayOf(b.operand("passed")).or(b.undefined), b.nativeMemory],
    result: "Ignored",
  });
+diff --git a/src/codegen/builtins/host/unseen-code.builtins.ts b/src/codegen/builtins/host/unseen-code.builtins.ts
+index 81f9e67ac6..ccb698d044 100644
+--- a/src/codegen/builtins/host/unseen-code.builtins.ts
++++ b/src/codegen/builtins/host/unseen-code.builtins.ts
+@@ -19,7 +19,6 @@ const moduleLoaders = [
+   "Bun.Transpiler",
+   "Bun.build",
+   "Bun.plugin",
+-  "ShadowRealm.prototype.importValue",
+   "node:module._extensions",
+   "node:module._load",
+   "node:module.runMain",
+@@ -30,7 +29,6 @@ const textEvaluators = [
+   "%NodeVMBinding%.Module",
+   "%NodeVMBinding%.Script",
+   "%NodeVMBinding%.compileFunction",
+-  "ShadowRealm.prototype.evaluate",
+   "native:Cpp:NodeVM.cpp:Bun::createNodeVMBinding",
+ ];
+ 
 diff --git a/src/codegen/builtins/host/web-classes.builtins.ts b/src/codegen/builtins/host/web-classes.builtins.ts
-index 5ca240781809111a43bc2d8956aaf74e238723ee..2a6ef6d6984449c3c76d21ce6f7e151965cf7e20 100644
+index 5ca2407818..2a6ef6d698 100644
 --- a/src/codegen/builtins/host/web-classes.builtins.ts
 +++ b/src/codegen/builtins/host/web-classes.builtins.ts
 @@ -65,7 +65,7 @@ const bodyOfAnyKind = [
@@ -765,7 +807,7 @@ index 5ca240781809111a43bc2d8956aaf74e238723ee..2a6ef6d6984449c3c76d21ce6f7e1519
      "OwnValues",
      "PrototypeChain",
 diff --git a/src/codegen/builtins/host/web-values.builtins.ts b/src/codegen/builtins/host/web-values.builtins.ts
-index 3ab839d0de2809788401da73485fe6d98456c46c..ed21af3e02c1de2cc2741e524c303e0502278503 100644
+index 3ab839d0de..ed21af3e02 100644
 --- a/src/codegen/builtins/host/web-values.builtins.ts
 +++ b/src/codegen/builtins/host/web-values.builtins.ts
 @@ -80,6 +80,7 @@ const forEachPair = {
@@ -814,8 +856,37 @@ index 3ab839d0de2809788401da73485fe6d98456c46c..ed21af3e02c1de2cc2741e524c303e05
        },
        implementation: b.hostCall,
      },
+diff --git a/src/jsc/bindings/ZigGlobalObject.cpp b/src/jsc/bindings/ZigGlobalObject.cpp
+index f8b13cf1ac..b7fd10726d 100644
+--- a/src/jsc/bindings/ZigGlobalObject.cpp
++++ b/src/jsc/bindings/ZigGlobalObject.cpp
+@@ -506,6 +506,8 @@ extern "C" void JSCInitialize(const char* envp[], size_t envc, void (*onCrash)(c
+             // After the loop: BUN_JSC_useShadowRealm=1 does not bring it back.
+             JSC::Options::useShadowRealm() = false;
+ #endif
++            if (runsCompiledCode || locksBuiltins)
++                JSC::Options::useShadowRealm() = false;
+             // This is the only assertOptionsAreCoherent() rule that BUN_JSC_* can break, and that assertion aborts.
+             if (JSC::Options::useWasm() && !JSC::Options::useWasmIPInt() && !(JSC::Options::useBBQJIT() && JSC::Options::useJIT())) [[unlikely]] {
+                 constexpr auto message = "BUN_JSC_useWasmIPInt=0 (needs useJIT and useBBQJIT, or BUN_JSC_useWasm=0)"_s;
+diff --git a/test/aot/builtins/realm-agreement.test.ts b/test/aot/builtins/realm-agreement.test.ts
+index 5c51b47618..512df2cae2 100644
+--- a/test/aot/builtins/realm-agreement.test.ts
++++ b/test/aot/builtins/realm-agreement.test.ts
+@@ -58,9 +58,9 @@ const namesOfGlobalObject = [
+   "console.log(JSON.stringify({ unlisted, isBelowObjectPrototype: Object.getPrototypeOf(globalThis) === Object.prototype }));",
+ ].join("\n");
+ 
+-test("the table lists every own name of the global object", async () => {
++test("the table lists every own name of the global object but ShadowRealm, which a compiled program does not have", async () => {
+   expect(JSON.parse((await runFile(namesOfGlobalObject)).stdout)).toEqual({
+-    unlisted: [],
++    unlisted: ["ShadowRealm"],
+     isBelowObjectPrototype: true,
+   });
+ });
 diff --git a/test/internal/build-aot-codegen-declared-outputs.test.ts b/test/internal/build-aot-codegen-declared-outputs.test.ts
-index b9b6a5353d4572e45a514d16b41ba84dc3a66f25..db4ea4bf79b52e27196a65582774eab455078ff6 100644
+index b9b6a5353d..db4ea4bf79 100644
 --- a/test/internal/build-aot-codegen-declared-outputs.test.ts
 +++ b/test/internal/build-aot-codegen-declared-outputs.test.ts
 @@ -9,7 +9,7 @@
@@ -936,7 +1007,7 @@ index b9b6a5353d4572e45a514d16b41ba84dc3a66f25..db4ea4bf79b52e27196a65582774eab4
      ["emitBuiltinSources", emitBuiltinSources],
    ] as const)("%s throws without an engine", (name, emit) => {
 diff --git a/test/internal/build-local-webkit.test.ts b/test/internal/build-local-webkit.test.ts
-index 813be511cb68422034d0567ce65f59733b257fb4..56bee5f41c7552a173ca0d929fd861be7243fb65 100644
+index 813be511cb..56bee5f41c 100644
 --- a/test/internal/build-local-webkit.test.ts
 +++ b/test/internal/build-local-webkit.test.ts
 @@ -295,6 +295,8 @@ const checkout = {
@@ -1016,7 +1087,7 @@ index 813be511cb68422034d0567ce65f59733b257fb4..56bee5f41c7552a173ca0d929fd861be
          "a folder of headers that is no include directory",
          { "aot/flow/AOTFlowGraph.h": "" },
 diff --git a/test/internal/builtins-table/places-of-callbacks.test.ts b/test/internal/builtins-table/places-of-callbacks.test.ts
-index 94235181ac80d7003a771321b3892b5bae45436f..cef51b3eed29c0e5f366964b7c4e6a0d5da67cbd 100644
+index 94235181ac..cef51b3eed 100644
 --- a/test/internal/builtins-table/places-of-callbacks.test.ts
 +++ b/test/internal/builtins-table/places-of-callbacks.test.ts
 @@ -1,11 +1,15 @@

@@ -89,8 +89,13 @@ def source_state(adapted):
         assert git(SOURCE, 'ls-files', '-s', '--', name).split()[0] == identity['mode']
 
 
-def junit(path, expected=None):
+def junit(path, expected=None, selected=None):
     cases = list(ElementTree.parse(path).iter('testcase'))
+    if selected is not None:
+        excluded = [case for case in cases if case.get('name') not in selected]
+        assert all(case.find('skipped') is not None and
+                   all(case.find(tag) is None for tag in ('failure', 'error')) for case in excluded)
+        cases = [case for case in cases if case.get('name') in selected]
     assert cases and all(not any(c.find(tag) is not None for tag in ('skipped', 'failure', 'error')) for c in cases)
     names = [c.get('name') for c in cases]
     assert len(names) == len(set(names)) and all(names)
@@ -103,7 +108,7 @@ OUT.mkdir(exist_ok=True)
 assert git(Path('/work/pipeline'), 'rev-parse', 'HEAD') == PIPELINE
 spec = json.loads((INPUTS / 'source-adapter.json').read_text())
 assert spec['bun'] == BUN and spec['webkit'] == WEBKIT
-assert len(spec['files']) == 15
+assert len(spec['files']) == 19
 assert sha(INPUTS / 'candidate.patch') == spec['patch_sha256']
 original_tree = git(SOURCE, 'rev-parse', 'HEAD^{tree}')
 source_state(False)
@@ -153,6 +158,17 @@ assert set(callback_cases) == {
     'a called function says what native code does afterwards',
 } and len(callback_cases) == 4
 internal_cases['builtins-table/places-of-callbacks.test.ts'] = callback_cases
+realm_names = [
+    'the table lists every own name of the global object but ShadowRealm, which a compiled program does not have',
+    'the table lists every own name of the global object of an executable',
+]
+xml = OUT / 'realm-contracts.xml'
+run('realm-contracts', [str(binary), 'test', 'test/aot/builtins/realm-agreement.test.ts',
+                        '--test-name-pattern=^(?:' + '|'.join(re.escape(name) for name in realm_names) + ')$',
+                        '--reporter=junit', '--reporter-outfile=' + str(xml)], 900)
+realm_cases = junit(xml, selected=set(realm_names))
+assert set(realm_cases) == set(realm_names) and len(realm_cases) == 2
+internal_cases['aot/builtins/realm-agreement.test.ts'] = realm_cases
 source_state(True)
 run('restore-source', ['git', 'restore', '--source=' + BUN, '--worktree', '--', *spec['files']], 120)
 source_state(False)

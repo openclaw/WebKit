@@ -1,7 +1,7 @@
 {
   "bun": "fd40ba44187c721ee023062fa153a6a27560e6b1",
   "webkit": "5ec9ac8557722128588184ed9cf77347d9a30cf1",
-  "patch_sha256": "a9446f7bc696d5bd65f0861735b59a581be35d173726c816914943f4fb4df08a",
+  "patch_sha256": "916794f45a7a1653b8bc2e553427b429be05e061b7b0d74357b3defeee3cdfbb",
   "files": {
     "scripts/build/aot-source-lists.ts": {
       "before": "881654b517a593c56bf65ca3f84a238a8825b43c9ad92b1bd3587cb78a579ffa",
@@ -45,6 +45,13 @@
       "adapted_blob": "952c8081f92e4f033ca592f8931b57b921865869",
       "mode": "100644"
     },
+    "src/codegen/builtins/data/own-properties.txt": {
+      "before": "31faf6399093c762fada49583e27a09324d4ff50d614f96e904316c8577a498f",
+      "after": "49169739e2e64b7a50f79cd19e3c1d4996ee9967dda8bc3260368af1133b2003",
+      "base_blob": "7eea973220efa53e3c700d26e2dc094d1723ac52",
+      "adapted_blob": "507d48de0f95c6f943196c7203e4fb78ad99ac6f",
+      "mode": "100644"
+    },
     "src/codegen/builtins/host/compiler-helpers.builtins.ts": {
       "before": "824338e5b74c3a6a86aba2cab776dd43bf0e35490b8e87864a656102a20245a9",
       "after": "276b5d69572226af8c179242ac302c91a2e426cd35bc0b9f35c59ff3b8861131",
@@ -73,6 +80,13 @@
       "adapted_blob": "3b0ccf4b09dab990e61898c4ee0540fec22dee77",
       "mode": "100644"
     },
+    "src/codegen/builtins/host/unseen-code.builtins.ts": {
+      "before": "a9e4507ad555278e38840285f9f613d0302420391b0932a7d2686d7d3196ac98",
+      "after": "2b251860f3b84ba1ef8b0b34104f443384d7996086440f5e5aea5f085c840034",
+      "base_blob": "81f9e67ac6a2eb81095c8c6dcdc2a365ff1a78fb",
+      "adapted_blob": "ccb698d0445f9ed524eac1572c439dcf34cc34ba",
+      "mode": "100644"
+    },
     "src/codegen/builtins/host/web-classes.builtins.ts": {
       "before": "8c3aacf47c824e625f0a5d635c3b9220f7bac84c0b2de4c74ae3061ae98602fa",
       "after": "7b5879f7a62ce6745ba5540307958931b8ba0ff66c7f9d8868f157e0f71e36f8",
@@ -85,6 +99,20 @@
       "after": "81fb34f1205963eed30d3544889f4fecd2a80ecd82982c366732f55303543957",
       "base_blob": "3ab839d0de2809788401da73485fe6d98456c46c",
       "adapted_blob": "ed21af3e02c1de2cc2741e524c303e0502278503",
+      "mode": "100644"
+    },
+    "src/jsc/bindings/ZigGlobalObject.cpp": {
+      "before": "8584a3b992a9e930eb7dbda1a4ef6c8986e10e09e9bd76819fead2a9110baa57",
+      "after": "55f8ce0aaa4866e131713def9bd0e16693af344a29109c4dc265c37a339ad6d5",
+      "base_blob": "f8b13cf1ac2723adb6908b5095eacfa462c3b863",
+      "adapted_blob": "b7fd10726d8879ca59c0cb2da4b669e75b18ff4f",
+      "mode": "100644"
+    },
+    "test/aot/builtins/realm-agreement.test.ts": {
+      "before": "a0b630a6981202d37a6a476c516bc00758845ada15ad84df04673ea4141bf4df",
+      "after": "57fc1876830d2b3706cf0a951af8c6b29246eca921cef324d195fc2d824f0a6a",
+      "base_blob": "5c51b4761814ee9398e507d87ac77cb229c1a638",
+      "adapted_blob": "512df2cae2ce877daa276f9cb38339778eda4e2f",
       "mode": "100644"
     },
     "test/internal/build-aot-codegen-declared-outputs.test.ts": {
