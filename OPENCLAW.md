@@ -145,6 +145,8 @@ baseline. Engine and Bun headers and libraries must be rebuilt together.
 
 ## Unreleased
 
+- Use the all-dead sweep specialization during VM destruction while preserving weak finalization and every cell destructor.
+
 - Release class-field identifier references when parser arenas are destroyed, preventing native string leaks during class initialization and Worker churn.
 
 - Retry asynchronous VM trap delivery after a foreign-stack suspension refusal without holding the process-wide suspension lock, allowing other VMs to collect while native calls await them. Blocking GC suspension and Mach suspension retain their existing contracts. Carries #25 onto engine main with its native regression.
