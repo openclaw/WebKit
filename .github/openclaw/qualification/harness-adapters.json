@@ -53,9 +53,45 @@
     "candidate": {
       "pin": "7b573c05d0c52dffc67d4d25daf108bed5930cf2",
       "build": {
-        "patch": null,
-        "sha256": null,
-        "files": {}
+        "kind": "source-compatibility",
+        "patch": "harness-adapters/candidate-build.patch",
+        "sha256": "0eb3ee1af8cb194001349a8f70d4cc1f371d186a51553cd0d963a8d41e97351a",
+        "compiled_inputs": [
+          "src/codegen/bundle-functions.ts",
+          "src/jsc/bindings/JSBuffer.cpp",
+          "src/jsc/bindings/JSCTestingHelpers.cpp",
+          "src/jsc/bindings/sqlite/NodeSqlite.cpp"
+        ],
+        "files": {
+          "src/codegen/bundle-functions.ts": {
+            "before": "e2764a60ce6a34b307dfa40c6dd108b718b99ae5ff89da71058a0b12c2289493",
+            "after": "04cd03f5daac325912db4f4e285f1871e2c86984fb6022e8ebe95b70070a9c30",
+            "base_blob": "9c991a68c09a9f9d36238805efc9d19ece9b70cd",
+            "adapted_blob": "7bf180f33af104fe3a18749818049e45ac813819",
+            "mode": "100644"
+          },
+          "src/jsc/bindings/JSBuffer.cpp": {
+            "before": "5445db01eac3bb9cc2bfd56de89e9a5c80631d1cde78749d4456148b292400ed",
+            "after": "f84579f0a75fabf71c76e34bc0ea989c938f5c924e0a778433ffe88b4d159f63",
+            "base_blob": "4078e20637104a1f416061071062b1b7c25bc80b",
+            "adapted_blob": "2d6485d17e75af2f544cc35848233bc935b3a946",
+            "mode": "100644"
+          },
+          "src/jsc/bindings/JSCTestingHelpers.cpp": {
+            "before": "b145121f9b830c386afda1fe7546d4ff119bc76d3942c1e9025b79a3dee9ae12",
+            "after": "ce11b0d93c586a6a9bf6179e2741e18ace501c999103fde08dedbc47b54a6c46",
+            "base_blob": "1ec73a62de1bbf9f0b9b8ec614541e0a7fbe1e06",
+            "adapted_blob": "ed62e231dbe67676a5a00ec977423dc9f945ada1",
+            "mode": "100644"
+          },
+          "src/jsc/bindings/sqlite/NodeSqlite.cpp": {
+            "before": "646b3e54dd66cc80adce94541ca57b55763b111badb50e7ad2413b42f6beaeb6",
+            "after": "dc29542440db4113fa31970d666f76af3ada75f4ee91bc20c156684a16eea783",
+            "base_blob": "a009685e942de61dca781d37c1e360ab2a4360ee",
+            "adapted_blob": "dcd35d6c798860ebf9e5ddf075c817bb8c8abc8a",
+            "mode": "100644"
+          }
+        }
       },
       "test": {
         "patch": "harness-adapters/candidate-test.patch",

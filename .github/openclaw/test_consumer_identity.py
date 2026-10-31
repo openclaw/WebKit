@@ -522,6 +522,44 @@ class HarnessAdapters(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'enters compiled source inventory'):self.run_owner()
         self.assertEqual(self.calls,[]);self.assert_restored()
 
+    def test_declared_compiled_candidate_build_is_measured_and_restored(self):
+        spec=copy.deepcopy(consumer.ADAPTERS['arms']['candidate']['build'])
+        spec.update(kind='source-compatibility',compiled_inputs=['harness.js'])
+        consumer.ADAPTERS['arms']['candidate']['build']=spec
+        self.inventory.append('harness.js')
+        receipt=self.root/'candidate-build-tools.json';receipt.unlink()
+        def child(argv,options):
+            self.assertEqual(self.file.read_text(),'adapted harness\n')
+            self.assertEqual((self.repo/'source.js').read_text(),'original\n')
+            return subprocess.CompletedProcess(argv,0)
+        self.child=child
+        self.assertEqual(self.run_owner('build'),0);self.assertEqual(len(self.calls),1)
+        record=json.loads(receipt.read_text())
+        self.assertEqual(record['adapter'],spec);self.assertTrue(record['restored'])
+        self.assertEqual(record['before'],record['after']);self.assert_restored()
+        consumer.validate_build_tools(record,'candidate',consumer.file_record(self.root,consumer.EXECUTABLE))
+        forged=copy.deepcopy(record);forged['adapter']['compiled_inputs']=[]
+        with self.assertRaises(ValueError):
+            consumer.validate_build_tools(forged,'candidate',consumer.file_record(self.root,consumer.EXECUTABLE))
+
+    def test_compiled_build_requires_exact_declared_inventory_before_mutation(self):
+        spec=consumer.ADAPTERS['arms']['candidate']['build']
+        consumer.ADAPTERS['arms']['candidate']['build']={**spec,'kind':'source-compatibility','compiled_inputs':['harness.js']}
+        (self.root/'candidate-build-tools.json').unlink()
+        with self.assertRaisesRegex(ValueError,'exact source compatibility declaration'):self.run_owner('build')
+        self.assertEqual(self.calls,[]);self.assert_restored()
+
+    def test_compiled_source_declaration_is_only_valid_for_candidate_build(self):
+        spec=consumer.ADAPTERS['arms']['candidate']['test']
+        for arm,phase in [('candidate','test'),('baseline','build'),('baseline','test')]:
+            with self.subTest(arm=arm,phase=phase):
+                adapters=copy.deepcopy(consumer.ADAPTERS)
+                adapters['arms'][arm][phase]={**spec,'kind':'source-compatibility','compiled_inputs':['harness.js']}
+                with patch.object(consumer,'ADAPTERS',adapters):
+                    with self.assertRaisesRegex(ValueError,'invalid source compatibility specification'):
+                        consumer.adapter_spec(arm,phase)
+        self.assertEqual(self.calls,[]);self.assert_restored()
+
 
     def test_spawn_error_records_unknown_status_and_restores_source(self):
         def child(argv,kwargs):raise OSError('fixture spawn failure')

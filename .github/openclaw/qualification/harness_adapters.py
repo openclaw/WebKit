@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply and restore the fixed build/test harness adapters without changing compile pins."""
+"""Apply measured harness/source adapters, then restore the frozen consumer checkout."""
 import argparse
 import hashlib
 import json
@@ -45,8 +45,9 @@ def excluded_inputs(repo, spec, inspector):
     identity.require_tracked_build_inputs(repo, inspector)
     inventory = identity.discover_build_inputs(repo, inspector)
     inputs = {Path(path).resolve() for path in inventory}
-    identity.require(not any((repo / path).resolve() in inputs for path in spec['files']),
-                     'harness adapter enters compiled source inventory')
+    adapted = sorted(path for path in spec['files'] if (repo / path).resolve() in inputs)
+    identity.require(adapted == spec.get('compiled_inputs', []),
+                     'harness adapter enters compiled source inventory without an exact source compatibility declaration')
     return hashlib.sha256(json.dumps(sorted(str(path.relative_to(repo.resolve())) for path in inputs)).encode()).hexdigest()
 
 

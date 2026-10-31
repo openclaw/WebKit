@@ -169,6 +169,13 @@ def adapter_spec(arm, phase):
                 'invalid native candidate build specification')
         return selected
     require(sha(INPUTS / selected['patch']) == selected['sha256'], 'harness adapter bytes drift')
+    if 'kind' in selected or 'compiled_inputs' in selected:
+        compiled = selected.get('compiled_inputs')
+        require(arm == 'candidate' and phase == 'build'
+                and selected.get('kind') == 'source-compatibility'
+                and isinstance(compiled, list) and bool(compiled)
+                and all(isinstance(path, str) and path in selected['files'] for path in compiled)
+                and compiled == sorted(set(compiled)), 'invalid source compatibility specification')
     return selected
 
 

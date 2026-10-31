@@ -1,0 +1,96 @@
+diff --git a/src/codegen/bundle-functions.ts b/src/codegen/bundle-functions.ts
+index 9c991a68c0..7bf180f33a 100644
+--- a/src/codegen/bundle-functions.ts
++++ b/src/codegen/bundle-functions.ts
+@@ -453,11 +453,11 @@ export async function bundleBuiltinFunctions({ requireTransformer, typesDir }: B
+     for (const fn of functions) {
+       const name = `${basename}${cap(fn.name)}`;
+       bundledCPP += `
+-JSC::FunctionExecutable* ${lowerBasename}${cap(fn.name)}CodeGenerator(JSC::VM& vm)
++JSC::BuiltinCode ${lowerBasename}${cap(fn.name)}CodeGenerator(JSC::VM& vm)
+ {
+     auto &builtins = static_cast<JSVMClientData*>(vm.clientData)->builtinFunctions().${lowerBasename}Builtins();
+     auto *executable = builtins.${lowerBasename}${cap(fn.name)}CodeExecutable();
+-    return executable->link(vm, nullptr, builtins.${lowerBasename}${cap(fn.name)}CodeSource(), std::nullopt, JSC::NoIntrinsic);
++    return { executable->link(vm, nullptr, builtins.${lowerBasename}${cap(fn.name)}CodeSource(), std::nullopt, JSC::NoIntrinsic), 0 };
+ }
+ `;
+     }
+@@ -636,7 +636,7 @@ JSBuiltinInternalFunctions::JSBuiltinInternalFunctions(JSC::VM& vm) : m_vm(vm)
+     }
+     bundledHeader += `
+     #define DECLARE_BUILTIN_GENERATOR(codeName, functionName, overriddenName, argumentCount) \\
+-        JSC::FunctionExecutable* codeName##Generator(JSC::VM&);
++        JSC::BuiltinCode codeName##Generator(JSC::VM&);
+ 
+     WEBCORE_FOREACH_${basename.toUpperCase()}_BUILTIN_CODE(DECLARE_BUILTIN_GENERATOR)
+     #undef DECLARE_BUILTIN_GENERATOR
+diff --git a/src/jsc/bindings/JSBuffer.cpp b/src/jsc/bindings/JSBuffer.cpp
+index 4078e20637..2d6485d17e 100644
+--- a/src/jsc/bindings/JSBuffer.cpp
++++ b/src/jsc/bindings/JSBuffer.cpp
+@@ -3080,7 +3080,7 @@ fastPath:
+         return JSValue::encode(jsNumber(JSC::purifyNaN(static_cast<double>(std::bit_cast<T>(raw)))));
+     } else if constexpr (byteSize == 8) {
+         // readBigInt64* / readBigUInt64*
+-        RELEASE_AND_RETURN(scope, JSValue::encode(JSBigInt::makeHeapBigIntOrBigInt32(lexicalGlobalObject, std::bit_cast<T>(raw))));
++        RELEASE_AND_RETURN(scope, JSValue::encode(JSBigInt::createFrom(lexicalGlobalObject, std::bit_cast<T>(raw))));
+     } else
+         return JSValue::encode(jsNumber(std::bit_cast<T>(raw)));
+ }
+diff --git a/src/jsc/bindings/JSCTestingHelpers.cpp b/src/jsc/bindings/JSCTestingHelpers.cpp
+index 1ec73a62de..ed62e231db 100644
+--- a/src/jsc/bindings/JSCTestingHelpers.cpp
++++ b/src/jsc/bindings/JSCTestingHelpers.cpp
+@@ -65,7 +65,7 @@ JSC_DEFINE_HOST_FUNCTION(jsFunctionStartOfFixedExecutableMemoryPool,
+ {
+     auto& vm = JSC::getVM(globalObject);
+     auto scope = DECLARE_THROW_SCOPE(vm);
+-    RELEASE_AND_RETURN(scope, JSValue::encode(JSBigInt::makeHeapBigIntOrBigInt32(globalObject, static_cast<uint64_t>(JSC::startOfFixedExecutableMemoryPool<uintptr_t>()))));
++    RELEASE_AND_RETURN(scope, JSValue::encode(JSBigInt::createFrom(globalObject, static_cast<uint64_t>(JSC::startOfFixedExecutableMemoryPool<uintptr_t>()))));
+ }
+ #endif
+ 
+@@ -77,7 +77,7 @@ JSC_DEFINE_HOST_FUNCTION(jsFunctionRawCellAddress, (JSGlobalObject * globalObjec
+     JSValue value = callframe->argument(0);
+     if (!value.isCell())
+         return JSValue::encode(jsUndefined());
+-    RELEASE_AND_RETURN(scope, JSValue::encode(JSBigInt::makeHeapBigIntOrBigInt32(globalObject, static_cast<uint64_t>(JSValue::encode(value)))));
++    RELEASE_AND_RETURN(scope, JSValue::encode(JSBigInt::createFrom(globalObject, static_cast<uint64_t>(JSValue::encode(value)))));
+ }
+ 
+ JSC_DEFINE_HOST_FUNCTION(jsFunctionIsLiveCellAtRawAddress, (JSGlobalObject * globalObject, CallFrame* callframe))
+diff --git a/src/jsc/bindings/sqlite/NodeSqlite.cpp b/src/jsc/bindings/sqlite/NodeSqlite.cpp
+index a009685e94..dcd35d6c79 100644
+--- a/src/jsc/bindings/sqlite/NodeSqlite.cpp
++++ b/src/jsc/bindings/sqlite/NodeSqlite.cpp
+@@ -323,7 +323,7 @@ static inline JSValue sqliteToJS(JSGlobalObject* globalObject, Source source, bo
+     case SQLITE_INTEGER: {
+         int64_t v = source.int64();
+         if (useBigInts)
+-            RELEASE_AND_RETURN(scope, JSBigInt::makeHeapBigIntOrBigInt32(globalObject, v));
++            RELEASE_AND_RETURN(scope, JSBigInt::createFrom(globalObject, v));
+         if (v > JSC::maxSafeInteger() || v < -JSC::maxSafeInteger()) {
+             Bun::throwError(globalObject, scope, ErrorCode::ERR_OUT_OF_RANGE,
+                 makeString("Value is too large to be represented as a JavaScript number: "_s, v));
+@@ -374,7 +374,7 @@ static SqliteFromJS sqliteFromJS(JSGlobalObject* globalObject, ThrowScope& scope
+     } else if (value.isBigInt()) {
+         // toBigInt64 truncates; detect loss by round-tripping.
+         int64_t v = JSBigInt::toBigInt64(value);
+-        JSValue roundTrip = JSBigInt::makeHeapBigIntOrBigInt32(globalObject, v);
++        JSValue roundTrip = JSBigInt::createFrom(globalObject, v);
+         RETURN_IF_EXCEPTION(scope, SqliteFromJS::Done);
+         if (JSBigInt::compare(value, roundTrip) != JSBigInt::ComparisonResult::Equal)
+             return SqliteFromJS::BigIntTooLarge;
+@@ -2461,9 +2461,9 @@ static EncodedJSValue statementStepRun(VM& vm, JSGlobalObject* globalObject, Thr
+     sqlite3_int64 changes = sqlite3_changes64(db);
+     sqlite3_int64 rowid = sqlite3_last_insert_rowid(db);
+     if (self->useBigInts()) {
+-        Bun::putDirectNamed(vm, result, "changes"_s, JSBigInt::makeHeapBigIntOrBigInt32(globalObject, static_cast<int64_t>(changes)));
++        Bun::putDirectNamed(vm, result, "changes"_s, JSBigInt::createFrom(globalObject, static_cast<int64_t>(changes)));
+         RETURN_IF_EXCEPTION(scope, {});
+-        Bun::putDirectNamed(vm, result, "lastInsertRowid"_s, JSBigInt::makeHeapBigIntOrBigInt32(globalObject, static_cast<int64_t>(rowid)));
++        Bun::putDirectNamed(vm, result, "lastInsertRowid"_s, JSBigInt::createFrom(globalObject, static_cast<int64_t>(rowid)));
+         RETURN_IF_EXCEPTION(scope, {});
+     } else {
+         Bun::putDirectNamed(vm, result, "changes"_s, jsNumber(static_cast<double>(changes)));

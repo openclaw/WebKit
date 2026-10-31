@@ -47,8 +47,14 @@ dependencies, build directories and caches. The historical baseline is Bun
 `1600131e46b5af48bbda3559af8d8a3327230b6e` and the recorded checksum/VM fixture
 patches 000 and 012. The candidate is Bun
 `7b573c05d0c52dffc67d4d25daf108bed5930cf2`, tree
-`50dbaef36882f6185b619ecf08b0663590cd0e5b`, with only its tracked WebKit
-manifest replaced by the measured candidate Linux archive. This is a Bun-plus-engine
+`50dbaef36882f6185b619ecf08b0663590cd0e5b`, with its tracked WebKit
+manifest replaced by the measured candidate Linux archive and an explicit
+four-file source compatibility patch for `BuiltinCode` generators and
+`JSBigInt::createFrom` callers. The build receipt records the patch and each
+file's original/adapted digest, including the exact compiled source paths.
+The patch is applied only during the build; the frozen source and index must
+be restored before runtime evidence is accepted. Baseline and test harness
+adapters still cannot modify compiled source. This is a Bun-plus-engine
 upgrade comparison, not an isolated engine measurement. The job runs the original 44-file
 fork selector output plus its two dependency checks, requires identical all-pass
 results, and checks Segmenter, four Proxy regressions, both 14-variant ALS hook
