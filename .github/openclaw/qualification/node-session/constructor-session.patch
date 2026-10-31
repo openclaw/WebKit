@@ -1,0 +1,48 @@
+diff --git a/lib/internal/tls/wrap.js b/lib/internal/tls/wrap.js
+index 82f343de726023a1ed85c98340235c372b3d1089..d7e2f13ce7e91534f57b9a6c4bd00cde206b6892 100644
+--- a/lib/internal/tls/wrap.js
++++ b/lib/internal/tls/wrap.js
+@@ -625,7 +625,7 @@
+  */
+ 
+ function TLSSocket(socket, opts) {
+-  const tlsOptions = { ...opts };
++  const tlsOptions = { ...opts, socket };
+   validateOpenSSLEngineOptions(tlsOptions);
+   let enableTrace = tlsOptions.enableTrace;
+ 
+@@ -859,7 +859,7 @@
+ 
+ TLSSocket.prototype[kReinitializeHandle] = function reinitializeHandle(handle) {
+   const originalServername = this.ssl ? this._handle.getServername() : null;
+-  const originalSession = this.ssl ? this._handle.getSession() : null;
++  const originalSession = this.ssl ? this.getSession() : null;
+ 
+   this.handle = this._wrapHandle(null, handle, false);
+   this.ssl = this._handle;
+@@ -1006,7 +1006,7 @@
+     ssl.onocspresponse = onocspresponse;
+ 
+     if (options.session)
+-      ssl.setSession(options.session);
++      this.setSession(options.session);
+ 
+     ssl.onnewsession = onnewsessionclient;
+ 
+@@ -1877,8 +1877,6 @@
+     );
+   }
+ 
+-  options.session = getSessionForReuse(options.session, options);
+-
+   const tlssock = new TLSSocket(options.socket, {
+     allowHalfOpen: options.allowHalfOpen,
+     pipe: !!options.path,
+@@ -1886,7 +1884,6 @@
+     isServer: false,
+     requestCert: true,
+     rejectUnauthorized: options.rejectUnauthorized !== false,
+-    session: options.session,
+     ALPNProtocols: options.ALPNProtocols,
+     requestOCSP: options.requestOCSP,
+     enableTrace: options.enableTrace,
