@@ -20,6 +20,10 @@ on:
         description: Assemble the completed fixed-run matrix after Linux replay
         type: boolean
         default: false
+      contracts_only:
+        description: Run only packaging and consumer contracts
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -34,8 +38,50 @@ env:
   CARRIER_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
+  contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: .github
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.12.1'
+      - name: Check the combined packaging and consumer contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          mkdir "$RUNNER_TEMP/contracts"
+          for suite in test_artifacts.py test_release.py test_consumer_identity.py test_compare_fork_ci.py test_verify_jsc_results.py; do
+            python3 ".github/openclaw/$suite" 2>&1 | tee "$RUNNER_TEMP/contracts/${suite%.py}.log"
+          done
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          config = json.loads(Path('.github/openclaw/variants.json').read_text())
+          assert len(config['lanes']) == 21
+          assert config['candidate']['commit'] == 'd9be087429c21e563bb5ac29f8a11805e64b56a3'
+          paths = ['artifacts.py', 'test_artifacts.py', 'release.py', 'test_release.py', 'variants.json']
+          controls = {name: hashlib.sha256(Path('.github/openclaw', name).read_bytes()).hexdigest() for name in paths}
+          Path(os.environ['RUNNER_TEMP'], 'contracts', 'gate.json').write_text(json.dumps({
+              'passed': True, 'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'lanes': 21, 'archives': 22, 'controls': controls,
+          }, indent=2) + '\n')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: integrated-packaging-contracts
+          path: ${{ runner.temp }}/contracts
+          if-no-files-found: warn
+          retention-days: 7
   linux-native:
-    if: ${{ !inputs.assemble_retained }}
+    needs: contracts
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.assemble_retained && !inputs.contracts_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
@@ -59,7 +105,7 @@ jobs:
             /JSTests/BUN-TEST-DIFFERENCES.md
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: 5e586e4ce8bd9f3f3703af98983f7f13fb58c242
           persist-credentials: false
           path: carrier
           fetch-depth: 1

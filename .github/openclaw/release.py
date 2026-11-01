@@ -86,21 +86,25 @@ def assemble(inputs,out,source):
     artifacts={}; lanes=[]
     expected_patches=None
     for lane in config['lanes']:
-        label=lane['label']; name=label+'.tar.gz'; directory=inputs/label
+        label=lane['label']; directory=inputs/label
         manifest=json.loads((directory/(label+'.manifest.json')).read_text())
         if manifest['source']!=source or manifest['lane']['label']!=label:
             raise ValueError('mixed source or lane')
         patches=lane_patch_records(manifest,source)
         if expected_patches is None:expected_patches=patches
         elif patches!=expected_patches:raise ValueError('lane patch provenance mismatch')
-        f=directory/name
-        if sha(f)!=manifest['files'][name]['sha256'] or f.stat().st_size!=manifest['files'][name]['size']:
-            raise ValueError('lane digest mismatch')
-        if label==consumer_identity.LANE:
-            measured=consumer_identity.engine_input(f,directory/(label+'.manifest.json'),source)
-            consumer_identity.validate_evidence(identity,source,measured,binaries,proof)
-        shutil.copyfile(f,out/name)
-        artifacts[name]={'url':f'https://github.com/{REPO}/releases/download/{tag}/{name}','sha256':sha(f),'size':f.stat().st_size}
+        for name in artifact_source.archive_names(manifest['lane']):
+            if name in artifacts:raise ValueError('duplicate release artifact: '+name)
+            entry=manifest['files'].get(name)
+            if entry is None:raise ValueError('missing lane artifact: '+name)
+            f=directory/name
+            if sha(f)!=entry['sha256'] or f.stat().st_size!=entry['size']:
+                raise ValueError('lane digest mismatch')
+            if name==label+'.tar.gz' and label==consumer_identity.LANE:
+                measured=consumer_identity.engine_input(f,directory/(label+'.manifest.json'),source)
+                consumer_identity.validate_evidence(identity,source,measured,binaries,proof)
+            shutil.copyfile(f,out/name)
+            artifacts[name]={'url':f'https://github.com/{REPO}/releases/download/{tag}/{name}','sha256':sha(f),'size':f.stat().st_size}
         lanes.append(manifest)
     windows=json.loads((inputs/'windows-arm64-qualification/gate.json').read_text())
     if (windows.get('passed') is not True or windows.get('source')!=source
@@ -181,7 +185,7 @@ def publish(directory,source):
         raise ValueError('publishing requires reviewed source on an explicitly permitted owned branch')
     # Tag creation fails atomically if the name exists. Neither existing drafts nor releases are resumed.
     api('-X','POST',f'repos/{REPO}/git/refs','-f','ref=refs/tags/'+tag,'-f','sha='+source)
-    body=f'OpenClaw-built WebKit at `{source}`. All {len(manifest["artifacts"])} lanes, Linux qualification and native Windows ARM64 engine probes passed.\n\n'+(ROOT/'.github/openclaw/release-notes.md').read_text()
+    body=f'OpenClaw-built WebKit at `{source}`. All {len(manifest["lanes"])} lanes, Linux qualification and native Windows ARM64 engine probes passed.\n\n'+(ROOT/'.github/openclaw/release-notes.md').read_text()
     draft=api('-X','POST',f'repos/{REPO}/releases','-f','tag_name='+tag,'-f','name='+tag,'-f','body='+body,'-F','draft=true')
     release_id=draft['id']
     execute('gh','release','upload',tag,'-R',REPO,*[str(p) for p in sorted(directory.iterdir())])

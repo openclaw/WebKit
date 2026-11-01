@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import tarfile
 import os
 from pathlib import Path
 import subprocess
@@ -84,6 +85,75 @@ class SourceHistory(unittest.TestCase):
             lanes.assert_not_called()
         self.assertFalse(destination.exists())
 
+
+    def test_build_packs_aot_sources_from_built_output(self):
+        repository, commits = self.graph('source-package')
+        label = 'bun-webkit-linux-amd64-lto-aot'
+        lane = {'label': label, 'sources': 'bun-webkit-aot-sources', 'aot': 1,
+            'image': 'fixture-toolchain', 'package_os': 'linux', 'package_cpu': 'x64', 'defines': ''}
+        destination = self.root / 'built-output'
+        artifact = destination / 'bun-webkit'
+        generated = b'{"origin":"built-engine-declarations"}\n'
+        members = {
+            'include/cmakeconfig.h': b'#pragma once\n',
+            'lib/libJavaScriptCore.a': b'native-library',
+            'Source/JavaScriptCore/aot/ir/AOTSchema.def': b'built-schema\n',
+            'Source/JavaScriptCore/aot/ir/generator/index.ts': b'// built-generator\n',
+            'Source/JavaScriptCore/aot/builtins/generated/AOTBuiltinEngineDeclarations.json': generated,
+            'Source/JavaScriptCore/aot/tests/example.ir': b'test-only\n',
+        }
+        real_run, real_capture = artifacts.run, artifacts.capture
+
+        def run(*args, **kwargs):
+            if args[0] != 'docker':
+                return real_run(*args, **kwargs)
+            if '--target=artifact' in args:
+                for name, data in members.items():
+                    path = artifact / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+
+        def capture(*args):
+            if args[0] == 'node':
+                if args[-1] == '--json':
+                    return json.dumps([lane])
+                return json.dumps(['docker', 'buildx', 'build', '--target=artifact', '.'])
+            if args[:3] == ('docker', 'image', 'inspect'):
+                return json.dumps([{'Id': 'fixture-image'}])
+            if args[0] == 'docker':
+                return 'fixture-tool-versions'
+            if args[:2] == ('git', 'ls-files'):
+                return self.capture(repository, *args[1:])
+            return real_capture(*args)
+
+        with patch.dict(os.environ, self.env, clear=True), patch.multiple(
+            artifacts, ROOT=repository, BASE=commits['B'], HISTORY_FLOOR=commits['F'],
+            RECIPE=['Dockerfile'], CONFIG={'lanes': [{'label': label}]}), patch.object(
+            artifacts, 'run', side_effect=run), patch.object(artifacts, 'capture', side_effect=capture):
+            artifacts.build(label, destination)
+
+        native = destination / (label + '.tar.gz')
+        sources = destination / 'bun-webkit-aot-sources.tar.gz'
+        declaration = 'bun-webkit/Source/JavaScriptCore/aot/builtins/generated/AOTBuiltinEngineDeclarations.json'
+        with tarfile.open(sources) as archive:
+            self.assertEqual(archive.extractfile(declaration).read(), generated)
+            names = archive.getnames()
+            self.assertTrue(all(name.startswith('bun-webkit/Source/JavaScriptCore/aot') for name in names))
+            self.assertFalse(any('/tests' in name for name in names))
+            self.assertFalse(any(name.startswith('bun-webkit/lib/') for name in names))
+        with tarfile.open(native) as archive:
+            self.assertEqual(archive.extractfile('bun-webkit/lib/libJavaScriptCore.a').read(), b'native-library')
+            self.assertEqual(archive.extractfile(declaration).read(), generated)
+        manifest = json.loads((destination / (label + '.manifest.json')).read_text())
+        expected = self.oracle(repository, commits, ['P', 'H'])
+        self.assertEqual({key: manifest[key] for key in expected}, expected)
+        files = {path.name: {'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'size': path.stat().st_size}
+            for path in (native, sources)}
+        self.assertEqual(manifest['files'], files)
+        self.assertEqual((destination / 'SHA256SUMS').read_text(),
+            ''.join(entry['sha256'] + '  ' + name + '\n' for name, entry in files.items()))
+        self.assertFalse(artifact.exists())
+
     def test_complete_history_and_raw_patch_hashes(self):
         repository, commits = self.graph('complete')
         self.assertEqual(self.source(repository, commits['B'], commits['F']),
@@ -160,6 +230,38 @@ class ArtifactHeaders(unittest.TestCase):
 
 
 class PreflightAdmission(unittest.TestCase):
+    def test_configured_matrix_admits_current_bun_aot_consumers(self):
+        legacy = [
+            'bun-webkit-linux-amd64',
+            'bun-webkit-macos-arm64',
+            'bun-webkit-linux-amd64-lto',
+            'bun-webkit-linux-arm64-lto',
+            'bun-webkit-macos-arm64-lto',
+            'bun-webkit-macos-amd64-lto',
+            'bun-webkit-linux-amd64-musl-lto',
+            'bun-webkit-linux-arm64-musl-lto',
+            'bun-webkit-windows-amd64-lto',
+            'bun-webkit-windows-arm64',
+        ]
+        aot = [label + '-aot' for label in legacy] + ['bun-webkit-linux-amd64-debug-asan-aot']
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'output'
+            for branch in ('claude/sync-webkit-upstream-20261014', 'claude/hosted-linux-consumer-20261031'):
+                with self.subTest(branch=branch):
+                    output.unlink(missing_ok=True)
+                    env = {'GITHUB_REF': 'refs/heads/' + branch,
+                        'INPUT_PUBLISH': 'false', 'INPUT_SHA': 'a' * 40,
+                        'GITHUB_SHA': 'a' * 40, 'ENGINE_SHA': 'a' * 40,
+                        'GITHUB_OUTPUT': str(output)}
+                    with patch.dict(os.environ, env, clear=True), patch.object(
+                        artifacts, 'source', return_value={'source': 'a' * 40}):
+                        artifacts.preflight()
+                    selected = [row['lane'] for row in json.loads(output.read_text().removeprefix('matrix='))['include']]
+                    self.assertEqual(selected, legacy + aot)
+        definitions = {lane['label']: lane for lane in artifacts.lane_definitions()}
+        source_producers = [label for label in selected if len(artifacts.archive_names(definitions[label])) == 2]
+        self.assertEqual(source_producers, ['bun-webkit-linux-amd64-lto-aot'])
+
     def test_sync_branch_is_qualification_only(self):
         cases = [
             ('refs/heads/claude/sync-webkit-upstream-20261014', 'false', True),
@@ -196,8 +298,16 @@ class PreflightAdmission(unittest.TestCase):
 
     def test_consumer_carrier_requires_exact_engine_and_frozen_matrix(self):
         engine = '42e4245f4180941634b482a7e8ef7fca47467de5'
-        original = copy.deepcopy(artifacts.CONFIG)
-        original['candidate'] = {'commit': 'b' * 40, 'tree': 'c' * 40, 'manifest_blob': 'd' * 40}
+        original = {
+            'baseline': {'commit': 'b' * 40},
+            'candidate': {'commit': 'c' * 40, 'tree': 'd' * 40, 'manifest_blob': 'e' * 40},
+            'lanes': [{'label': 'legacy-' + str(index), 'consumer': 'fixture'} for index in range(10)],
+        }
+        expected = copy.deepcopy(original)
+        expected['candidate'] = {
+            'commit': 'd9be087429c21e563bb5ac29f8a11805e64b56a3',
+            'tree': '980068aa5aa9f51f40fc4125114a68fccd9bc9dc',
+            'manifest_blob': 'e9544c96d5cd9a5e5f6b0245ed5c8dd78fb1a218'}
         cases = [
             ('false', engine, None, None),
             ('true', engine, None, 'permitted owned branch'),
@@ -205,6 +315,7 @@ class PreflightAdmission(unittest.TestCase):
             ('false', 'e' * 40, None, 'engine source mismatch'),
             ('false', engine, 'baseline', 'matrix/configuration drift'),
             ('false', engine, 'lanes', 'matrix/configuration drift'),
+            ('false', engine, 'lanes-added', 'matrix/configuration drift'),
             ('false', engine, 'candidate', 'matrix/configuration drift'),
         ]
         with tempfile.TemporaryDirectory() as temporary:
@@ -212,11 +323,13 @@ class PreflightAdmission(unittest.TestCase):
                 with self.subTest(publish=publish, engine=source, drift=drift):
                     output = Path(temporary) / 'output'
                     output.unlink(missing_ok=True)
-                    config = copy.deepcopy(artifacts.CONFIG)
+                    config = copy.deepcopy(expected)
                     if drift == 'baseline':
                         config['baseline']['commit'] = 'f' * 40
                     elif drift == 'lanes':
                         config['lanes'][0]['consumer'] = 'changed consumer'
+                    elif drift == 'lanes-added':
+                        config['lanes'].append({'label': 'aot-fixture', 'consumer': 'fixture'})
                     elif drift == 'candidate':
                         config['candidate']['commit'] = 'f' * 40
                     env = {'GITHUB_REF': 'refs/heads/claude/hosted-linux-consumer-20261031',

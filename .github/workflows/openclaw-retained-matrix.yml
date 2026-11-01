@@ -29,7 +29,7 @@ jobs:
             Source/WTF/wtf/COPYING.LIB
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.sha }}
+          ref: 5e586e4ce8bd9f3f3703af98983f7f13fb58c242
           fetch-depth: 1
           persist-credentials: false
           path: carrier

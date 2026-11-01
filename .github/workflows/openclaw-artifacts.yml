@@ -14,7 +14,7 @@ permissions:
   contents: read
   actions: read
 env:
-  ENGINE_SHA: ${{ github.ref == 'refs/heads/claude/hosted-linux-consumer-20261031' && '42e4245f4180941634b482a7e8ef7fca47467de5' || github.sha }}
+  ENGINE_SHA: ${{ inputs.sha }}
 concurrency:
   group: openclaw-artifacts-${{ inputs.sha }}
   cancel-in-progress: false
@@ -142,24 +142,6 @@ jobs:
           curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o "$RUNNER_TEMP/bun.zip"
           unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bootstrap"
           echo "$RUNNER_TEMP/bootstrap/bun-linux-x64" >> "$GITHUB_PATH"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        if: github.ref == 'refs/heads/claude/hosted-linux-consumer-20261031'
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-          path: carrier
-          sparse-checkout: .github/openclaw
-      - name: Download the unchanged historical baseline proof
-        if: github.ref == 'refs/heads/claude/hosted-linux-consumer-20261031'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          mkdir "$RUNNER_TEMP/retained"
-          gh api repos/openclaw/WebKit/actions/artifacts/13068952583 > "$RUNNER_TEMP/retained/proof.metadata.json"
-          gh api repos/openclaw/WebKit/actions/artifacts/13068952583/zip > "$RUNNER_TEMP/retained/proof.zip"
-          gh api repos/openclaw/WebKit/actions/artifacts/13068828135 > "$RUNNER_TEMP/retained/binaries.metadata.json"
-          gh api repos/openclaw/WebKit/actions/artifacts/13068828135/zip > "$RUNNER_TEMP/retained/binaries.zip"
       - name: Qualify the new engine archive and build the exact candidate
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/linux-artifact
@@ -170,13 +152,7 @@ jobs:
           export INSPECTOR_RUNTIME="$(realpath "$(command -v bun)")"
           test "$(node --version)" = v26.12.1
           bash .github/openclaw/qualify-engine.sh
-          if test "$GITHUB_REF" = refs/heads/claude/hosted-linux-consumer-20261031; then
-            python3 carrier/.github/openclaw/qualification/resume-consumer.py --fresh-engine "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/carrier" "$RUNNER_TEMP/retained" "$QUALIFICATION_DIR" "$ARTIFACT_DIR"
-            python3 .github/openclaw/test_consumer_identity.py
-            bash "$QUALIFICATION_DIR/qualify-candidate-fresh.sh"
-          else
-            bash .github/openclaw/qualify.sh
-          fi
+          bash .github/openclaw/qualify.sh
           export CANDIDATE_BUN="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
           export CANDIDATE_RECEIPT="$QUALIFICATION_DIR/candidate-identity.json"
           bash .github/openclaw/qualify-sync-compatibility.sh
@@ -264,16 +240,6 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           path: ${{ runner.temp }}/inputs
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        if: github.ref == 'refs/heads/claude/hosted-linux-consumer-20261031'
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-          path: carrier
-          sparse-checkout: .github/openclaw
-      - name: Install the exact reviewed consumer policy for assembly
-        if: github.ref == 'refs/heads/claude/hosted-linux-consumer-20261031'
-        run: python3 carrier/.github/openclaw/qualification/resume-consumer.py install "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/carrier"
       - name: Assemble complete release and verify checksums
         run: |
           python3 .github/openclaw/release.py assemble --source "$ENGINE_SHA" --inputs "$RUNNER_TEMP/inputs" --directory "$RUNNER_TEMP/release"

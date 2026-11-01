@@ -41,9 +41,53 @@
     {
       "label": "bun-webkit-windows-arm64",
       "consumer": "openclaw-release.yml windows-arm64: release without LTO"
+    },
+    {
+      "label": "bun-webkit-linux-amd64-aot",
+      "consumer": "openclaw-build-test.yml linux-x64: build:release --lto=off (current Bun AOT)"
+    },
+    {
+      "label": "bun-webkit-macos-arm64-aot",
+      "consumer": "openclaw-build-test.yml darwin-arm64: build:release --lto=off (current Bun AOT)"
+    },
+    {
+      "label": "bun-webkit-linux-amd64-lto-aot",
+      "consumer": "openclaw-release.yml default linux-x64 (current Bun AOT)"
+    },
+    {
+      "label": "bun-webkit-linux-arm64-lto-aot",
+      "consumer": "openclaw-release.yml default linux-arm64 (current Bun AOT)"
+    },
+    {
+      "label": "bun-webkit-macos-arm64-lto-aot",
+      "consumer": "openclaw-release.yml default darwin-arm64 (current Bun AOT)"
+    },
+    {
+      "label": "bun-webkit-macos-amd64-lto-aot",
+      "consumer": "openclaw-release.yml default darwin-x64 (current Bun AOT)"
+    },
+    {
+      "label": "bun-webkit-linux-amd64-musl-lto-aot",
+      "consumer": "openclaw-release.yml optional linux-x64-musl (current Bun AOT)"
+    },
+    {
+      "label": "bun-webkit-linux-arm64-musl-lto-aot",
+      "consumer": "openclaw-release.yml optional linux-arm64-musl (current Bun AOT)"
+    },
+    {
+      "label": "bun-webkit-windows-amd64-lto-aot",
+      "consumer": "openclaw-release.yml optional windows-x64 (current Bun AOT)"
+    },
+    {
+      "label": "bun-webkit-windows-arm64-aot",
+      "consumer": "openclaw-release.yml windows-arm64: release without LTO (current Bun AOT)"
+    },
+    {
+      "label": "bun-webkit-linux-amd64-debug-asan-aot",
+      "consumer": "Linux x64 bun bd test: Debug ASan with AOT"
     }
   ],
-  "excluded": "Android, FreeBSD, debug and ASAN are not selected by the fork's active OpenClaw workflows. Windows arm64 uses upstream's non-LTO lane because LLVM CodeView cannot encode its LTO register tuples. There is no separate x64 baseline WebKit archive.",
+  "excluded": "Android, FreeBSD and developer debug/ASAN variants other than the Linux x64 AOT proof lane are not selected by the fork's active OpenClaw workflows. Windows arm64 uses upstream's non-LTO lane because LLVM CodeView cannot encode its LTO register tuples. There is no separate x64 baseline WebKit archive.",
   "baseline": {
     "commit": "b83b544ef744b6ab0dc1feadb59652261d64291d",
     "tree": "0cb8c8700ae8ec2a2da75487072ad690a5747f8b",

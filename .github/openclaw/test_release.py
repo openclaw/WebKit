@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import io
+import tarfile
 import base64
 import hashlib
 import xml.etree.ElementTree as ET
@@ -26,8 +28,16 @@ class ReleaseIntegrity(unittest.TestCase):
         q=self.inputs/'qualification';q.mkdir()
         for lane in config['lanes']:
             label=lane['label'];d=self.inputs/label;d.mkdir();(d/'provenance').mkdir()
-            f=d/(label+'.tar.gz');f.write_bytes(label.encode())
-            (d/(label+'.manifest.json')).write_text(json.dumps({'source':SOURCE,'base':release.artifact_source.BASE,'history_floor':release.artifact_source.HISTORY_FLOOR,'patches':PATCHES,'lane':{'label':label},'files':{f.name:{'sha256':release.sha(f),'size':f.stat().st_size}}}))
+            metadata={'label':label}
+            payloads={label+'.tar.gz':label.encode()}
+            if label=='bun-webkit-linux-amd64-lto-aot':
+                metadata['sources']='bun-webkit-aot-sources'
+                payloads['bun-webkit-aot-sources.tar.gz']=b'built AOT sources'
+            files={}
+            for name,data in payloads.items():
+                f=d/name;f.write_bytes(data)
+                files[name]={'sha256':release.sha(f),'size':f.stat().st_size}
+            (d/(label+'.manifest.json')).write_text(json.dumps({'source':SOURCE,'base':release.artifact_source.BASE,'history_floor':release.artifact_source.HISTORY_FLOOR,'patches':PATCHES,'lane':metadata,'files':files}))
         release_fixture(self.inputs,SOURCE)
         w=self.inputs/'windows-arm64-qualification';w.mkdir()
         archive=self.inputs/'bun-webkit-windows-arm64/bun-webkit-windows-arm64.tar.gz'
@@ -136,7 +146,73 @@ class ReleaseIntegrity(unittest.TestCase):
                     for path,data in originals.items():(proof/path).write_bytes(data)
 
     def test_complete_set_roundtrip(self):
-        self.assemble();self.assertEqual(len(release.verify(self.out,SOURCE)['artifacts']),10)
+        self.assemble();self.assertEqual(len(release.verify(self.out,SOURCE)['artifacts']),22)
+
+    def test_aot_source_producer_roundtrip_and_integrity(self):
+        config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())
+        label='bun-webkit-linux-amd64-lto-aot'
+        source_name='bun-webkit-aot-sources.tar.gz'
+        root=self.root/'source'
+        config_path=root/'.github/openclaw/variants.json'
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(json.dumps(config))
+        directory=self.inputs/label
+        declaration='bun-webkit/Source/JavaScriptCore/aot/builtins/generated/AOTBuiltinEngineDeclarations.json'
+        generated=b'{"origin":"built-engine-declarations"}\n'
+        for name,members in [
+            (label+'.tar.gz',{'bun-webkit/lib/libJavaScriptCore.a':b'native-library',declaration:generated}),
+            (source_name,{declaration:generated}),
+        ]:
+            with tarfile.open(directory/name,'w:gz') as archive:
+                for member,data in members.items():
+                    info=tarfile.TarInfo(member);info.size=len(data)
+                    archive.addfile(info,io.BytesIO(data))
+        manifest={'source':SOURCE,'base':release.artifact_source.BASE,
+            'history_floor':release.artifact_source.HISTORY_FLOOR,'patches':PATCHES,
+            'lane':{'label':label,'sources':'bun-webkit-aot-sources'},
+            'files':{name:{'sha256':release.sha(directory/name),'size':(directory/name).stat().st_size}
+                for name in (label+'.tar.gz',source_name)}}
+        manifest_path=directory/(label+'.manifest.json')
+        manifest_path.write_text(json.dumps(manifest))
+        source_path=directory/source_name
+        original=source_path.read_bytes()
+
+        with patch.object(release,'ROOT',root):
+            release.assemble(self.inputs,self.out,SOURCE)
+            result=release.verify(self.out,SOURCE)
+            self.assertEqual(len(result['lanes']),len(config['lanes']))
+            self.assertEqual(len(result['artifacts']),len(config['lanes'])+1)
+            self.assertEqual(result['artifacts'][source_name],{
+                'url':f'https://github.com/openclaw/WebKit/releases/download/autobuild-{SOURCE}/{source_name}',
+                'sha256':hashlib.sha256(original).hexdigest(),'size':len(original)})
+            self.assertEqual((self.out/source_name).read_bytes(),original)
+            with tarfile.open(self.out/source_name) as archive:
+                self.assertEqual(archive.extractfile(declaration).read(),generated)
+            with tarfile.open(self.out/'provenance.tar.gz') as archive:
+                recorded=json.loads(archive.extractfile(label+'/'+label+'.manifest.json').read())
+                self.assertEqual(recorded,manifest)
+            for index,case in enumerate(('missing-file','missing-entry','changed-bytes','wrong-size','missing-sources','duplicate')):
+                with self.subTest(case=case):
+                    source_path.write_bytes(original)
+                    changed=json.loads(json.dumps(manifest))
+                    expected=ValueError
+                    if case=='missing-file':
+                        source_path.unlink();expected=FileNotFoundError
+                    elif case=='missing-entry':
+                        del changed['files'][source_name]
+                    elif case=='changed-bytes':
+                        source_path.write_bytes(bytes([original[0]^1])+original[1:])
+                    elif case=='wrong-size':
+                        changed['files'][source_name]['size']+=1
+                    elif case=='missing-sources':
+                        del changed['lane']['sources']
+                    elif case=='duplicate':
+                        config['lanes'].append({'label':label})
+                        config_path.write_text(json.dumps(config))
+                    manifest_path.write_text(json.dumps(changed))
+                    with self.assertRaises(expected):
+                        release.assemble(self.inputs,self.root/('invalid-source-'+str(index)),SOURCE)
+
     def test_changed_lane_bytes_rejected(self):
         next(self.inputs.glob('*/*.tar.gz')).write_bytes(b'tampered')
         with self.assertRaises(ValueError):self.assemble()
