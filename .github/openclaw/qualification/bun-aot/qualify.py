@@ -367,6 +367,7 @@ rust_cases = [
     ('bun_sema_parser', 'analysis_fold', 'ordinary_run_typeof_keeps_reached_await_live'),
     ('bun_sema_parser', 'analysis_fold', 'build_only_conditions_leave_ordinary_run_await_live'),
     ('bun_aot', None, 'link::marks::tests::expected_result_keeps_its_layouts'),
+    ('bun_aot', None, 'ir::tests::types::constructors_set_one_part'),
     ('bun_aot', None, 'emit::tests::engine_prints_same_text'),
     ('bun_aot', None, 'modules::plan::tests::the_commonjs_files_of_a_graph_run_first'),
     ('bun_aot', None, 'modules::imports::tests::strict_import_survives_a_soft_typescript_re_export_of_the_same_name'),

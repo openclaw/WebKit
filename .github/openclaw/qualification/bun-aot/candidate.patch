@@ -1,11 +1,13 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0..f881277bdebf6dd3dc88c674daba836f4502a20d 100644
+index ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0..526e8279c2d1ab3ba4a930ab2d0f1030db766da7 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,15 @@
+@@ -2,6 +2,17 @@
  
  ## Unreleased
  
++- Represent well-known symbol builtins as primitive AOT types instead of object identities.
++
 +- Preserve `typeof` side effects while excluding unreachable awaits from ordinary-run function metadata.
 +
 +- Remove unused private AOT byte-range host declarations that prevented the native compiler from linking.
@@ -3511,6 +3513,59 @@ index 845837d1c4d195883bac108416a497b72dda374d..3825a94437d89b19560f0993f7b6d0a5
 +        [Some(TEXT), Some(TEXT), Some(TEXT), None, None, Some(TEXT)]
 +    );
  }
+diff --git a/src/aot/ir/tests/types.rs b/src/aot/ir/tests/types.rs
+index c2968a91ef90f883091146e42ed40cf33a7b3c87..b9da2aa1d2c59a4ce9ef1cad71187c58915e1c87 100644
+--- a/src/aot/ir/tests/types.rs
++++ b/src/aot/ir/tests/types.rs
+@@ -168,6 +168,12 @@ fn constructors_set_one_part() {
+         ..none()
+     };
+     assert_eq!(Type::builtin(builtin(7)), expected);
++    assert_eq!(Type::value_of_builtin(builtin(7)), Some(expected));
++    assert_eq!(
++        Type::value_of_builtin(BuiltinId::SymbolIterator),
++        Some(Type::primitives(Primitives::SYMBOL))
++    );
++    assert_eq!(Type::value_of_builtin(BuiltinId::MathPI), None);
+     let expected = Type {
+         flags: TypeFlags::ANY_FUNCTION,
+         ..none()
+diff --git a/src/aot/ir/types.rs b/src/aot/ir/types.rs
+index 248629579bf39b29536d47aed69a54e6b314505c..702cd7abea4f43751f7c14766172525786b2c6c4 100644
+--- a/src/aot/ir/types.rs
++++ b/src/aot/ir/types.rs
+@@ -13,7 +13,7 @@ use super::type_union::{
+     union_all_types, union_types,
+ };
+ use crate::builtins::id::{BuiltinClass, BuiltinId};
+-use crate::builtins::table::class_data;
++use crate::builtins::table::{BuiltinKind, canonical_id, class_data, entry, well_known_symbol};
+ 
+ impl Type {
+     pub fn never() -> Type {
+@@ -72,12 +72,21 @@ impl Type {
+     }
+ 
+     pub fn builtin(builtin: BuiltinId) -> Type {
++        debug_assert_ne!(entry(builtin).kind, BuiltinKind::Constant);
+         Type {
+-            builtins: vec![builtin],
++            builtins: vec![canonical_id(builtin)],
+             ..Type::default()
+         }
+     }
+ 
++    /// A constant is a primitive, and the table says which kind of primitive only for the well-known symbols.
++    pub fn value_of_builtin(builtin: BuiltinId) -> Option<Type> {
++        if entry(builtin).kind != BuiltinKind::Constant {
++            return Some(Type::builtin(builtin));
++        }
++        well_known_symbol(builtin).map(|_| Type::primitives(Primitives::SYMBOL))
++    }
++
+     pub fn function(function: FunctionId) -> Type {
+         Type {
+             functions: vec![function],
 diff --git a/src/aot/link/marks/tests.rs b/src/aot/link/marks/tests.rs
 index 39791f2055d64202fc94b00a41f5e721c8fab0d6..80a90a410513f5bb3c9043645b9624146c8ccb75 100644
 --- a/src/aot/link/marks/tests.rs
@@ -4832,6 +4887,22 @@ index d32265cd0264cd1b90482cb457674d919e5f76f0..ffcb1fb7e95dd443099f9b3676e94e46
          let value = lowering.builder.boolean(true);
          branch_on_truthiness(lowering, None, value, if_true, if_false);
      } else if is_statically_resolved(lowering.file, expression) {
+diff --git a/src/aot/lower/context/function.rs b/src/aot/lower/context/function.rs
+index 56b99a1bc2b0e668afaaf850874f8617ed78871a..cbb962c96f791bf80aaecf3f59d965e303f3ade5 100644
+--- a/src/aot/lower/context/function.rs
++++ b/src/aot/lower/context/function.rs
+@@ -123,7 +123,10 @@ impl<'f, 'a, 'c, 'p, 's> FunctionLowering<'f, 'a, 'c, 'p, 's> {
+                 None => return value,
+             }
+         } else {
+-            Type::builtin(builtin)
++            match Type::value_of_builtin(builtin) {
++                Some(expected) => expected,
++                None => return value,
++            }
+         };
+         let expected = self.file.fragment.types.intern(expected);
+         self.expect_type(value, expected)
 diff --git a/src/aot/lower/convert.rs b/src/aot/lower/convert.rs
 index 3d80e65aa90ca3a9a35ddc12738aef1d1e5f09d6..1e1b041ee4a005e40c6ebc730a32cb69a4bf4f0e 100644
 --- a/src/aot/lower/convert.rs
@@ -6571,6 +6642,24 @@ index dc17ffb540f284e81fe82af961b82079af1b1bd1..fb775161826b8f26447408cafc5ef5bc
      let is_builtin = lowering.builder.strict_eq(constructor, builtin);
      continue_if(lowering, is_builtin, done);
      let part = PrivateStatePart::Collection;
+diff --git a/src/aot/lower/scope/environments.rs b/src/aot/lower/scope/environments.rs
+index 2c28666c8827602641b3a951523055d8037bbd51..518536fda9140dad71f9f03b9ac8f9b977be09c0 100644
+--- a/src/aot/lower/scope/environments.rs
++++ b/src/aot/lower/scope/environments.rs
+@@ -263,9 +263,10 @@ fn expect_builtin_path(
+         false => None,
+     };
+     let types = &mut file.fragment.types;
+-    let builtin = match own_exports {
+-        Some(exports) => exports.ty,
+-        None => types.intern(Type::builtin(path.id)),
++    let builtin = match (own_exports, Type::value_of_builtin(path.id)) {
++        (Some(exports), _) => exports.ty,
++        (None, Some(builtin)) => types.intern(builtin),
++        (None, None) => return position,
+     };
+     let expected = match is_expected {
+         true => types.union(position.ty, builtin),
 diff --git a/src/aot/lower/scope/eval.rs b/src/aot/lower/scope/eval.rs
 index 836987baf2b81b6af5c905ba70af74dfd1951748..0a4d3cef7f33bc36b65ab6c08dada0fc25b5e26b 100644
 --- a/src/aot/lower/scope/eval.rs
