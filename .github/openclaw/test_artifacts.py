@@ -252,7 +252,7 @@ class PreflightAdmission(unittest.TestCase):
                     env = {'GITHUB_REF': 'refs/heads/' + branch,
                         'INPUT_PUBLISH': 'false', 'INPUT_SHA': 'a' * 40,
                         'GITHUB_SHA': 'a' * 40, 'ENGINE_SHA': 'a' * 40,
-                        'GITHUB_OUTPUT': str(output)}
+                        'GITHUB_OUTPUT': str(output), 'PATH': os.environ['PATH']}
                     with patch.dict(os.environ, env, clear=True), patch.object(
                         artifacts, 'source', return_value={'source': 'a' * 40}):
                         artifacts.preflight()

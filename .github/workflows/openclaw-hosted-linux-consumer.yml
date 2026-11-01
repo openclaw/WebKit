@@ -46,7 +46,9 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-          sparse-checkout: .github
+          sparse-checkout: |
+            .github
+            icu
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '26.12.1'
