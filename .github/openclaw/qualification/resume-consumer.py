@@ -56,6 +56,7 @@ def install_controls(pipeline, carrier, identity):
         target = frozen.parent / name if name in parent_files else frozen / name
         assert sha(source) == digest, name
         shutil.copyfile(source, target)
+    shutil.copyfile(reviewed / "consumer-repair.json", frozen / "consumer-repair.json")
 
     return source_manifest
 
