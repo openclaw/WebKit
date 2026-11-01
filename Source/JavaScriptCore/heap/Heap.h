@@ -657,6 +657,8 @@ public:
     JS_EXPORT_PRIVATE size_t jsHeapSizeForReporting();
     JS_EXPORT_PRIVATE size_t jsHeapCapacityForReporting();
 #endif
+    JS_EXPORT_PRIVATE bool tryReserveCapacityForNewArrayBuffer();
+    bool tryGrowListOfArrayBuffersEarly();
     
     bool isDeferred() const { return !!m_deferralDepth; }
 

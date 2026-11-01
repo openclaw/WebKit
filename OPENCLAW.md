@@ -1,7 +1,7 @@
 # OpenClaw WebKit artifacts
 
 This fork owns the WebKit artifacts consumed by `openclaw/bun`. The engine base is
-`e66916298091dd12469076fd854e135b03fb16ff`. Normal merges retain both the
+`4d45755fed4aeef19e95beb90d3d0c884a2812bd`. Normal merges retain both the
 main and published fork histories. Upstream `.github/scripts/lanes.mjs`, Dockerfiles, ICU inputs and macOS
 cross tools remain unchanged. No workflow publishes toolchain images.
 
@@ -23,7 +23,7 @@ LTO for Linux glibc x64/arm64, macOS x64/arm64, and its optional Linux musl
 x64/arm64 and Windows x64 targets. Fork CI adds non-LTO Linux x64 and macOS arm64.
 Windows ARM64 adds the upstream non-LTO release lane, for ten artifacts. These existing lanes disable AOT; packaged headers carry the same lane ABI definitions as their libraries. LLVM's
 CodeView register-tuple limitation prevents ARM64 LTO (oven-sh/bun#31345).
-Debug, ASAN, Android and FreeBSD are not selected by these OpenClaw workflows. x64 has one Nehalem baseline.
+The matching AOT lanes and Linux x64 Debug ASAN AOT lane are also admitted, for 21 native variants. Android and FreeBSD are not selected by these OpenClaw workflows. x64 has one Nehalem baseline.
 
 ## Add a patch and qualify
 
@@ -138,6 +138,10 @@ entry, reset, nested-scope, and microtask lifecycle behavior. Deferred scopes ke
 the existing lazy entry and teardown boundaries without allocating heap storage.
 The Linux x64 artifact build makes both VM entry targets dependencies of `jsc`
 and requires both native executables to pass before accepting the artifact.
+
+## Matched upstream sync (2026-11-01)
+
+- Merge upstream `4d45755fed4aeef19e95beb90d3d0c884a2812bd`, pinned by Bun upstream `3f3a9ff87cdccf3d32d7ec6b648c664eddaae840`, with both histories intact. Admit its matching lane and Docker recipes while preserving the fork fixes, history floor, and 21 native variants. Native engine and paired Bun qualification are pending.
 
 ## Batch 1 (2026-10-04)
 

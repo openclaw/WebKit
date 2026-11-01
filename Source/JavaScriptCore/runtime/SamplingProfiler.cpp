@@ -275,7 +275,7 @@ public:
 
             if (isCFrame()) {
                 RELEASE_ASSERT(!LLInt::isLLIntPC(frame()->callerFrame));
-                stackTrace[m_depth] = UnprocessedStackFrame(frame()->returnPC);
+                stackTrace[m_depth] = UnprocessedStackFrame(removeReturnAddressSignature(frame()->returnPC));
                 m_depth++;
             } else
                 recordJITFrame(stackTrace);
@@ -391,7 +391,7 @@ protected:
         m_framePointerOfFrameWithoutRecord = nullptr;
         CallFrame* calleeFrame = m_callFrame;
         EntryFrame* calleeEntryFrame = m_entryFrame;
-        m_pc = removeCodePtrTag(reinterpret_cast<const CallerFrameAndPC*>(calleeFrame)->returnPC);
+        m_pc = removeReturnAddressSignature(reinterpret_cast<const CallerFrameAndPC*>(calleeFrame)->returnPC);
         Base::advanceToParentFrame();
         if (isAtTop())
             return;
@@ -462,7 +462,7 @@ public:
 
             if (isCFrame()) {
                 RELEASE_ASSERT(!LLInt::isLLIntPC(frame()->callerFrame));
-                stackTrace[m_depth] = UnprocessedStackFrame(frame()->returnPC);
+                stackTrace[m_depth] = UnprocessedStackFrame(removeReturnAddressSignature(frame()->returnPC));
                 m_depth++;
             } else
                 recordJITFrame(stackTrace);
@@ -1200,7 +1200,7 @@ int SamplingProfiler::StackFrame::functionStartLine()
 {
 #if ENABLE(AOT)
     if (isCompiledFrame()) {
-        auto definition = AOT::FunctionDescription(compiledFrame.function).definition();
+        auto definition = AOT::definitionOf(compiledFrame);
         return definition ? static_cast<int>(definition->lineColumn.line) : -1;
     }
 #endif
@@ -1225,7 +1225,7 @@ unsigned SamplingProfiler::StackFrame::functionStartColumn()
 {
 #if ENABLE(AOT)
     if (isCompiledFrame()) {
-        auto definition = AOT::FunctionDescription(compiledFrame.function).definition();
+        auto definition = AOT::definitionOf(compiledFrame);
         return definition ? definition->lineColumn.column : std::numeric_limits<unsigned>::max();
     }
 #endif
@@ -1250,7 +1250,7 @@ unsigned SamplingProfiler::StackFrame::functionStartColumn()
 #if ENABLE(AOT)
 AOT::Typed::ModuleID SamplingProfiler::StackFrame::compiledModule() const
 {
-    auto definition = AOT::FunctionDescription(compiledFrame.function).definition();
+    auto definition = AOT::definitionOf(compiledFrame);
     return definition && definition->source ? definition->source : compiledSiteModule;
 }
 #endif
