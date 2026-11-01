@@ -33,9 +33,15 @@ else
 fi
 if test "$selection_exit" -ne 0; then exit "$selection_exit"; fi
 "$candidate" test --expose-internals test/js/node/quic/quic-sni.test.ts > "$results/quic-sni.log" 2>&1
-"$candidate" test --expose-gc test/js/node/sqlite/node-sqlite.test.ts test/js/node/test/parallel/test-sqlite-statement-sync.js \
-  -t "rejects oversized BigInt with ERR_INVALID_ARG_VALUE|bind error messages match node's exactly|database-level defaults flow to prepared statements|BigInts support can be toggled|BigInt is required for reading large integers|BigInts are returned when input is true" \
+"$candidate" test --expose-gc test/js/node/sqlite/node-sqlite.test.ts \
+  -t "rejects oversized BigInt with ERR_INVALID_ARG_VALUE|bind error messages match node's exactly|database-level defaults flow to prepared statements" \
+  --reporter=junit --reporter-outfile="$results/sqlite-bigint.xml" \
   > "$results/sqlite-bigint.log" 2>&1
+"$candidate" test --expose-gc --config="$repo/bunfig.node-test.toml" \
+  "$repo/test/js/node/test/parallel/test-sqlite-statement-sync.js" \
+  -t 'BigInts support can be toggled|BigInt is required for reading large integers|BigInts are returned when input is true' \
+  --reporter=junit --reporter-outfile="$results/sqlite-bigint-node.xml" \
+  > "$results/sqlite-bigint-node.log" 2>&1
 "$candidate" test test/bake/dev/production.test.ts \
   -t 'builds a framework without server components and keeps its client entry point' \
   > "$results/bake-builtin.log" 2>&1

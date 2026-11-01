@@ -1,14 +1,14 @@
 {
-  "source": "4fd77cbea9fc9a63220941c1af5e283ca455d075",
+  "source": "2323913322dfdfed96ecf20163d62f5ff2796ecc",
   "engine": "42e4245f4180941634b482a7e8ef7fca47467de5",
   "files": {
-    "harness-adapters.json": "bb1ee92f7924e6f6d515979e097aa608c357b5272772ae17f8b298c50cf14a70",
+    "harness-adapters.json": "4ba71d03cac2a000b8f49c6f4f0954462bf3b275968395455bd9130fb1f17523",
     "harness_adapters.py": "b010ff192ebdb91d52b64e0521abfb1d079e8cd34792f0b9bb46570bb9d4ad83",
-    "harness-adapters/candidate-build.patch": "a83d29b694c0ae06158eb8412ed664913257cfe730418f164f37c52bd91fd0a6",
+    "harness-adapters/candidate-build.patch": "414c02660faa9dcc48c383458dbe13dea5c9a26a7f3abc62265ea637ec074769",
     "harness-adapters/candidate-test.patch": "a85d6648cff0bd041a19be98a21d1d299da3704198b9c876ff683dd1182162d7",
     "test_consumer_identity.py": "f6163dea3b0c5111e5df3c9914486cde11befbfad4d9eabd7ef55e194b610afc",
     "variants.json": "a181182de15f50d6c30d4d185a9d21cdea2093236dc17aa66628e65008c57bc7",
-    "qualify-sync.sh": "880ba11d8eda8f4cf38af3c1f4f47b31211457c71255c9435a775773c373431e",
-    "verify-sync.py": "8a2dfca07f4a18d0f755f5c7b315304af11983361f1caccb84c6fd645ca1ffa0"
+    "qualify-sync.sh": "65d3d21f0b944e06c10b9b5521182048d6988f81f15859f29cf9a07464cf90cd",
+    "verify-sync.py": "e9aeb350b0de5e5b5962af9934985805985a2291b3e90ff0302fd6c427a1db23"
   }
 }

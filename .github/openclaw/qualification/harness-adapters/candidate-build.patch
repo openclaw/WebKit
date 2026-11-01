@@ -897,3 +897,17 @@ index eb829838e3c35cf318ffa5df574bb813eb1b8233..85581c9f25f9ad8c54907d2bc98409fe
  
      if (basicBlocks.isEmpty()) {
          blockCallback(ctx, nullptr, 0, 0);
+diff --git a/src/jsc/bindings/JSInspectorProfiler.cpp b/src/jsc/bindings/JSInspectorProfiler.cpp
+index e5e626d17fd55645606a079bac7c45de997494be..af15ac268434f7b60fc07f0f64b2d328de586a5d 100644
+--- a/src/jsc/bindings/JSInspectorProfiler.cpp
++++ b/src/jsc/bindings/JSInspectorProfiler.cpp
+@@ -199,6 +199,9 @@ JSC_DEFINE_HOST_FUNCTION(jsFunction_collectPreciseCoverage, (JSGlobalObject * gl
+         // JSC's ranges include their last character; V8's end after it.
+         auto blockArray = JSON::Array::create();
+         for (const auto& block : blocks) {
++            // V8 has no range for the condition, the increment or the left side in a loop header. The basic block that the loop is in has their text.
++            if (block.m_isInLoopHeader)
++                continue;
+             auto range = JSON::Array::create();
+             range->pushInteger(block.m_startOffset);
+             range->pushInteger(block.m_endOffset + 1);

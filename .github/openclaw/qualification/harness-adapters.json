@@ -55,7 +55,7 @@
       "build": {
         "kind": "source-compatibility",
         "patch": "harness-adapters/candidate-build.patch",
-        "sha256": "a83d29b694c0ae06158eb8412ed664913257cfe730418f164f37c52bd91fd0a6",
+        "sha256": "414c02660faa9dcc48c383458dbe13dea5c9a26a7f3abc62265ea637ec074769",
         "compiled_inputs": [
           "src/codegen/bindgen-lib-internal.ts",
           "src/codegen/bundle-functions.ts",
@@ -65,6 +65,7 @@
           "src/jsc/bindings/CodeCoverage.cpp",
           "src/jsc/bindings/JSBuffer.cpp",
           "src/jsc/bindings/JSCTestingHelpers.cpp",
+          "src/jsc/bindings/JSInspectorProfiler.cpp",
           "src/jsc/bindings/bindings.cpp",
           "src/jsc/bindings/sqlite/NodeSqlite.cpp",
           "src/jsc/bindings/webcore/SerializedScriptValue.cpp",
@@ -168,6 +169,13 @@
             "after": "49e6095309ca2f57fe84c25b226d736cc88683da15f314ba3c09438aa6e9938b",
             "base_blob": "eb829838e3c35cf318ffa5df574bb813eb1b8233",
             "adapted_blob": "85581c9f25f9ad8c54907d2bc98409fe21a72f91",
+            "mode": "100644"
+          },
+          "src/jsc/bindings/JSInspectorProfiler.cpp": {
+            "before": "71861391d4bb8f67a388800b4bfcb7bac4e41eb748f60540273235ab51fe2fbc",
+            "after": "c22d6f527e1ebddacb3557c4eeafc1d23fd7c7d3cd6ed77912000fb594d603dd",
+            "base_blob": "e5e626d17fd55645606a079bac7c45de997494be",
+            "adapted_blob": "af15ac268434f7b60fc07f0f64b2d328de586a5d",
             "mode": "100644"
           }
         }
