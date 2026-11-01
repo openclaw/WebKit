@@ -229,6 +229,34 @@ class ArtifactHeaders(unittest.TestCase):
 
 
 class PreflightAdmission(unittest.TestCase):
+    def test_configured_matrix_admits_current_bun_aot_consumers(self):
+        legacy = [
+            'bun-webkit-linux-amd64',
+            'bun-webkit-macos-arm64',
+            'bun-webkit-linux-amd64-lto',
+            'bun-webkit-linux-arm64-lto',
+            'bun-webkit-macos-arm64-lto',
+            'bun-webkit-macos-amd64-lto',
+            'bun-webkit-linux-amd64-musl-lto',
+            'bun-webkit-linux-arm64-musl-lto',
+            'bun-webkit-windows-amd64-lto',
+            'bun-webkit-windows-arm64',
+        ]
+        aot = [label + '-aot' for label in legacy] + ['bun-webkit-linux-amd64-debug-asan-aot']
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'output'
+            env = {'GITHUB_REF': 'refs/heads/claude/sync-webkit-upstream-20261014',
+                'INPUT_PUBLISH': 'false', 'INPUT_SHA': 'a' * 40,
+                'GITHUB_SHA': 'a' * 40, 'GITHUB_OUTPUT': str(output)}
+            with patch.dict(os.environ, env), patch.object(
+                artifacts, 'source', return_value={'source': 'a' * 40}):
+                artifacts.preflight()
+            selected = [row['lane'] for row in json.loads(output.read_text().removeprefix('matrix='))['include']]
+        self.assertEqual(selected, legacy + aot)
+        definitions = {lane['label']: lane for lane in artifacts.lane_definitions()}
+        source_producers = [label for label in selected if len(artifacts.archive_names(definitions[label])) == 2]
+        self.assertEqual(source_producers, ['bun-webkit-linux-amd64-lto-aot'])
+
     def test_sync_branch_is_qualification_only(self):
         cases = [
             ('refs/heads/claude/sync-webkit-upstream-20261014', 'false', True),
