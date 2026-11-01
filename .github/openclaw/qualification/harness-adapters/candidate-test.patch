@@ -681,3 +681,38 @@ index c9ff165f351dd1345732d8426f2013d1bd8d27fc..11f00085169a54bcc16d241993ec5bc9
    if (outcome === "fail") {
      return 2;
    }
+diff --git a/test/js/node/child_process/child-process-stdio.test.js b/test/js/node/child_process/child-process-stdio.test.js
+index 361d675936e9694835956eebbd9b4256f8b9e5e3..7e448388ceb3dc10781b55f1df4e72d10f8637c3 100644
+--- a/test/js/node/child_process/child-process-stdio.test.js
++++ b/test/js/node/child_process/child-process-stdio.test.js
+@@ -1,6 +1,6 @@
+ import { describe, expect, it } from "bun:test";
+ import { bunEnv, bunExe, isPosix, isWindows } from "harness";
+-import { execSync, spawn } from "node:child_process";
++import { execSync, spawn, spawnSync } from "node:child_process";
+ import { once } from "node:events";
+ import { readSync, writeSync } from "node:fs";
+ import { join } from "node:path";
+@@ -8,6 +8,22 @@ import { join } from "node:path";
+ const CHILD_PROCESS_FILE = import.meta.dir + "/spawned-child.js";
+ const OUT_FILE = import.meta.dir + "/stdio-test-out.txt";
+ 
++it("spawnSync accepts an array subclass for stdio", () => {
++  class Stdio extends Array {}
++  const result = spawnSync(bunExe(), ["-e", 'console.log("stdout"); console.error("stderr")'], {
++    env: bunEnv,
++    stdio: new Stdio("ignore", "pipe", "pipe"),
++    encoding: "utf8",
++  });
++  expect({
++    error: result.error,
++    status: result.status,
++    signal: result.signal,
++    stdout: result.stdout,
++    stderr: result.stderr,
++  }).toEqual({ error: undefined, status: 0, signal: null, stdout: "stdout\n", stderr: "stderr\n" });
++});
++
+ describe("process.stdout", () => {
+   it("should allow us to write to it", done => {
+     const child = spawn(bunExe(), [CHILD_PROCESS_FILE, "STDOUT"], {

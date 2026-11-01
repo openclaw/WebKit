@@ -55,7 +55,7 @@
       "build": {
         "kind": "source-compatibility",
         "patch": "harness-adapters/candidate-build.patch",
-        "sha256": "0482c437365d3606b14c9b35222515a6cf3ad95fa0b16d71e4829280e7c1bf53",
+        "sha256": "6d67a4027df0f3081443c2348ac27efd73f786035ea38c02f2b41eeb0138e928",
         "compiled_inputs": [
           "src/codegen/bindgen-lib-internal.ts",
           "src/codegen/bundle-functions.ts",
@@ -87,9 +87,9 @@
           },
           "src/jsc/JSType.rs": {
             "before": "03b74867c3243546a3acd61973f2134ff825e0157f3b5ce4de35b893e9afcccb",
-            "after": "3fedf23e63bbcc52553e787bae0d88a97c6d1fa52215191549df7970a76863a6",
+            "after": "e9badcd3834d1a2137e53699d2e3b335a0cd7d2ef6b42b7ce1c10de61f11b4bc",
             "base_blob": "3c21ec7b288db26eafad93dd9077d42cc9bfec46",
-            "adapted_blob": "c8fae978d69b55f9c63a7bbb7ea23642ce6e05fc",
+            "adapted_blob": "ee36a5470003064084496fb262a1daabb032f907",
             "mode": "100644"
           },
           "src/jsc/JSValue.rs": {
@@ -166,7 +166,7 @@
       },
       "test": {
         "patch": "harness-adapters/candidate-test.patch",
-        "sha256": "016e80ad52598b03184070789eb9cfa44321c74cbd03a0089042c11325a1457b",
+        "sha256": "a85d6648cff0bd041a19be98a21d1d299da3704198b9c876ff683dd1182162d7",
         "files": {
           "scripts/buildkite.ts": {
             "before": "cf1999381cf38d34b9892118266614ae2b81a28066d47a455aa15794fb2c1c3e",
@@ -187,6 +187,13 @@
             "after": "7d1a06e7298a71342e0237188038591ff90303e31ff986357e527764aadd211e",
             "base_blob": "6507f885c1cdfdf8937574946d6959fa898a4345",
             "adapted_blob": "5ce950bee35def7156a1ee7f5d1ac6230c812d2f",
+            "mode": "100644"
+          },
+          "test/js/node/child_process/child-process-stdio.test.js": {
+            "before": "bab89f856c2ccc709474b47854fc85c6b54e3091e0cebdf7a2e841f2efd7d767",
+            "after": "bd621b307c23839d594d961ccb5e591731c451111f5244bfdf696fde11d9f893",
+            "base_blob": "361d675936e9694835956eebbd9b4256f8b9e5e3",
+            "adapted_blob": "7e448388ceb3dc10781b55f1df4e72d10f8637c3",
             "mode": "100644"
           }
         }

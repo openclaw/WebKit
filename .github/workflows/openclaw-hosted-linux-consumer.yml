@@ -4,6 +4,11 @@ on:
   pull_request:
     paths:
       - .github/workflows/openclaw-hosted-linux-consumer.yml
+      - .github/openclaw/qualification/resume-consumer.py
+      - .github/openclaw/qualification/consumer-repair.json
+      - .github/openclaw/qualification/harness-adapters.json
+      - .github/openclaw/qualification/harness_adapters.py
+      - .github/openclaw/qualification/harness-adapters/**
   workflow_dispatch:
 
 permissions:
@@ -21,7 +26,7 @@ env:
 jobs:
   linux-native:
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -41,7 +46,13 @@ jobs:
             /JSTests/modules/
             /JSTests/*.yaml
             /JSTests/BUN-TEST-DIFFERENCES.md
-      - name: Make room for both independent cold builds
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: carrier
+          sparse-checkout: .github/openclaw/qualification
+      - name: Make room for the candidate cold build
         shell: bash
         run: |
           set -euo pipefail
@@ -54,7 +65,7 @@ jobs:
           import json, os, shutil
           from pathlib import Path
           capacity = dict(cpus=os.cpu_count(), disk_free_bytes=shutil.disk_usage('.').free)
-          assert capacity['disk_free_bytes'] >= 40 * 1024**3, 'paired cold builds need 40 GiB free'
+          assert capacity['disk_free_bytes'] >= 40 * 1024**3, 'candidate build and retained artifacts need 40 GiB free'
           Path(os.environ['QUALIFICATION_DIR']).mkdir()
           Path(os.environ['QUALIFICATION_DIR'], 'carrier.json').write_text(json.dumps(dict(
               carrier=os.environ['CARRIER_COMMIT'], sync=os.environ['SYNC_COMMIT'],
@@ -131,7 +142,24 @@ jobs:
           curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o "$RUNNER_TEMP/bun.zip"
           unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bootstrap"
           echo "$RUNNER_TEMP/bootstrap/bun-linux-x64" >> "$GITHUB_PATH"
-      - name: Verify the unchanged pipeline contracts
+      - name: Download the admitted historical build and baseline observation
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/retained"
+          gh api repos/openclaw/WebKit/actions/artifacts/13065898437 > "$RUNNER_TEMP/retained/proof.metadata.json"
+          gh api repos/openclaw/WebKit/actions/artifacts/13065898437/zip > "$RUNNER_TEMP/retained/proof.zip"
+          gh api repos/openclaw/WebKit/actions/artifacts/13065868636 > "$RUNNER_TEMP/retained/binaries.metadata.json"
+          gh api repos/openclaw/WebKit/actions/artifacts/13065868636/zip > "$RUNNER_TEMP/retained/binaries.zip"
+      - name: Admit retained proof and install the reviewed consumer repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 carrier/.github/openclaw/qualification/resume-consumer.py "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/carrier" "$RUNNER_TEMP/retained" "$QUALIFICATION_DIR" "$ARTIFACT_DIR"
+      - name: Verify contracts with the reviewed adapters
         shell: bash
         run: |
           set -euo pipefail
@@ -142,18 +170,18 @@ jobs:
           python3 .github/openclaw/test_consumer_identity.py
           python3 .github/openclaw/test_verify_jsc_results.py
           bash .github/openclaw/preflight.sh
-      - name: Qualify the exact frozen Bun pair with live build progress
+      - name: Qualify the corrected candidate against the retained baseline
         shell: bash
         run: |
           set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
           export INSPECTOR_RUNTIME="$(realpath "$(command -v bun)")"
           tail -n +1 -F "$QUALIFICATION_DIR/build-baseline.log" "$QUALIFICATION_DIR/build-candidate.log" &
           tail_pid=$!
           (while sleep 60; do date -u; free -m; df -h /; done) &
           monitor_pid=$!
           trap 'kill "$tail_pid" "$monitor_pid" 2>/dev/null || true' EXIT
-          bash .github/openclaw/qualify-engine.sh
-          bash .github/openclaw/qualify.sh
+          bash "$QUALIFICATION_DIR/qualify-candidate-reuse.sh"
           export CANDIDATE_BUN="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
           export CANDIDATE_RECEIPT="$QUALIFICATION_DIR/candidate-identity.json"
           bash .github/openclaw/qualify-sync-compatibility.sh
@@ -181,6 +209,7 @@ jobs:
             ${{ runner.temp }}/qualification/*.log
             ${{ runner.temp }}/qualification/*.sha256
             ${{ runner.temp }}/qualification/*.patch
+            ${{ runner.temp }}/qualification/qualify-candidate-reuse.sh
             ${{ runner.temp }}/qualification/candidate-input/artifacts.json
             ${{ runner.temp }}/qualification/baseline/*.json
             ${{ runner.temp }}/qualification/baseline/*.log
