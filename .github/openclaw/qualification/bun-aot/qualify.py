@@ -264,6 +264,8 @@ OUT.mkdir(exist_ok=True)
 assert git(Path('/work/pipeline'), 'rev-parse', 'HEAD') == PIPELINE
 spec = json.loads((INPUTS / 'source-adapter.json').read_text())
 assert spec['bun'] == BUN and spec['webkit'] == WEBKIT
+capture_wire = spec.get('capture_wire', False)
+assert isinstance(capture_wire, bool) and not (capture_wire and spec.get('prepare_only', False))
 assert spec['files']
 assert sha(INPUTS / 'candidate.patch') == spec['patch_sha256']
 original_tree = git(SOURCE, 'rev-parse', 'HEAD^{tree}')
@@ -300,6 +302,44 @@ source_state(True)
 compile_env = dict(ENV, BUN_CODEGEN_DIR=str(BUILD / 'codegen'),
                    CARGO_PROFILE_DEV_OPT_LEVEL='1', CARGO_BUILD_JOBS='2',
                    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS='-Cforce-frame-pointers=yes')
+if capture_wire:
+    tool = OUT / 'capture-tool'
+    with tool.open('xb') as stream:
+        stream.write((INPUTS / 'capture-wire.py').read_bytes())
+    tool.chmod(0o700)
+    selector = 'emit::tests::engine_prints_same_text'
+    text = run('capture-emitted-wire', ['cargo', '+nightly-2026-09-15', 'test', '--locked',
+        '-p', 'bun_aot', '--lib', selector, '--', '--exact', '--nocapture'],
+        1800, env=dict(compile_env, TESTAOT=str(tool)), expected=101)
+    assert text.count('OPENCLAW_AOT_WIRE_CAPTURED') == 1
+    assert re.search(r'^test ' + re.escape(selector) + r' \.\.\. FAILED$', text, re.M)
+    assert len(re.findall(r'^test result: FAILED\. 0 passed; 1 failed; 0 ignored; 0 measured;', text, re.M)) == 1
+    assert (OUT / 'wire-capture-invocations.log').read_text() == 'capture\n'
+    captured = json.loads((OUT / 'wire-capture.json').read_text())
+    wire = OUT / 'wire-program.bin'
+    assert captured == {'diagnostic_only': True, 'arguments': ['print', '--wire', '<fixture>'],
+                        'bytes': wire.stat().st_size, 'sha256': sha(wire)}
+    context = {}
+    for source, name in [
+        (jsc / 'aot/ir/AOTSchema.def', 'AOTSchema.def'),
+        *[(BUILD / 'codegen' / name, name) for name in [
+            'aot_schema.rs', 'aot_schema_builtins.rs', 'aot_schema_interface.rs',
+            'aot_builtin_ids.rs', 'aot_builtin_syntax.rs', 'aot_builtin_table.rs',
+            'aot_builtin_table.json']],
+    ]:
+        assert stat.S_ISREG(source.lstat().st_mode)
+        target = OUT / ('wire-' + name)
+        with source.open('rb') as origin, target.open('xb') as destination:
+            shutil.copyfileobj(origin, destination)
+        context[target.name] = {'bytes': target.stat().st_size, 'sha256': sha(target)}
+    assert sum(p.stat().st_size for p in OUT.iterdir() if p.is_file()) <= LIMIT
+    source_state(True)
+    restore_source()
+    result = json.loads((OUT / 'proof.json').read_text())
+    result.update(passed=False, diagnostic_only=True, wire_captured=True,
+                  wire=captured, wire_context=context, adapter_patch_sha256=spec['patch_sha256'])
+    (OUT / 'proof.json').write_text(json.dumps(result, indent=2) + '\n')
+    raise SystemExit(1)
 for index, (package, target) in enumerate([
     ('bun_sema_parser', ['--test', 'analysis_fold']),
     ('bun_aot', ['--lib']),
