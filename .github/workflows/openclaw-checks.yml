@@ -98,6 +98,17 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '26.3.0'
+      - name: Bind the historical baseline Node reference
+        run: |
+          test "$(node --version)" = v26.3.0
+          echo "BASELINE_REFERENCE_NODE=$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.12.1'
+      - name: Bind the candidate Node reference
+        run: |
+          test "$(node --version)" = v26.12.1
+          echo "CANDIDATE_REFERENCE_NODE=$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
       - name: Verify pipeline integrity and runner support
         run: |
           python3 .github/openclaw/test_artifacts.py
@@ -150,6 +161,7 @@ jobs:
           path: |
             ${{ runner.temp }}/qualification/bun-baseline/build/qualify-baseline/bun
             ${{ runner.temp }}/qualification/bun/build/qualify-candidate/bun
+            ${{ runner.temp }}/qualification/bun/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o
             ${{ runner.temp }}/qualification/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
             ${{ runner.temp }}/qualification/*.sha256
           compression-level: 0

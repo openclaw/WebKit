@@ -36,7 +36,8 @@ def install_controls(pipeline, carrier, identity):
     expected_paths = {"harness-adapters.json", "harness_adapters.py",
                       "harness-adapters/candidate-build.patch", "harness-adapters/candidate-test.patch",
                       "test_consumer_identity.py", "variants.json", "qualify-sync.sh", "verify-sync.py",
-                      "continue-consumer.py", "probe-allocator.cpp"}
+                      "continue-consumer.py", "probe-allocator.cpp", "consumer_identity.py",
+                      "harness-adapters/candidate-current-test.patch"}
     assert set(source_manifest["files"]) == expected_paths
     new_adapters = read(reviewed / "harness-adapters.json")
     assert new_adapters["arms"]["baseline"] == identity.ADAPTERS["arms"]["baseline"]

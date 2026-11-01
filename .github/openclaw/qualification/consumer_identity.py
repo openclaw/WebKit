@@ -159,10 +159,12 @@ def baseline_source(root, inspector_runtime):
     return hashlib.sha256(patch).hexdigest()
 
 
-def adapter_spec(arm, phase):
+def adapter_spec(arm, phase, engine_source=None):
     spec = ADAPTERS['arms'][arm]
     require(spec['pin'] == CONFIG[arm]['commit'], 'harness adapter source pin drift')
-    selected = spec[phase]
+    selected = (spec['current_test'] if arm == 'candidate' and phase == 'test'
+                and engine_source is not None and engine_source != '42e4245f4180941634b482a7e8ef7fca47467de5'
+                else spec[phase])
     if selected['patch'] is None:
         require(arm == 'candidate' and phase == 'build'
                 and selected == {'patch': None, 'sha256': None, 'files': {}},
@@ -225,14 +227,14 @@ def validate_invocation(proof, name):
     arm = 'baseline' if name == 'baseline' else 'candidate'
     path = name + '/invocation.json'
     record = json.loads((proof / path).read_text())
+    require(record['identity'] == file_record(proof, arm + '-identity.json'), 'invocation identity mismatch')
+    consumer = json.loads((proof / (arm + '-identity.json')).read_text())
     require(record['schema_version'] == 1 and record['phase'] == 'test' and record['arm'] == arm
-            and record['source'] == CONFIG[arm] and record['adapter'] == adapter_spec(arm, 'test')
+            and record['source'] == CONFIG[arm] and record['adapter'] == adapter_spec(arm, 'test', consumer['runtime']['webkit'])
             and record['restored'] is True and record['before'] == record['after']
             and record['before']['index_tree'] == CONFIG[arm]['tree']
             and valid_digest(record['before']['other_patch_sha256'])
             and valid_digest(record['compiled_inputs_sha256']), 'invalid restored test invocation')
-    require(record['identity'] == file_record(proof, arm + '-identity.json'), 'invocation identity mismatch')
-    consumer = json.loads((proof / record['identity']['path']).read_text())
     if arm == 'baseline':
         validate_baseline(consumer)
     else:

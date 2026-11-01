@@ -31,6 +31,9 @@ chmod 700 "$results/home" "$results/tmp"
 "$candidate" --revision > "$results/revision.log"
 "$candidate" -e 'const server=Bun.serve({port:0,fetch(){return new Response("ready")}});try{if(await(await fetch(server.url)).text()!=="ready")throw Error("startup");console.log("build/startup/http passed")}finally{await server.stop(true)}' > "$results/startup.log" 2>&1
 ln -s "$candidate" "$results/bin/bun"
+reference_node="${CANDIDATE_REFERENCE_NODE:-$(command -v node)}"
+test "$("$reference_node" --version)" = v26.12.1
+ln -s "$reference_node" "$results/bin/node"
 export HOME="$results/home" TMPDIR="$results/tmp" PATH="$results/bin:$PATH" OPENCLAW_CI_PLATFORM=linux
 # Retain all 82 historical cases and the three additions selected by the frozen candidate.
 "$candidate" --eval 'import {selectTests} from "./scripts/openclaw-ci/tests.ts"; import{$}from"bun";import{readFileSync,writeFileSync,mkdirSync}from"node:fs";const tracked=(await $`git ls-files -z test`.text()).split("\0").filter(Boolean);const historical=[...new Set(process.argv.slice(1).flatMap(path=>JSON.parse(readFileSync(path,"utf8"))))];if(historical.length!==82)throw Error("historical selection drift");const selected=[...new Set([...historical,...selectTests(["scripts/build/deps/webkit.ts"],tracked,true,"linux")])].sort();for(const file of selected)if(!tracked.includes(file))throw Error("missing historical/current selected test "+file);if(selected.length!==85)throw Error("frozen candidate selection drift");mkdirSync("build/openclaw-ci",{recursive:true});writeFileSync("build/openclaw-ci/selected.json",JSON.stringify(selected,null,2)+"\n");' "$inputs/selected.json" "$inputs/sync/selected.json"

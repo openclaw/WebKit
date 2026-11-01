@@ -60,6 +60,10 @@ for arm in baseline candidate; do
   mkdir -p "$results" "$results/home" "$results/tmp" "$results/bin"
   chmod 700 "$results/home" "$results/tmp"
   ln -s "$candidate" "$results/bin/bun"
+  if test "$arm" = baseline; then reference_node="${BASELINE_REFERENCE_NODE:?}"; expected_node=v26.3.0;
+  else reference_node="${CANDIDATE_REFERENCE_NODE:?}"; expected_node=v26.12.1; fi
+  test "$("$reference_node" --version)" = "$expected_node"
+  ln -s "$reference_node" "$results/bin/node"
   mkdir -p build/openclaw-ci
   cp "$inputs/selected.json" build/openclaw-ci/selected.json
   cp "$inputs/selected.json" "$results/selected.json"

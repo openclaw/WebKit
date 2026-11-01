@@ -1,3 +1,5 @@
+Linux qualification now binds separate Node references for the historical baseline (26.3.0) and current candidate (26.12.1). The synchronized engine expects one resolution of each pending static cycle edge; the immutable engine42 continuation retains its original test recipe. Future Linux proof bundles also retain the matching Bun mimalloc object so post-build native probes can resume without recovering it through a full rebuild. Runtime proof for these CI repairs is still pending.
+
 Native artifact smoke probes now destroy the standalone JSC VM and release the FFI test VM under the API lock. ASan and LeakSanitizer checks cover normal teardown.
 
 Artifact builds admit the AOT lanes used by current Bun's release and non-LTO CI builds, including both optional musl targets. Linux x64 Debug ASan AOT supplies the native `bun bd test` gate. The ten existing non-AOT lanes and historical Bun qualification remain selected. Current Bun qualification with the AOT libraries is still pending.

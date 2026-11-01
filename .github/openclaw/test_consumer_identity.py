@@ -73,7 +73,7 @@ def write_invocation(root, name, records):
     argv = [str(cwd/'build'/('qualify-'+arm)/'bun'), 'scripts/openclaw-ci/tests.ts', 'test']
     if name == 'sync': argv += ['--junit-prefix', 'openclaw-sync-junit-'+'1'*32+'-']
     invocation = {'schema_version': 1, 'phase': 'test', 'arm': arm, 'source': consumer.CONFIG[arm],
-                  'adapter': consumer.adapter_spec(arm, 'test'), 'restored': True, 'before': before, 'after': before,
+                  'adapter': consumer.adapter_spec(arm, 'test', record['runtime']['webkit']), 'restored': True, 'before': before, 'after': before,
                   'compiled_inputs_sha256': '1'*64, 'cwd': str(cwd), 'argv': argv,
                   'identity': consumer.file_record(root, arm+'-identity.json'), 'executable': record['executable'],
                   'selection': consumer.file_record(root, name+'/selected.json'), 'evidence': {}}
@@ -184,6 +184,15 @@ class ConsumerIdentity(unittest.TestCase):
 
     def record(self):
         record=consumer.capture(self.root,self.engine,self.inspector);consumer.write_once(self.receipt,record);return record
+
+    def test_cycle_adapter_matches_the_engine_generation(self):
+        legacy = consumer.adapter_spec('candidate', 'test', '42e4245f4180941634b482a7e8ef7fca47467de5')
+        current = consumer.adapter_spec('candidate', 'test', self.source)
+        path = 'test/js/node/module/node-module-module.test.js'
+        self.assertNotIn(path, legacy['files'])
+        self.assertEqual(current['files'][path]['before'], '83dda3bff94343176a1faa677723f5826dc612e376963192e3ca2400cc6aba45')
+        self.assertNotEqual(legacy['sha256'], current['sha256'])
+        self.assertEqual(consumer.adapter_spec('candidate', 'test'), legacy)
 
     def test_measured_receipt_written_once_and_reused(self):
         record=self.record()
@@ -382,7 +391,7 @@ class HarnessAdapters(unittest.TestCase):
         self.file.write_text('original harness\n')
         spec={'patch':str(self.adapter),'sha256':consumer.sha(self.adapter),
               'files':{'harness.js':{'before':before,'after':after,'mode':'100644'}}}
-        consumer.ADAPTERS['arms']['candidate']={'pin':pin['commit'],'build':spec,'test':spec}
+        consumer.ADAPTERS['arms']['candidate']={'pin':pin['commit'],'build':spec,'test':spec,'current_test':spec}
         (self.root/'candidate-build-tools.json').unlink()
         _,overlay=consumer.source_identity(self.repo,self.engine,self.inspector)
         seed_build_tools(self.root,'candidate',{'executable':consumer.file_record(self.root,consumer.EXECUTABLE),

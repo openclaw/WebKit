@@ -65,7 +65,7 @@ def prepare(root, name, phase, engine, inspector, command, prefix=None):
     arm = 'baseline' if name == 'baseline' else 'candidate'
     identity.require(phase != 'build' or name != 'sync', 'invalid build arm')
     repo = root / ('bun-baseline' if arm == 'baseline' else 'bun')
-    spec = identity.adapter_spec(arm, phase)
+    spec = identity.adapter_spec(arm, phase, engine['source'])
     receipt = root / (arm + '-build-tools.json' if phase == 'build' else name + '/invocation.json')
     pending = receipt.with_suffix('.pending.json')
     identity.require(not receipt.exists() and not pending.exists(), 'adapter receipt already exists')
@@ -98,7 +98,7 @@ def prepare(root, name, phase, engine, inspector, command, prefix=None):
 def restore(root, name, phase, engine, inspector, status, active, completed):
     arm = 'baseline' if name == 'baseline' else 'candidate'
     repo = root / ('bun-baseline' if arm == 'baseline' else 'bun')
-    spec = identity.adapter_spec(arm, phase)
+    spec = identity.adapter_spec(arm, phase, engine['source'])
     receipt = root / (arm + '-build-tools.json' if phase == 'build' else name + '/invocation.json')
     pending = receipt.with_suffix('.pending.json')
     record, digest, inode = active
