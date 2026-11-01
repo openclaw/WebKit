@@ -87,7 +87,10 @@ def candidate():
     assert binary.stat().st_size == admission['bytes'] and sha(binary) == admission['sha256'] == EXECUTABLE
     assert Path(shutil.which('bun')).resolve() == binary
     revision = subprocess.check_output([str(binary), '--revision'], text=True).strip()
-    assert BUN in revision
+    script = 'console.log(JSON.stringify({bun_revision:Bun.revision,webkit:process.versions.webkit,platform:process.platform,architecture:process.arch}))'
+    observed = json.loads(subprocess.check_output([str(binary), '--no-env-file', '-e', script], text=True))
+    assert observed == {'bun_revision': BUN, 'webkit': SOURCE, 'platform': 'linux', 'architecture': 'x64'}
+    write('candidate-runtime.json', {'runtime': observed, 'cli_revision': revision, 'binary_sha256': sha(binary)})
     return binary, revision
 
 
