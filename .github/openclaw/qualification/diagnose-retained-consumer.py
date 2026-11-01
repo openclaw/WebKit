@@ -30,15 +30,15 @@ def read(path):
     return json.loads(path.read_text())
 
 
-def unpack(root, name):
-    artifact, size, digest = ARTIFACTS[name]
+def unpack(root, name, *, expected=None, run=RUN, carrier=CARRIER):
+    artifact, size, digest = ARTIFACTS[name] if expected is None else expected
     metadata = read(root / (name + ".metadata.json"))
     archive = root / (name + ".zip")
     assert metadata["id"] == artifact and not metadata["expired"]
     assert metadata["size_in_bytes"] == archive.stat().st_size == size
     assert metadata["digest"] == "sha256:" + digest and sha(archive) == digest
-    assert metadata["workflow_run"]["id"] == RUN
-    assert metadata["workflow_run"]["head_sha"] == CARRIER
+    assert metadata["workflow_run"]["id"] == run
+    assert metadata["workflow_run"]["head_sha"] == carrier
     destination = root / name
     destination.mkdir()
     with zipfile.ZipFile(archive) as bundle:

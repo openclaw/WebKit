@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Admit prior proof and prepare a candidate-only run of the frozen gates."""
+"""Admit successful builds and rerun the candidate through the frozen gates."""
 import hashlib
 import importlib.util
 import json
@@ -10,7 +10,14 @@ import sys
 
 SYNC = "42e4245f4180941634b482a7e8ef7fca47467de5"
 SOURCE = "6e0c032a394820b65278943bd3a4e793718a97ca"
-DIAGNOSTIC_SHA = "f8b39dc04c29c8482c8a0537b1ab44c6c6f98c240538e65f119c407f489ed994"
+DIAGNOSTIC_SHA = "18857aa910f38803aca4f9578fac86d7e42b83792931d582272b3ffeebcb3144"
+PREVIOUS_RUN = 41267060695
+PREVIOUS_CARRIER = "e3df8cfa54c394697bcfa45cbe4f9fd33d08f1f3"
+RETAINED = {
+    "proof": (13068660557, 146302, "ddea8c8cd0522ca98356108ca2a3217e9cf0f7df4d0d9b08991ff54d8a226097"),
+    "binaries": (13067819853, 181870231, "4a5b5d1063ef2a6d337e982556a5d1afd953a91625cdafdd5a88cf1846816232"),
+}
+CANDIDATE_SHA = "afab308b7280bda93a116d4f5208e201b7ee09ccc537d61ea8399ef7ce87090f"
 
 
 def sha(path):
@@ -35,18 +42,19 @@ def main():
     spec = importlib.util.spec_from_file_location("retained_diagnostic", diagnostic)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    proof, binaries = module.unpack(retained, "proof"), module.unpack(retained, "binaries")
+    proof, binaries = [module.unpack(retained, name, expected=RETAINED[name],
+                                     run=PREVIOUS_RUN, carrier=PREVIOUS_CARRIER)
+                       for name in ("proof", "binaries")]
     baseline, candidate = read(proof / "baseline-identity.json"), read(proof / "candidate-identity.json")
     engine = identity.engine_input(artifacts / (identity.LANE + ".tar.gz"),
                                    artifacts / (identity.LANE + ".manifest.json"), SYNC)
     identity.validate_baseline_evidence(baseline, binaries, proof)
     identity.validate_invocation(proof, "baseline")
-    identity.validate_evidence(candidate, SYNC, engine, binaries, proof)
     assert (proof / "baseline/selected.json").read_bytes() == (frozen / "selected.json").read_bytes()
     assert (proof / "candidate/selected.json").read_bytes() == (frozen / "selected.json").read_bytes()
     assert len(read(frozen / "selected.json")) == 44
     old_carrier = read(proof / "carrier.json")
-    assert old_carrier["carrier"] == module.CARRIER and old_carrier["sync"] == SYNC
+    assert old_carrier["carrier"] == PREVIOUS_CARRIER and old_carrier["sync"] == SYNC
     engine_gate = read(proof / "engine-gate.json")
     assert engine_gate["passed"] is True and engine_gate["source"] == SYNC
     assert engine_gate["stress_counts"]["jsc-stress"] >= 1400
@@ -94,23 +102,46 @@ def main():
         assert sha(source) == digest, name
         shutil.copyfile(source, target)
 
-    # Preserve every gate; omit only the admitted historical build/test arm.
+    # The baseline uses its original policy; this build used the admitted repaired adapter.
+    identity = importlib.reload(identity)
+    identity.validate_evidence(candidate, SYNC, engine, binaries, proof)
+    identity.validate_invocation(proof, "candidate")
+    assert candidate["executable"]["sha256"] == CANDIDATE_SHA
+    for name in ("candidate-build-tools.json", "candidate-identity.json", "build-candidate.log"):
+        shutil.copyfile(proof / name, root / name)
+    retained_candidate = root / "retained-candidate-bun"
+    shutil.copyfile(binaries / identity.EXECUTABLE, retained_candidate)
+    assert sha(retained_candidate) == CANDIDATE_SHA
+
+    # Preserve source preparation and every test gate; reuse only the admitted builds.
     source = subprocess.check_output(["git", "-C", str(pipeline), "show", SYNC + ":.github/openclaw/qualify.sh"])
     assert source == (pipeline / ".github/openclaw/qualify.sh").read_bytes()
     anchor = b"for arm in baseline candidate; do"
     assert source.count(anchor) == 1
     source = source.replace(anchor, b"for arm in candidate; do")
+    build = (b'  python3 "$inputs/harness_adapters.py" build --name "$arm" --root "$QUALIFICATION_DIR" \\\n'
+             b'    --inspector-runtime "$INSPECTOR_RUNTIME" --source "$SOURCE_SHA" --artifacts "$ARTIFACT_DIR"\n')
+    assert source.count(build) == 1
+    source = source.replace(build,
+        b'  install -D -m 700 "$QUALIFICATION_DIR/retained-candidate-bun" "$repo/build/qualify-$arm/bun"\n')
+    create = b'    python3 "$inputs/consumer_identity.py" create --root '
+    assert source.count(create) == 1
+    source = source.replace(create, b'    python3 "$inputs/consumer_identity.py" verify --root ')
     driver = root / "qualify-candidate-reuse.sh"
     driver.write_bytes(source)
     (root / "reuse.json").write_text(json.dumps({
-        "previous_run": module.RUN, "previous_carrier": module.CARRIER,
+        "previous_run": PREVIOUS_RUN, "previous_carrier": PREVIOUS_CARRIER,
         "sync": SYNC, "candidate_repair_source": SOURCE,
-        "proof_artifact": module.ARTIFACTS["proof"][0],
-        "binary_artifact": module.ARTIFACTS["binaries"][0],
+        "proof_artifact": RETAINED["proof"][0],
+        "binary_artifact": RETAINED["binaries"][0],
         "baseline_identity_sha256": sha(root / "baseline-identity.json"),
         "baseline_invocation_sha256": sha(root / "baseline/invocation.json"),
         "engine_gate_sha256": sha(root / "engine-gate.json"),
         "candidate_driver_sha256": sha(driver),
+        "candidate_identity_sha256": sha(root / "candidate-identity.json"),
+        "candidate_build_tools_sha256": sha(root / "candidate-build-tools.json"),
+        "candidate_executable_sha256": CANDIDATE_SHA,
+        "candidate_build_reused": True,
         "repair": source_manifest,
     }, indent=2) + "\n")
 

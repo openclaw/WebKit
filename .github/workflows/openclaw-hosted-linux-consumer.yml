@@ -52,7 +52,7 @@ jobs:
           persist-credentials: false
           path: carrier
           sparse-checkout: .github/openclaw/qualification
-      - name: Make room for the candidate cold build
+      - name: Make room for retained qualification
         shell: bash
         run: |
           set -euo pipefail
@@ -65,7 +65,7 @@ jobs:
           import json, os, shutil
           from pathlib import Path
           capacity = dict(cpus=os.cpu_count(), disk_free_bytes=shutil.disk_usage('.').free)
-          assert capacity['disk_free_bytes'] >= 40 * 1024**3, 'candidate build and retained artifacts need 40 GiB free'
+          assert capacity['disk_free_bytes'] >= 40 * 1024**3, 'retained artifacts and qualification need 40 GiB free'
           Path(os.environ['QUALIFICATION_DIR']).mkdir()
           Path(os.environ['QUALIFICATION_DIR'], 'carrier.json').write_text(json.dumps(dict(
               carrier=os.environ['CARRIER_COMMIT'], sync=os.environ['SYNC_COMMIT'],
@@ -74,7 +74,9 @@ jobs:
           PY
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version: '26.3.0'
+          node-version: '26.12.1'
+      - name: Verify the frozen candidate Node version
+        run: test "$(node --version)" = v26.12.1
       - name: Admit the exact retained engine artifact
         env:
           GH_TOKEN: ${{ github.token }}
@@ -142,7 +144,7 @@ jobs:
           curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o "$RUNNER_TEMP/bun.zip"
           unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bootstrap"
           echo "$RUNNER_TEMP/bootstrap/bun-linux-x64" >> "$GITHUB_PATH"
-      - name: Download the admitted historical build and baseline observation
+      - name: Download the admitted successful builds and baseline observation
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
@@ -150,10 +152,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/retained"
-          gh api repos/openclaw/WebKit/actions/artifacts/13065898437 > "$RUNNER_TEMP/retained/proof.metadata.json"
-          gh api repos/openclaw/WebKit/actions/artifacts/13065898437/zip > "$RUNNER_TEMP/retained/proof.zip"
-          gh api repos/openclaw/WebKit/actions/artifacts/13065868636 > "$RUNNER_TEMP/retained/binaries.metadata.json"
-          gh api repos/openclaw/WebKit/actions/artifacts/13065868636/zip > "$RUNNER_TEMP/retained/binaries.zip"
+          gh api repos/openclaw/WebKit/actions/artifacts/13068660557 > "$RUNNER_TEMP/retained/proof.metadata.json"
+          gh api repos/openclaw/WebKit/actions/artifacts/13068660557/zip > "$RUNNER_TEMP/retained/proof.zip"
+          gh api repos/openclaw/WebKit/actions/artifacts/13067819853 > "$RUNNER_TEMP/retained/binaries.metadata.json"
+          gh api repos/openclaw/WebKit/actions/artifacts/13067819853/zip > "$RUNNER_TEMP/retained/binaries.zip"
       - name: Admit retained proof and install the reviewed consumer repair
         shell: bash
         run: |
@@ -170,17 +172,15 @@ jobs:
           python3 .github/openclaw/test_consumer_identity.py
           python3 .github/openclaw/test_verify_jsc_results.py
           bash .github/openclaw/preflight.sh
-      - name: Qualify the corrected candidate against the retained baseline
+      - name: Qualify the retained corrected candidate against the retained baseline
         shell: bash
         run: |
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
           export INSPECTOR_RUNTIME="$(realpath "$(command -v bun)")"
-          tail -n +1 -F "$QUALIFICATION_DIR/build-baseline.log" "$QUALIFICATION_DIR/build-candidate.log" &
-          tail_pid=$!
           (while sleep 60; do date -u; free -m; df -h /; done) &
           monitor_pid=$!
-          trap 'kill "$tail_pid" "$monitor_pid" 2>/dev/null || true' EXIT
+          trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
           bash "$QUALIFICATION_DIR/qualify-candidate-reuse.sh"
           export CANDIDATE_BUN="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
           export CANDIDATE_RECEIPT="$QUALIFICATION_DIR/candidate-identity.json"
