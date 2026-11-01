@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shlex
 import stat
 import subprocess
 import time
@@ -58,13 +59,13 @@ def state(adapted):
             identity(SOURCE / name, expected)
 
 
-def run(name, argv, seconds=120, env=None):
+def run(name, argv, seconds=120, env=None, cwd=None):
     row = {'command': argv, 'returncode': None, 'timed_out': False}
     RECORD['steps'][name] = row
     save()
     start = time.monotonic()
     with (OUT / (name + '.log')).open('xb') as log:
-        process = subprocess.Popen(argv, cwd=SOURCE, env=env, stdin=subprocess.DEVNULL,
+        process = subprocess.Popen(argv, cwd=cwd or SOURCE, env=env, stdin=subprocess.DEVNULL,
             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             process.wait(timeout=seconds)
@@ -144,14 +145,35 @@ for name, row in SPEC['files'].items():
     (SOURCE / name).write_bytes(control.read_bytes())
 state(True)
 flags = ['-G', 'Ninja', '-DPORT=JSCOnly', '-DCMAKE_BUILD_TYPE=Release', '-DDEVELOPER_MODE=ON',
-    '-DCMAKE_COMPILE_WARNING_AS_ERROR=OFF', '-DENABLE_STATIC_JSC=ON', '-DUSE_BUN_JSC_ADDITIONS=ON',
+    '-DCMAKE_COMPILE_WARNING_AS_ERROR=OFF', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON', '-DENABLE_STATIC_JSC=ON', '-DUSE_BUN_JSC_ADDITIONS=ON',
     '-DUSE_BUN_EVENT_LOOP=ON', '-DUSE_MIMALLOC=ON', '-DUSE_EXTERNAL_MIMALLOC=OFF', '-DENABLE_FTL_JIT=ON',
     '-DENABLE_BUN_SKIP_FAILING_ASSERTIONS=ON', '-DALLOW_LINE_AND_COLUMN_NUMBER_IN_BUILTINS=ON',
     '-DENABLE_REMOTE_INSPECTOR=ON', '-DCMAKE_C_COMPILER=clang-23', '-DCMAKE_CXX_COMPILER=clang++-23']
 run('configure', ['cmake', '-S', str(SOURCE), '-B', str(BUILD), *flags], 600)
-config = (BUILD / 'cmakeconfig.h').read_text()
-assert re.search(r'^#define ENABLE_AOT 1$', config, re.M), 'full AOT is required'
 run('build', ['cmake', '--build', str(BUILD), '--target', 'jsc', 'TestJavaScriptCore', '-j2'], 7200)
+# AOT is derived in PlatformEnable.h. Ask the compiler using the actual API
+# translation unit's flags, after the build has supplied any forced PCHs.
+entries = json.loads((BUILD / 'compile_commands.json').read_text())
+unit = SOURCE / 'Source/JavaScriptCore/aot/runtime/AOTNoFeatureRemoved.cpp'
+rows = [row for row in entries if Path(row['file']).resolve() == unit and
+        'TestJavaScriptCore.dir/' in (row.get('output', '') + row.get('command', '') + ' '.join(row.get('arguments', [])))]
+assert len(rows) == 1, 'missing or ambiguous API AOT translation unit'
+row = rows[0]
+arguments = row.get('arguments') or shlex.split(row['command'])
+assert not any(arg.startswith('@') for arg in arguments), 'unexpanded compiler response file'
+assert arguments.count(str(unit)) == 1 and arguments.count('-c') == 1
+argv = []
+iterator = iter(arguments)
+for arg in iterator:
+    if arg in ('-o', '-MF', '-MT', '-MQ', '-MJ'):
+        next(iterator)
+    elif arg not in ('-c', '-MD', '-MMD', '-MP', str(unit)):
+        argv.append(arg)
+probe = BUILD / 'full-aot-admission.cpp'
+probe.write_text('#include ' + json.dumps(str(unit)) + '\n#ifndef ENABLE\n#error missing WebKit platform configuration\n#endif\n#if !ENABLE(AOT)\n#error full AOT is disabled for TestJavaScriptCore\n#endif\n')
+RECORD['feature_admission'] = {'compile_row': row, 'probe_sha256': sha(probe)}
+save()
+run('full-aot-admission', [*argv, '-E', '-x', 'c++', str(probe), '-o', '/dev/null'], cwd=Path(row['directory']))
 state(True)
 binaries = {name: sha(BUILD / path) for name, path in {'jsc': 'bin/jsc', 'api': 'bin/TestWebKitAPI/TestJavaScriptCore'}.items()}
 api('marked-vector', ['MarkedVector.Append_JSObjectPtr'])
