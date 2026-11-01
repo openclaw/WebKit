@@ -306,7 +306,7 @@ if capture_wire:
     tool = OUT / 'capture-tool'
     with tool.open('xb') as stream:
         stream.write((INPUTS / 'capture-wire.py').read_bytes())
-    tool.chmod(0o700)
+    tool.chmod(0o755)
     selector = 'emit::tests::engine_prints_same_text'
     text = run('capture-emitted-wire', ['cargo', '+nightly-2026-09-15', 'test', '--locked',
         '-p', 'bun_aot', '--lib', selector, '--', '--exact', '--nocapture'],
