@@ -408,7 +408,10 @@ class HarnessAdapters(unittest.TestCase):
         self.dispatch=dispatch
 
     def run_owner(self,phase='test'):
-        with patch.object(harness.subprocess,'run',side_effect=self.dispatch):
+        def run_test_command(argv,*,cwd,env,stream,seconds):
+            return self.dispatch(argv,cwd=cwd,env=env,stdout=stream,stderr=subprocess.STDOUT).returncode
+        with patch.object(harness.subprocess,'run',side_effect=self.dispatch), \
+                patch.object(harness,'run_with_deadline',side_effect=run_test_command):
             return harness.run(self.root,'candidate',phase,self.engine,self.inspector)
 
     def assert_restored(self,final=False,pending=False):

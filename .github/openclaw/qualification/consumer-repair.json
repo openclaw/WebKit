@@ -5,6 +5,7 @@
     "harness-adapters.json": "6f2b04e36ceecae3b28616ab55a283a99c5d213e04bb427e8ef29e1fdf7ec623",
     "harness_adapters.py": "b010ff192ebdb91d52b64e0521abfb1d079e8cd34792f0b9bb46570bb9d4ad83",
     "harness-adapters/candidate-build.patch": "6d67a4027df0f3081443c2348ac27efd73f786035ea38c02f2b41eeb0138e928",
-    "harness-adapters/candidate-test.patch": "a85d6648cff0bd041a19be98a21d1d299da3704198b9c876ff683dd1182162d7"
+    "harness-adapters/candidate-test.patch": "a85d6648cff0bd041a19be98a21d1d299da3704198b9c876ff683dd1182162d7",
+    "test_consumer_identity.py": "f6163dea3b0c5111e5df3c9914486cde11befbfad4d9eabd7ef55e194b610afc"
   }
 }

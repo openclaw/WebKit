@@ -82,14 +82,17 @@ def main():
     source_manifest = read(reviewed / "consumer-repair.json")
     assert source_manifest["source"] == SOURCE and source_manifest["engine"] == SYNC
     expected_paths = {"harness-adapters.json", "harness_adapters.py",
-                      "harness-adapters/candidate-build.patch", "harness-adapters/candidate-test.patch"}
+                      "harness-adapters/candidate-build.patch", "harness-adapters/candidate-test.patch",
+                      "test_consumer_identity.py"}
     assert set(source_manifest["files"]) == expected_paths
     new_adapters = read(reviewed / "harness-adapters.json")
     assert new_adapters["arms"]["baseline"] == identity.ADAPTERS["arms"]["baseline"]
     assert new_adapters["origins"] == identity.ADAPTERS["origins"]
     for name, digest in source_manifest["files"].items():
-        assert sha(reviewed / name) == digest, name
-        shutil.copyfile(reviewed / name, frozen / name)
+        source = reviewed.parent / name if name == "test_consumer_identity.py" else reviewed / name
+        target = frozen.parent / name if name == "test_consumer_identity.py" else frozen / name
+        assert sha(source) == digest, name
+        shutil.copyfile(source, target)
 
     # Preserve every gate; omit only the admitted historical build/test arm.
     source = subprocess.check_output(["git", "-C", str(pipeline), "show", SYNC + ":.github/openclaw/qualify.sh"])
