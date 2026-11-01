@@ -64,11 +64,21 @@ def install_controls(pipeline, carrier, identity):
 
 def main():
     args = sys.argv[1:]
+    checkpoint = bool(args and args[0] == "--checkpoint")
+    if checkpoint:
+        args = args[1:]
+    sync = "9f5edfb699e35691497b06572a321b20994ca4e5" if checkpoint else SYNC
+    previous_run = 41318328617 if checkpoint else PREVIOUS_RUN
+    previous_carrier = sync if checkpoint else PREVIOUS_CARRIER
+    retained_inputs = ({
+        "proof": (13088932734, 164172, "16a72ee327da468500515bffdc799e9d1a2b9ef0abed825a4500d17a949150ed"),
+        "binaries": (13089031547, 182136473, "75d9112abe8452be1b8e7f4f5b27f765544011803a9e80dc93f3356f0aebfd24"),
+    } if checkpoint else RETAINED)
     fresh_engine = bool(args and args[0] == "--fresh-engine")
     if fresh_engine:
         args = args[1:]
     pipeline, carrier, retained, root, artifacts = [Path(p).resolve() for p in args]
-    assert subprocess.check_output(["git", "-C", str(pipeline), "rev-parse", "HEAD"], text=True).strip() == SYNC
+    assert subprocess.check_output(["git", "-C", str(pipeline), "rev-parse", "HEAD"], text=True).strip() == sync
     frozen = pipeline / ".github/openclaw/qualification"
     reviewed = carrier / ".github/openclaw/qualification"
     # Validate old receipts with the original policy before installing new adapters.
@@ -79,21 +89,22 @@ def main():
     spec = importlib.util.spec_from_file_location("retained_diagnostic", diagnostic)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    proof, binaries = [module.unpack(retained, name, expected=RETAINED[name],
-                                     run=PREVIOUS_RUN, carrier=PREVIOUS_CARRIER)
+    proof, binaries = [module.unpack(retained, name, expected=retained_inputs[name],
+                                     run=previous_run, carrier=previous_carrier)
                        for name in ("proof", "binaries")]
     baseline = read(proof / "baseline-identity.json")
     engine = identity.engine_input(artifacts / (identity.LANE + ".tar.gz"),
-                                   artifacts / (identity.LANE + ".manifest.json"), SYNC)
+                                   artifacts / (identity.LANE + ".manifest.json"), sync)
     identity.validate_baseline_evidence(baseline, binaries, proof)
     identity.validate_invocation(proof, "baseline")
     assert (proof / "baseline/selected.json").read_bytes() == (frozen / "selected.json").read_bytes()
     assert len(read(frozen / "selected.json")) == 44
-    old_carrier = read(proof / "carrier.json")
-    assert old_carrier["carrier"] == PREVIOUS_CARRIER and old_carrier["sync"] == SYNC
+    if not checkpoint:
+        old_carrier = read(proof / "carrier.json")
+        assert old_carrier["carrier"] == previous_carrier and old_carrier["sync"] == sync
     engine_proof = root if fresh_engine else proof
     engine_gate = read(engine_proof / "engine-gate.json")
-    assert engine_gate["passed"] is True and engine_gate["source"] == SYNC
+    assert engine_gate["passed"] is True and engine_gate["source"] == sync
     assert engine_gate["stress_counts"]["jsc-stress"] >= 1400
     assert engine_gate["stress_counts"]["jsc-modules"] >= 1600
     for name, count in engine_gate["stress_counts"].items():
@@ -129,8 +140,11 @@ def main():
 
     # Candidate receipts and executables are deliberately not copied across source changes.
     # Keep the normal build, identity creation, selection and every later gate.
-    source = subprocess.check_output(["git", "-C", str(pipeline), "show", SYNC + ":.github/openclaw/qualify.sh"])
-    assert source == (pipeline / ".github/openclaw/qualify.sh").read_bytes()
+    if checkpoint:
+        source = (carrier / ".github/openclaw/qualify.sh").read_bytes()
+    else:
+        source = subprocess.check_output(["git", "-C", str(pipeline), "show", SYNC + ":.github/openclaw/qualify.sh"])
+        assert source == (pipeline / ".github/openclaw/qualify.sh").read_bytes()
     anchor = b"for arm in baseline candidate; do"
     assert source.count(anchor) == 1
     source = source.replace(anchor, b"for arm in candidate; do")
@@ -140,10 +154,10 @@ def main():
     driver = root / "qualify-candidate-fresh.sh"
     driver.write_bytes(source)
     (root / "reuse.json").write_text(json.dumps({
-        "previous_run": PREVIOUS_RUN, "previous_carrier": PREVIOUS_CARRIER,
-        "sync": SYNC, "candidate_repair_source": SOURCE,
-        "proof_artifact": RETAINED["proof"][0],
-        "binary_artifact": RETAINED["binaries"][0],
+        "previous_run": previous_run, "previous_carrier": previous_carrier,
+        "sync": sync, "candidate_repair_source": SOURCE,
+        "proof_artifact": retained_inputs["proof"][0],
+        "binary_artifact": retained_inputs["binaries"][0],
         "baseline_identity_sha256": sha(root / "baseline-identity.json"),
         "baseline_invocation_sha256": sha(root / "baseline/invocation.json"),
         "engine_gate_sha256": sha(root / "engine-gate.json"),
