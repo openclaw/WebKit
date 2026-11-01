@@ -308,6 +308,99 @@ if debug_prepush:
                                    stdout=stream, stderr=subprocess.STDOUT)
     step.update(exitCode=completed.returncode, seconds=time.monotonic() - started)
     save()
+    if completed.returncode != 0:
+        diagnostic = {'diagnostic_only': True}
+        try:
+            source_state(True)
+            cases = list(ElementTree.parse(xml).iter('testcase'))
+            assert len(cases) == 1
+            case = cases[0]
+            assert case.get('name') == 'JSON.parse and json() keep their declared types'
+            assert case.find('skipped') is None and case.find('error') is None
+            failure = case.find('failure')
+            assert failure is not None
+            assert 'integerRepresentationOf' in failure.get('message', '') + ''.join(failure.itertext())
+            binary = SOURCE / 'build/debug-prepush/bun-debug'
+            assert stat.S_ISREG(binary.lstat().st_mode) and os.access(binary, os.X_OK)
+            diagnostic['binary_sha256'] = sha(binary)
+            # Keep the original fixture's working directory and type roots. Build
+            # outputs stay outside the flat, bounded proof archive.
+            fixture = SOURCE / 'build/debug-prepush/integer-diagnostic'
+            fixture.mkdir()
+            program = fixture / 'program.ts'
+            program.write_bytes((SOURCE / 'test/aot/programs/type-rules/standard-functions-keep-their-declared-types.ts').read_bytes())
+            config = fixture / 'tsconfig.json'
+            config.write_text(json.dumps({'compilerOptions': {
+                'strict': True, 'lib': ['esnext', 'dom'], 'typeRoots': ['./no-types-here'],
+            }}))
+            diagnostic['inputs'] = {p.name: sha(p) for p in (program, config)}
+            for path in (program, config):
+                shutil.copyfile(path, OUT / ('debug-repro-' + path.name))
+            wire = OUT / 'debug-repro.aot'
+            command_diag = command[:command.index('test')] + [
+                '--', '--cwd=' + str(fixture), 'build', '--compile', '--aot',
+                './program.ts', '--outfile', str(fixture / 'program'),
+                '--aot-check=verify-each-pass', '--aot-out=' + str(wire), '--aot-threads=1',
+            ]
+            record = {'name': 'debug-diagnostic', 'command': command_diag, 'exitCode': None, 'timedOut': False}
+            STEPS.append(record)
+            save()
+            started_diag = time.monotonic()
+            log = OUT / 'debug-diagnostic.log'
+            with log.open('xb') as stream:
+                result_diag = subprocess.run(command_diag, cwd=SOURCE, env=debug_env,
+                    stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT)
+            record.update(exitCode=result_diag.returncode, seconds=time.monotonic() - started_diag)
+            save()
+            assert log.stat().st_size <= LIMIT
+            assert sha(binary) == diagnostic['binary_sha256']
+            if wire.is_file():
+                assert stat.S_ISREG(wire.lstat().st_mode) and 0 < wire.stat().st_size <= LIMIT
+                diagnostic['wire'] = {'bytes': wire.stat().st_size, 'sha256': sha(wire)}
+                # The debug runner does not print IR. Link testaot against this
+                # build's generated Bun builtin table, then stop before reps.
+                tool_command = command[:command.index('test')] + ['--target=testaot']
+                tool_record = {'name': 'debug-diagnostic-testaot-build', 'command': tool_command,
+                               'exitCode': None, 'timedOut': False}
+                STEPS.append(tool_record)
+                save()
+                started_tool = time.monotonic()
+                with (OUT / 'debug-diagnostic-testaot-build.log').open('xb') as stream:
+                    tool_build = subprocess.run(tool_command, cwd=SOURCE, env=debug_env,
+                        stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT)
+                tool_record.update(exitCode=tool_build.returncode, seconds=time.monotonic() - started_tool)
+                save()
+                assert tool_build.returncode == 0, 'matching testaot build'
+                tool = SOURCE / 'build/debug-prepush/testaot'
+                assert stat.S_ISREG(tool.lstat().st_mode) and os.access(tool, os.X_OK)
+                diagnostic['testaot_sha256'] = sha(tool)
+                print_command = [str(tool), 'print', str(wire), '--until=NumberAndEncode', 'check=verify-each-pass']
+                print_record = {'name': 'debug-diagnostic-ir', 'command': print_command,
+                                'exitCode': None, 'timedOut': False}
+                STEPS.append(print_record)
+                save()
+                started_print = time.monotonic()
+                tool_env = dict(debug_env)
+                if tool_env.get('ASAN_OPTIONS'):
+                    tool_env['ASAN_OPTIONS'] += ':detect_leaks=0'
+                with (OUT / 'debug-diagnostic-ir.log').open('xb') as stream, (OUT / 'debug-diagnostic-ir-stderr.log').open('xb') as errors:
+                    printed = subprocess.run(print_command, cwd=SOURCE, env=tool_env,
+                        stdin=subprocess.DEVNULL, stdout=stream, stderr=errors, timeout=120)
+                print_record.update(exitCode=printed.returncode, seconds=time.monotonic() - started_print)
+                save()
+                assert sha(binary) == diagnostic['binary_sha256']
+                assert sha(tool) == diagnostic['testaot_sha256']
+                diagnostic['print_exit_code'] = printed.returncode
+                diagnostic['print_pass'] = 'NumberAndEncode'
+                if printed.returncode == 0:
+                    assert (OUT / 'debug-diagnostic-ir.log').stat().st_size > 0, 'empty IR output'
+            assert sum(p.stat().st_size for p in OUT.iterdir() if p.is_file()) <= LIMIT
+            source_state(True)
+        except Exception as error:
+            diagnostic['gap'] = str(error)[:1000]
+        receipt = json.loads((OUT / 'proof.json').read_text())
+        receipt.update(passed=False, debug_diagnostic=diagnostic)
+        (OUT / 'proof.json').write_text(json.dumps(receipt, indent=2) + '\n')
     assert completed.returncode == 0, 'debug-prepush'
     source_state(True)
     cases = junit(xml, expected='JSON.parse and json() keep their declared types')
