@@ -1,3 +1,5 @@
+Native artifact smoke probes now destroy the standalone JSC VM and release the FFI test VM under the API lock. ASan and LeakSanitizer checks cover normal teardown.
+
 Artifact builds admit the AOT lanes used by current Bun's release and non-LTO CI builds, including both optional musl targets. Linux x64 Debug ASan AOT supplies the native `bun bd test` gate. The ten existing non-AOT lanes and historical Bun qualification remain selected. Current Bun qualification with the AOT libraries is still pending.
 
 When the AOT source-producing lane is selected, packaging retains its generator sources and built engine declarations in a separate checksum-verified archive for Bun's generator-only jobs. Release assembly checks and includes that archive alongside the native lane output.
