@@ -2,13 +2,13 @@
   "bun": "fd40ba44187c721ee023062fa153a6a27560e6b1",
   "webkit": "8e335354a58fa9a8eed14a70a8b9bf97b5d3073f",
   "prepare_only": false,
-  "patch_sha256": "125edec6575d689f73836e9e24548651c2e323a6f3f6f5724f1dd4807eaaedc9",
+  "patch_sha256": "1c325e4f3b564cb0a2574bc1c5823a97866374042635cc80c2f4b38c568ded82",
   "files": {
     "CHANGELOG.md": {
       "before": "aa3d183726734a0c1dd7f255d783b7e7b1946e4ff88e9432623e31556c206308",
-      "after": "c2f8593858eb2bd7ba7ef3bdc68f94ced2b1f7747707ed6f72baa5cb304e5582",
+      "after": "99e02c7ba08918853c844acea2ed5ac4b4a28115fe737dab3a4ec419d9ae3298",
       "base_blob": "ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0",
-      "adapted_blob": "e3d0a20ab6f8ccffe09cb7137d9d19fdcf26ef21",
+      "adapted_blob": "4d8154ae908d139f35a532e84a12b03c11044868",
       "mode": "100644"
     },
     "Cargo.lock": {
@@ -1189,9 +1189,9 @@
     },
     "src/codegen/builtins/host/compiler-helpers.builtins.ts": {
       "before": "824338e5b74c3a6a86aba2cab776dd43bf0e35490b8e87864a656102a20245a9",
-      "after": "6a17d5a7c853c7f083b96127006f445b231bcdec2fe90572034d14342dfb4d61",
+      "after": "bcdde387eb6b62b598fa38114ff34af888025460e13a3255cb892fc94f9d0b5e",
       "base_blob": "da639ebf279ac88cc5146b5eb5dcf0a5988c3c44",
-      "adapted_blob": "881010cd3f3459b8ec55712e6fc8c4c866383f65",
+      "adapted_blob": "39a9adb80b20feb18da5d8c027776988867b994e",
       "mode": "100644"
     },
     "src/codegen/builtins/host/globals.builtins.ts": {

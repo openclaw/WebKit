@@ -1,11 +1,13 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0..e3d0a20ab6f8ccffe09cb7137d9d19fdcf26ef21 100644
+index ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0..4d8154ae908d139f35a532e84a12b03c11044868 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,11 @@
+@@ -2,6 +2,13 @@
  
  ## Unreleased
  
++- Remove unused private AOT byte-range host declarations that prevented the native compiler from linking.
++
 +- Keep imported module namespaces unmarked and preserve live exports through the own `__esModule` marker of `require(esm)`, including compiled AOT modules.
 +
 +- Align AOT module loading and code admission with the JavaScriptCore module-host interface.
@@ -11280,7 +11282,7 @@ index 9ba4bb1c9de1a943ecb00a80a26e6c858990c026..dc369c9befbed10d5e96a1d78f02677b
    b.intrinsic("assert", "Call", erased),
    b.intrinsic("bundleError", "Call", { intrinsic: "BundleError" }),
 diff --git a/src/codegen/builtins/host/compiler-helpers.builtins.ts b/src/codegen/builtins/host/compiler-helpers.builtins.ts
-index da639ebf279ac88cc5146b5eb5dcf0a5988c3c44..881010cd3f3459b8ec55712e6fc8c4c866383f65 100644
+index da639ebf279ac88cc5146b5eb5dcf0a5988c3c44..39a9adb80b20feb18da5d8c027776988867b994e 100644
 --- a/src/codegen/builtins/host/compiler-helpers.builtins.ts
 +++ b/src/codegen/builtins/host/compiler-helpers.builtins.ts
 @@ -29,7 +29,9 @@ const newArrayOf = (elements: b.TableType) => b.instance("Array").holding({ elem
@@ -11316,7 +11318,91 @@ index da639ebf279ac88cc5146b5eb5dcf0a5988c3c44..881010cd3f3459b8ec55712e6fc8c4c8
  // These files reach built-ins through intrinsics and locked members, which a program cannot replace.
  const usesOnlyFixedBuiltins = true;
  
-@@ -306,7 +292,17 @@ export default b.declarations(
+@@ -164,83 +150,8 @@ const listOfPlainQuery = (symbol: string, element: b.TableType) =>
+     },
+   }) satisfies b.FunctionField;
+ 
+-// view.subarray(begin) that goes into encoder.encodeInto(text, ..) and nowhere else on its way there is not made: what travels in its place is the view and where the range starts. startOfRangeOfBytes stands where the call stood and answers the start for bytes of a fixed length that give an ordinary Uint8Array, and -1 for everything else. viewOrRangeOfBytes stands there too: it hands the view on, or makes the call where the start is -1, so an error comes from where it came from. encodeIntoRangeOfBytes writes behind the start. rangeOfBytes makes the range for whoever else wants to see it, as it would be by then: nothing but a transfer of the buffer can have changed such bytes.
+-const startOfRange = b.int(-1, 2 ** 31 - 1);
+-const storageOfBytes = ["TypedArrayStorage"] as const;
+-const anyView = b.union(b.instance("TypedArray"), b.instance("DataView"));
+-const entryOfRangeHelper = (symbol: string, numberOfValues: number) => ({
+-  symbol,
+-  declaration: `extern "C" SYSV_ABI JSC::EncodedJSValue ${symbol}(JSC::JSGlobalObject*${", JSC::EncodedJSValue".repeat(numberOfValues)});`,
+-  headers: [],
+-  parameters: [realm, ...Array.from({ length: numberOfValues }, () => value)],
+-});
+-const encodedIntoRange = {
+-  returns: b.ordinaryObjectOf("ReadAndWrittenCounts").fresh,
+-  reads: storageOfBytes,
+-  writes: [...storageOfBytes, "TypedArrayElements"],
+-  implementation: b.hostCall,
+-  directEntry: entryOfRangeHelper("AOT__encodeIntoRangeOfBytes", 4),
+-} satisfies Partial<b.FunctionField>;
+-
+ export default b.declarations(
+   b.namespace("%CompilerHelpers%", {
+-    startOfRangeOfBytes: {
+-      args: { view: b.any, begin: b.any },
+-      returns: startOfRange,
+-      capability: "none",
+-      uses: { view: b.inspected, begin: b.inspected },
+-      reads: storageOfBytes,
+-      implementation: b.hostCall,
+-      directEntry: entryOfRangeHelper("AOT__startOfRangeOfBytes", 2),
+-    },
+-    viewOrRangeOfBytes: {
+-      args: { view: b.any, begin: b.any, start: b.any },
+-      returns: b.operand("view"),
+-      capability: "heap",
+-      throws: true,
+-      uses: { view: [b.returned, b.retained], begin: b.inspected, start: b.inspected },
+-      reads: storageOfBytes,
+-      writes: storageOfBytes,
+-      implementation: b.hostCall,
+-      directEntry: entryOfRangeHelper("AOT__viewOrRangeOfBytes", 3),
+-    },
+-    rangeOfBytes: {
+-      args: { view: b.any, start: b.any },
+-      returns: b.operand("view"),
+-      capability: "heap",
+-      throws: true,
+-      uses: { view: [b.returned, b.retained], start: b.inspected },
+-      reads: storageOfBytes,
+-      writes: storageOfBytes,
+-      implementation: b.hostCall,
+-      directEntry: entryOfRangeHelper("AOT__rangeOfBytes", 2),
+-    },
+-    encodeIntoRangeOfBytes: [
+-      {
+-        ...encodedIntoRange,
+-        args: { encoder: b.any, source: b.string, destination: anyView, start: b.any },
+-        capability: "heap",
+-        uses: {
+-          encoder: b.inspected,
+-          source: [b.readAsCharacters],
+-          destination: [b.readsContents(), b.writesContents()],
+-          start: b.inspected,
+-        },
+-      },
+-      {
+-        ...encodedIntoRange,
+-        args: { encoder: b.any, source: b.any, destination: b.any, start: b.any },
+-        capability: "js",
+-        runsOnlyOperandCode: true,
+-        throws: true,
+-        uses: {
+-          encoder: b.inspected,
+-          source: [b.readAsCharacters, b.runs("ToPrimitive")],
+-          destination: [b.readsContents(), b.writesContents()],
+-          start: b.inspected,
+-        },
+-      },
+-    ],
+     scanPlainQuery: scanOfText("AOT__scanPlainQuery", -1, { text: b.string }, [realm, value]),
+     findInPlainQuery: scanOfText("AOT__findInPlainQuery", -2, { text: b.string, name: b.any }, [realm, value, value]),
+     plainQueryEntries: listOfPlainQuery(
+@@ -306,7 +217,17 @@ export default b.declarations(
        decorateProperty: { decorators: calledOrChanged, target: calledOrChanged, key: usedAsKey },
        decorateParameter: {
          index: kept,
@@ -11335,7 +11421,7 @@ index da639ebf279ac88cc5146b5eb5dcf0a5988c3c44..881010cd3f3459b8ec55712e6fc8c4c8
        },
        defineMetadata: { key: kept, value: kept },
        createDecoratorMetadata: { base: calledOrChanged },
-@@ -397,22 +393,6 @@ export default b.declarations(
+@@ -397,22 +318,6 @@ export default b.declarations(
          operand: [b.retained, b.returned],
        },
      }),
