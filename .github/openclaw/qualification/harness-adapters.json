@@ -182,7 +182,7 @@
       },
       "test": {
         "patch": "harness-adapters/candidate-test.patch",
-        "sha256": "a85d6648cff0bd041a19be98a21d1d299da3704198b9c876ff683dd1182162d7",
+        "sha256": "6a56f290ef1d0b87f50e7c8311913b3f562bae15fd8bf22ab02289fa8005062b",
         "files": {
           "scripts/buildkite.ts": {
             "before": "cf1999381cf38d34b9892118266614ae2b81a28066d47a455aa15794fb2c1c3e",
@@ -210,6 +210,13 @@
             "after": "bd621b307c23839d594d961ccb5e591731c451111f5244bfdf696fde11d9f893",
             "base_blob": "361d675936e9694835956eebbd9b4256f8b9e5e3",
             "adapted_blob": "7e448388ceb3dc10781b55f1df4e72d10f8637c3",
+            "mode": "100644"
+          },
+          "test/js/node/vm/vm.test.ts": {
+            "before": "12d833538525702ce2fee1e3f76946e8886af26bf368af0abab74241f8ab8433",
+            "after": "c5c057e5832f4aaf1adbaff5df127ad1f8c4cf8614f436c293d06ac9588aa87f",
+            "base_blob": "179eb48620280040bd7808653731f6aba7cb81f5",
+            "adapted_blob": "1be67b432d1121e6978cc9557c78b15326877879",
             "mode": "100644"
           }
         }

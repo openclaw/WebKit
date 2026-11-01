@@ -2,10 +2,10 @@
   "source": "2323913322dfdfed96ecf20163d62f5ff2796ecc",
   "engine": "42e4245f4180941634b482a7e8ef7fca47467de5",
   "files": {
-    "harness-adapters.json": "4ba71d03cac2a000b8f49c6f4f0954462bf3b275968395455bd9130fb1f17523",
+    "harness-adapters.json": "b8f26ddac333687c8bbfb8f0f9508822065d4ae7027059fcb4a979af426a321e",
     "harness_adapters.py": "b010ff192ebdb91d52b64e0521abfb1d079e8cd34792f0b9bb46570bb9d4ad83",
     "harness-adapters/candidate-build.patch": "414c02660faa9dcc48c383458dbe13dea5c9a26a7f3abc62265ea637ec074769",
-    "harness-adapters/candidate-test.patch": "a85d6648cff0bd041a19be98a21d1d299da3704198b9c876ff683dd1182162d7",
+    "harness-adapters/candidate-test.patch": "6a56f290ef1d0b87f50e7c8311913b3f562bae15fd8bf22ab02289fa8005062b",
     "test_consumer_identity.py": "f6163dea3b0c5111e5df3c9914486cde11befbfad4d9eabd7ef55e194b610afc",
     "variants.json": "a181182de15f50d6c30d4d185a9d21cdea2093236dc17aa66628e65008c57bc7",
     "qualify-sync.sh": "b124b19863695fbd67564e82531459ced2470b9000a6a4f04ae3dc40534ab33d",

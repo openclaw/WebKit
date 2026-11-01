@@ -56,6 +56,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
           path: carrier
+          fetch-depth: 1
           sparse-checkout: .github/openclaw
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -68,7 +69,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export ARTIFACT_DIR="$RUNNER_TEMP/linux-artifact" QUALIFICATION_DIR="$RUNNER_TEMP/qualification"
+          export ARTIFACT_DIR="$RUNNER_TEMP/linux-artifact" QUALIFICATION_DIR="/home/runner/_work/_temp/qualification"
           echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> "$GITHUB_ENV"
           echo "QUALIFICATION_DIR=$QUALIFICATION_DIR" >> "$GITHUB_ENV"
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /opt/microsoft
@@ -78,10 +79,10 @@ jobs:
           from pathlib import Path
           capacity = dict(cpus=os.cpu_count(), disk_free_bytes=shutil.disk_usage('.').free)
           assert capacity['disk_free_bytes'] >= 40 * 1024**3, 'retained source, executables and engine need 40 GiB free'
-          Path(os.environ['QUALIFICATION_DIR']).mkdir()
+          Path(os.environ['QUALIFICATION_DIR']).mkdir(parents=True)
           Path(os.environ['QUALIFICATION_DIR'], 'carrier.json').write_text(json.dumps(dict(
               carrier=os.environ['CARRIER_COMMIT'], sync=os.environ['SYNC_COMMIT'],
-              engine_artifact=13050907884, engine_run=41213533216, engine_attempt=2,
+              engine_artifact=13075718771, engine_run=41286392252, engine_attempt=1,
               capacity=capacity), indent=2) + '\n')
           PY
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -95,19 +96,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh api repos/openclaw/WebKit/actions/artifacts/13050907884 > "$RUNNER_TEMP/engine-artifact.json"
-          gh api repos/openclaw/WebKit/actions/artifacts/13050907884/zip > "$RUNNER_TEMP/engine.zip"
+          gh api repos/openclaw/WebKit/actions/artifacts/13075718771 > "$RUNNER_TEMP/engine-artifact.json"
+          gh api repos/openclaw/WebKit/actions/artifacts/13075718771/zip > "$RUNNER_TEMP/engine.zip"
           python3 - <<'PY'
           import hashlib, json, os, shutil, stat, zipfile
           from pathlib import Path, PurePosixPath
           root = Path(os.environ['RUNNER_TEMP'])
           artifact = json.loads((root / 'engine-artifact.json').read_text())
-          digest = 'da8bbf2a08a5bff8d566b213a7e329f4103da4e627e05ff5c64c1576e9c06385'
-          assert artifact['id'] == 13050907884 and not artifact['expired']
+          digest = 'e762b6e8022b4d0f454b1ddc8288f0b3b2ad511b159fe2b8cff7fd4a4eb197d4'
+          assert artifact['id'] == 13075718771 and not artifact['expired']
           assert artifact['name'] == 'bun-webkit-linux-amd64'
-          assert artifact['workflow_run']['id'] == 41213533216
-          assert artifact['workflow_run']['head_sha'] == os.environ['SYNC_COMMIT']
-          assert artifact['size_in_bytes'] == (root / 'engine.zip').stat().st_size == 709332920
+          assert artifact['workflow_run']['id'] == 41286392252
+          assert artifact['workflow_run']['head_sha'] == 'bfea5fad536fe27d6beb39bdf64106536418428f'
+          assert artifact['size_in_bytes'] == (root / 'engine.zip').stat().st_size == 709340274
           assert artifact['digest'] == 'sha256:' + digest
           with (root / 'engine.zip').open('rb') as stream:
               assert hashlib.file_digest(stream, 'sha256').hexdigest() == digest
@@ -164,10 +165,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/retained"
-          gh api repos/openclaw/WebKit/actions/artifacts/13074375041 > "$RUNNER_TEMP/retained/proof.metadata.json"
-          gh api repos/openclaw/WebKit/actions/artifacts/13074375041/zip > "$RUNNER_TEMP/retained/proof.zip"
-          gh api repos/openclaw/WebKit/actions/artifacts/13073981057 > "$RUNNER_TEMP/retained/binaries.metadata.json"
-          gh api repos/openclaw/WebKit/actions/artifacts/13073981057/zip > "$RUNNER_TEMP/retained/binaries.zip"
+          gh api repos/openclaw/WebKit/actions/artifacts/13077667443 > "$RUNNER_TEMP/retained/proof.metadata.json"
+          gh api repos/openclaw/WebKit/actions/artifacts/13077667443/zip > "$RUNNER_TEMP/retained/proof.zip"
+          gh api repos/openclaw/WebKit/actions/artifacts/13077208926 > "$RUNNER_TEMP/retained/binaries.metadata.json"
+          gh api repos/openclaw/WebKit/actions/artifacts/13077208926/zip > "$RUNNER_TEMP/retained/binaries.zip"
       - name: Install the reviewed continuation and unchanged consumer policy
         shell: bash
         run: |
@@ -184,29 +185,33 @@ jobs:
           python3 .github/openclaw/test_consumer_identity.py
           python3 .github/openclaw/test_verify_jsc_results.py
           bash .github/openclaw/preflight.sh
-      - name: Admit the retained suites and finish both native probes
+      - name: Replay the consumer suites against the retained matrix build
         shell: bash
         run: |
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
           export INSPECTOR_RUNTIME="$(realpath "$(command -v bun)")"
-          python3 .github/openclaw/qualification/continue-consumer.py prepare \
+          python3 carrier/.github/openclaw/qualification/resume-consumer.py replay-matrix \
             "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/carrier" "$RUNNER_TEMP/retained" \
             "$QUALIFICATION_DIR" "$ARTIFACT_DIR" "$GITHUB_WORKSPACE/retained-bun-source" "$INSPECTOR_RUNTIME"
           export CANDIDATE_BUN="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
           export CANDIDATE_RECEIPT="$QUALIFICATION_DIR/candidate-identity.json"
-          bash .github/openclaw/qualify-sync.sh --retained-probes
+          bash "$QUALIFICATION_DIR/qualify-retained-matrix.sh"
+          bash .github/openclaw/qualify-sync-compatibility.sh
+          bash .github/openclaw/qualify-sync.sh
+          python3 carrier/.github/openclaw/qualification/resume-consumer.py seal-matrix \
+            "$GITHUB_WORKSPACE" "$QUALIFICATION_DIR" "$ARTIFACT_DIR" "$INSPECTOR_RUNTIME"
       - name: Retain the exact qualified Bun executables
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: hosted-linux-bun-executables
           path: |
-            ${{ runner.temp }}/qualification/bun-baseline/build/qualify-baseline/bun
-            ${{ runner.temp }}/qualification/bun/build/qualify-candidate/bun
-            ${{ runner.temp }}/qualification/bun/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o
-            ${{ runner.temp }}/qualification/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
-            ${{ runner.temp }}/qualification/*.sha256
+            /home/runner/_work/_temp/qualification/bun-baseline/build/qualify-baseline/bun
+            /home/runner/_work/_temp/qualification/bun/build/qualify-candidate/bun
+            /home/runner/_work/_temp/qualification/bun/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o
+            /home/runner/_work/_temp/qualification/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
+            /home/runner/_work/_temp/qualification/*.sha256
           compression-level: 0
           if-no-files-found: warn
           retention-days: 3
@@ -216,23 +221,24 @@ jobs:
         with:
           name: hosted-linux-native-proof
           path: |
-            ${{ runner.temp }}/qualification/*.json
-            ${{ runner.temp }}/qualification/*.log
-            ${{ runner.temp }}/qualification/*.sha256
-            ${{ runner.temp }}/qualification/*.patch
-            ${{ runner.temp }}/qualification/qualify-candidate-fresh.sh
-            ${{ runner.temp }}/qualification/candidate-input/artifacts.json
-            ${{ runner.temp }}/qualification/baseline/*.json
-            ${{ runner.temp }}/qualification/baseline/*.log
-            ${{ runner.temp }}/qualification/candidate/*.json
-            ${{ runner.temp }}/qualification/candidate/*.log
-            ${{ runner.temp }}/qualification/compatibility/*.log
-            ${{ runner.temp }}/qualification/sync/*.json
-            ${{ runner.temp }}/qualification/sync/*.xml
-            ${{ runner.temp }}/qualification/sync/*.log
-            ${{ runner.temp }}/qualification/jsc-*/results
-            ${{ runner.temp }}/qualification/jsc-stack/*.log
-            ${{ runner.temp }}/qualification/jsc-stack/*.json
-            ${{ runner.temp }}/qualification/sync/runtime-cache/*.json
+            /home/runner/_work/_temp/qualification/*.json
+            /home/runner/_work/_temp/qualification/*.log
+            /home/runner/_work/_temp/qualification/*.sha256
+            /home/runner/_work/_temp/qualification/*.patch
+            /home/runner/_work/_temp/qualification/qualify-retained-matrix.sh
+            /home/runner/_work/_temp/qualification/candidate-input/artifacts.json
+            /home/runner/_work/_temp/qualification/baseline/*.json
+            /home/runner/_work/_temp/qualification/baseline/*.log
+            /home/runner/_work/_temp/qualification/candidate/*.json
+            /home/runner/_work/_temp/qualification/candidate/*.log
+            /home/runner/_work/_temp/qualification/previous-candidate/*
+            /home/runner/_work/_temp/qualification/compatibility/*.log
+            /home/runner/_work/_temp/qualification/sync/*.json
+            /home/runner/_work/_temp/qualification/sync/*.xml
+            /home/runner/_work/_temp/qualification/sync/*.log
+            /home/runner/_work/_temp/qualification/jsc-*/results
+            /home/runner/_work/_temp/qualification/jsc-stack/*.log
+            /home/runner/_work/_temp/qualification/jsc-stack/*.json
+            /home/runner/_work/_temp/qualification/sync/runtime-cache/*.json
           if-no-files-found: error
           retention-days: 7
