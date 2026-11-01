@@ -1,4 +1,6 @@
 import hashlib
+import json
+import tarfile
 import os
 from pathlib import Path
 import subprocess
@@ -81,6 +83,75 @@ class SourceHistory(unittest.TestCase):
                 artifacts.build('bun-webkit-linux-amd64', destination)
             lanes.assert_not_called()
         self.assertFalse(destination.exists())
+
+
+    def test_build_packs_aot_sources_from_built_output(self):
+        repository, commits = self.graph('source-package')
+        label = 'bun-webkit-linux-amd64-lto-aot'
+        lane = {'label': label, 'sources': 'bun-webkit-aot-sources', 'aot': 1,
+            'image': 'fixture-toolchain', 'package_os': 'linux', 'package_cpu': 'x64', 'defines': ''}
+        destination = self.root / 'built-output'
+        artifact = destination / 'bun-webkit'
+        generated = b'{"origin":"built-engine-declarations"}\n'
+        members = {
+            'include/cmakeconfig.h': b'#pragma once\n',
+            'lib/libJavaScriptCore.a': b'native-library',
+            'Source/JavaScriptCore/aot/ir/AOTSchema.def': b'built-schema\n',
+            'Source/JavaScriptCore/aot/ir/generator/index.ts': b'// built-generator\n',
+            'Source/JavaScriptCore/aot/builtins/generated/AOTBuiltinEngineDeclarations.json': generated,
+            'Source/JavaScriptCore/aot/tests/example.ir': b'test-only\n',
+        }
+        real_run, real_capture = artifacts.run, artifacts.capture
+
+        def run(*args, **kwargs):
+            if args[0] != 'docker':
+                return real_run(*args, **kwargs)
+            if '--target=artifact' in args:
+                for name, data in members.items():
+                    path = artifact / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+
+        def capture(*args):
+            if args[0] == 'node':
+                if args[-1] == '--json':
+                    return json.dumps([lane])
+                return json.dumps(['docker', 'buildx', 'build', '--target=artifact', '.'])
+            if args[:3] == ('docker', 'image', 'inspect'):
+                return json.dumps([{'Id': 'fixture-image'}])
+            if args[0] == 'docker':
+                return 'fixture-tool-versions'
+            if args[:2] == ('git', 'ls-files'):
+                return self.capture(repository, *args[1:])
+            return real_capture(*args)
+
+        with patch.dict(os.environ, self.env, clear=True), patch.multiple(
+            artifacts, ROOT=repository, BASE=commits['B'], HISTORY_FLOOR=commits['F'],
+            RECIPE=['Dockerfile'], CONFIG={'lanes': [{'label': label}]}), patch.object(
+            artifacts, 'run', side_effect=run), patch.object(artifacts, 'capture', side_effect=capture):
+            artifacts.build(label, destination)
+
+        native = destination / (label + '.tar.gz')
+        sources = destination / 'bun-webkit-aot-sources.tar.gz'
+        declaration = 'bun-webkit/Source/JavaScriptCore/aot/builtins/generated/AOTBuiltinEngineDeclarations.json'
+        with tarfile.open(sources) as archive:
+            self.assertEqual(archive.extractfile(declaration).read(), generated)
+            names = archive.getnames()
+            self.assertTrue(all(name.startswith('bun-webkit/Source/JavaScriptCore/aot') for name in names))
+            self.assertFalse(any('/tests' in name for name in names))
+            self.assertFalse(any(name.startswith('bun-webkit/lib/') for name in names))
+        with tarfile.open(native) as archive:
+            self.assertEqual(archive.extractfile('bun-webkit/lib/libJavaScriptCore.a').read(), b'native-library')
+            self.assertEqual(archive.extractfile(declaration).read(), generated)
+        manifest = json.loads((destination / (label + '.manifest.json')).read_text())
+        expected = self.oracle(repository, commits, ['P', 'H'])
+        self.assertEqual({key: manifest[key] for key in expected}, expected)
+        files = {path.name: {'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'size': path.stat().st_size}
+            for path in (native, sources)}
+        self.assertEqual(manifest['files'], files)
+        self.assertEqual((destination / 'SHA256SUMS').read_text(),
+            ''.join(entry['sha256'] + '  ' + name + '\n' for name, entry in files.items()))
+        self.assertFalse(artifact.exists())
 
     def test_complete_history_and_raw_patch_hashes(self):
         repository, commits = self.graph('complete')
