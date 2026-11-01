@@ -1,24 +1,14 @@
-name: OpenClaw pinned Bun AOT consumer
+name: OpenClaw Bun AOT debug pre-push
 on:
-  pull_request:
-    branches: [claude/sync-webkit-upstream-20261014]
-    paths:
-      - .github/workflows/openclaw-bun-aot.yml
-      - .github/openclaw/qualification/bun-aot/**
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: openclaw-bun-aot-${{ github.ref }}
+  group: openclaw-bun-aot-debug-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   linux-arm64:
-    if: >-
-      github.repository == 'openclaw/WebKit' &&
-      (github.head_ref == 'claude/bun-aot-consumer-proof-20261031' ||
-       github.ref == 'refs/heads/claude/bun-aot-consumer-proof-20261031')
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 340
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -74,15 +64,14 @@ jobs:
           echo "id=$container_id" >> "$GITHUB_OUTPUT"
           docker exec -e SCRIPT bun-aot-consumer sh -euc 'sh "$SCRIPT" fd40ba44187c721ee023062fa153a6a27560e6b1 openclaw-release'
           docker exec bun-aot-consumer sh -euc 'apt-get update; apt-get install --yes --no-install-recommends python3 ruby bison gawk perl libxml2-dev pkg-config'
-      - name: Prepare source or qualify the pinned compiler
-        timeout-minutes: 285
+      - name: Run the required debug build and test
         shell: bash
         run: |
           set -euo pipefail
           docker exec bun-aot-consumer bash -e -lc '
             . /etc/profile.d/bun-ci.sh
             for repo in /work/source /work/engine /work/pipeline; do git config --global --add safe.directory "$repo"; done
-            python3 controls/.github/openclaw/qualification/bun-aot/qualify.py
+            python3 controls/.github/openclaw/qualification/bun-aot/qualify.py --debug-prepush
           '
       - name: Retain bounded source and native proof
         if: always()
@@ -118,7 +107,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: pinned-bun-aot-linux-arm64-proof
+          name: bun-aot-debug-prepush-proof
           path: |
             bun-aot-proof.tar.gz
             bun-aot-SHA256SUMS

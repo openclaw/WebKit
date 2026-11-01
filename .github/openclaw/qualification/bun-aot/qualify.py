@@ -9,6 +9,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tarfile
 import io
 import tomllib
@@ -265,6 +266,9 @@ assert git(Path('/work/pipeline'), 'rev-parse', 'HEAD') == PIPELINE
 spec = json.loads((INPUTS / 'source-adapter.json').read_text())
 assert spec['bun'] == BUN and spec['webkit'] == WEBKIT
 capture_wire = spec.get('capture_wire', False)
+assert sys.argv[1:] in ([], ['--debug-prepush'])
+debug_prepush = bool(sys.argv[1:])
+assert not debug_prepush or (not capture_wire and not spec.get('prepare_only', False))
 assert isinstance(capture_wire, bool) and not (capture_wire and spec.get('prepare_only', False))
 assert spec['files']
 assert sha(INPUTS / 'candidate.patch') == spec['patch_sha256']
@@ -287,6 +291,35 @@ if spec.get('prepare_only', False):
     prepare_source()
     raise SystemExit(0)
 icu = target_icu()
+if debug_prepush:
+    xml = OUT / 'debug-prepush-junit.xml'
+    command = ['bun', 'bd', '--webkit=local', '--webkit-version=' + WEBKIT,
+               '--aot=on', '--ci=off', '--buildkite=off', '--build-dir=build/debug-prepush', '-j2',
+               'test', 'test/aot/standard-functions-without-installed-types.test.ts',
+               '--reporter=junit', '--reporter-outfile=' + str(xml)]
+    step = {'name': 'debug-prepush', 'command': command, 'exitCode': None, 'timedOut': False}
+    STEPS.append(step)
+    save()
+    started = time.monotonic()
+    # build.ts executes trailing runtime arguments only outside CI mode.
+    debug_env = {key: value for key, value in ENV.items() if key not in ('CI', 'BUILDKITE', 'GITHUB_ACTIONS')}
+    with (OUT / 'debug-prepush.log').open('xb') as stream:
+        completed = subprocess.run(command, cwd=SOURCE, env=debug_env, stdin=subprocess.DEVNULL,
+                                   stdout=stream, stderr=subprocess.STDOUT)
+    step.update(exitCode=completed.returncode, seconds=time.monotonic() - started)
+    save()
+    assert completed.returncode == 0, 'debug-prepush'
+    source_state(True)
+    cases = junit(xml, expected='JSON.parse and json() keep their declared types')
+    binary = SOURCE / 'build/debug-prepush/bun-debug'
+    identity = {'bytes': binary.stat().st_size, 'sha256': sha(binary)}
+    restore_source()
+    result = json.loads((OUT / 'proof.json').read_text())
+    result.update(passed=True, mode='debug-prepush', program_cases=cases,
+                  debug_executable=identity, patch_sha256=spec['patch_sha256'],
+                  source_tree=original_tree, icu=icu)
+    (OUT / 'proof.json').write_text(json.dumps(result, indent=2) + '\n')
+    raise SystemExit(0)
 build_command = ['bun', 'scripts/build.ts', '--profile=release-local', '--webkit=local',
                  '--webkit-version=' + WEBKIT, '--aot=on', '--ci=on', '--buildkite=off',
                  '--os=linux', '--arch=aarch64', '--abi=gnu', '--build-dir=build/aot-linux-arm64', '-j2']
