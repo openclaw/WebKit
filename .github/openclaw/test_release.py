@@ -103,9 +103,10 @@ class ReleaseIntegrity(unittest.TestCase):
                     p.write_text(original_text)
 
     def test_candidate_lane_patch_provenance_is_bound_to_receipt(self):
-        label=release.consumer_identity.LANE
-        p=self.inputs/label/(label+'.manifest.json');manifest=json.loads(p.read_text())
-        manifest['patches'][0]['subject']='different';p.write_text(json.dumps(manifest))
+        for lane in release.consumer_identity.CONFIG['lanes']:
+            label=lane['label'];p=self.inputs/label/(label+'.manifest.json')
+            manifest=json.loads(p.read_text());manifest['patches'][0]['subject']='different'
+            p.write_text(json.dumps(manifest))
         with self.assertRaisesRegex(ValueError,'candidate archive identity mismatch'):self.assemble()
 
     def test_base_source_allows_empty_patch_history(self):
