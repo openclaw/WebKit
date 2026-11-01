@@ -1,3 +1,5 @@
+The AOT builtin-table collector now recognizes native data properties declared with `CustomValue`. Getter and setter symbols remain available to code generation; Bun's `process.ppid` and `process.title` keep their existing data descriptors. Unknown table attributes still fail validation.
+
 Native artifact smoke probes now destroy the standalone JSC VM and release the FFI test VM under the API lock. ASan and LeakSanitizer checks cover normal teardown.
 
 Artifact builds admit the AOT lanes used by current Bun's release and non-LTO CI builds, including both optional musl targets. Linux x64 Debug ASan AOT supplies the native `bun bd test` gate. The ten existing non-AOT lanes and historical Bun qualification remain selected. Current Bun qualification with the AOT libraries is still pending.
