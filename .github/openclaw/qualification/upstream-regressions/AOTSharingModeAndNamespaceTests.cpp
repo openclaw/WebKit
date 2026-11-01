@@ -150,6 +150,7 @@ function f0 name="main" kind=Module results=[{type=anything}] {
     PropSet v0, v1 key="capturedNamespace"
     v3 = NewClosure function=f3
     PropSet v0, v3 key="readCaptured"
+    v5 = Call v3, -, v1 [isNeverInlined]
     Return
 }
 function f1 name="value" module=m1 kind=CommonJsModule flags=[IsSloppy] results=[{type=anything}] {

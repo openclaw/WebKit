@@ -10,6 +10,8 @@ import shlex
 import stat
 import subprocess
 import time
+import zipfile
+from pathlib import PurePosixPath
 from xml.etree import ElementTree
 
 INPUTS = Path(__file__).resolve().parent
@@ -45,11 +47,11 @@ def identity(path, expected):
 
 
 def state(stage):
-    assert stage in ('base', 'tests', 'ported', 'fixed')
+    assert stage in ('base', 'tests', 'ported', 'fixed', 'host')
     assert git('rev-parse', 'HEAD') == ENGINE
     assert git('write-tree') == git('rev-parse', 'HEAD^{tree}')
     applied = {name for name, row in SPEC['files'].items()
-        if stage in ('ported', 'fixed') or (stage == 'tests' and row['kind'] == 'test')}
+        if stage in ('ported', 'fixed', 'host') or (stage == 'tests' and row['kind'] == 'test')}
     tracked = {name for name in applied if SPEC['files'][name]['before'] is not None}
     added = applied - tracked
     changed = set(git('diff', '--name-only', 'HEAD').splitlines())
@@ -57,7 +59,7 @@ def state(stage):
     assert changed == tracked, (changed, tracked, stage)
     assert untracked == added, (untracked, added, stage)
     for name, row in SPEC['files'].items():
-        expected = row.get('ported', row['after']) if stage == 'ported' else row['after' if name in applied else 'before']
+        expected = row.get('host', row['after']) if stage == 'host' else row.get('ported', row['after']) if stage == 'ported' else row['after' if name in applied else 'before']
         if expected is None:
             assert not os.path.lexists(SOURCE / name)
         else:
@@ -154,6 +156,56 @@ for name, row in SPEC['files'].items():
     identity(control, row['after'])
     (SOURCE / name).write_bytes(control.read_bytes())
 state('tests')
+# The only test change is a warmup call in another test's IR. Keep the old
+# baseline tied to its original bytes and line, rather than relabeling it.
+baseline = SPEC['reused_baseline']
+fixture = SOURCE / SPEC['regression']['file']
+current = fixture.read_text()
+assert current.count(baseline['inserted_call']) == 1
+original = current.replace(baseline['inserted_call'], '').encode()
+assert len(original) == baseline['fixture']['bytes']
+assert hashlib.sha256(original).hexdigest() == baseline['fixture']['sha256']
+assert hashlib.sha1(b'blob ' + str(len(original)).encode() + b'\0' + original).hexdigest() == baseline['fixture']['blob']
+archive = Path(os.environ['RUNNER_TEMP']) / 'namespace-baseline.zip'
+assert archive.stat().st_size == baseline['bytes'] and sha(archive) == baseline['sha256']
+with zipfile.ZipFile(archive) as prior:
+    entries = prior.infolist()
+    names = {entry.filename for entry in entries}
+    assert len(names) == len(entries) == 10
+    for entry in entries:
+        name = PurePosixPath(entry.filename)
+        assert not name.is_absolute() and len(name.parts) == 1 and '..' not in name.parts
+        assert stat.S_IFMT(entry.external_attr >> 16) in (0, stat.S_IFREG)
+    assert prior.testzip() is None
+    manifest = json.loads(prior.read('archive-manifest.json'))
+    assert set(manifest) == names - {'archive-manifest.json'}
+    for name, expected in manifest.items():
+        data = prior.read(name)
+        assert len(data) == expected['bytes'] and hashlib.sha256(data).hexdigest() == expected['sha256']
+    proof = json.loads(prior.read('proof.json'))
+    assert proof['passed'] is False and proof['engine'] == ENGINE and proof['pipeline'] == baseline['pipeline']
+    assert proof['controls']['AOTSharingModeAndNamespaceTests.cpp'] == baseline['fixture']['sha256']
+    for name in ('configure', 'baseline-build', 'baseline-full-aot-admission'):
+        row = proof['steps'][name]
+        assert row['returncode'] == 0 and row['timed_out'] is False
+    assert proof['feature_admission']['baseline'] and len(proof['baseline_binary_sha256']) == 3
+    assert proof['baseline_expected_failure'] == baseline['regression']
+    row = proof['steps']['namespace-baseline']
+    assert row['returncode'] == -6 and row['timed_out'] is False
+    text = prior.read('namespace-baseline.log').decode()
+    regression = baseline['regression']
+    assert re.search(r'^' + re.escape(regression['case']) + r'$', text, re.M)
+    assert 'ASSERTION FAILED: ' + regression['failure_expression'] in text
+    assert re.search(re.escape(Path(regression['file']).name) + r'\(' + str(regression['failure_line']) + r'\)\s*:\s*native test', text)
+    RECORD['reused_baseline'] = dict(baseline, archive_manifest=manifest,
+        baseline_binary_sha256=proof['baseline_binary_sha256'])
+(OUT / 'reused-baseline.zip').write_bytes(archive.read_bytes())
+save()
+patch = INPUTS / SPEC['production_patch']['control']
+identity(patch, SPEC['production_patch'])
+run('namespace-patch-check', ['git', 'apply', '--check', str(patch)])
+run('namespace-patch-apply', ['git', 'apply', str(patch)])
+state('ported')
 flags = ['-G', 'Ninja', '-DPORT=JSCOnly', '-DCMAKE_BUILD_TYPE=Release', '-DDEVELOPER_MODE=ON',
     '-DCMAKE_COMPILE_WARNING_AS_ERROR=OFF', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON', '-DENABLE_STATIC_JSC=ON', '-DUSE_BUN_JSC_ADDITIONS=ON',
     '-DUSE_BUN_EVENT_LOOP=ON', '-DUSE_MIMALLOC=ON', '-DUSE_EXTERNAL_MIMALLOC=OFF', '-DENABLE_FTL_JIT=ON',
@@ -193,12 +245,6 @@ def admit_full_aot(label):
     run(label + '-full-aot-admission', [*argv, '-E', '-x', 'c++', str(probe), '-o', '/dev/null'], cwd=Path(row['directory']))
 
 
-run('baseline-build', ['cmake', '--build', str(BUILD), '--target', *targets, '-j2'], 7200)
-admit_full_aot('baseline')
-state('tests')
-baseline_binaries = binary_hashes()
-RECORD['baseline_binary_sha256'] = baseline_binaries
-save()
 def expected_native_failure(name, regression):
     run(name, [str(BUILD / paths['testaot']), 'native', regression['case'], '--single-process'],
         300, expected_failure=True)
@@ -208,17 +254,8 @@ def expected_native_failure(name, regression):
     assert re.search(re.escape(Path(regression['file']).name) + r'\(' + str(regression['failure_line']) + r'\)\s*:\s*native test', text)
 
 
-expected_native_failure('namespace-baseline', SPEC['regression'])
-state('tests')
-assert binary_hashes() == baseline_binaries
-RECORD['baseline_expected_failure'] = SPEC['regression']
-save()
-patch = INPUTS / SPEC['production_patch']['control']
-identity(patch, SPEC['production_patch'])
-run('namespace-patch-check', ['git', 'apply', '--check', str(patch)])
-run('namespace-patch-apply', ['git', 'apply', str(patch)])
-state('ported')
 run('ported-build', ['cmake', '--build', str(BUILD), '--target', *targets, '-j2'], 7200)
+admit_full_aot('ported')
 state('ported')
 ported_binaries = binary_hashes()
 RECORD['ported_binary_sha256'] = ported_binaries
@@ -236,14 +273,33 @@ state('fixed')
 run('fixed-build', ['cmake', '--build', str(BUILD), '--target', *targets, '-j2'], 7200)
 admit_full_aot('fixed')
 state('fixed')
+cache_binaries = binary_hashes()
+run('namespace-cache-after-repair', [str(BUILD / paths['testaot']), 'native', SPEC['cache_regression']['case'], '--single-process'], 300)
+text = (OUT / 'namespace-cache-after-repair.log').read_text(errors='replace')
+assert re.findall(r'^(sharing-mode-and-namespace/[^\r\n]+)$', text, re.M) == [SPEC['cache_regression']['case']]
+assert len(re.findall(r'^1 passed, 0 failed, 0 todo$', text, re.M)) == 1
+assert not re.search(r'^(FAIL |LEFT OUT )', text, re.M)
+state('fixed')
+assert binary_hashes() == cache_binaries
+RECORD['cache_red_green'] = True
+save()
+patch = INPUTS / SPEC['host_api_patch']['control']
+identity(patch, SPEC['host_api_patch'])
+run('namespace-host-api-check', ['git', 'apply', '--check', str(patch)])
+run('namespace-host-api-apply', ['git', 'apply', str(patch)])
+state('host')
+run('host-build', ['cmake', '--build', str(BUILD), '--target', *targets, '-j2'], 7200)
+admit_full_aot('host')
+state('host')
 binaries = binary_hashes()
 run('namespace-fixed', [str(BUILD / paths['testaot']), 'native', 'sharing-mode-and-namespace/', '--single-process'], 600)
 text = (OUT / 'namespace-fixed.log').read_text(errors='replace')
 observed = re.findall(r'^(sharing-mode-and-namespace/[^\r\n]+)$', text, re.M)
-assert set(observed) == set(SPEC['native_cases']) and len(SPEC['native_cases']) == 11, observed
+assert set(observed) == set(SPEC['native_cases']) and len(observed) == len(SPEC['native_cases']) == 11, observed
 assert len(re.findall(r'^11 passed, 0 failed, 0 todo$', text, re.M)) == 1
 assert not re.search(r'^(FAIL |LEFT OUT )', text, re.M)
 RECORD['native_cases'] = SPEC['native_cases']
+RECORD['host_api_limits'] = 'One loaded image: same-image conversion/idempotence only; cross-image/mock-boundary runtime is unproven.'
 save()
 api('marked-vector', ['MarkedVector.Append_JSObjectPtr'])
 api('heap-teardown', ['HeapTeardown.FinalizesNewCellsWithoutLiveBitmaps', 'HeapTeardown.FinalizesMarkedCellsWithoutLiveBitmaps'])
@@ -261,7 +317,7 @@ run('shell-off-configure', ['cmake', '-S', str(SOURCE), '-B', str(shell_off), *f
 run('shell-off-api-link', ['ninja', '-C', str(shell_off), '-t', 'query', 'bin/TestWebKitAPI/TestJavaScriptCore'])
 link = (OUT / 'shell-off-api-link.log').read_text()
 assert 'aot-builtin-table-obj' in link and 'AOTNoFeatureRemoved.cpp.o' in link
-state('fixed')
+state('host')
 assert binaries == binary_hashes()
 RECORD.update(passed=True, binary_sha256=binaries, source_delta=SPEC['files'], cmake_cache_sha256=sha(BUILD / 'CMakeCache.txt'))
 save()

@@ -46,12 +46,17 @@
         "blob": "319330ac912ef2ab7b09c71040a45955d437d21f"
       },
       "after": {
-        "bytes": 29780,
-        "sha256": "b50e9c5dc0706ed5799e55b467a89dc78182b1e77a6d272b5003a73fc0bf1b01",
-        "blob": "eac225ac60d69e17dce326eb3fd594d591acd101"
+        "bytes": 29821,
+        "sha256": "a0afb56626a28b0d79fae510195b3a5cd695db55b4868de3bfba86f5bbe8b828",
+        "blob": "370ac48b25cc6eda7ec335e6215fe7def9da27fe"
       },
       "control": "AOTSharingModeAndNamespaceTests.cpp",
-      "kind": "test"
+      "kind": "test",
+      "host": {
+        "bytes": 30017,
+        "sha256": "9e86f3d521aeee08b3f160aaf01e371fc8fb5bf9b7b3e8bc5e581e86b8f1f484",
+        "blob": "570541e81ccf75fd82fa083d8da3b55f3ceb310a"
+      }
     },
     "Source/JavaScriptCore/aot/runtime/AOTModuleNamespace.h": {
       "before": {
@@ -82,6 +87,11 @@
         "bytes": 263904,
         "sha256": "0f4850a42fbfdb1a7768c05dc4cad709ecf687460d21db16bf61561b2682a7e7",
         "blob": "d22289c46d9ca6f2d76182ca8e5e1eab87cb25e6"
+      },
+      "host": {
+        "bytes": 263920,
+        "sha256": "34ec56257be9ed651d60d4fc224acce73c053d51798d0fec3d2d9631f568bf28",
+        "blob": "0dd82e68d934df33d207aebd96659c3bbdae9241"
       }
     },
     "Source/JavaScriptCore/aot/runtime/AOTModuleEvaluation.cpp": {
@@ -121,7 +131,12 @@
         "sha256": "224fb192e022810b38fd20778cca7a1bb2f0f06a2f5218f9c54e7d349b27d1f1",
         "blob": "55e2bfecf9c2f6c102dcfd7e1e68c692c3b9177f"
       },
-      "kind": "production"
+      "kind": "production",
+      "host": {
+        "bytes": 21539,
+        "sha256": "bae88edb8ea5db134fd5b869d950123854d939dc0a938102da527792bcf8c26d",
+        "blob": "ce1eb4a73a37827dd5713e51c1ac58f8e1aa55d9"
+      }
     },
     "Source/JavaScriptCore/aot/passes/AOTCallModules.cpp": {
       "before": {
@@ -160,7 +175,7 @@
     "file": "Source/JavaScriptCore/aot/tests/AOTSharingModeAndNamespaceTests.cpp",
     "case": "sharing-mode-and-namespace/require-namespace-does-not-mutate-imports",
     "failure_expression": "required.get() != imported.get()",
-    "failure_line": 276,
+    "failure_line": 277,
     "limits": [
       "live module-binding update",
       "late namespace face assignment",
@@ -191,7 +206,7 @@
     "file": "Source/JavaScriptCore/aot/tests/AOTSharingModeAndNamespaceTests.cpp",
     "case": "sharing-mode-and-namespace/require-facade-invalidates-captured-exports",
     "failure_expression": "evaluate(program, \"readCaptured(requiredNamespace)\"_s) == jsNumber(2)",
-    "failure_line": 334,
+    "failure_line": 335,
     "baseline": "pre-repair namespace port; unchanged163 has no separate facade"
   },
   "cache_fix_patch": {
@@ -199,5 +214,36 @@
     "bytes": 846,
     "sha256": "f271e758fda302820080b686ae33957f413a4d431ccbcfa968022fe516e12178",
     "blob": "b471ba427f1af1829ae56d2d5beed210e5a70b47"
+  },
+  "host_api_patch": {
+    "control": "namespace-host-api.patch",
+    "bytes": 3021,
+    "sha256": "50bb7e960e4592a87ffd469fe1399bd0da6128085264ee55bdc1ea1656064b87",
+    "blob": "d04d645fe438687e1beb48d9b842cdf6cae8dd26"
+  },
+  "reused_baseline": {
+    "run": 41318143757,
+    "pipeline": "8a2a37cee27e7d457c894c4a95b3a5fd9047e365",
+    "artifact": 13091741325,
+    "bytes": 121981,
+    "sha256": "2ddb7a2aa808630fb780b69e7138a1261106fcb9bbb3f6a23770f127249494af",
+    "fixture": {
+      "bytes": 29780,
+      "sha256": "b50e9c5dc0706ed5799e55b467a89dc78182b1e77a6d272b5003a73fc0bf1b01",
+      "blob": "eac225ac60d69e17dce326eb3fd594d591acd101"
+    },
+    "inserted_call": "    v5 = Call v3, -, v1 [isNeverInlined]\n",
+    "regression": {
+      "file": "Source/JavaScriptCore/aot/tests/AOTSharingModeAndNamespaceTests.cpp",
+      "case": "sharing-mode-and-namespace/require-namespace-does-not-mutate-imports",
+      "failure_expression": "required.get() != imported.get()",
+      "failure_line": 276,
+      "limits": [
+        "live module-binding update",
+        "late namespace face assignment",
+        "cross-image ownership"
+      ]
+    },
+    "limits": "Failed prior job; reuse only admitted baseline build/full-AOT/basic-isolation red. Cache warmup failure is excluded."
   }
 }

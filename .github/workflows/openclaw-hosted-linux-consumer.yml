@@ -3,6 +3,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: openclaw-maintainer-native-${{ github.ref }}
   cancel-in-progress: true
@@ -46,6 +47,29 @@ jobs:
           echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends cmake ninja-build clang-23 lld-23 libicu-dev ruby ruby-highline libjson-pp-perl
+      - name: Admit the failed run's immutable baseline evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          def api(route):
+              return json.loads(subprocess.check_output(['gh', 'api', 'repos/openclaw/WebKit/' + route], timeout=120))
+          run = api('actions/runs/41318143757')
+          assert run['id'] == 41318143757 and run['head_sha'] == '8a2a37cee27e7d457c894c4a95b3a5fd9047e365'
+          assert run['path'] == '.github/workflows/openclaw-hosted-linux-consumer.yml'
+          assert run['status'] == 'completed' and run['conclusion'] == 'failure'
+          artifact = api('actions/artifacts/13091741325')
+          digest = '2ddb7a2aa808630fb780b69e7138a1261106fcb9bbb3f6a23770f127249494af'
+          assert artifact['id'] == 13091741325 and artifact['name'] == 'integrated-engine-regression-proof'
+          assert artifact['workflow_run']['id'] == run['id'] and artifact['workflow_run']['head_sha'] == run['head_sha']
+          assert artifact['expired'] is False and artifact['size_in_bytes'] == 121981 and artifact['digest'] == 'sha256:' + digest
+          path = Path(os.environ['RUNNER_TEMP']) / 'namespace-baseline.zip'
+          with path.open('xb') as output:
+              subprocess.run(['gh', 'api', 'repos/openclaw/WebKit/actions/artifacts/13091741325/zip'], stdout=output, check=True, timeout=180)
+          assert path.stat().st_size == 121981 and hashlib.sha256(path.read_bytes()).hexdigest() == digest
+          PY
       - name: Prove namespace isolation red/green and the integrated native contracts
         run: python3 controls/.github/openclaw/qualification/upstream-regressions/qualify.py
       - name: Bound and record the evidence

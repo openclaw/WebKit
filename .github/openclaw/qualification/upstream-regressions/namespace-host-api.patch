@@ -1,0 +1,53 @@
+--- a/Source/JavaScriptCore/aot/runtime/AOTModules.cpp
++++ b/Source/JavaScriptCore/aot/runtime/AOTModules.cpp
+@@ -1636,12 +1636,7 @@
+     auto scope = DECLARE_THROW_SCOPE(*m_instance.vm);
+     JSObject* namespaceObject = moduleNamespace(module, ModulePhase::Evaluation);
+     RETURN_IF_EXCEPTION(scope, nullptr);
+-    if (auto* compiled = dynamicDowncast<ModuleNamespace>(namespaceObject))
+-        namespaceObject = compiled->createNamespaceForRequire(m_instance.globalObject);
+-    else if (auto* interpreted = dynamicDowncast<JSModuleNamespaceObject>(namespaceObject))
+-        namespaceObject = interpreted->createNamespaceForRequire(m_instance.globalObject);
+-    RETURN_IF_EXCEPTION(scope, nullptr);
+-    return namespaceObject;
++    RELEASE_AND_RETURN(scope, AOT::moduleNamespaceForRequire(m_instance.globalObject, namespaceObject));
+ }
+ 
+ JSObject* Modules::importMeta(ModuleID module)
+@@ -4524,6 +4519,15 @@
+     return modules ? modules->moduleNamespace(module, Modules::ModulePhase::Evaluation) : nullptr;
+ }
+ 
++JSObject* moduleNamespaceForRequire(JSGlobalObject* realm, JSObject* namespaceObject)
++{
++    if (auto* compiled = dynamicDowncast<ModuleNamespace>(namespaceObject))
++        return compiled->createNamespaceForRequire(realm);
++    if (auto* interpreted = dynamicDowncast<JSModuleNamespaceObject>(namespaceObject))
++        return interpreted->createNamespaceForRequire(realm);
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
+ JSObject* moduleNamespaceForRequire(JSGlobalObject* realm, ModuleID moduleOfHost)
+ {
+     ModuleFromHost module(realm, moduleOfHost);
+--- a/Source/JavaScriptCore/aot/runtime/AOTModuleHost.h
++++ b/Source/JavaScriptCore/aot/runtime/AOTModuleHost.h
+@@ -185,6 +185,7 @@
+ JS_EXPORT_PRIVATE void evaluateModuleSynchronously(JSGlobalObject*, ModuleID);
+ JS_EXPORT_PRIVATE JSObject* moduleNamespace(JSGlobalObject*, ModuleID);
+ JS_EXPORT_PRIVATE JSObject* moduleNamespaceForRequire(JSGlobalObject*, ModuleID);
++JS_EXPORT_PRIVATE JSObject* moduleNamespaceForRequire(JSGlobalObject*, JSObject*);
+ // False only if the namespace object of the module has no such name. Creates nothing.
+ JS_EXPORT_PRIVATE bool mayExport(JSGlobalObject*, ModuleID, UniquedStringImpl* name);
+ // The referrer is the file of the image whose require() the host answers.
+--- a/Source/JavaScriptCore/aot/tests/AOTSharingModeAndNamespaceTests.cpp
++++ b/Source/JavaScriptCore/aot/tests/AOTSharingModeAndNamespaceTests.cpp
+@@ -277,6 +277,8 @@
+     AOT_TEST_CHECK(required.get() != imported.get());
+     AOT_TEST_CHECK(modules.require(firstModule) == JSValue(required.get()));
+     AOT_TEST_CHECK(requireModule(program.realm(), firstModule) == JSValue(required.get()));
++    AOT_TEST_CHECK(moduleNamespaceForRequire(program.realm(), imported.get()) == required.get());
++    AOT_TEST_CHECK(moduleNamespaceForRequire(program.realm(), required.get()) == required.get());
+ 
+     JSGlobalObject* plain = program.realms().plain();
+     plain->putDirect(vm, Identifier::fromString(vm, "importedNamespace"_s), imported.get());
