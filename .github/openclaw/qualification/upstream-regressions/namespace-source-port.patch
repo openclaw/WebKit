@@ -1,0 +1,503 @@
+--- a/Source/JavaScriptCore/aot/runtime/AOTModuleNamespace.h
++++ b/Source/JavaScriptCore/aot/runtime/AOTModuleNamespace.h
+@@ -49,7 +49,12 @@
+     unsigned imagePosition() const { return m_imagePosition; }
+     bool hasNamespaceLayoutOf(ModuleID module) const { return (m_module == module || m_face == module) && !m_isDeferred; }
+     // The object of a file is also what code gets that asks for the namespace object of the file's face, where that face captures nothing.
+-    void setFace(ModuleID face) { m_face = face; }
++    void setFace(ModuleID face)
++    {
++        m_face = face;
++        if (ModuleNamespace* required = m_requiredNamespace.get())
++            required->m_face = face;
++    }
+     std::optional<unsigned> find(UniquedStringImpl*) const;
+     bool hasExport(UniquedStringImpl* name) const { return find(name) || isDynamicExport(name); }
+     // Reads every export once, in the order of the keys, as [[OwnPropertyKeys]] and [[Get]] of each key would, without a lookup by name.
+@@ -62,8 +67,7 @@
+     // Of a module of the library: the export is read now if nobody has read it yet, and stays what it is then. False: the name is no export of such a module.
+     bool readDeferredExport(JSGlobalObject*, const Identifier& name);
+ 
+-    bool hasESModuleMarker() const { return m_hasESModuleMarker; }
+-    void setESModuleMarker(bool hasMarker) { m_hasESModuleMarker = hasMarker; }
++    ModuleNamespace* createNamespaceForRequire(JSGlobalObject*);
+ 
+     bool hasOwnStructure() const { return m_hasOwnStructure; }
+     void ensureOwnStructure(VM&);
+@@ -86,10 +90,12 @@
+     bool isHiddenExport(unsigned index) const;
+     bool isSymbolLikeKey(UniquedStringImpl*) const;
+     bool isOrdinaryKey(PropertyName) const;
++    bool isESModuleMarker(PropertyName) const;
+     bool isDynamicExport(UniquedStringImpl*) const;
+     JSValue readDynamicExport(JSGlobalObject*, PropertyName);
+     bool evaluateIfNeeded(JSGlobalObject*);
+ 
++    WriteBarrier<ModuleNamespace> m_requiredNamespace;
+     WriteBarrier<JSCellButterfly> m_dynamicExportNames;
+     WriteBarrier<JSObject> m_capturedValues;
+     WriteBarrier<JSObject> m_liveSources;
+--- a/Source/JavaScriptCore/aot/runtime/AOTModules.cpp
++++ b/Source/JavaScriptCore/aot/runtime/AOTModules.cpp
+@@ -1604,17 +1604,12 @@
+         exportObjects.names->setIndex(vm, i, text);
+     }
+ 
+-    bool isRequired = phase == ModulePhase::Evaluation && m_modulesWithMarkOfRequire.get(module.index());
+-    if (phase == ModulePhase::Evaluation && m_modulesWithExtensibleNamespace.get(module.index()))
+-        shouldPreventExtensions = false;
+     Structure*& structure = shouldPreventExtensions ? m_namespaceStructure : m_extensibleNamespaceStructure;
+     if (!structure) {
+-        structure = ModuleNamespace::createStructure(vm, realm, realm->moduleNamespaceObjectStructure()->storedPrototype(), shouldPreventExtensions);
++        structure = ModuleNamespace::createStructure(vm, realm, jsNull(), shouldPreventExtensions);
+         m_storedReferences.recordAll();
+     }
+     ModuleNamespace* namespaceObject = ModuleNamespace::create(vm, structure, module, phase, exportObjects);
+-    if (isRequired && !namespaceObject->hasExport(vm.propertyNames->__esModule.impl()))
+-        namespaceObject->setESModuleMarker(true);
+     setNamespace(module, phase, namespaceObject);
+     return namespaceObject;
+ }
+@@ -1634,6 +1629,19 @@
+     if (JSObject* namespaceObject = namespaceIfCreated(module, phase))
+         return namespaceObject;
+     return createNamespace(module, phase, shouldPreventExtensions);
++}
++
++JSObject* Modules::moduleNamespaceForRequire(ModuleID module)
++{
++    auto scope = DECLARE_THROW_SCOPE(*m_instance.vm);
++    JSObject* namespaceObject = moduleNamespace(module, ModulePhase::Evaluation);
++    RETURN_IF_EXCEPTION(scope, nullptr);
++    if (auto* compiled = dynamicDowncast<ModuleNamespace>(namespaceObject))
++        namespaceObject = compiled->createNamespaceForRequire(m_instance.globalObject);
++    else if (auto* interpreted = dynamicDowncast<JSModuleNamespaceObject>(namespaceObject))
++        namespaceObject = interpreted->createNamespaceForRequire(m_instance.globalObject);
++    RETURN_IF_EXCEPTION(scope, nullptr);
++    return namespaceObject;
+ }
+ 
+ JSObject* Modules::importMeta(ModuleID module)
+@@ -4516,6 +4524,13 @@
+     return modules ? modules->moduleNamespace(module, Modules::ModulePhase::Evaluation) : nullptr;
+ }
+ 
++JSObject* moduleNamespaceForRequire(JSGlobalObject* realm, ModuleID moduleOfHost)
++{
++    ModuleFromHost module(realm, moduleOfHost);
++    Modules* modules = modulesOrThrow(realm, module);
++    return modules ? modules->moduleNamespaceForRequire(module) : nullptr;
++}
++
+ bool mayExport(JSGlobalObject* realm, ModuleID moduleOfHost, UniquedStringImpl* name)
+ {
+     ModuleFromHost module(realm, moduleOfHost);
+@@ -4781,16 +4796,6 @@
+     modules->takeWhatMockAdds(module, false);
+ }
+ 
+-bool hasESModuleMarker(JSCell* moduleNamespace)
+-{
+-    return uncheckedDowncast<ModuleNamespace>(moduleNamespace)->hasESModuleMarker();
+-}
+-
+-void setESModuleMarker(JSCell* moduleNamespace, bool hasMarker)
+-{
+-    uncheckedDowncast<ModuleNamespace>(moduleNamespace)->setESModuleMarker(hasMarker);
+-}
+-
+ static constexpr unsigned invalidIndex = static_cast<unsigned>(-1);
+ 
+ const ClassInfo ModuleRecord::s_info = { "CompiledModuleRecord"_s, &Base::s_info, nullptr, nullptr, CREATE_METHOD_TABLE(ModuleRecord) };
+@@ -5284,6 +5289,28 @@
+     return object;
+ }
+ 
++ModuleNamespace* ModuleNamespace::createNamespaceForRequire(JSGlobalObject* globalObject)
++{
++    ImageOfCellScope imageOfCell(globalObject->vm(), this);
++    auto scope = DECLARE_THROW_SCOPE(globalObject->vm());
++    if (ModuleNamespace* required = m_requiredNamespace.get())
++        return required;
++    evaluateIfNeeded(globalObject);
++    RETURN_IF_EXCEPTION(scope, nullptr);
++    VM& vm = globalObject->vm();
++    if (m_hasESModuleMarker || hasExport(vm.propertyNames->__esModule.impl()) || !hasExport(vm.propertyNames->defaultKeyword.impl()))
++        return this;
++    DynamicExports exports { m_dynamicExportNames.get(), m_capturedValues.get(), m_liveSources.get() };
++    Structure* facadeStructure = structure();
++    if (facadeStructure->isStructureExtensible())
++        facadeStructure = Structure::preventExtensionsTransition(vm, facadeStructure);
++    auto* facade = create(vm, facadeStructure, m_module, ModulePhase::Evaluation, exports);
++    facade->m_face = m_face;
++    facade->m_hasESModuleMarker = true;
++    m_requiredNamespace.set(vm, this, facade);
++    return facade;
++}
++
+ Modules& ModuleNamespace::modules() const
+ {
+     Instance* instance = realm()->aotInstance();
+@@ -5316,6 +5343,7 @@
+ {
+     auto* thisObject = uncheckedDowncast<ModuleNamespace>(cell);
+     Base::visitChildren(thisObject, visitor);
++    visitor.append(thisObject->m_requiredNamespace);
+     visitor.append(thisObject->m_dynamicExportNames);
+     visitor.append(thisObject->m_capturedValues);
+     visitor.append(thisObject->m_liveSources);
+@@ -5333,7 +5361,7 @@
+ 
+ bool ModuleNamespace::tryReadExports(JSGlobalObject* globalObject, Vector<UniquedStringImpl*, 8>& names, MarkedArgumentBuffer& values)
+ {
+-    if (m_isDeferred || m_mayNeedEvaluation || m_dynamicExportNames || isValidOffset(structure()->maxOffset()))
++    if (m_isDeferred || m_mayNeedEvaluation || m_hasESModuleMarker || m_dynamicExportNames || isValidOffset(structure()->maxOffset()))
+         return false;
+     ImageOfCellScope imageOfCell(globalObject->vm(), this);
+     auto scope = DECLARE_THROW_SCOPE(globalObject->vm());
+@@ -5361,7 +5389,12 @@
+     VM& vm = this->vm();
+     if (name == vm.propertyNames->toStringTagSymbol)
+         return false;
+-    return isSymbolLikeKey(name.uid()) || (name == vm.propertyNames->__esModule && !hasExport(name.uid()));
++    return isSymbolLikeKey(name.uid());
++}
++
++bool ModuleNamespace::isESModuleMarker(PropertyName name) const
++{
++    return m_hasESModuleMarker && name == vm().propertyNames->__esModule;
+ }
+ 
+ bool ModuleNamespace::evaluateIfNeeded(JSGlobalObject* globalObject)
+@@ -5379,15 +5412,17 @@
+ {
+     if (JSObject* capturedValues = m_capturedValues.get())
+         capturedValues->putDirectMayBeIndex(globalObject, name, value);
+-    if (!m_hasOwnStructure)
+-        return;
+-    // The caches of every image file what they know of this object under its Structure: classifyNamespaceRead(). It never has that one again.
+-    // A property that is deleted may bring an earlier Structure back. A dictionary has no earlier one, and nothing of the kind is filed under it.
++    // Both views share values but cache reads under separate Structures.
+     VM& vm = globalObject->vm();
+-    if (isValidOffset(structure()->maxOffset()))
+-        convertToDictionary(vm);
+-    else
+-        setStructure(vm, createStructure(vm, realm(), structure()->storedPrototype(), !structure()->isStructureExtensible()));
++    for (ModuleNamespace* object : { this, m_requiredNamespace.get() }) {
++        if (!object || !object->m_hasOwnStructure)
++            continue;
++        // A dictionary cannot return to an earlier Structure when a property is deleted.
++        if (isValidOffset(object->structure()->maxOffset()))
++            object->convertToDictionary(vm);
++        else
++            object->setStructure(vm, createStructure(vm, object->realm(), object->structure()->storedPrototype(), !object->structure()->isStructureExtensible()));
++    }
+ }
+ 
+ JSValue ModuleNamespace::capturedValueWithoutAllocating(UniquedStringImpl* name) const
+@@ -5471,6 +5506,10 @@
+         thisObject->evaluateIfNeeded(globalObject);
+         RETURN_IF_EXCEPTION(scope, false);
+     }
++    if (thisObject->isESModuleMarker(name)) {
++        slot.setValue(thisObject, static_cast<unsigned>(PropertyAttribute::DontDelete), jsBoolean(true));
++        return true;
++    }
+     std::optional<unsigned> index = thisObject->find(name.uid());
+     if (!index && !thisObject->isDynamicExport(name.uid())) {
+         if (thisObject->isOrdinaryKey(name))
+@@ -5511,6 +5550,7 @@
+     std::span<const ModuleExportData> entries = thisObject->exports();
+     JSCellButterfly* dynamicNames = thisObject->m_dynamicExportNames.get();
+     unsigned dynamicNameCount = dynamicNames ? dynamicNames->length() : 0;
++    bool needsMarker = thisObject->m_hasESModuleMarker;
+     for (unsigned ownIndex = 0, dynamicIndex = 0; ownIndex < entries.size() || dynamicIndex < dynamicNameCount;) {
+         if (ownIndex < entries.size() && thisObject->isHiddenExport(ownIndex)) {
+             ++ownIndex;
+@@ -5530,8 +5570,14 @@
+             if (!hasProperty)
+                 continue;
+         }
++        if (needsMarker && codePointCompare(StringView(vm.propertyNames->__esModule.string()), StringView(name.string())) < 0) {
++            names.add(vm.propertyNames->__esModule);
++            needsMarker = false;
++        }
+         names.add(name);
+     }
++    if (needsMarker)
++        names.add(vm.propertyNames->__esModule);
+     if (!names.includeSymbolProperties())
+         return;
+     // The order of JSModuleNamespaceObject::getOwnPropertyNames, where Symbol.toStringTag is the first property of the Structure.
+@@ -5549,13 +5595,9 @@
+         names.add((*structureNames)[index]);
+ }
+ 
+-bool ModuleNamespace::put(JSCell* cell, JSGlobalObject* globalObject, PropertyName name, JSValue value, PutPropertySlot& slot)
+-{
+-    ImageOfCellScope imageOfCell(globalObject->vm(), cell);
+-    VM& vm = globalObject->vm();
+-    auto scope = DECLARE_THROW_SCOPE(vm);
+-    if (name == vm.propertyNames->__esModule && !uncheckedDowncast<ModuleNamespace>(cell)->hasExport(name.uid()))
+-        RELEASE_AND_RETURN(scope, Base::put(cell, globalObject, name, value, slot));
++bool ModuleNamespace::put(JSCell*, JSGlobalObject* globalObject, PropertyName, JSValue, PutPropertySlot& slot)
++{
++    auto scope = DECLARE_THROW_SCOPE(globalObject->vm());
+     return typeError(globalObject, scope, slot.isStrictMode(), ReadonlyPropertyWriteError);
+ }
+ 
+@@ -5573,7 +5615,7 @@
+         return Base::deleteProperty(thisObject, globalObject, name, slot);
+     if (!thisObject->isSymbolLikeKey(name.uid()) && !thisObject->evaluateIfNeeded(globalObject))
+         return false;
+-    return !thisObject->hasExport(name.uid()) && name != globalObject->vm().propertyNames->toStringTagSymbol;
++    return !thisObject->hasExport(name.uid()) && !thisObject->isESModuleMarker(name) && name != globalObject->vm().propertyNames->toStringTagSymbol;
+ }
+ 
+ bool ModuleNamespace::deletePropertyByIndex(JSCell* cell, JSGlobalObject* globalObject, unsigned index)
+@@ -5594,7 +5636,7 @@
+     PropertyDescriptor current;
+     bool isCurrentDefined = object->getOwnPropertyDescriptor(globalObject, name, current);
+     RETURN_IF_EXCEPTION(scope, false);
+-    if (!isCurrentDefined || !thisObject->hasExport(name.uid()))
++    if (!isCurrentDefined || (!thisObject->hasExport(name.uid()) && !thisObject->isESModuleMarker(name)))
+         RELEASE_AND_RETURN(scope, validateAndApplyPropertyDescriptor(globalObject, nullptr, name, false, descriptor, isCurrentDefined, current, shouldThrow));
+ 
+     // The steps of JSModuleNamespaceObject::defineOwnProperty.
+--- a/Source/JavaScriptCore/aot/runtime/AOTModuleEvaluation.cpp
++++ b/Source/JavaScriptCore/aot/runtime/AOTModuleEvaluation.cpp
+@@ -3150,12 +3150,7 @@
+     }
+     if (!targetData.hasExportTable()) {
+         if (LoadedModule* loaded = targetData.mayBeImportedWhileItRuns() ? loadedIfExists(target) : nullptr; loaded && loaded->isAnsweredWithNamespace) [[unlikely]] {
+-            JSObject* namespaceObject = moduleNamespace(target, ModulePhase::Evaluation, false);
+-            RETURN_IF_EXCEPTION(scope, { });
+-            // As for an ES module below.
+-            if (auto* names = uncheckedDowncast<ModuleNamespace>(namespaceObject); !names->hasExport(vm.propertyNames->__esModule.impl()))
+-                names->setESModuleMarker(true);
+-            return namespaceObject;
++            RELEASE_AND_RETURN(scope, moduleNamespaceForRequire(target));
+         }
+         JSValue executed = execute(target);
+         RETURN_IF_EXCEPTION(scope, { });
+@@ -3163,7 +3158,6 @@
+         return executed;
+     }
+ 
+-    willRequireESModule(target);
+     LoadedModule& loaded = ensureLoaded(target);
+     // In plain Bun the cache holds a module object with empty exports until the loader's require() returns. The jobs of the loader that it runs behind the evaluation can run a file that requires the module.
+     if (loaded.isBeingRequired) {
+@@ -3219,18 +3213,13 @@
+         RETURN_IF_EXCEPTION(scope, { });
+     } else {
+         RELEASE_ASSERT(targetData.requireResult != RequireResult::ModuleExports);
+-        JSObject* namespaceObject = moduleNamespace(target, ModulePhase::Evaluation);
++        JSObject* namespaceObject = moduleNamespaceForRequire(target);
+         RETURN_IF_EXCEPTION(scope, { });
+         if (m_moduleExportsName.isNull())
+             m_moduleExportsName = Identifier::fromString(vm, "module.exports"_s);
+-        JSValue esModule = readExportForRequire(namespaceObject, vm.propertyNames->__esModule);
++        JSValue moduleExports = readExportForRequire(namespaceObject, m_moduleExportsName);
+         RETURN_IF_EXCEPTION(scope, { });
+-        JSValue moduleExports;
+-        if (esModule) {
+-            moduleExports = readExportForRequire(namespaceObject, m_moduleExportsName);
+-            RETURN_IF_EXCEPTION(scope, { });
+-        }
+-        markNamespaceAsRequired(target);
++        noteRequireOfESModule(target);
+         result = !moduleExports || moduleExports.isUndefinedOrNull() ? JSValue(namespaceObject) : moduleExports;
+     }
+     if (!isAnsweredAsByLoader)
+@@ -3526,7 +3515,7 @@
+         return nullptr;
+     if (data(file).kind == ModuleKind::CommonJs)
+         return mayHandOutModuleObject(file) && wasRequestedByLoader(file) ? moduleObject(file) : nullptr;
+-    bool hasObjectMadeByRequire = m_storesPathOfMainModule && !data(file).isOfLibrary() && m_modulesWithMarkOfRequire.get(file.index());
++    bool hasObjectMadeByRequire = m_storesPathOfMainModule && !data(file).isOfLibrary() && m_modulesRequiredAsESModule.get(file.index());
+     return hasObjectMadeByRequire ? moduleObjectMadeByRequire(file) : nullptr;
+ }
+ 
+@@ -3537,7 +3526,7 @@
+     const ModuleData& targetData = data(target);
+     bool isCommonJSFile = targetData.kind == ModuleKind::CommonJs;
+     if (!isCommonJSFile)
+-        markNamespaceAsRequired(target);
++        noteRequireOfESModule(target);
+     if (!m_showsWaysBetweenModuleObjects || !(isFileOfProgram(target) || targetData.kind == ModuleKind::Data))
+         return;
+     if (isCommonJSFile)
+@@ -3832,27 +3821,12 @@
+     RELEASE_AND_RETURN(scope, host().resolveSpecifier(m_instance.globalObject, holder, specifier, form));
+ }
+ 
+-// In plain Bun a namespace object is extensible if require() creates it, and not if an import does: import(), or the link of a module with `import * as`.
+-// Compiled code creates the object on first use, so the first require() decides here.
+-void Modules::willRequireESModule(ModuleID module)
+-{
+-    if (m_modulesWithMarkOfRequire.get(module.index()) || namespaceIfCreated(module, ModulePhase::Evaluation))
+-        return;
+-    if (data(module).isImportedAsNamespace() && !isNotLoaded(module))
+-        return;
+-    m_modulesWithExtensibleNamespace.set(module.index());
+-}
+-
+-// From the first require() on, the namespace object of a module without an export `__esModule` reads `true` under that name, for everybody who holds it.
+-void Modules::markNamespaceAsRequired(ModuleID module)
+-{
+-    if (!data(module).hasExportTable() || m_modulesWithMarkOfRequire.get(module.index()))
+-        return;
+-    willRequireESModule(module);
+-    m_modulesWithMarkOfRequire.set(module.index());
+-    auto* namespaceObject = uncheckedDowncast<ModuleNamespace>(namespaceIfCreated(module, ModulePhase::Evaluation));
+-    if (namespaceObject && !namespaceObject->hasExport(m_instance.vm->propertyNames->__esModule.impl()))
+-        namespaceObject->setESModuleMarker(true);
++// `require.main` needs to know whether an ES module has been required, independently of its namespace views.
++void Modules::noteRequireOfESModule(ModuleID module)
++{
++    if (!data(module).hasExportTable() || m_modulesRequiredAsESModule.get(module.index()))
++        return;
++    m_modulesRequiredAsESModule.set(module.index());
+ }
+ 
+ // An empty result says that the read threw, as it does for a binding in its dead zone.
+--- a/Source/JavaScriptCore/aot/runtime/AOTModules.h
++++ b/Source/JavaScriptCore/aot/runtime/AOTModules.h
+@@ -239,6 +239,7 @@
+     static JSValue storedValue(JSGlobalObject*, JSObject* table, const Identifier& name);
+     // As AbstractModuleRecord::getModuleNamespace(): the caller that creates the object decides whether it is extensible.
+     JSObject* moduleNamespace(ModuleID, ModulePhase, bool shouldPreventExtensions = true);
++    JSObject* moduleNamespaceForRequire(ModuleID);
+     bool mayExport(ModuleID, UniquedStringImpl* name) const;
+     JSObject* importMeta(ModuleID);
+     JSCell* builtinCell(BuiltinID, ModuleID);
+@@ -680,8 +681,7 @@
+     JSValue defaultExportOfMockMarkedAsESModule(ModuleID);
+     JSValue loadEvictedFile(ModuleID);
+     JSValue readExportForRequire(JSObject* namespaceObject, const Identifier& name);
+-    void willRequireESModule(ModuleID);
+-    void markNamespaceAsRequired(ModuleID);
++    void noteRequireOfESModule(ModuleID);
+ 
+     JSPromise* importUncompiled(const Identifier& key, ModuleID referrer, RefPtr<ScriptFetchParameters>&&);
+     std::optional<ModuleID> findByName(const Identifier& key);
+@@ -785,8 +785,7 @@
+     void noteRequireOfFile(ModuleID file);
+     bool hasReachedLevelOf(FilesBeingRun&, ModuleID file);
+     void findDistanceOfFiles(FilesBeingRun&);
+-    BitVector m_modulesWithMarkOfRequire;
+-    BitVector m_modulesWithExtensibleNamespace;
++    BitVector m_modulesRequiredAsESModule;
+     BitVector m_modulesWithEarlierNamespaceInValue;
+     BitVector m_modulesEvaluatedUnderAnotherEvaluation;
+     Box<MockedModules> m_mocks;
+--- a/Source/JavaScriptCore/aot/runtime/AOTModuleHost.h
++++ b/Source/JavaScriptCore/aot/runtime/AOTModuleHost.h
+@@ -184,6 +184,7 @@
+ JS_EXPORT_PRIVATE JSPromise* importModule(JSGlobalObject*, ModuleID, std::optional<int64_t> referrerAsyncOrder);
+ JS_EXPORT_PRIVATE void evaluateModuleSynchronously(JSGlobalObject*, ModuleID);
+ JS_EXPORT_PRIVATE JSObject* moduleNamespace(JSGlobalObject*, ModuleID);
++JS_EXPORT_PRIVATE JSObject* moduleNamespaceForRequire(JSGlobalObject*, ModuleID);
+ // False only if the namespace object of the module has no such name. Creates nothing.
+ JS_EXPORT_PRIVATE bool mayExport(JSGlobalObject*, ModuleID, UniquedStringImpl* name);
+ // The referrer is the file of the image whose require() the host answers.
+@@ -245,8 +246,6 @@
+ JS_EXPORT_PRIVATE void didMockModule(JSGlobalObject*, ModuleID);
+ // Stores one export of the mock. A name that the module does not export is passed over.
+ JS_EXPORT_PRIVATE void mockExport(JSGlobalObject*, ModuleID, UniquedStringImpl* name, JSValue);
+-JS_EXPORT_PRIVATE bool hasESModuleMarker(JSCell* moduleNamespace);
+-JS_EXPORT_PRIVATE void setESModuleMarker(JSCell* moduleNamespace, bool);
+ 
+ JS_EXPORT_PRIVATE void setVerbose(bool);
+ 
+--- a/Source/JavaScriptCore/aot/passes/AOTCallModules.cpp
++++ b/Source/JavaScriptCore/aot/passes/AOTCallModules.cpp
+@@ -607,29 +607,6 @@
+     builder.emitReturn(builder.appendUndefined());
+ }
+ 
+-// Behind the evaluation, require() marks the namespace object of a module that has no export `__esModule`: everybody who holds that object reads `true` under the name from then on.
+-static bool isMarkOfRequireSpelled(const Program& program, const ParallelLoops& loops)
+-{
+-    PropertyKeyID marker = program.keyOf(BuiltinNames::__esModule);
+-    if (!marker || !program.types.isSpelledByOperations(marker))
+-        return false;
+-    return !findIndicesInParallel(loops, program.functions.size(), [&](unsigned index) {
+-        constexpr OpcodeSet opcodesThatSpellKeys {
+-            Opcode::PropGet, Opcode::PropSet, Opcode::PropDefine, Opcode::PropHas, Opcode::PropHasOwn, Opcode::PropDelete, Opcode::GetOwnProperty, Opcode::KeyConstant, Opcode::NarrowByField,
+-        };
+-        if (listsAllValues(program, FunctionID(index))) {
+-            bool isSpelled = false;
+-            forEachListedName(program, FunctionID(index), opcodesThatSpellKeys, [&](BlockID, ValueID, Opcode, NameKind kind, uint32_t name) {
+-                isSpelled |= kind == NameKind::Key && name == marker.index();
+-            });
+-            return isSpelled;
+-        }
+-        return anyValueListedOrNot(program, FunctionID(index), opcodesThatSpellKeys, [&](ValueID, const Value& value) {
+-            return value.key() == marker;
+-        });
+-    }).isEmpty();
+-}
+-
+ // `children` and `parent` of a module object say which `require` came first and which has run at all.
+ static bool asksWhoRequiredWhom(const Program& program, const FlowResults& flow)
+ {
+@@ -646,7 +623,7 @@
+     return idOfModuleObject && !flow.usesOf(idOfModuleObject).isEmpty();
+ }
+ 
+-static void replaceSites(const EvaluationPlan& plan, NOESCAPE const Invocable<bool(ModuleID)> auto& recordsNothingThatIsSeen, ModuleID evaluated, Function& function, IRBuilder& builder)
++static void replaceSites(const EvaluationPlan& plan, bool recordsNothingThatIsSeen, ModuleID evaluated, Function& function, IRBuilder& builder)
+ {
+     const Program& program = plan.program;
+     // By the number of the value: which of the bare sites of the module it is, counted from one.
+@@ -664,7 +641,7 @@
+             ValueID id = function.blocks[blockIndex].values[index];
+             const Value& value = function.at(id);
+             bool isRecord = value.opcode == Opcode::RecordRequire;
+-            if (isRecord ? !recordsNothingThatIsSeen(value.module()) : value.opcode != Opcode::EvaluateModule)
++            if (isRecord ? !recordsNothingThatIsSeen : value.opcode != Opcode::EvaluateModule)
+                 continue;
+             isErased.quickSet(id.index());
+             if (isRecord)
+@@ -877,18 +854,7 @@
+     }
+     plan.hasNoState = findModulesWithoutState(plan, isStart);
+ 
+-    // What a program can tell of a `require` beyond the evaluation of the module.
+-    bool markIsSpelled = !recordsRequires || isMarkOfRequireSpelled(program, loops);
+-    bool isAskedWhoRequiredWhom = !recordsRequires || somebodyAsksWhoRequiredWhom;
+-    // What is recorded is who required whom and, of an ES module, the mark, which a module that exports the name itself does not get.
+-    auto recordsNothingThatIsSeen = [&](ModuleID target) {
+-        if (isAskedWhoRequiredWhom)
+-            return false;
+-        const Module& module = program.at(target);
+-        if (module.kind != ModuleKind::SourceText || std::ranges::contains(module.exports, program.stringOf(BuiltinNames::__esModule), &ModuleExport::name))
+-            return true;
+-        return flow.hasResults() && !markIsSpelled && flow.module(target).namespaceUse != NamespaceUse::Unknown;
+-    };
++    bool recordsNothingThatIsSeen = recordsRequires && !somebodyAsksWhoRequiredWhom;
+ 
+     // What compiled code starts where a handler of the program may stand around it, and everything that is evaluated below that.
+     BitVector mayBeLeftByCaughtError = isRequiredLate;
+@@ -1028,7 +994,7 @@
+         case SiteKind::Named:
+             break;
+         case SiteKind::Record:
+-            isReplaced = recordsNothingThatIsSeen(site.target);
++            isReplaced = recordsNothingThatIsSeen;
+             numberOfRequiresRecorded += !isReplaced;
+             break;
+         }
+--- a/Source/JavaScriptCore/aot/runtime/AOTModuleLinking.cpp
++++ b/Source/JavaScriptCore/aot/runtime/AOTModuleLinking.cpp
+@@ -988,7 +988,7 @@
+     // Without the mark the module itself is the default export, whatever it has under that name.
+     if (!isOfRuntimeModule && isDefault && !isMarked)
+         return &source;
+-    if (!isOfRuntimeModule && ((isMarked && name == names.__esModule.impl()) || (stars && name == names.constructor.impl())))
++    if (!isOfRuntimeModule && stars && name == names.constructor.impl())
+         return { };
+     const LayoutData& layout = source.layout();
+     const FieldData* field = source.state().objects->layouts.field(vm, layout, name);

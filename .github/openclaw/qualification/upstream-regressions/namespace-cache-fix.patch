@@ -1,0 +1,13 @@
+--- a/Source/JavaScriptCore/aot/runtime/AOTModules.cpp
++++ b/Source/JavaScriptCore/aot/runtime/AOTModules.cpp
+@@ -5301,9 +5301,7 @@
+     if (m_hasESModuleMarker || hasExport(vm.propertyNames->__esModule.impl()) || !hasExport(vm.propertyNames->defaultKeyword.impl()))
+         return this;
+     DynamicExports exports { m_dynamicExportNames.get(), m_capturedValues.get(), m_liveSources.get() };
+-    Structure* facadeStructure = structure();
+-    if (facadeStructure->isStructureExtensible())
+-        facadeStructure = Structure::preventExtensionsTransition(vm, facadeStructure);
++    Structure* facadeStructure = createStructure(vm, realm(), structure()->storedPrototype(), true);
+     auto* facade = create(vm, facadeStructure, m_module, ModulePhase::Evaluation, exports);
+     facade->m_face = m_face;
+     facade->m_hasESModuleMarker = true;

@@ -1,9 +1,10 @@
-"""Exercise the four test-only maintainer PRs on the integrated AOT engine."""
+"""Prove namespace isolation red/green and integrated native regressions."""
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import resource
 import signal
 import shlex
 import stat
@@ -16,9 +17,10 @@ SOURCE = Path('engine').resolve()
 BUILD = Path(os.environ['RUNNER_TEMP']) / 'maintainer-native-build'
 OUT = Path(os.environ['RUNNER_TEMP']) / 'maintainer-native-proof'
 SPEC = json.loads((INPUTS / 'source-adapter.json').read_text())
-ENGINE = '8e335354a58fa9a8eed14a70a8b9bf97b5d3073f'
+ENGINE = '163b3f42dbe9003508597eaa4c52f6b28ebd533d'
 RECORD = {'passed': False, 'engine': ENGINE, 'pipeline': os.environ['GITHUB_SHA'], 'steps': {}}
 OUT.mkdir()
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
 def sha(path):
@@ -42,24 +44,29 @@ def identity(path, expected):
     assert hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest() == expected['blob']
 
 
-def state(adapted):
+def state(stage):
+    assert stage in ('base', 'tests', 'ported', 'fixed')
     assert git('rev-parse', 'HEAD') == ENGINE
     assert git('write-tree') == git('rev-parse', 'HEAD^{tree}')
-    tracked = {name for name, row in SPEC['files'].items() if row['before'] is not None}
-    added = set(SPEC['files']) - tracked
+    applied = {name for name, row in SPEC['files'].items()
+        if stage in ('ported', 'fixed') or (stage == 'tests' and row['kind'] == 'test')}
+    tracked = {name for name in applied if SPEC['files'][name]['before'] is not None}
+    added = applied - tracked
     changed = set(git('diff', '--name-only', 'HEAD').splitlines())
     untracked = set(git('ls-files', '--others', '--exclude-standard').splitlines())
-    assert changed == (tracked if adapted else set()), (changed, tracked, adapted)
-    assert untracked == (added if adapted else set()), (untracked, added, adapted)
+    assert changed == tracked, (changed, tracked, stage)
+    assert untracked == added, (untracked, added, stage)
     for name, row in SPEC['files'].items():
-        expected = row['after' if adapted else 'before']
+        expected = row.get('ported', row['after']) if stage == 'ported' else row['after' if name in applied else 'before']
         if expected is None:
             assert not os.path.lexists(SOURCE / name)
         else:
             identity(SOURCE / name, expected)
+    for name, expected in SPEC['unchanged_inputs'].items():
+        identity(SOURCE / name, expected)
 
 
-def run(name, argv, seconds=120, env=None, cwd=None):
+def run(name, argv, seconds=120, env=None, cwd=None, expected_failure=False):
     row = {'command': argv, 'returncode': None, 'timed_out': False}
     RECORD['steps'][name] = row
     save()
@@ -78,7 +85,7 @@ def run(name, argv, seconds=120, env=None, cwd=None):
             process.wait()
             row.update(returncode=process.returncode, seconds=time.monotonic() - start)
             save()
-    assert process.returncode == 0 and not row['timed_out'], name
+    assert not row['timed_out'] and (process.returncode != 0 if expected_failure else process.returncode == 0), name
     assert sum(p.stat().st_size for p in OUT.iterdir()) <= 64 * 1024**2
 
 
@@ -134,48 +141,110 @@ def stress(name, pattern, expected, quick=False, gc=False, timings=False):
     save()
 
 
-assert SPEC['engine'] == ENGINE and len(SPEC['files']) == 3
+assert SPEC['engine'] == ENGINE and len(SPEC['files']) == 11
+assert sum(row['kind'] == 'production' for row in SPEC['files'].values()) == 7
+assert sum(row['kind'] == 'test' for row in SPEC['files'].values()) == 4
 RECORD['controls'] = {p.name: sha(p) for p in INPUTS.iterdir() if p.is_file()}
 save()
-state(False)
-assert sha(SOURCE / 'Tools/TestWebKitAPI/Tests/JavaScriptCore/HeapTeardown.cpp') == '6ffd949ac2a2cba9aba09ca367bd982d3cb9c0d6e0364e7e8d7a19be8a519e71'
+state('base')
 for name, row in SPEC['files'].items():
+    if row['kind'] != 'test':
+        continue
     control = INPUTS / row['control']
     identity(control, row['after'])
     (SOURCE / name).write_bytes(control.read_bytes())
-state(True)
+state('tests')
 flags = ['-G', 'Ninja', '-DPORT=JSCOnly', '-DCMAKE_BUILD_TYPE=Release', '-DDEVELOPER_MODE=ON',
     '-DCMAKE_COMPILE_WARNING_AS_ERROR=OFF', '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON', '-DENABLE_STATIC_JSC=ON', '-DUSE_BUN_JSC_ADDITIONS=ON',
     '-DUSE_BUN_EVENT_LOOP=ON', '-DUSE_MIMALLOC=ON', '-DUSE_EXTERNAL_MIMALLOC=OFF', '-DENABLE_FTL_JIT=ON',
     '-DENABLE_BUN_SKIP_FAILING_ASSERTIONS=ON', '-DALLOW_LINE_AND_COLUMN_NUMBER_IN_BUILTINS=ON',
     '-DENABLE_REMOTE_INSPECTOR=ON', '-DCMAKE_C_COMPILER=clang-23', '-DCMAKE_CXX_COMPILER=clang++-23']
 run('configure', ['cmake', '-S', str(SOURCE), '-B', str(BUILD), *flags], 600)
-run('build', ['cmake', '--build', str(BUILD), '--target', 'jsc', 'TestJavaScriptCore', '-j2'], 7200)
-# AOT is derived in PlatformEnable.h. Ask the compiler using the actual API
-# translation unit's flags, after the build has supplied any forced PCHs.
-entries = json.loads((BUILD / 'compile_commands.json').read_text())
-unit = SOURCE / 'Source/JavaScriptCore/aot/runtime/AOTNoFeatureRemoved.cpp'
-rows = [row for row in entries if Path(row['file']).resolve() == unit and
+targets = ['testaot', 'jsc', 'TestJavaScriptCore']
+paths = {'testaot': 'bin/testaot', 'jsc': 'bin/jsc', 'api': 'bin/TestWebKitAPI/TestJavaScriptCore'}
+
+
+def binary_hashes():
+    return {name: sha(BUILD / path) for name, path in paths.items()}
+
+
+def admit_full_aot(label):
+    # Use the actual API translation unit's flags after its forced PCH exists.
+    entries = json.loads((BUILD / 'compile_commands.json').read_text())
+    unit = SOURCE / 'Source/JavaScriptCore/aot/runtime/AOTNoFeatureRemoved.cpp'
+    rows = [row for row in entries if Path(row['file']).resolve() == unit and
         'TestJavaScriptCore.dir/' in (row.get('output', '') + row.get('command', '') + ' '.join(row.get('arguments', [])))]
-assert len(rows) == 1, 'missing or ambiguous API AOT translation unit'
-row = rows[0]
-arguments = row.get('arguments') or shlex.split(row['command'])
-assert not any(arg.startswith('@') for arg in arguments), 'unexpanded compiler response file'
-assert arguments.count(str(unit)) == 1 and arguments.count('-c') == 1
-argv = []
-iterator = iter(arguments)
-for arg in iterator:
-    if arg in ('-o', '-MF', '-MT', '-MQ', '-MJ'):
-        next(iterator)
-    elif arg not in ('-c', '-MD', '-MMD', '-MP', str(unit)):
-        argv.append(arg)
-probe = BUILD / 'full-aot-admission.cpp'
-probe.write_text('#include ' + json.dumps(str(unit)) + '\n#ifndef ENABLE\n#error missing WebKit platform configuration\n#endif\n#if !ENABLE(AOT)\n#error full AOT is disabled for TestJavaScriptCore\n#endif\n')
-RECORD['feature_admission'] = {'compile_row': row, 'probe_sha256': sha(probe)}
+    assert len(rows) == 1, 'missing or ambiguous API AOT translation unit'
+    row = rows[0]
+    arguments = row.get('arguments') or shlex.split(row['command'])
+    assert not any(arg.startswith('@') for arg in arguments), 'unexpanded compiler response file'
+    assert arguments.count(str(unit)) == 1 and arguments.count('-c') == 1
+    argv = []
+    iterator = iter(arguments)
+    for arg in iterator:
+        if arg in ('-o', '-MF', '-MT', '-MQ', '-MJ'):
+            next(iterator)
+        elif arg not in ('-c', '-MD', '-MMD', '-MP', str(unit)):
+            argv.append(arg)
+    probe = BUILD / (label + '-full-aot-admission.cpp')
+    probe.write_text('#include ' + json.dumps(str(unit)) + '\n#ifndef ENABLE\n#error missing WebKit platform configuration\n#endif\n#if !ENABLE(AOT)\n#error full AOT is disabled for TestJavaScriptCore\n#endif\n')
+    RECORD.setdefault('feature_admission', {})[label] = {'compile_row': row, 'probe_sha256': sha(probe)}
+    save()
+    run(label + '-full-aot-admission', [*argv, '-E', '-x', 'c++', str(probe), '-o', '/dev/null'], cwd=Path(row['directory']))
+
+
+run('baseline-build', ['cmake', '--build', str(BUILD), '--target', *targets, '-j2'], 7200)
+admit_full_aot('baseline')
+state('tests')
+baseline_binaries = binary_hashes()
+RECORD['baseline_binary_sha256'] = baseline_binaries
 save()
-run('full-aot-admission', [*argv, '-E', '-x', 'c++', str(probe), '-o', '/dev/null'], cwd=Path(row['directory']))
-state(True)
-binaries = {name: sha(BUILD / path) for name, path in {'jsc': 'bin/jsc', 'api': 'bin/TestWebKitAPI/TestJavaScriptCore'}.items()}
+def expected_native_failure(name, regression):
+    run(name, [str(BUILD / paths['testaot']), 'native', regression['case'], '--single-process'],
+        300, expected_failure=True)
+    text = (OUT / (name + '.log')).read_text(errors='replace')
+    assert re.search(r'^' + re.escape(regression['case']) + r'$', text, re.M)
+    assert 'ASSERTION FAILED: ' + regression['failure_expression'] in text
+    assert re.search(re.escape(Path(regression['file']).name) + r'\(' + str(regression['failure_line']) + r'\)\s*:\s*native test', text)
+
+
+expected_native_failure('namespace-baseline', SPEC['regression'])
+state('tests')
+assert binary_hashes() == baseline_binaries
+RECORD['baseline_expected_failure'] = SPEC['regression']
+save()
+patch = INPUTS / SPEC['production_patch']['control']
+identity(patch, SPEC['production_patch'])
+run('namespace-patch-check', ['git', 'apply', '--check', str(patch)])
+run('namespace-patch-apply', ['git', 'apply', str(patch)])
+state('ported')
+run('ported-build', ['cmake', '--build', str(BUILD), '--target', *targets, '-j2'], 7200)
+state('ported')
+ported_binaries = binary_hashes()
+RECORD['ported_binary_sha256'] = ported_binaries
+save()
+expected_native_failure('namespace-cache-before-repair', SPEC['cache_regression'])
+state('ported')
+assert binary_hashes() == ported_binaries
+RECORD['cache_expected_failure'] = SPEC['cache_regression']
+save()
+patch = INPUTS / SPEC['cache_fix_patch']['control']
+identity(patch, SPEC['cache_fix_patch'])
+run('namespace-cache-fix-check', ['git', 'apply', '--check', str(patch)])
+run('namespace-cache-fix-apply', ['git', 'apply', str(patch)])
+state('fixed')
+run('fixed-build', ['cmake', '--build', str(BUILD), '--target', *targets, '-j2'], 7200)
+admit_full_aot('fixed')
+state('fixed')
+binaries = binary_hashes()
+run('namespace-fixed', [str(BUILD / paths['testaot']), 'native', 'sharing-mode-and-namespace/', '--single-process'], 600)
+text = (OUT / 'namespace-fixed.log').read_text(errors='replace')
+observed = re.findall(r'^(sharing-mode-and-namespace/[^\r\n]+)$', text, re.M)
+assert set(observed) == set(SPEC['native_cases']) and len(SPEC['native_cases']) == 11, observed
+assert len(re.findall(r'^11 passed, 0 failed, 0 todo$', text, re.M)) == 1
+assert not re.search(r'^(FAIL |LEFT OUT )', text, re.M)
+RECORD['native_cases'] = SPEC['native_cases']
+save()
 api('marked-vector', ['MarkedVector.Append_JSObjectPtr'])
 api('heap-teardown', ['HeapTeardown.FinalizesNewCellsWithoutLiveBitmaps', 'HeapTeardown.FinalizesMarkedCellsWithoutLiveBitmaps'])
 api('async-frame', ['AsyncStackTrace.SuspendedFrameUsesResumeInstruction'], {'JSC_useAsyncStackTrace': 'true'})
@@ -192,7 +261,7 @@ run('shell-off-configure', ['cmake', '-S', str(SOURCE), '-B', str(shell_off), *f
 run('shell-off-api-link', ['ninja', '-C', str(shell_off), '-t', 'query', 'bin/TestWebKitAPI/TestJavaScriptCore'])
 link = (OUT / 'shell-off-api-link.log').read_text()
 assert 'aot-builtin-table-obj' in link and 'AOTNoFeatureRemoved.cpp.o' in link
-state(True)
-assert binaries == {name: sha(BUILD / path) for name, path in {'jsc': 'bin/jsc', 'api': 'bin/TestWebKitAPI/TestJavaScriptCore'}.items()}
-RECORD.update(passed=True, binary_sha256=binaries, overlays=SPEC['files'], cmake_cache_sha256=sha(BUILD / 'CMakeCache.txt'))
+state('fixed')
+assert binaries == binary_hashes()
+RECORD.update(passed=True, binary_sha256=binaries, source_delta=SPEC['files'], cmake_cache_sha256=sha(BUILD / 'CMakeCache.txt'))
 save()

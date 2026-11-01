@@ -18,7 +18,7 @@ jobs:
           sparse-checkout: .github/openclaw/qualification/upstream-regressions
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 8e335354a58fa9a8eed14a70a8b9bf97b5d3073f
+          ref: 163b3f42dbe9003508597eaa4c52f6b28ebd533d
           path: engine
           persist-credentials: false
           sparse-checkout-cone-mode: false
@@ -46,7 +46,7 @@ jobs:
           echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends cmake ninja-build clang-23 lld-23 libicu-dev ruby ruby-highline libjson-pp-perl
-      - name: Prove the integrated API and stress contracts
+      - name: Prove namespace isolation red/green and the integrated native contracts
         run: python3 controls/.github/openclaw/qualification/upstream-regressions/qualify.py
       - name: Bound and record the evidence
         id: evidence

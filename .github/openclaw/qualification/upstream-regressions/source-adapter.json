@@ -1,18 +1,19 @@
 {
-  "engine": "8e335354a58fa9a8eed14a70a8b9bf97b5d3073f",
+  "engine": "163b3f42dbe9003508597eaa4c52f6b28ebd533d",
   "files": {
     "Tools/TestWebKitAPI/CMakeLists.txt": {
       "before": {
-        "bytes": 32086,
-        "sha256": "d64c961053f96ccd00e0e7501a2f4bb85b856e9ccf813f06787f00b0026e06e5",
-        "blob": "ab9bbb32be1367bd75f5c2c0cf9f34f08e12dc94"
+        "bytes": 32111,
+        "sha256": "5a0355abbe387a2fee5685e9ef2578b19d62b174dd09a401915643c2bfd8d66b",
+        "blob": "f7eecde3b2e1d1931897426ac9720130dbd6ec4d"
       },
       "after": {
-        "bytes": 32216,
-        "sha256": "41cdbf6fcd17cece2d3ee814dd82c4e4e1f6e9254363cffc4db745cbc86e4d52",
-        "blob": "c8f745f953306db673cca7d603f12ac9bc579c1e"
+        "bytes": 32241,
+        "sha256": "20efb8d051d7bfbee1b30b04cc0c444876ad6c46e8f8d719dad4ca8f1400d4c8",
+        "blob": "bcc474c1c685221d1c6b0978cca01ab48f7a195e"
       },
-      "control": "TestWebKitAPI-CMakeLists.txt"
+      "control": "TestWebKitAPI-CMakeLists.txt",
+      "kind": "test"
     },
     "Tools/TestWebKitAPI/Tests/JavaScriptCore/AsyncStackTrace.cpp": {
       "before": null,
@@ -21,7 +22,8 @@
         "sha256": "fdd809f40f171b69a6db64c4486feedb06834ee7f17145d68031d9579d93fe33",
         "blob": "40343fdd9de395f88ea8fc6e129da84d115fa5bf"
       },
-      "control": "AsyncStackTrace.cpp"
+      "control": "AsyncStackTrace.cpp",
+      "kind": "test"
     },
     "JSTests/stress/error-stack-async-relative-resume-target.js": {
       "before": {
@@ -34,7 +36,168 @@
         "sha256": "014ebbeecbd94287c126a356c18ded2a44b667c338a452927d78b3e658dd9235",
         "blob": "18f52dd37073b9fd9facd9ab86145126efb35120"
       },
-      "control": "error-stack-async-relative-resume-target.js"
+      "control": "error-stack-async-relative-resume-target.js",
+      "kind": "test"
+    },
+    "Source/JavaScriptCore/aot/tests/AOTSharingModeAndNamespaceTests.cpp": {
+      "before": {
+        "bytes": 23205,
+        "sha256": "f3a0266fdcf9950f2efcf433c501535bb77c0a0e91628ade0d809b25d3fe92fb",
+        "blob": "319330ac912ef2ab7b09c71040a45955d437d21f"
+      },
+      "after": {
+        "bytes": 29780,
+        "sha256": "b50e9c5dc0706ed5799e55b467a89dc78182b1e77a6d272b5003a73fc0bf1b01",
+        "blob": "eac225ac60d69e17dce326eb3fd594d591acd101"
+      },
+      "control": "AOTSharingModeAndNamespaceTests.cpp",
+      "kind": "test"
+    },
+    "Source/JavaScriptCore/aot/runtime/AOTModuleNamespace.h": {
+      "before": {
+        "bytes": 5129,
+        "sha256": "78c0cd38b915341159936b4e6fed76b185ebbd600cc097d866fd08d807135cb9",
+        "blob": "44bf46d832db60a6c0749f1ce62b5871deba2787"
+      },
+      "after": {
+        "bytes": 5269,
+        "sha256": "27ebe4c5abc8dff89fa2ff11eca6424ffa15b91cdf7f967e9aa44f881745464e",
+        "blob": "a95f8c2190c33c1a93aabbed85d695facdea4881"
+      },
+      "kind": "production"
+    },
+    "Source/JavaScriptCore/aot/runtime/AOTModules.cpp": {
+      "before": {
+        "bytes": 262111,
+        "sha256": "fc958469e7c01b2cb7cdd513364f9924ea669ba70b9655b802dc9e459c78272d",
+        "blob": "957017e2679a42424fb926cd668d840fe6fdb9df"
+      },
+      "after": {
+        "bytes": 263822,
+        "sha256": "0a90d2487960c6302e9bfd0bb09c3e26f5611a7b468be9cd0bee7813707f0973",
+        "blob": "c6a01c0df19ad90f93d74ad252a2cd83e1e0d745"
+      },
+      "kind": "production",
+      "ported": {
+        "bytes": 263904,
+        "sha256": "0f4850a42fbfdb1a7768c05dc4cad709ecf687460d21db16bf61561b2682a7e7",
+        "blob": "d22289c46d9ca6f2d76182ca8e5e1eab87cb25e6"
+      }
+    },
+    "Source/JavaScriptCore/aot/runtime/AOTModuleEvaluation.cpp": {
+      "before": {
+        "bytes": 183308,
+        "sha256": "9a0191909e5699aaacc588e8bc107b364cb141bc9357cf0d825a2db9c0adaa38",
+        "blob": "26e5dfce5b504354656b70fe3cbda32b0e871a79"
+      },
+      "after": {
+        "bytes": 181804,
+        "sha256": "e1209ba153c537b5936377a96d1b7674f0d04623b87e9cb2c4a0feff5f680a64",
+        "blob": "be76c151ea552102a1d92c00ea8b52b38649ac8d"
+      },
+      "kind": "production"
+    },
+    "Source/JavaScriptCore/aot/runtime/AOTModules.h": {
+      "before": {
+        "bytes": 63465,
+        "sha256": "70ebc5db0b1c22aca28d24dc7db804910ae1c5d24e8f0a1159643a47c2b5790c",
+        "blob": "b4aa2b2e34af7b6e3e2701b6d455380780cde869"
+      },
+      "after": {
+        "bytes": 63427,
+        "sha256": "68e851742c2e52ad7327b8ec2ef51d7c82a83607a0d7b7dc627025d4dc35cc8f",
+        "blob": "635d6cb9e5f59760f9e33b481630a5df531ec200"
+      },
+      "kind": "production"
+    },
+    "Source/JavaScriptCore/aot/runtime/AOTModuleHost.h": {
+      "before": {
+        "bytes": 21514,
+        "sha256": "97aede2dfa54a56eb289956e2f998bb9c244ae23663b97e1cb67ab0946176732",
+        "blob": "f80ba3f4b528170ba2d579debfbc7d55854175b2"
+      },
+      "after": {
+        "bytes": 21456,
+        "sha256": "224fb192e022810b38fd20778cca7a1bb2f0f06a2f5218f9c54e7d349b27d1f1",
+        "blob": "55e2bfecf9c2f6c102dcfd7e1e68c692c3b9177f"
+      },
+      "kind": "production"
+    },
+    "Source/JavaScriptCore/aot/passes/AOTCallModules.cpp": {
+      "before": {
+        "bytes": 51306,
+        "sha256": "c78e5ea890885526ce4e8fea8fe3c726974da1a93dc86b83cceb563e645bd0df",
+        "blob": "79dc7df3790ba9e5f83ce50f358cfd625ecf7062"
+      },
+      "after": {
+        "bytes": 49127,
+        "sha256": "ec991b7a69b8723235a1c05714fa9ddcfa71d06e0fc893388d88405f71c3a2f0",
+        "blob": "72f15b3b24c3dbeb9b992fa204ff6452466faff1"
+      },
+      "kind": "production"
+    },
+    "Source/JavaScriptCore/aot/runtime/AOTModuleLinking.cpp": {
+      "before": {
+        "bytes": 58601,
+        "sha256": "01718c8d8844abffe38b6b0d69afff2946a65f7fb2ba5ba7c23ed9db31b6d5cc",
+        "blob": "afb20cc211148563c59d8b5486f33287061e4dd1"
+      },
+      "after": {
+        "bytes": 58548,
+        "sha256": "cf74e8b272d4479ebd54abf1258b885bca30bbeb64c5a0a578c68c1180e32574",
+        "blob": "e0a6dec86749bac39917b9265f027731df257a1b"
+      },
+      "kind": "production"
     }
+  },
+  "production_patch": {
+    "control": "namespace-source-port.patch",
+    "bytes": 26260,
+    "sha256": "d77ca16f5289c73381d75d3e8e65f799e7f4c1a746151b2a7c87f6df63741518",
+    "blob": "ff6bc700a739efb65cc9b4bde6df32d6dbc9669c"
+  },
+  "regression": {
+    "file": "Source/JavaScriptCore/aot/tests/AOTSharingModeAndNamespaceTests.cpp",
+    "case": "sharing-mode-and-namespace/require-namespace-does-not-mutate-imports",
+    "failure_expression": "required.get() != imported.get()",
+    "failure_line": 276,
+    "limits": [
+      "live module-binding update",
+      "late namespace face assignment",
+      "cross-image ownership"
+    ]
+  },
+  "native_cases": [
+    "sharing-mode-and-namespace/sharing-mode-of-values",
+    "sharing-mode-and-namespace/module-of-namespace-objects",
+    "sharing-mode-and-namespace/require-namespace-does-not-mutate-imports",
+    "sharing-mode-and-namespace/require-facade-invalidates-captured-exports",
+    "sharing-mode-and-namespace/namespace-objects-made-between-collections-last",
+    "sharing-mode-and-namespace/literals-made-between-collections-last",
+    "sharing-mode-and-namespace/addition-that-waits-for-its-first-structure",
+    "sharing-mode-and-namespace/no-shape-passes",
+    "sharing-mode-and-namespace/messages",
+    "sharing-mode-and-namespace/compiled-tests",
+    "sharing-mode-and-namespace/compiled-tests-under-validation"
+  ],
+  "unchanged_inputs": {
+    "Tools/TestWebKitAPI/Tests/JavaScriptCore/HeapTeardown.cpp": {
+      "bytes": 4099,
+      "sha256": "6ffd949ac2a2cba9aba09ca367bd982d3cb9c0d6e0364e7e8d7a19be8a519e71",
+      "blob": "0468fe8f615165ebd49cc582ed8d219706167cf2"
+    }
+  },
+  "cache_regression": {
+    "file": "Source/JavaScriptCore/aot/tests/AOTSharingModeAndNamespaceTests.cpp",
+    "case": "sharing-mode-and-namespace/require-facade-invalidates-captured-exports",
+    "failure_expression": "evaluate(program, \"readCaptured(requiredNamespace)\"_s) == jsNumber(2)",
+    "failure_line": 334,
+    "baseline": "pre-repair namespace port; unchanged163 has no separate facade"
+  },
+  "cache_fix_patch": {
+    "control": "namespace-cache-fix.patch",
+    "bytes": 846,
+    "sha256": "f271e758fda302820080b686ae33957f413a4d431ccbcfa968022fe516e12178",
+    "blob": "b471ba427f1af1829ae56d2d5beed210e5a70b47"
   }
 }
