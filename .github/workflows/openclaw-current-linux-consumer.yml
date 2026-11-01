@@ -121,6 +121,8 @@ jobs:
                       target.chmod(0o600)
           bootstrap = Path(os.environ['INSPECTOR_RUNTIME']).resolve()
           assert bootstrap.stat().st_size == 79500640 and sha(bootstrap) == 'a83d263767d839e4d2649ca8e35d07159c7afc99afdc96d731ced29e056dda0c'
+          with Path(os.environ['GITHUB_PATH']).open('a') as path:
+              path.write(str(bootstrap.parent) + '\n')
           references = {}
           for arm, key, version in [('baseline', 'BASELINE_REFERENCE_NODE', 'v26.3.0'), ('candidate', 'CANDIDATE_REFERENCE_NODE', 'v26.12.1')]:
               executable = Path(os.environ[key]).resolve(strict=True)
