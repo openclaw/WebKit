@@ -83,12 +83,29 @@ def preflight():
     if sha != os.environ['INPUT_SHA'] or sha != os.environ['GITHUB_SHA']:
         raise ValueError('dispatch must use the same reviewed branch head and full input SHA')
     ref = os.environ['GITHUB_REF']
+    carrier_ref = 'refs/heads/claude/hosted-linux-consumer-20261031'
     qualification_only = (
-        ref == 'refs/heads/claude/sync-webkit-upstream-20261014'
+        ref in ('refs/heads/claude/sync-webkit-upstream-20261014', carrier_ref)
         and os.environ.get('INPUT_PUBLISH') == 'false'
     )
     if ref not in ('refs/heads/openclaw/main', 'refs/heads/openclaw/batch-1', 'refs/heads/openclaw/release-5718a6ec') and not qualification_only:
         raise ValueError('only an explicitly permitted owned branch may run this workflow')
+    engine_sha = os.environ.get('ENGINE_SHA', sha)
+    if ref == carrier_ref:
+        expected = '42e4245f4180941634b482a7e8ef7fca47467de5'
+        if engine_sha != expected:
+            raise ValueError('qualification engine source mismatch')
+        run('git', '-C', str(ROOT), 'merge-base', '--is-ancestor', expected, sha)
+        frozen_config = json.loads(capture('git', '-C', str(ROOT), 'show',
+            expected + ':.github/openclaw/variants.json'))
+        frozen_config['candidate'] = {
+            'commit': 'd9be087429c21e563bb5ac29f8a11805e64b56a3',
+            'tree': '980068aa5aa9f51f40fc4125114a68fccd9bc9dc',
+            'manifest_blob': 'e9544c96d5cd9a5e5f6b0245ed5c8dd78fb1a218'}
+        if CONFIG != frozen_config:
+            raise ValueError('qualification matrix/configuration drift')
+    elif engine_sha != sha:
+        raise ValueError('engine source must match dispatch head')
     upstream = {l['label'] for l in lane_definitions()}
     wanted = [l['label'] for l in CONFIG['lanes']]
     if len(set(wanted)) != len(wanted) or not set(wanted) <= upstream:

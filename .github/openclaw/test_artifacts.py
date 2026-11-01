@@ -1,4 +1,6 @@
+import copy
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -190,6 +192,70 @@ class PreflightAdmission(unittest.TestCase):
                                 artifacts.preflight()
                             lanes.assert_not_called()
                             self.assertFalse(output.exists())
+
+
+    def test_consumer_carrier_requires_exact_engine_and_frozen_matrix(self):
+        engine = '42e4245f4180941634b482a7e8ef7fca47467de5'
+        original = copy.deepcopy(artifacts.CONFIG)
+        original['candidate'] = {'commit': 'b' * 40, 'tree': 'c' * 40, 'manifest_blob': 'd' * 40}
+        cases = [
+            ('false', engine, None, None),
+            ('true', engine, None, 'permitted owned branch'),
+            (None, engine, None, 'permitted owned branch'),
+            ('false', 'e' * 40, None, 'engine source mismatch'),
+            ('false', engine, 'baseline', 'matrix/configuration drift'),
+            ('false', engine, 'lanes', 'matrix/configuration drift'),
+            ('false', engine, 'candidate', 'matrix/configuration drift'),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            for publish, source, drift, error in cases:
+                with self.subTest(publish=publish, engine=source, drift=drift):
+                    output = Path(temporary) / 'output'
+                    output.unlink(missing_ok=True)
+                    config = copy.deepcopy(artifacts.CONFIG)
+                    if drift == 'baseline':
+                        config['baseline']['commit'] = 'f' * 40
+                    elif drift == 'lanes':
+                        config['lanes'][0]['consumer'] = 'changed consumer'
+                    elif drift == 'candidate':
+                        config['candidate']['commit'] = 'f' * 40
+                    env = {'GITHUB_REF': 'refs/heads/claude/hosted-linux-consumer-20261031',
+                        'INPUT_SHA': 'a' * 40, 'GITHUB_SHA': 'a' * 40,
+                        'ENGINE_SHA': source, 'GITHUB_OUTPUT': str(output)}
+                    if publish is not None:
+                        env['INPUT_PUBLISH'] = publish
+                    with patch.dict(os.environ, env, clear=True), patch.object(
+                        artifacts, 'source', return_value={'source': 'a' * 40}), patch.object(
+                        artifacts, 'CONFIG', config), patch.object(
+                        artifacts, 'capture', return_value=json.dumps(original)), patch.object(
+                        artifacts, 'run') as ancestry, patch.object(
+                        artifacts, 'lane_definitions', return_value=config['lanes']) as lanes:
+                        if error:
+                            with self.assertRaisesRegex(ValueError, error):
+                                artifacts.preflight()
+                            lanes.assert_not_called()
+                            self.assertFalse(output.exists())
+                        else:
+                            artifacts.preflight()
+                            matrix = json.loads(output.read_text().split('=', 1)[1])
+                            self.assertEqual(matrix['include'], [{'lane': lane['label']} for lane in config['lanes']])
+                            ancestry.assert_called_once_with('git', '-C', str(artifacts.ROOT),
+                                'merge-base', '--is-ancestor', engine, 'a' * 40)
+
+    def test_consumer_carrier_rejects_unrelated_history_before_lane_admission(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'output'
+            env = {'GITHUB_REF': 'refs/heads/claude/hosted-linux-consumer-20261031',
+                'INPUT_SHA': 'a' * 40, 'GITHUB_SHA': 'a' * 40, 'INPUT_PUBLISH': 'false',
+                'ENGINE_SHA': '42e4245f4180941634b482a7e8ef7fca47467de5', 'GITHUB_OUTPUT': str(output)}
+            with patch.dict(os.environ, env, clear=True), patch.object(
+                artifacts, 'source', return_value={'source': 'a' * 40}), patch.object(
+                artifacts, 'run', side_effect=subprocess.CalledProcessError(1, ['git'])), patch.object(
+                artifacts, 'lane_definitions') as lanes:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    artifacts.preflight()
+                lanes.assert_not_called()
+                self.assertFalse(output.exists())
 
 
 if __name__ == '__main__':

@@ -12,6 +12,9 @@ on:
         default: false
 permissions:
   contents: read
+  actions: read
+env:
+  ENGINE_SHA: ${{ github.ref == 'refs/heads/claude/hosted-linux-consumer-20261031' && '42e4245f4180941634b482a7e8ef7fca47467de5' || github.sha }}
 concurrency:
   group: openclaw-artifacts-${{ inputs.sha }}
   cancel-in-progress: false
@@ -22,7 +25,8 @@ jobs:
       (github.ref == 'refs/heads/openclaw/main' ||
        github.ref == 'refs/heads/openclaw/batch-1' ||
        github.ref == 'refs/heads/openclaw/release-5718a6ec' ||
-       (github.ref == 'refs/heads/claude/sync-webkit-upstream-20261014' &&
+       ((github.ref == 'refs/heads/claude/sync-webkit-upstream-20261014' ||
+         github.ref == 'refs/heads/claude/hosted-linux-consumer-20261031') &&
         inputs.publish == false))
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 10
@@ -44,7 +48,7 @@ jobs:
             !/WebDriverTests/
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version: '26.3.0'
+          node-version: '26.12.1'
       - name: Test publication integrity gates
         run: |
           python3 .github/openclaw/test_artifacts.py
@@ -71,6 +75,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ env.ENGINE_SHA }}
           fetch-depth: 0
           persist-credentials: false
           sparse-checkout-cone-mode: false
@@ -84,7 +89,7 @@ jobs:
             !/WebDriverTests/
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version: '26.3.0'
+          node-version: '26.12.1'
       - name: Build unchanged upstream lane and record provenance
         env:
           LANE: ${{ matrix.lane }}
@@ -104,18 +109,20 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ env.ENGINE_SHA }}
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: |
             /.github/
             /Tools/
+            /Source/JavaScriptCore/
             /JSTests/stress/
             /JSTests/modules/
             /JSTests/*.yaml
             /JSTests/BUN-TEST-DIFFERENCES.md
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version: '26.3.0'
+          node-version: '26.12.1'
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: bun-webkit-linux-amd64
@@ -135,14 +142,41 @@ jobs:
           curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o "$RUNNER_TEMP/bun.zip"
           unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bootstrap"
           echo "$RUNNER_TEMP/bootstrap/bun-linux-x64" >> "$GITHUB_PATH"
-      - name: Build baseline and candidate Bun, then qualify the same candidate
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: github.ref == 'refs/heads/claude/hosted-linux-consumer-20261031'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          path: carrier
+          sparse-checkout: .github/openclaw
+      - name: Download the unchanged historical baseline proof
+        if: github.ref == 'refs/heads/claude/hosted-linux-consumer-20261031'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/retained"
+          gh api repos/openclaw/WebKit/actions/artifacts/13068952583 > "$RUNNER_TEMP/retained/proof.metadata.json"
+          gh api repos/openclaw/WebKit/actions/artifacts/13068952583/zip > "$RUNNER_TEMP/retained/proof.zip"
+          gh api repos/openclaw/WebKit/actions/artifacts/13068828135 > "$RUNNER_TEMP/retained/binaries.metadata.json"
+          gh api repos/openclaw/WebKit/actions/artifacts/13068828135/zip > "$RUNNER_TEMP/retained/binaries.zip"
+      - name: Qualify the new engine archive and build the exact candidate
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/linux-artifact
           QUALIFICATION_DIR: ${{ runner.temp }}/qualification
         run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
           export INSPECTOR_RUNTIME="$(realpath "$(command -v bun)")"
+          test "$(node --version)" = v26.12.1
           bash .github/openclaw/qualify-engine.sh
-          bash .github/openclaw/qualify.sh
+          if test "$GITHUB_REF" = refs/heads/claude/hosted-linux-consumer-20261031; then
+            python3 carrier/.github/openclaw/qualification/resume-consumer.py --fresh-engine "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/carrier" "$RUNNER_TEMP/retained" "$QUALIFICATION_DIR" "$ARTIFACT_DIR"
+            python3 .github/openclaw/test_consumer_identity.py
+            bash "$QUALIFICATION_DIR/qualify-candidate-fresh.sh"
+          else
+            bash .github/openclaw/qualify.sh
+          fi
           export CANDIDATE_BUN="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
           export CANDIDATE_RECEIPT="$QUALIFICATION_DIR/candidate-identity.json"
           bash .github/openclaw/qualify-sync-compatibility.sh
@@ -155,6 +189,7 @@ jobs:
           path: |
             ${{ runner.temp }}/qualification/bun-baseline/build/qualify-baseline/bun
             ${{ runner.temp }}/qualification/bun/build/qualify-candidate/bun
+            ${{ runner.temp }}/qualification/bun/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o
             ${{ runner.temp }}/qualification/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
             ${{ runner.temp }}/qualification/*.sha256
           compression-level: 0
@@ -191,6 +226,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ env.ENGINE_SHA }}
           persist-credentials: false
           sparse-checkout: |
             .github
@@ -201,7 +237,7 @@ jobs:
           path: ${{ runner.temp }}/windows-artifact
       - name: Qualify native ARM64 engine
         shell: pwsh
-        run: ./.github/openclaw/qualify-windows-arm64.ps1 -ArtifactDirectory "$env:RUNNER_TEMP/windows-artifact" -OutputDirectory "$env:RUNNER_TEMP/windows-proof" -Source $env:GITHUB_SHA
+        run: ./.github/openclaw/qualify-windows-arm64.ps1 -ArtifactDirectory "$env:RUNNER_TEMP/windows-artifact" -OutputDirectory "$env:RUNNER_TEMP/windows-proof" -Source $env:ENGINE_SHA
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
@@ -218,6 +254,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ env.ENGINE_SHA }}
           persist-credentials: false
           sparse-checkout: |
             .github
@@ -227,10 +264,20 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           path: ${{ runner.temp }}/inputs
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: github.ref == 'refs/heads/claude/hosted-linux-consumer-20261031'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          path: carrier
+          sparse-checkout: .github/openclaw
+      - name: Install the exact reviewed consumer policy for assembly
+        if: github.ref == 'refs/heads/claude/hosted-linux-consumer-20261031'
+        run: python3 carrier/.github/openclaw/qualification/resume-consumer.py install "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/carrier"
       - name: Assemble complete release and verify checksums
         run: |
-          python3 .github/openclaw/release.py assemble --source "$GITHUB_SHA" --inputs "$RUNNER_TEMP/inputs" --directory "$RUNNER_TEMP/release"
-          python3 .github/openclaw/release.py verify --source "$GITHUB_SHA" --directory "$RUNNER_TEMP/release"
+          python3 .github/openclaw/release.py assemble --source "$ENGINE_SHA" --inputs "$RUNNER_TEMP/inputs" --directory "$RUNNER_TEMP/release"
+          python3 .github/openclaw/release.py verify --source "$ENGINE_SHA" --directory "$RUNNER_TEMP/release"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: release

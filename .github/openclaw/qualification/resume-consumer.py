@@ -62,7 +62,11 @@ def install_controls(pipeline, carrier, identity):
 
 
 def main():
-    pipeline, carrier, retained, root, artifacts = [Path(p).resolve() for p in sys.argv[1:]]
+    args = sys.argv[1:]
+    fresh_engine = bool(args and args[0] == "--fresh-engine")
+    if fresh_engine:
+        args = args[1:]
+    pipeline, carrier, retained, root, artifacts = [Path(p).resolve() for p in args]
     assert subprocess.check_output(["git", "-C", str(pipeline), "rev-parse", "HEAD"], text=True).strip() == SYNC
     frozen = pipeline / ".github/openclaw/qualification"
     reviewed = carrier / ".github/openclaw/qualification"
@@ -86,12 +90,13 @@ def main():
     assert len(read(frozen / "selected.json")) == 44
     old_carrier = read(proof / "carrier.json")
     assert old_carrier["carrier"] == PREVIOUS_CARRIER and old_carrier["sync"] == SYNC
-    engine_gate = read(proof / "engine-gate.json")
+    engine_proof = root if fresh_engine else proof
+    engine_gate = read(engine_proof / "engine-gate.json")
     assert engine_gate["passed"] is True and engine_gate["source"] == SYNC
     assert engine_gate["stress_counts"]["jsc-stress"] >= 1400
     assert engine_gate["stress_counts"]["jsc-modules"] >= 1600
     for name, count in engine_gate["stress_counts"].items():
-        lines = (proof / name / "results").read_text().splitlines()
+        lines = (engine_proof / name / "results").read_text().splitlines()
         assert len(lines) == count and all(line.endswith(": PASS") for line in lines), name
 
     shutil.copytree(proof / "baseline", root / "baseline")
@@ -103,20 +108,21 @@ def main():
     shutil.copyfile(binaries / identity.BASELINE_EXECUTABLE, executable)
     assert sha(executable) == baseline["executable"]["sha256"]
     executable.chmod(0o700)
-    # Preserve original engine evidence; the engine and historical baseline are unchanged.
-    for path in proof.rglob("*"):
-        relative = path.relative_to(proof)
-        if not path.is_file():
-            continue
-        name = relative.parts[0]
-        if name.startswith(("jsc-", "sampling-", "accounting-")) or name in ("engine-gate.json", "stack-visitor.log"):
-            destination = root / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(path, destination)
-    engine_directory = root / "engine"
-    engine_directory.mkdir()
-    subprocess.run(["tar", "-xzf", str(artifacts / (identity.LANE + ".tar.gz")),
-                    "-C", str(engine_directory)], check=True)
+    if not fresh_engine:
+        # Preserve original engine evidence; the engine and historical baseline are unchanged.
+        for path in proof.rglob("*"):
+            relative = path.relative_to(proof)
+            if not path.is_file():
+                continue
+            name = relative.parts[0]
+            if name.startswith(("jsc-", "sampling-", "accounting-")) or name in ("engine-gate.json", "stack-visitor.log"):
+                destination = root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, destination)
+        engine_directory = root / "engine"
+        engine_directory.mkdir()
+        subprocess.run(["tar", "-xzf", str(artifacts / (identity.LANE + ".tar.gz")),
+                        "-C", str(engine_directory)], check=True)
 
     source_manifest = install_controls(pipeline, carrier, identity)
 
@@ -140,6 +146,7 @@ def main():
         "baseline_identity_sha256": sha(root / "baseline-identity.json"),
         "baseline_invocation_sha256": sha(root / "baseline/invocation.json"),
         "engine_gate_sha256": sha(root / "engine-gate.json"),
+        "engine_evidence_reused": not fresh_engine,
         "candidate_driver_sha256": sha(driver),
         "candidate_build_reused": False,
         "candidate_selection_reused": False,
