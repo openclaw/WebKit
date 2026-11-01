@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-from qualification import consumer_identity as consumer, compile_cache, harness_adapters as harness
+from qualification import consumer_identity as consumer, compile_cache, harness_adapters as harness, darwin
 import xml.etree.ElementTree as ET
 
 
@@ -132,6 +132,36 @@ def release_fixture(inputs, source):
         'upstream_sync':{'passed':True,'source':source,'candidate_identity_sha256':digest,'historical_selected_files':82,'selected_files':85,'result_rows':87,'regressions':0,'aot':aot,'compile_cache':compile_cache.evidence(report),'invocation':consumer.file_record(proof,'sync/invocation.json')},
         'engine':{'passed':True,'source':source},'compatibility':{'passed':True,'source':source,'candidate_identity_sha256':digest,'memory_tests':3,'startup':True}}
     (proof/'gate.json').write_text(json.dumps(gate))
+    darwin_release_fixture(inputs, source)
+
+
+
+def darwin_release_fixture(inputs, source):
+    """Distinct native-platform receipts and binaries; never execute fixture bytes."""
+    proof = inputs / 'darwin-qualification'; proof.mkdir()
+    binaries = inputs / 'darwin-bun-executables'
+    lane = inputs / darwin.LANE
+    engine = consumer.engine_input(lane / (darwin.LANE + '.tar.gz'),
+                                   lane / (darwin.LANE + '.manifest.json'), source, darwin.LANE)
+    for name, data in [(consumer.EXECUTABLE, b'darwin candidate'),
+                       (consumer.FIXTURE, (consumer.INPUTS / 'worker-resource-limits.test.ts').read_bytes()),
+                       (consumer.AOT_TEST, AOT_FIXTURE)]:
+        file = binaries / name; file.parent.mkdir(parents=True, exist_ok=True); file.write_bytes(data)
+    overlay = proof / 'candidate-input/artifacts.json'; overlay.parent.mkdir()
+    overlay.write_text(json.dumps(consumer.overlay_manifest(engine)))
+    (proof / 'candidate-manifest.patch').write_bytes(b'darwin manifest overlay\n')
+    identity = json.loads((inputs / 'qualification/candidate-identity.json').read_text())
+    identity.update(engine=engine, executable=consumer.file_record(binaries, consumer.EXECUTABLE),
+                    fixture=consumer.file_record(binaries, consumer.FIXTURE))
+    identity['runtime'].update(platform='darwin', architecture='arm64')
+    identity['overlay'].update(sha256=consumer.sha(overlay), patch_sha256=consumer.sha(proof / 'candidate-manifest.patch'))
+    seed_build_tools(proof, 'candidate', identity)
+    consumer.write_once(proof / 'candidate-identity.json', identity)
+    from test_compare_fork_ci import evidence
+    selected = json.loads((consumer.INPUTS / 'darwin-selected.json').read_text())
+    write_invocation(proof, 'candidate', evidence(selected=selected))
+    log = proof / consumer.AOT_LOG; log.parent.mkdir(); log.write_text(' 4 pass\n 0 fail\n')
+    consumer.write_once(proof / 'gate.json', darwin.evidence(proof, binaries, source, engine))
 
 
 class ConsumerIdentity(unittest.TestCase):
@@ -191,6 +221,27 @@ class ConsumerIdentity(unittest.TestCase):
 
     def record(self):
         record=consumer.capture(self.root,self.engine,self.inspector);consumer.write_once(self.receipt,record);return record
+
+    def test_native_darwin_identity_requires_explicit_lane_and_matching_runtime(self):
+        record = self.record()
+        native = copy.deepcopy(record)
+        native['engine']['lane'] = consumer.DARWIN_LANE
+        native['engine']['archive']['path'] = consumer.DARWIN_LANE + '.tar.gz'
+        native['runtime'].update(platform='darwin', architecture='arm64')
+        with self.assertRaises(ValueError): consumer.validate(native, self.engine['source'])
+        consumer.validate(native, self.engine['source'], lane=consumer.DARWIN_LANE)
+        for field, value in [('platform', 'linux'), ('architecture', 'x64')]:
+            with self.subTest(field=field):
+                changed = copy.deepcopy(native); changed['runtime'][field] = value
+                with self.assertRaises(ValueError):
+                    consumer.validate(changed, self.engine['source'], lane=consumer.DARWIN_LANE)
+        for field, value in [('lane', consumer.LANE), ('archive', record['engine']['archive'])]:
+            with self.subTest(field=field):
+                changed = copy.deepcopy(native); changed['engine'][field] = value
+                with self.assertRaises(ValueError):
+                    consumer.validate(changed, self.engine['source'], lane=consumer.DARWIN_LANE)
+        with self.assertRaisesRegex(ValueError, 'unsupported native consumer lane'):
+            consumer.validate(native, self.engine['source'], lane='bun-webkit-macos-amd64-aot')
 
     def test_current_candidate_rejects_legacy_build_profile(self):
         record=json.loads((self.root/'candidate-build-tools.json').read_text())

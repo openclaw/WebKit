@@ -148,6 +148,9 @@ def restore(root, name, phase, engine, inspector, status, active, completed):
 def run(root, name, phase, engine, inspector, prefix=None):
     arm = 'baseline' if name == 'baseline' else 'candidate'
     repo = root / ('bun-baseline' if arm == 'baseline' else 'bun')
+    identity.require(engine['lane'] in identity.TARGETS and (engine['lane'] == identity.LANE or name == 'candidate'),
+                     'invalid native adapter lane')
+    platform = identity.TARGETS[engine['lane']][0]
     env = os.environ.copy()
     if phase == 'build':
         revision = identity.CONFIG['baseline']['engine'] if arm == 'baseline' else engine['source']
@@ -166,12 +169,12 @@ def run(root, name, phase, engine, inspector, prefix=None):
             env.pop(key, None)
         if name != 'sync':
             env.update(HOME=str(root / name / 'home'), TMPDIR=str(root / name / 'tmp'),
-                       PATH=str(root / name / 'bin') + os.pathsep + env['PATH'], OPENCLAW_CI_PLATFORM='linux')
+                       PATH=str(root / name / 'bin') + os.pathsep + env['PATH'], OPENCLAW_CI_PLATFORM=platform)
         else:
             identity.require(env.get('HOME') == str(root / name / 'home')
                              and env.get('TMPDIR') == str(root / name / 'tmp')
                              and env['PATH'].startswith(str(root / name / 'bin') + os.pathsep)
-                             and env.get('OPENCLAW_CI_PLATFORM') == 'linux', 'sync environment drift')
+                             and env.get('OPENCLAW_CI_PLATFORM') == platform, 'sync environment drift')
         log = root / name / 'tests.log'
     active = prepare(root, name, phase, engine, inspector, command, prefix)
     status, completed = None, False
@@ -213,12 +216,13 @@ def main():
     parser.add_argument('--name', choices=['baseline', 'candidate', 'sync'], required=True)
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--source', required=True)
+    parser.add_argument('--lane', choices=identity.TARGETS, default=identity.LANE)
     parser.add_argument('--artifacts', type=Path, required=True)
     parser.add_argument('--inspector-runtime', type=Path, required=True)
     parser.add_argument('--junit-prefix')
     args = parser.parse_args()
-    engine = identity.engine_input(args.artifacts / (identity.LANE + '.tar.gz'),
-                                   args.artifacts / (identity.LANE + '.manifest.json'), args.source)
+    engine = identity.engine_input(args.artifacts / (args.lane + '.tar.gz'),
+                                   args.artifacts / (args.lane + '.manifest.json'), args.source, args.lane)
     return run(args.root, args.name, args.phase, engine, args.inspector_runtime, args.junit_prefix)
 
 

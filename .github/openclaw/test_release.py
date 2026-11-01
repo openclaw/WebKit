@@ -44,6 +44,42 @@ class ReleaseIntegrity(unittest.TestCase):
         w=self.inputs/'windows-arm64-qualification';w.mkdir()
         archive=self.inputs/'bun-webkit-windows-arm64/bun-webkit-windows-arm64.tar.gz'
         (w/'gate.json').write_text(json.dumps({'passed':True,'source':SOURCE,'lane':'bun-webkit-windows-arm64','architecture':'arm64','sha256':release.sha(archive),'startup':True,'dfg':True,'ffi':True,'arraybuffer_accounting':True,'arraybuffer_modes':5}))
+    def test_native_darwin_gate_is_required(self):
+        (self.inputs / 'darwin-qualification/gate.json').unlink()
+        with self.assertRaises(FileNotFoundError): self.assemble()
+
+    def test_native_darwin_inputs_and_execution_are_revalidated(self):
+        from test_consumer_identity import write_invocation
+        proof = self.inputs / 'darwin-qualification'
+        originals = {path: path.read_bytes() for folder in
+                     (proof, self.inputs / 'darwin-bun-executables', self.inputs / release.darwin.LANE)
+                     for path in folder.rglob('*') if path.is_file()}
+        for case in ('binary', 'archive', 'runtime', 'missing-result', 'skipped-aot'):
+            with self.subTest(case=case):
+                try:
+                    if case == 'binary':
+                        (self.inputs / 'darwin-bun-executables' / release.consumer_identity.EXECUTABLE).write_bytes(b'replaced')
+                    elif case == 'archive':
+                        lane = self.inputs / release.darwin.LANE
+                        archive = lane / (release.darwin.LANE + '.tar.gz'); archive.write_bytes(b'replaced')
+                        manifest = lane / (release.darwin.LANE + '.manifest.json'); value = json.loads(manifest.read_text())
+                        value['files'][archive.name] = {'size': archive.stat().st_size, 'sha256': release.sha(archive)}
+                        manifest.write_text(json.dumps(value))
+                    elif case == 'runtime':
+                        path = proof / 'candidate-identity.json'; value = json.loads(path.read_text())
+                        value['runtime']['platform'] = 'linux'; path.write_text(json.dumps(value))
+                    elif case == 'missing-result':
+                        records = {name: json.loads((proof / 'candidate' / name).read_text()) for name in
+                                   ('selected.json', 'results.json', 'runner-terminal.json', 'wrapper-terminal.json')}
+                        records['results.json'].pop()
+                        write_invocation(proof, 'candidate', records)
+                    else:
+                        (proof / release.consumer_identity.AOT_LOG).write_text(' 4 pass\n 0 fail\n 1 skip\n')
+                    with self.assertRaises(ValueError):
+                        release.assemble(self.inputs, self.root / ('darwin-invalid-' + case), SOURCE)
+                finally:
+                    for path, data in originals.items(): path.write_bytes(data)
+
     def test_windows_gate_rejects_wrong_source_digest_or_failed_probe(self):
         p=self.inputs/'windows-arm64-qualification/gate.json';original=json.loads(p.read_text())
         for key,value in [('source','b'*40),('sha256','0'*64),('architecture','x64'),('startup',False),('dfg',False),('ffi',False),('arraybuffer_accounting',False),('arraybuffer_accounting',None),('arraybuffer_modes',4),('arraybuffer_modes',None)]:
@@ -292,7 +328,7 @@ class ReleaseIntegrity(unittest.TestCase):
     def test_authorization_accepts_ref_qualified_path(self):
         run={'head_sha':SOURCE,'head_branch':'openclaw/main','event':'workflow_dispatch','path':'.github/workflows/openclaw-artifacts.yml@openclaw/main','run_attempt':1}
         config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())
-        names=['preflight','test','windows-arm64','assemble']+['build ('+l['label']+')' for l in config['lanes']]
+        names=['preflight','test','darwin-arm64','windows-arm64','assemble']+['build ('+l['label']+')' for l in config['lanes']]
         jobs={'jobs':[{'name':n,'conclusion':'success','run_attempt':1} for n in names]}
         pending=[{'environment':{'name':'openclaw-artifacts','id':99},'current_user_can_approve':True}]
         with patch.object(release,'api',side_effect=[{'enabled':True},run,jobs,pending,{}]) as api,patch.object(release,'execute') as execute:
@@ -303,7 +339,7 @@ class ReleaseIntegrity(unittest.TestCase):
     def test_authorization_accepts_protected_batch_branch(self):
         run={'head_sha':SOURCE,'head_branch':'openclaw/batch-1','event':'workflow_dispatch','path':'.github/workflows/openclaw-artifacts.yml@openclaw/batch-1','run_attempt':1}
         config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())
-        names=['preflight','test','windows-arm64','assemble']+['build ('+l['label']+')' for l in config['lanes']]
+        names=['preflight','test','darwin-arm64','windows-arm64','assemble']+['build ('+l['label']+')' for l in config['lanes']]
         jobs={'jobs':[{'name':n,'conclusion':'success','run_attempt':1} for n in names]}
         pending=[{'environment':{'name':'openclaw-artifacts','id':99},'current_user_can_approve':True}]
         with patch.object(release,'api',side_effect=[{'enabled':True},run,jobs,pending,{}]),patch.object(release,'execute') as execute:
@@ -428,7 +464,7 @@ class ReleaseIntegrity(unittest.TestCase):
     def test_authorization_accepts_rebased_release_branch(self):
         run={'head_sha':SOURCE,'head_branch':'openclaw/release-5718a6ec','event':'workflow_dispatch','path':'.github/workflows/openclaw-artifacts.yml','run_attempt':1}
         config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())
-        names=['preflight','test','windows-arm64','assemble']+['build ('+l['label']+')' for l in config['lanes']]
+        names=['preflight','test','darwin-arm64','windows-arm64','assemble']+['build ('+l['label']+')' for l in config['lanes']]
         jobs={'jobs':[{'name':n,'conclusion':'success','run_attempt':1} for n in names]}
         pending=[{'environment':{'name':'openclaw-artifacts','id':99},'current_user_can_approve':True}]
         with patch.object(release,'api',side_effect=[{'enabled':True},run,jobs,pending,{}]),patch.object(release,'execute') as execute:

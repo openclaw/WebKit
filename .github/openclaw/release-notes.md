@@ -1,3 +1,5 @@
+Native Darwin ARM64 qualification builds the frozen Bun candidate against the same-run macOS AOT archive, completes the reviewed 52-file selection, and runs all four AOT platform cases before assembly. Linux historical comparison and native Windows ARM64 engine gates remain required.
+
 The AOT builtin-table collector now recognizes native data properties declared with `CustomValue`. Getter and setter symbols remain available to code generation; Bun's `process.ppid` and `process.title` keep their existing data descriptors. Unknown table attributes still fail validation.
 
 Native artifact smoke probes now destroy the standalone JSC VM and release the FFI test VM under the API lock. ASan and LeakSanitizer checks cover normal teardown.
