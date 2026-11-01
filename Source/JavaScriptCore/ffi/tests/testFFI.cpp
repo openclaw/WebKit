@@ -2522,8 +2522,12 @@ static int runAll()
     }
 
     dataLogLn(s_failureCount ? "FAILED: " : "OK: ", s_checkCount - s_failureCount, " checks passed, ", s_failureCount, " failed.");
-    VM& leaked = s_vm.releaseNonNull().leakRef();
-    UNUSED_PARAM(leaked);
+    {
+        JSLockHolder locker(*s_vm);
+        gcUnprotect(s_globalObject);
+        s_globalObject = nullptr;
+        s_vm = nullptr;
+    }
     return s_failureCount ? 1 : 0;
 }
 

@@ -172,7 +172,8 @@ def build(label, destination):
     write(destination/(label+'.manifest.json'), manifest)
     (destination/'SHA256SUMS').write_text(''.join(files[name]['sha256']+'  '+name+'\n' for name in names))
     if label in ('bun-webkit-linux-amd64', 'bun-webkit-linux-amd64-aot', 'bun-webkit-linux-amd64-debug-asan-aot'):
-        run(str(artifact/'bin/jsc'), '-e', 'print("OpenClaw WebKit ready")')
+        # Release the shell VM before LeakSanitizer checks process teardown.
+        run(str(artifact/'bin/jsc'), '--destroy-vm', '-e', 'print("OpenClaw WebKit ready")')
         run(str(artifact/'bin/testFFI'))
         # ASan uses the system allocator; only the release lanes build these probes.
         if label in ('bun-webkit-linux-amd64', 'bun-webkit-linux-amd64-aot'):
