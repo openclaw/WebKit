@@ -4,76 +4,105 @@ on:
   pull_request:
     paths:
       - .github/workflows/openclaw-retained-linux-diagnostic.yml
-      - .github/openclaw/qualification/diagnose-retained-consumer.py
   workflow_dispatch:
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   group: openclaw-retained-linux-diagnostic-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  retained-driver:
+  tls-session-baseline:
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          path: carrier
+          repository: openclaw/bun
+          ref: 191755ec115ece3dd642eba3cb0143cecb5e5d7a
           persist-credentials: false
-          sparse-checkout: .github/openclaw/qualification/diagnose-retained-consumer.py
-          sparse-checkout-cone-mode: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: 42e4245f4180941634b482a7e8ef7fca47467de5
-          path: frozen
-          persist-credentials: false
-          sparse-checkout: .github/openclaw
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: '26.3.0'
-      - name: Prepare the isolated diagnostic tools and frozen source
-        timeout-minutes: 10
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends gdb strace unzip
-          curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o "$RUNNER_TEMP/bootstrap.zip"
-          unzip -q "$RUNNER_TEMP/bootstrap.zip" -d "$RUNNER_TEMP/bootstrap"
-          mkdir "$RUNNER_TEMP/qualification"
-          git clone --depth=1 --filter=blob:none --no-checkout https://github.com/openclaw/bun.git "$RUNNER_TEMP/qualification/bun"
-          git -C "$RUNNER_TEMP/qualification/bun" fetch --depth=1 origin 7b573c05d0c52dffc67d4d25daf108bed5930cf2
-          git -C "$RUNNER_TEMP/qualification/bun" checkout --detach 7b573c05d0c52dffc67d4d25daf108bed5930cf2
-          mkdir "$RUNNER_TEMP/retained"
-      - name: Download the exact retained build evidence
-        timeout-minutes: 5
+      - name: Download the exact shipped baseline
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          gh api repos/openclaw/WebKit/actions/artifacts/13065898437 > "$RUNNER_TEMP/retained/proof.metadata.json"
-          gh api repos/openclaw/WebKit/actions/artifacts/13065898437/zip > "$RUNNER_TEMP/retained/proof.zip"
-          gh api repos/openclaw/WebKit/actions/artifacts/13065868636 > "$RUNNER_TEMP/retained/binaries.metadata.json"
-          gh api repos/openclaw/WebKit/actions/artifacts/13065868636/zip > "$RUNNER_TEMP/retained/binaries.zip"
-      - name: Diagnose the original driver with an external deadline
-        timeout-minutes: 18
+          mkdir diagnostics
+          gh api repos/openclaw/bun/releases/assets/679971474 -H 'Accept: application/octet-stream' > diagnostics/manifest.json
+          gh api repos/openclaw/bun/releases/assets/679971203 -H 'Accept: application/octet-stream' > baseline.zip
+      - name: Verify shipping identity and replay the unchanged TLS context file
         shell: bash
         run: |
           set -euo pipefail
-          python3 carrier/.github/openclaw/qualification/diagnose-retained-consumer.py \
-            "$RUNNER_TEMP/retained" "$GITHUB_WORKSPACE/frozen" "$RUNNER_TEMP/qualification/bun" \
-            "$RUNNER_TEMP/bootstrap/bun-linux-x64/bun"
-      - name: Retain diagnostic facts and raw driver reports
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          python3 - <<'PY'
+          import hashlib, json, os, stat, subprocess, sys, zipfile
+          from pathlib import Path, PurePosixPath
+          from xml.etree import ElementTree
+
+          def sha(path):
+              with path.open('rb') as stream:
+                  return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+          commit = '191755ec115ece3dd642eba3cb0143cecb5e5d7a'
+          webkit = 'b82bc917e99110b61c3a21202d6def7457aa194c'
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD', 'HEAD^{tree}'], text=True).splitlines() == [commit, '656ed5260b61d9063f546f837238661a19514c1f']
+          assert not subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'], text=True)
+          report = Path('diagnostics').resolve()
+          manifest = report / 'manifest.json'
+          assert sha(manifest) == '8c3a9d87f37832fa07173635af52d53b813e29470afa4afdb49a83033fed039e'
+          data = json.loads(manifest.read_text())
+          assert data['bun']['commit'] == commit and data['webkit']['version'] == webkit
+          assets = [a for a in data['assets'] if a['target'] == 'linux-x64']
+          assert len(assets) == 1
+          asset = assets[0]
+          archive = Path('baseline.zip')
+          assert archive.stat().st_size == asset['size'] == 51053995
+          assert sha(archive) == asset['sha256'] == 'a59df8273c232782c16a6c0e680511becd9a49ba08fa6a1adc7baea1a632de0b'
+          executable = asset['executable']['path']
+          with zipfile.ZipFile(archive) as bundle:
+              entries = bundle.infolist()
+              path = PurePosixPath(executable)
+              assert not path.is_absolute() and '..' not in path.parts and '\\' not in executable
+              directory = str(path.parent) + '/'
+              assert len(entries) == 2 and {e.filename for e in entries} == {directory, executable}
+              folder = bundle.getinfo(directory)
+              assert folder.is_dir() and folder.file_size == 0 and stat.S_IFMT(folder.external_attr >> 16) in (0, stat.S_IFDIR)
+              entry = bundle.getinfo(executable)
+              assert stat.S_IFMT(entry.external_attr >> 16) in (0, stat.S_IFREG)
+              assert entry.file_size == asset['executable']['size'] < 256 * 1024**2
+              bundle.extract(entry, 'baseline')
+          exe = (Path('baseline') / executable).resolve()
+          assert sha(exe) == asset['executable']['sha256']
+          exe.chmod(0o700)
+          facts = json.loads(subprocess.check_output([str(exe), '-e', 'console.log(JSON.stringify({commit:Bun.revision,webkit:process.versions.webkit,platform:process.platform,arch:process.arch}))'], text=True, timeout=30))
+          assert facts == {'commit': commit, 'webkit': webkit, 'platform': 'linux', 'arch': 'x64'}
+          fixture = Path('test/js/node/tls/node-tls-context.test.ts')
+          digest = sha(fixture)
+          assert digest == '0f6ba03e222d53279f9fa553cc3390bdd9707fc7ab382294f18d292ec8ad0bb3'
+          env = dict(os.environ, CI='1', BUN_RUNTIME_TRANSPILER_CACHE_PATH='0')
+          with (report / 'stdout.log').open('xb') as stdout, (report / 'stderr.log').open('xb') as stderr:
+              result = subprocess.run([str(exe), 'test', '--expose-internals', str(fixture), '--reporter=junit', '--reporter-outfile=' + str(report / 'result.xml')],
+                  env=env, stdout=stdout, stderr=stderr, timeout=120)
+          tree = ElementTree.parse(report / 'result.xml')
+          cases = list(tree.iter('testcase'))
+          failures = [{'name': c.get('name'), 'classname': c.get('classname')} for c in cases if c.find('failure') is not None or c.find('error') is not None]
+          outcome = {'qualification': False, 'identity': facts, 'executable_sha256': sha(exe), 'fixture_sha256': digest,
+                     'exitCode': result.returncode, 'cases': len(cases), 'skipped': sum(c.find('skipped') is not None for c in cases), 'failures': failures}
+          (report / 'outcome.json').write_text(json.dumps(outcome, indent=2) + '\n')
+          print(json.dumps(outcome), flush=True)
+          assert len(cases) == 83 and outcome['skipped'] == 0, 'baseline file did not execute completely'
+          assert result.returncode in (0, 1) and bool(failures) == (result.returncode == 1)
+          assert sha(fixture) == digest and sha(exe) == asset['executable']['sha256']
+          sys.exit(result.returncode)
+          PY
+      - name: Retain the baseline result and unchanged assertions
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: retained-linux-consumer-diagnostic
-          path: ${{ runner.temp }}/retained/diagnostic/
+          name: tls-session-baseline-linux-x64
+          path: diagnostics
           if-no-files-found: error
           retention-days: 7
