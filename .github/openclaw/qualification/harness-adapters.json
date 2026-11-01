@@ -51,7 +51,7 @@
       }
     },
     "candidate": {
-      "pin": "7b573c05d0c52dffc67d4d25daf108bed5930cf2",
+      "pin": "d9be087429c21e563bb5ac29f8a11805e64b56a3",
       "build": {
         "kind": "source-compatibility",
         "patch": "harness-adapters/candidate-build.patch",

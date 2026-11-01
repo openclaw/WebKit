@@ -9,6 +9,9 @@ on:
       - .github/openclaw/qualification/harness-adapters.json
       - .github/openclaw/qualification/harness_adapters.py
       - .github/openclaw/qualification/harness-adapters/**
+      - .github/openclaw/variants.json
+      - .github/openclaw/qualify-sync.sh
+      - .github/openclaw/qualification/verify-sync.py
   workflow_dispatch:
 
 permissions:
@@ -51,8 +54,8 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
           path: carrier
-          sparse-checkout: .github/openclaw/qualification
-      - name: Make room for retained qualification
+          sparse-checkout: .github/openclaw
+      - name: Make room for an independent candidate build
         shell: bash
         run: |
           set -euo pipefail
@@ -65,7 +68,7 @@ jobs:
           import json, os, shutil
           from pathlib import Path
           capacity = dict(cpus=os.cpu_count(), disk_free_bytes=shutil.disk_usage('.').free)
-          assert capacity['disk_free_bytes'] >= 40 * 1024**3, 'retained artifacts and qualification need 40 GiB free'
+          assert capacity['disk_free_bytes'] >= 40 * 1024**3, 'candidate build and retained baseline need 40 GiB free'
           Path(os.environ['QUALIFICATION_DIR']).mkdir()
           Path(os.environ['QUALIFICATION_DIR'], 'carrier.json').write_text(json.dumps(dict(
               carrier=os.environ['CARRIER_COMMIT'], sync=os.environ['SYNC_COMMIT'],
@@ -144,7 +147,7 @@ jobs:
           curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o "$RUNNER_TEMP/bun.zip"
           unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bootstrap"
           echo "$RUNNER_TEMP/bootstrap/bun-linux-x64" >> "$GITHUB_PATH"
-      - name: Download the admitted successful builds and baseline observation
+      - name: Download unchanged engine and baseline evidence
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
@@ -156,7 +159,7 @@ jobs:
           gh api repos/openclaw/WebKit/actions/artifacts/13068952583/zip > "$RUNNER_TEMP/retained/proof.zip"
           gh api repos/openclaw/WebKit/actions/artifacts/13068828135 > "$RUNNER_TEMP/retained/binaries.metadata.json"
           gh api repos/openclaw/WebKit/actions/artifacts/13068828135/zip > "$RUNNER_TEMP/retained/binaries.zip"
-      - name: Admit completed native proof and install the reviewed consumer repair
+      - name: Admit baseline proof and install the integrated consumer controls
         shell: bash
         run: |
           set -euo pipefail
@@ -172,16 +175,18 @@ jobs:
           python3 .github/openclaw/test_consumer_identity.py
           python3 .github/openclaw/test_verify_jsc_results.py
           bash .github/openclaw/preflight.sh
-      - name: Finish qualification with the admitted native selection
+      - name: Build and qualify the integrated consumer from source
         shell: bash
         run: |
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
           export INSPECTOR_RUNTIME="$(realpath "$(command -v bun)")"
+          tail -n +1 -F "$QUALIFICATION_DIR/build-candidate.log" &
+          tail_pid=$!
           (while sleep 60; do date -u; free -m; df -h /; done) &
           monitor_pid=$!
-          trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
-          bash "$QUALIFICATION_DIR/qualify-candidate-reuse.sh"
+          trap 'kill "$tail_pid" "$monitor_pid" 2>/dev/null || true' EXIT
+          bash "$QUALIFICATION_DIR/qualify-candidate-fresh.sh"
           export CANDIDATE_BUN="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
           export CANDIDATE_RECEIPT="$QUALIFICATION_DIR/candidate-identity.json"
           bash .github/openclaw/qualify-sync-compatibility.sh
@@ -194,6 +199,7 @@ jobs:
           path: |
             ${{ runner.temp }}/qualification/bun-baseline/build/qualify-baseline/bun
             ${{ runner.temp }}/qualification/bun/build/qualify-candidate/bun
+            ${{ runner.temp }}/qualification/bun/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o
             ${{ runner.temp }}/qualification/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
             ${{ runner.temp }}/qualification/*.sha256
           compression-level: 0
@@ -209,7 +215,7 @@ jobs:
             ${{ runner.temp }}/qualification/*.log
             ${{ runner.temp }}/qualification/*.sha256
             ${{ runner.temp }}/qualification/*.patch
-            ${{ runner.temp }}/qualification/qualify-candidate-reuse.sh
+            ${{ runner.temp }}/qualification/qualify-candidate-fresh.sh
             ${{ runner.temp }}/qualification/candidate-input/artifacts.json
             ${{ runner.temp }}/qualification/baseline/*.json
             ${{ runner.temp }}/qualification/baseline/*.log

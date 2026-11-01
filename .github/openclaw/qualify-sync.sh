@@ -32,6 +32,7 @@ else
   selection_exit=$?
 fi
 if test "$selection_exit" -ne 0; then exit "$selection_exit"; fi
+"$candidate" test --expose-internals test/js/node/quic/quic-sni.test.ts > "$results/quic-sni.log" 2>&1
 "$candidate" test --expose-gc test/js/node/sqlite/node-sqlite.test.ts test/js/node/test/parallel/test-sqlite-statement-sync.js \
   -t "rejects oversized BigInt with ERR_INVALID_ARG_VALUE|bind error messages match node's exactly|database-level defaults flow to prepared statements|BigInts support can be toggled|BigInt is required for reading large integers|BigInts are returned when input is true" \
   > "$results/sqlite-bigint.log" 2>&1
@@ -58,7 +59,7 @@ python3 "$inputs/compile_cache.py" /tmp "$junit_prefix" "$results/module-junit.x
 "$candidate" test test/bundler/bundler_minify.test.ts > "$results/stack-minifier.log" 2>&1
 python3 "$inputs/stack/check-runtime-cache.py" --baseline "$QUALIFICATION_DIR/bun-baseline/build/qualify-baseline/bun" --candidate "$candidate" --fixture "$inputs/stack/observe-regressions.js" --output "$results/runtime-cache" --expected-version 45 > "$results/stack-cache.json"
 "$candidate" "$inputs/segmenter.js" > "$results/segmenter.log" 2>&1
-"$candidate" test test/js/node/vm/vm.test.ts -t 'a Proxy in the prototype chain' > "$results/proxy.log" 2>&1
+"$candidate" test --expose-internals test/js/node/vm/vm.test.ts -t 'a Proxy in the prototype chain' > "$results/proxy.log" 2>&1
 "$candidate" test test/js/node/worker_threads/openclaw-resource-limits.test.ts -t resourceLimits > "$results/resource-limits.log" 2>&1
 "$candidate" test test/js/bun/resolve/esModule.test.ts test/js/bun/namespace-prototype-pollution.test.ts test/js/bun/resolve/require-esm-evaluating-cycle.test.ts test/js/bun/import-attributes/import-attributes.test.ts test/js/node/module/require-extensions.test.ts > "$results/namespace.log" 2>&1
 "$candidate" test test/js/node/process/process.test.js -t 'ArrayBuffer memory ownership' > "$results/arraybuffer.log" 2>&1
