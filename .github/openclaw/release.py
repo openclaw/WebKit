@@ -78,6 +78,8 @@ def assemble(inputs,out,source):
         raise ValueError('missing or mismatched sync invocation')
     if sync.get('compile_cache')!=compile_cache.evidence(proof/'sync/module-junit.xml'):
         raise ValueError('missing or mismatched compile-cache qualification')
+    if sync.get('aot')!=consumer_identity.aot_evidence(proof,binaries,identity):
+        raise ValueError('missing or mismatched AOT qualification')
     compatibility=gate.get('compatibility',{})
     if (compatibility.get('passed') is not True or compatibility.get('source')!=source
         or compatibility.get('candidate_identity_sha256')!=identity_sha

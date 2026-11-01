@@ -11,7 +11,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
-from test_consumer_identity import release_fixture
+from test_consumer_identity import release_fixture, AOT_FIXTURE
 
 spec=importlib.util.spec_from_file_location('release',Path(__file__).with_name('release.py'))
 release=importlib.util.module_from_spec(spec);spec.loader.exec_module(release)
@@ -24,6 +24,8 @@ class ReleaseIntegrity(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name);self.inputs=self.root/'inputs';self.inputs.mkdir()
         self.out=self.root/'release'
+        aot_pin=patch.object(release.consumer_identity,'AOT_TEST_SHA256',hashlib.sha256(AOT_FIXTURE).hexdigest())
+        aot_pin.start();self.addCleanup(aot_pin.stop)
         config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())
         q=self.inputs/'qualification';q.mkdir()
         for lane in config['lanes']:
@@ -144,6 +146,30 @@ class ReleaseIntegrity(unittest.TestCase):
                     with self.assertRaises(ValueError):release.assemble(self.inputs,self.root/('raw-tamper-'+name),SOURCE)
                 finally:
                     for path,data in originals.items():(proof/path).write_bytes(data)
+
+    def test_aot_gate_rechecks_raw_log_and_pinned_test(self):
+        proof=self.inputs/'qualification';gate_path=proof/'gate.json'
+        original_gate=gate_path.read_text();log=proof/release.consumer_identity.AOT_LOG;original_log=log.read_text()
+        test=self.inputs/'linux-bun-executables'/release.consumer_identity.AOT_TEST;original_test=test.read_bytes()
+        cases=['missing','identity','binary','log','source','failed','skipped','todo']
+        for case in cases:
+            with self.subTest(case=case):
+                gate=json.loads(original_gate)
+                try:
+                    if case=='missing':del gate['upstream_sync']['aot']
+                    elif case=='identity':gate['upstream_sync']['aot']['candidate_identity_sha256']='f'*64
+                    elif case=='binary':gate['upstream_sync']['aot']['executable']['sha256']='f'*64
+                    elif case=='log':log.write_text(original_log+'extra log bytes\n')
+                    elif case=='source':test.write_bytes(original_test+b'changed')
+                    else:
+                        log.write_text(' 4 pass\n '+('1' if case=='failed' else '0')+' fail\n'
+                            + (' 1 '+('skip' if case=='skipped' else 'todo')+'\n' if case!='failed' else ''))
+                        gate['upstream_sync']['aot']['log']=release.consumer_identity.file_record(proof,release.consumer_identity.AOT_LOG)
+                    gate_path.write_text(json.dumps(gate))
+                    with self.assertRaisesRegex(ValueError,'AOT'):
+                        release.assemble(self.inputs,self.root/('bad-aot-'+case),SOURCE)
+                finally:
+                    gate_path.write_text(original_gate);log.write_text(original_log);test.write_bytes(original_test)
 
     def test_complete_set_roundtrip(self):
         self.assemble();self.assertEqual(len(release.verify(self.out,SOURCE)['artifacts']),22)

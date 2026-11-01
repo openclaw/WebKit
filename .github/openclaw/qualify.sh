@@ -32,8 +32,8 @@ for arm in baseline candidate; do
     export BUN_BUILD_PREFETCH_DIR="$QUALIFICATION_DIR/baseline-prefetch"
   else
     unset BUN_WEBKIT_ARTIFACT_MANIFEST
-    python3 "$inputs/stage-sync-artifact.py" "$ARTIFACT_DIR/bun-webkit-linux-amd64.tar.gz" \
-      --lane-manifest "$ARTIFACT_DIR/bun-webkit-linux-amd64.manifest.json" --version "$SOURCE_SHA" --output "$QUALIFICATION_DIR/candidate-input"
+    python3 "$inputs/stage-sync-artifact.py" "$ARTIFACT_DIR/bun-webkit-linux-amd64-aot.tar.gz" \
+      --lane-manifest "$ARTIFACT_DIR/bun-webkit-linux-amd64-aot.manifest.json" --version "$SOURCE_SHA" --output "$QUALIFICATION_DIR/candidate-input"
     cp "$QUALIFICATION_DIR/candidate-input/artifacts.json" scripts/build/deps/webkit-artifacts.json
     git diff --binary HEAD > "$QUALIFICATION_DIR/candidate-manifest.patch"
     export BUN_BUILD_PREFETCH_DIR="$QUALIFICATION_DIR/candidate-input/prefetch"

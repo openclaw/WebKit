@@ -151,7 +151,8 @@ def run(root, name, phase, engine, inspector, prefix=None):
     env = os.environ.copy()
     if phase == 'build':
         revision = identity.CONFIG['baseline']['engine'] if arm == 'baseline' else engine['source']
-        command = [str(inspector), 'run', 'build:release', '--lto=off', '--webkit-version=' + revision,
+        flags = ['--lto=off'] if arm == 'baseline' else ['--aot=on', '--lto=off']
+        command = [str(inspector), 'run', 'build:release', *flags, '--webkit-version=' + revision,
                    '--buildDir=' + str(repo / 'build' / ('qualify-' + arm)), '--timings']
         for key in ('GITHUB_SHA', 'BUILDKITE_COMMIT', 'GIT_SHA'):
             env.pop(key, None)
