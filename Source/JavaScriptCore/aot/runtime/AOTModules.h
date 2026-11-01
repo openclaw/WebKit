@@ -122,6 +122,7 @@ public:
     static JSValue storedValue(JSGlobalObject*, JSObject* table, const Identifier& name);
     // As AbstractModuleRecord::getModuleNamespace(): the caller that creates the object decides whether it is extensible.
     JSObject* moduleNamespace(ModuleID, ModulePhase, bool shouldPreventExtensions = true);
+    JSObject* moduleNamespaceForRequire(ModuleID);
     bool mayExport(ModuleID, UniquedStringImpl* name) const;
     JSObject* importMeta(ModuleID);
     JSCell* builtinCell(BuiltinID, ModuleID);
@@ -407,8 +408,6 @@ private:
     bool mayHandOutModuleObject(ModuleID module) const { return data(module).kind != ModuleKind::CommonJs || data(module).hasValue(); }
     JSValue answerRequire(ModuleID);
     JSValue readExportForRequire(JSObject* namespaceObject, const Identifier& name);
-    void willRequireESModule(ModuleID);
-    void markNamespaceAsRequired(ModuleID);
 
     JSPromise* importUncompiled(const Identifier& key, ModuleID referrer, RefPtr<ScriptFetchParameters>&&);
     std::optional<ModuleID> findByName(const Identifier& key);
@@ -493,8 +492,6 @@ private:
     bool wasRequestedByLoader(ModuleID file);
     bool hasReachedLevelOf(FilesBeingRun&, ModuleID file);
     void findDistanceOfFiles(FilesBeingRun&);
-    BitVector m_modulesWithMarkOfRequire;
-    BitVector m_modulesWithExtensibleNamespace;
     BitVector m_modulesWithEarlierNamespaceInValue;
     BitVector m_modulesEvaluatedUnderAnotherEvaluation;
     std::optional<ModuleID> m_firstModuleRequestedByHost;

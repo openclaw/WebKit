@@ -589,29 +589,6 @@ static void beginEvaluationInCode(const AnalysisContext& context, Function& code
     builder.emitReturn(builder.appendUndefined());
 }
 
-// Behind the evaluation, require() marks the namespace object of a module that has no export `__esModule`: everybody who holds that object reads `true` under the name from then on.
-static bool isMarkOfRequireSpelled(const Program& program, const ParallelLoops& loops)
-{
-    PropertyKeyID marker = program.keyOf(BuiltinNames::__esModule);
-    if (!marker || !program.types.isSpelledByOperations(marker))
-        return false;
-    return !findIndicesInParallel(loops, program.functions.size(), [&](unsigned index) {
-        constexpr OpcodeSet opcodesThatSpellKeys {
-            Opcode::PropGet, Opcode::PropSet, Opcode::PropDefine, Opcode::PropHas, Opcode::PropHasOwn, Opcode::PropDelete, Opcode::GetOwnProperty, Opcode::KeyConstant, Opcode::NarrowByField,
-        };
-        if (listsAllValues(program, FunctionID(index))) {
-            bool isSpelled = false;
-            forEachListedName(program, FunctionID(index), opcodesThatSpellKeys, [&](BlockID, ValueID, Opcode, NameKind kind, uint32_t name) {
-                isSpelled |= kind == NameKind::Key && name == marker.index();
-            });
-            return isSpelled;
-        }
-        return anyValueListedOrNot(program, FunctionID(index), opcodesThatSpellKeys, [&](ValueID, const Value& value) {
-            return value.key() == marker;
-        });
-    }).isEmpty();
-}
-
 // `children` and `parent` of a module object say which `require` came first and which has run at all.
 static bool asksWhoRequiredWhom(const Program& program, const FlowResults& flow)
 {
@@ -628,7 +605,7 @@ static bool asksWhoRequiredWhom(const Program& program, const FlowResults& flow)
     return idOfModuleObject && !flow.usesOf(idOfModuleObject).isEmpty();
 }
 
-static void replaceSites(const EvaluationPlan& plan, NOESCAPE const Invocable<bool(ModuleID)> auto& recordsNothingThatIsSeen, ModuleID evaluated, Function& function, IRBuilder& builder)
+static void replaceSites(const EvaluationPlan& plan, bool recordsNothingThatIsSeen, ModuleID evaluated, Function& function, IRBuilder& builder)
 {
     const Program& program = plan.program;
     // By the number of the value: which of the bare sites of the module it is, counted from one.
@@ -646,7 +623,7 @@ static void replaceSites(const EvaluationPlan& plan, NOESCAPE const Invocable<bo
             ValueID id = function.blocks[blockIndex].values[index];
             const Value& value = function.at(id);
             bool isRecord = value.opcode == Opcode::RecordRequire;
-            if (isRecord ? !recordsNothingThatIsSeen(value.module()) : value.opcode != Opcode::EvaluateModule)
+            if (isRecord ? !recordsNothingThatIsSeen : value.opcode != Opcode::EvaluateModule)
                 continue;
             isErased.quickSet(id.index());
             if (isRecord)
@@ -841,18 +818,7 @@ void callModules(ProgramEditor& editor, const FlowResults& flow, BuildContext& b
     }
     plan.hasNoState = findModulesWithoutState(plan, isStart);
 
-    // What a program can tell of a `require` beyond the evaluation of the module.
-    bool markIsSpelled = !recordsRequires || isMarkOfRequireSpelled(program, loops);
-    bool isAskedWhoRequiredWhom = !recordsRequires || somebodyAsksWhoRequiredWhom;
-    // What is recorded is who required whom and, of an ES module, the mark, which a module that exports the name itself does not get.
-    auto recordsNothingThatIsSeen = [&](ModuleID target) {
-        if (isAskedWhoRequiredWhom)
-            return false;
-        const Module& module = program.at(target);
-        if (module.kind != ModuleKind::SourceText || std::ranges::contains(module.exports, program.stringOf(BuiltinNames::__esModule), &ModuleExport::name))
-            return true;
-        return flow.hasResults() && !markIsSpelled && flow.module(target).namespaceUse != NamespaceUse::Unknown;
-    };
+    bool recordsNothingThatIsSeen = recordsRequires && !somebodyAsksWhoRequiredWhom;
 
     // What compiled code starts where a handler of the program may stand around it, and everything that is evaluated below that.
     BitVector mayBeLeftByCaughtError = isRequiredLate;
@@ -985,7 +951,7 @@ void callModules(ProgramEditor& editor, const FlowResults& flow, BuildContext& b
         case SiteKind::Named:
             break;
         case SiteKind::Record:
-            isReplaced = recordsNothingThatIsSeen(site.target);
+            isReplaced = recordsNothingThatIsSeen;
             numberOfRequiresRecorded += !isReplaced;
             break;
         }

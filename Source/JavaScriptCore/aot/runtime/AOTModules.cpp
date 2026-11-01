@@ -38,6 +38,7 @@
 #include "JSCInlines.h"
 #include "JSMicrotask.h"
 #include "JSModuleLoader.h"
+#include "JSModuleNamespaceObject.h"
 #include "MicrotaskQueueInlines.h"
 #include "ModuleGraphLoadingState.h"
 #include "ModuleRegistryEntry.h"
@@ -583,17 +584,12 @@ JSObject* Modules::createNamespace(ModuleID module, ModulePhase phase, bool shou
         exportObjects.names->setIndex(vm, i, text);
     }
 
-    bool isRequired = phase == ModulePhase::Evaluation && m_modulesWithMarkOfRequire.get(module.index());
-    if (phase == ModulePhase::Evaluation && m_modulesWithExtensibleNamespace.get(module.index()))
-        shouldPreventExtensions = false;
     Structure*& structure = shouldPreventExtensions ? m_namespaceStructure : m_extensibleNamespaceStructure;
     if (!structure) {
-        structure = ModuleNamespace::createStructure(vm, realm, realm->moduleNamespaceObjectStructure()->storedPrototype(), shouldPreventExtensions);
+        structure = ModuleNamespace::createStructure(vm, realm, jsNull(), shouldPreventExtensions);
         m_storedReferences.recordAll();
     }
     ModuleNamespace* namespaceObject = ModuleNamespace::create(vm, structure, module, phase, exportObjects);
-    if (isRequired && !namespaceObject->hasExport(vm.propertyNames->__esModule.impl()))
-        namespaceObject->setESModuleMarker(true);
     setNamespace(module, phase, namespaceObject);
     return namespaceObject;
 }
@@ -611,6 +607,19 @@ JSObject* Modules::moduleNamespace(ModuleID module, ModulePhase phase, bool shou
     if (JSObject* namespaceObject = namespaceIfCreated(module, phase))
         return namespaceObject;
     return createNamespace(module, phase, shouldPreventExtensions);
+}
+
+JSObject* Modules::moduleNamespaceForRequire(ModuleID module)
+{
+    auto scope = DECLARE_THROW_SCOPE(*m_instance.vm);
+    JSObject* namespaceObject = moduleNamespace(module, ModulePhase::Evaluation);
+    RETURN_IF_EXCEPTION(scope, nullptr);
+    if (auto* compiled = dynamicDowncast<ModuleNamespace>(namespaceObject))
+        namespaceObject = compiled->createNamespaceForRequire(m_instance.globalObject);
+    else if (auto* interpreted = dynamicDowncast<JSModuleNamespaceObject>(namespaceObject))
+        namespaceObject = interpreted->createNamespaceForRequire(m_instance.globalObject);
+    RETURN_IF_EXCEPTION(scope, nullptr);
+    return namespaceObject;
 }
 
 JSObject* Modules::importMeta(ModuleID module)
@@ -2314,6 +2323,12 @@ JSObject* moduleNamespace(JSGlobalObject* realm, ModuleID module)
     return modules ? modules->moduleNamespace(module, Modules::ModulePhase::Evaluation) : nullptr;
 }
 
+JSObject* moduleNamespaceForRequire(JSGlobalObject* realm, ModuleID module)
+{
+    Modules* modules = modulesOrThrow(realm, module);
+    return modules ? modules->moduleNamespaceForRequire(module) : nullptr;
+}
+
 bool mayExport(JSGlobalObject* realm, ModuleID module, UniquedStringImpl* name)
 {
     Modules* modules = modulesOf(realm);
@@ -2356,16 +2371,6 @@ bool hasFileWithExtension(StringView extension)
 bool isModuleNamespace(JSCell* cell)
 {
     return cell->inherits<ModuleNamespace>();
-}
-
-bool hasESModuleMarker(JSCell* moduleNamespace)
-{
-    return uncheckedDowncast<ModuleNamespace>(moduleNamespace)->hasESModuleMarker();
-}
-
-void setESModuleMarker(JSCell* moduleNamespace, bool hasMarker)
-{
-    uncheckedDowncast<ModuleNamespace>(moduleNamespace)->setESModuleMarker(hasMarker);
 }
 
 static constexpr unsigned invalidIndex = static_cast<unsigned>(-1);
@@ -2783,6 +2788,26 @@ ModuleNamespace* ModuleNamespace::create(VM& vm, Structure* structure, ModuleID 
     return object;
 }
 
+ModuleNamespace* ModuleNamespace::createNamespaceForRequire(JSGlobalObject* globalObject)
+{
+    auto scope = DECLARE_THROW_SCOPE(globalObject->vm());
+    if (ModuleNamespace* required = m_requiredNamespace.get())
+        return required;
+    evaluateIfNeeded(globalObject);
+    RETURN_IF_EXCEPTION(scope, nullptr);
+    VM& vm = globalObject->vm();
+    if (m_hasESModuleMarker || hasExport(vm.propertyNames->__esModule.impl()) || !hasExport(vm.propertyNames->defaultKeyword.impl()))
+        return this;
+    DynamicExports exports { m_dynamicExportNames.get(), m_capturedValues.get(), m_liveSources.get() };
+    Structure* facadeStructure = structure();
+    if (facadeStructure->isStructureExtensible())
+        facadeStructure = Structure::preventExtensionsTransition(vm, facadeStructure);
+    auto* facade = create(vm, facadeStructure, m_module, ModulePhase::Evaluation, exports);
+    facade->m_hasESModuleMarker = true;
+    m_requiredNamespace.set(vm, this, facade);
+    return facade;
+}
+
 Modules& ModuleNamespace::modules() const
 {
     return *modulesOf(realm());
@@ -2812,6 +2837,7 @@ void ModuleNamespace::visitChildrenImpl(JSCell* cell, Visitor& visitor)
 {
     auto* thisObject = uncheckedDowncast<ModuleNamespace>(cell);
     Base::visitChildren(thisObject, visitor);
+    visitor.append(thisObject->m_requiredNamespace);
     visitor.append(thisObject->m_dynamicExportNames);
     visitor.append(thisObject->m_capturedValues);
     visitor.append(thisObject->m_liveSources);
@@ -2829,7 +2855,7 @@ std::optional<unsigned> ModuleNamespace::find(UniquedStringImpl* name) const
 
 bool ModuleNamespace::tryReadExports(JSGlobalObject* globalObject, Vector<UniquedStringImpl*, 8>& names, MarkedArgumentBuffer& values)
 {
-    if (m_isDeferred || m_mayNeedEvaluation || m_dynamicExportNames || isValidOffset(structure()->maxOffset()))
+    if (m_isDeferred || m_mayNeedEvaluation || m_hasESModuleMarker || m_dynamicExportNames || isValidOffset(structure()->maxOffset()))
         return false;
     auto scope = DECLARE_THROW_SCOPE(globalObject->vm());
     Modules& modules = this->modules();
@@ -2856,7 +2882,12 @@ bool ModuleNamespace::isOrdinaryKey(PropertyName name) const
     VM& vm = this->vm();
     if (name == vm.propertyNames->toStringTagSymbol)
         return false;
-    return isSymbolLikeKey(name.uid()) || (name == vm.propertyNames->__esModule && !hasExport(name.uid()));
+    return isSymbolLikeKey(name.uid());
+}
+
+bool ModuleNamespace::isESModuleMarker(PropertyName name) const
+{
+    return m_hasESModuleMarker && name == vm().propertyNames->__esModule;
 }
 
 bool ModuleNamespace::evaluateIfNeeded(JSGlobalObject* globalObject)
@@ -2918,6 +2949,10 @@ bool ModuleNamespace::getOwnPropertySlot(JSObject* object, JSGlobalObject* globa
         thisObject->evaluateIfNeeded(globalObject);
         RETURN_IF_EXCEPTION(scope, false);
     }
+    if (thisObject->isESModuleMarker(name)) {
+        slot.setValue(thisObject, static_cast<unsigned>(PropertyAttribute::DontDelete), jsBoolean(true));
+        return true;
+    }
     std::optional<unsigned> index = thisObject->find(name.uid());
     if (!index && !thisObject->isDynamicExport(name.uid())) {
         if (thisObject->isOrdinaryKey(name))
@@ -2956,6 +2991,7 @@ void ModuleNamespace::getOwnPropertyNames(JSObject* object, JSGlobalObject* glob
     std::span<const ModuleExportData> entries = thisObject->exports();
     JSCellButterfly* dynamicNames = thisObject->m_dynamicExportNames.get();
     unsigned dynamicNameCount = dynamicNames ? dynamicNames->length() : 0;
+    bool needsMarker = thisObject->m_hasESModuleMarker;
     for (unsigned ownIndex = 0, dynamicIndex = 0; ownIndex < entries.size() || dynamicIndex < dynamicNameCount;) {
         if (ownIndex < entries.size() && thisObject->isAmbiguousExport(ownIndex)) {
             ++ownIndex;
@@ -2975,8 +3011,14 @@ void ModuleNamespace::getOwnPropertyNames(JSObject* object, JSGlobalObject* glob
             if (!hasProperty)
                 continue;
         }
+        if (needsMarker && codePointCompare(StringView(vm.propertyNames->__esModule.string()), StringView(name.string())) < 0) {
+            names.add(vm.propertyNames->__esModule);
+            needsMarker = false;
+        }
         names.add(name);
     }
+    if (needsMarker)
+        names.add(vm.propertyNames->__esModule);
     if (!names.includeSymbolProperties())
         return;
     // The order of JSModuleNamespaceObject::getOwnPropertyNames, where Symbol.toStringTag is the first property of the Structure.
@@ -2994,12 +3036,9 @@ void ModuleNamespace::getOwnPropertyNames(JSObject* object, JSGlobalObject* glob
         names.add((*structureNames)[index]);
 }
 
-bool ModuleNamespace::put(JSCell* cell, JSGlobalObject* globalObject, PropertyName name, JSValue value, PutPropertySlot& slot)
+bool ModuleNamespace::put(JSCell*, JSGlobalObject* globalObject, PropertyName, JSValue, PutPropertySlot& slot)
 {
-    VM& vm = globalObject->vm();
-    auto scope = DECLARE_THROW_SCOPE(vm);
-    if (name == vm.propertyNames->__esModule && !uncheckedDowncast<ModuleNamespace>(cell)->hasExport(name.uid()))
-        RELEASE_AND_RETURN(scope, Base::put(cell, globalObject, name, value, slot));
+    auto scope = DECLARE_THROW_SCOPE(globalObject->vm());
     return typeError(globalObject, scope, slot.isStrictMode(), ReadonlyPropertyWriteError);
 }
 
@@ -3016,7 +3055,7 @@ bool ModuleNamespace::deleteProperty(JSCell* cell, JSGlobalObject* globalObject,
         return Base::deleteProperty(thisObject, globalObject, name, slot);
     if (!thisObject->isSymbolLikeKey(name.uid()) && !thisObject->evaluateIfNeeded(globalObject))
         return false;
-    return !thisObject->hasExport(name.uid()) && name != globalObject->vm().propertyNames->toStringTagSymbol;
+    return !thisObject->hasExport(name.uid()) && !thisObject->isESModuleMarker(name) && name != globalObject->vm().propertyNames->toStringTagSymbol;
 }
 
 bool ModuleNamespace::deletePropertyByIndex(JSCell* cell, JSGlobalObject* globalObject, unsigned index)
@@ -3035,7 +3074,7 @@ bool ModuleNamespace::defineOwnProperty(JSObject* object, JSGlobalObject* global
     PropertyDescriptor current;
     bool isCurrentDefined = object->getOwnPropertyDescriptor(globalObject, name, current);
     RETURN_IF_EXCEPTION(scope, false);
-    if (!isCurrentDefined || !thisObject->hasExport(name.uid()))
+    if (!isCurrentDefined || (!thisObject->hasExport(name.uid()) && !thisObject->isESModuleMarker(name)))
         RELEASE_AND_RETURN(scope, validateAndApplyPropertyDescriptor(globalObject, nullptr, name, false, descriptor, isCurrentDefined, current, shouldThrow));
 
     // The steps of JSModuleNamespaceObject::defineOwnProperty.

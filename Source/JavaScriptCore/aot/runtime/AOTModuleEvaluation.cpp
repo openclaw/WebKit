@@ -2575,12 +2575,7 @@ JSValue Modules::answerRequire(ModuleID target)
         RELEASE_AND_RETURN(scope, requireSpecifier(pathString(target), *targetData.referrerModule(), true));
     if (!targetData.hasExportTable()) {
         if (LoadedModule* loaded = targetData.mayBeImportedWhileItRuns() ? loadedIfExists(target) : nullptr; loaded && loaded->isAnsweredWithNamespace) [[unlikely]] {
-            JSObject* namespaceObject = moduleNamespace(target, ModulePhase::Evaluation, false);
-            RETURN_IF_EXCEPTION(scope, { });
-            // As for an ES module below.
-            if (auto* names = uncheckedDowncast<ModuleNamespace>(namespaceObject); !names->hasExport(vm.propertyNames->__esModule.impl()))
-                names->setESModuleMarker(true);
-            return namespaceObject;
+            RELEASE_AND_RETURN(scope, moduleNamespaceForRequire(target));
         }
         JSValue executed = execute(target);
         RETURN_IF_EXCEPTION(scope, { });
@@ -2588,7 +2583,6 @@ JSValue Modules::answerRequire(ModuleID target)
         return executed;
     }
 
-    willRequireESModule(target);
     LoadedModule& loaded = ensureLoaded(target);
     // In plain Bun the cache holds a module object with empty exports until the loader's require() returns. The jobs of the loader that it runs behind the evaluation can run a file that requires the module.
     if (loaded.isBeingRequired) {
@@ -2614,18 +2608,12 @@ JSValue Modules::answerRequire(ModuleID target)
         RETURN_IF_EXCEPTION(scope, { });
     } else {
         RELEASE_ASSERT(targetData.requireResult == RequireResult::Namespace);
-        JSObject* namespaceObject = moduleNamespace(target, ModulePhase::Evaluation);
+        JSObject* namespaceObject = moduleNamespaceForRequire(target);
         RETURN_IF_EXCEPTION(scope, { });
         if (m_moduleExportsName.isNull())
             m_moduleExportsName = Identifier::fromString(vm, "module.exports"_s);
-        JSValue esModule = readExportForRequire(namespaceObject, vm.propertyNames->__esModule);
+        JSValue moduleExports = readExportForRequire(namespaceObject, m_moduleExportsName);
         RETURN_IF_EXCEPTION(scope, { });
-        JSValue moduleExports;
-        if (esModule) {
-            moduleExports = readExportForRequire(namespaceObject, m_moduleExportsName);
-            RETURN_IF_EXCEPTION(scope, { });
-        }
-        markNamespaceAsRequired(target);
         result = !moduleExports || moduleExports.isUndefinedOrNull() ? JSValue(namespaceObject) : moduleExports;
     }
     loaded.requiredValue.set(*this, result);
@@ -2832,8 +2820,6 @@ void Modules::recordRequire(ModuleID target, ModuleID referrer)
 {
     const ModuleData& targetData = data(target);
     bool isCommonJSFile = targetData.kind == ModuleKind::CommonJs;
-    if (!isCommonJSFile)
-        markNamespaceAsRequired(target);
     if (!m_showsWaysBetweenModuleObjects || !(isFileOfProgram(target) || targetData.kind == ModuleKind::Data))
         return;
     // A file without a module object to hand out is shown neither as a child nor as a parent. Which file is the main one hangs on the calls that come before that is decided.
@@ -3024,29 +3010,6 @@ JSValue Modules::resolveDynamic(JSValue specifier, ModuleID referrer, ResolvedSp
     JSObject* holder = form == ResolvedSpecifierForm::URL ? importMeta(referrer) : moduleObject(referrer);
     RETURN_IF_EXCEPTION(scope, { });
     RELEASE_AND_RETURN(scope, host().resolveSpecifier(m_instance.globalObject, holder, specifier, form));
-}
-
-// In plain Bun a namespace object is extensible if require() creates it, and not if an import does: import(), or the link of a module with `import * as`.
-// Compiled code creates the object on first use, so the first require() decides here.
-void Modules::willRequireESModule(ModuleID module)
-{
-    if (m_modulesWithMarkOfRequire.get(module.index()) || namespaceIfCreated(module, ModulePhase::Evaluation))
-        return;
-    if (data(module).isImportedAsNamespace() && !isNotLoaded(module))
-        return;
-    m_modulesWithExtensibleNamespace.set(module.index());
-}
-
-// From the first require() on, the namespace object of a module without an export `__esModule` reads `true` under that name, for everybody who holds it.
-void Modules::markNamespaceAsRequired(ModuleID module)
-{
-    if (!data(module).hasExportTable() || m_modulesWithMarkOfRequire.get(module.index()))
-        return;
-    willRequireESModule(module);
-    m_modulesWithMarkOfRequire.set(module.index());
-    auto* namespaceObject = uncheckedDowncast<ModuleNamespace>(namespaceIfCreated(module, ModulePhase::Evaluation));
-    if (namespaceObject && !namespaceObject->hasExport(m_instance.vm->propertyNames->__esModule.impl()))
-        namespaceObject->setESModuleMarker(true);
 }
 
 // An empty result says that the read threw, as it does for a binding in its dead zone.
