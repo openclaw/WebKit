@@ -46,8 +46,10 @@ def state(adapted):
     assert git('write-tree') == git('rev-parse', 'HEAD^{tree}')
     tracked = {name for name, row in SPEC['files'].items() if row['before'] is not None}
     added = set(SPEC['files']) - tracked
-    assert set(git('diff', '--name-only', 'HEAD').splitlines()) == (tracked if adapted else set())
-    assert set(git('ls-files', '--others', '--exclude-standard').splitlines()) == (added if adapted else set())
+    changed = set(git('diff', '--name-only', 'HEAD').splitlines())
+    untracked = set(git('ls-files', '--others', '--exclude-standard').splitlines())
+    assert changed == (tracked if adapted else set()), (changed, tracked, adapted)
+    assert untracked == (added if adapted else set()), (untracked, added, adapted)
     for name, row in SPEC['files'].items():
         expected = row['after' if adapted else 'before']
         if expected is None:
@@ -133,6 +135,7 @@ def stress(name, pattern, expected, quick=False, gc=False, timings=False):
 
 assert SPEC['engine'] == ENGINE and len(SPEC['files']) == 3
 RECORD['controls'] = {p.name: sha(p) for p in INPUTS.iterdir() if p.is_file()}
+save()
 state(False)
 assert sha(SOURCE / 'Tools/TestWebKitAPI/Tests/JavaScriptCore/HeapTeardown.cpp') == '6ffd949ac2a2cba9aba09ca367bd982d3cb9c0d6e0364e7e8d7a19be8a519e71'
 for name, row in SPEC['files'].items():

@@ -30,6 +30,7 @@ jobs:
             !/JSTests/stress/*
             /JSTests/stress/basic-eden-gc-test.js
             /JSTests/stress/weakmap-gc.js
+            /JSTests/stress/error-stack-async-relative-resume-target.js
             !/PerformanceTests/
             !/Websites/
             !/ManualTests/

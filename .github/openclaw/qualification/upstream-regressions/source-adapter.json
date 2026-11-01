@@ -24,7 +24,11 @@
       "control": "AsyncStackTrace.cpp"
     },
     "JSTests/stress/error-stack-async-relative-resume-target.js": {
-      "before": null,
+      "before": {
+        "bytes": 754,
+        "sha256": "870d4fc0f903f6fd9e6cf26c992c411658fb4ce673ec401e78a21960b4ccf7e3",
+        "blob": "876efeec7377175a2f7e59179dfb844c706aa794"
+      },
       "after": {
         "bytes": 870,
         "sha256": "014ebbeecbd94287c126a356c18ded2a44b667c338a452927d78b3e658dd9235",
