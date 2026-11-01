@@ -1,0 +1,79 @@
+name: OpenClaw retained Linux consumer diagnostic
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/openclaw-retained-linux-diagnostic.yml
+      - .github/openclaw/qualification/diagnose-retained-consumer.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: openclaw-retained-linux-diagnostic-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  retained-driver:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: carrier
+          persist-credentials: false
+          sparse-checkout: .github/openclaw/qualification/diagnose-retained-consumer.py
+          sparse-checkout-cone-mode: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 42e4245f4180941634b482a7e8ef7fca47467de5
+          path: frozen
+          persist-credentials: false
+          sparse-checkout: .github/openclaw
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.3.0'
+      - name: Prepare the isolated diagnostic tools and frozen source
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gdb strace unzip
+          curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o "$RUNNER_TEMP/bootstrap.zip"
+          unzip -q "$RUNNER_TEMP/bootstrap.zip" -d "$RUNNER_TEMP/bootstrap"
+          mkdir "$RUNNER_TEMP/qualification"
+          git clone --depth=1 --filter=blob:none --no-checkout https://github.com/openclaw/bun.git "$RUNNER_TEMP/qualification/bun"
+          git -C "$RUNNER_TEMP/qualification/bun" fetch --depth=1 origin 7b573c05d0c52dffc67d4d25daf108bed5930cf2
+          git -C "$RUNNER_TEMP/qualification/bun" checkout --detach 7b573c05d0c52dffc67d4d25daf108bed5930cf2
+          mkdir "$RUNNER_TEMP/retained"
+      - name: Download the exact retained build evidence
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api repos/openclaw/WebKit/actions/artifacts/13065898437 > "$RUNNER_TEMP/retained/proof.metadata.json"
+          gh api repos/openclaw/WebKit/actions/artifacts/13065898437/zip > "$RUNNER_TEMP/retained/proof.zip"
+          gh api repos/openclaw/WebKit/actions/artifacts/13065868636 > "$RUNNER_TEMP/retained/binaries.metadata.json"
+          gh api repos/openclaw/WebKit/actions/artifacts/13065868636/zip > "$RUNNER_TEMP/retained/binaries.zip"
+      - name: Diagnose the original driver with an external deadline
+        timeout-minutes: 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 carrier/.github/openclaw/qualification/diagnose-retained-consumer.py \
+            "$RUNNER_TEMP/retained" "$GITHUB_WORKSPACE/frozen" "$RUNNER_TEMP/qualification/bun" \
+            "$RUNNER_TEMP/bootstrap/bun-linux-x64/bun"
+      - name: Retain diagnostic facts and raw driver reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: retained-linux-consumer-diagnostic
+          path: ${{ runner.temp }}/retained/diagnostic/
+          if-no-files-found: error
+          retention-days: 7
