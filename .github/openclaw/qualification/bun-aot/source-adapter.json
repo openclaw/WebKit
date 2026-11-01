@@ -2,13 +2,13 @@
   "bun": "fd40ba44187c721ee023062fa153a6a27560e6b1",
   "webkit": "8e335354a58fa9a8eed14a70a8b9bf97b5d3073f",
   "prepare_only": false,
-  "patch_sha256": "1c325e4f3b564cb0a2574bc1c5823a97866374042635cc80c2f4b38c568ded82",
+  "patch_sha256": "cdb30b433834161f42d5f9926b0c1977eb443bc5cb4be7def90bb60fb800a231",
   "files": {
     "CHANGELOG.md": {
       "before": "aa3d183726734a0c1dd7f255d783b7e7b1946e4ff88e9432623e31556c206308",
-      "after": "99e02c7ba08918853c844acea2ed5ac4b4a28115fe737dab3a4ec419d9ae3298",
+      "after": "48e4472e2f4a7e4619900a02711fa99fc93e20adfde33c351c78fb0660d94ebb",
       "base_blob": "ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0",
-      "adapted_blob": "4d8154ae908d139f35a532e84a12b03c11044868",
+      "adapted_blob": "f881277bdebf6dd3dc88c674daba836f4502a20d",
       "mode": "100644"
     },
     "Cargo.lock": {
@@ -1378,9 +1378,9 @@
     },
     "src/sema/file_analysis/source_tests/fold.rs": {
       "before": "9acdcc80ebf1316edd832134267b37acea52a8843396799326b052af324f0bdd",
-      "after": "9da49e3727d4c80e77dd4ca328e349d42d2f810c9d1e7f37e21ea907f50c70d4",
+      "after": "fa4bc61e60015e2e1ca5cc1851ffa28d86abe91dcb102019c02b28272d39008e",
       "base_blob": "ad77980983d3dc48c45923876de862890a5cfd41",
-      "adapted_blob": "e3fa7238d77f523a4c8e79b1e8f04d24c34b7755",
+      "adapted_blob": "f7fb5683358527347e5a454c05b97658b4902aa8",
       "mode": "100644"
     },
     "src/sema/file_analysis/top_level_await.rs": {
@@ -1448,9 +1448,9 @@
     },
     "src/sema/fold/folder_operators.rs": {
       "before": "fe293f41a09107e10b9303d3d2aab55527bbef71344e9164bf4908951e25fc16",
-      "after": "128ad3d59fb0315531d865883a2019c78c3a55648eff2660aa94da0f19b8083b",
+      "after": "5c9327dca9ed45f71c2a0ea6cf4f9841dae5544d0c5bef437d0de7da8ce82faf",
       "base_blob": "d1777422b699d1c6a740f21ee72bcf54a2008453",
-      "adapted_blob": "a8ca44c1a4392d44976b7ac380ef489c4b91cc4b",
+      "adapted_blob": "caa3169d916f5ffb1e5d03033faa2a97f4e94cc0",
       "mode": "100644"
     },
     "src/sema/fold/known_to_bun_run.rs": {

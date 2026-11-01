@@ -1,11 +1,13 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0..4d8154ae908d139f35a532e84a12b03c11044868 100644
+index ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0..f881277bdebf6dd3dc88c674daba836f4502a20d 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,13 @@
+@@ -2,6 +2,15 @@
  
  ## Unreleased
  
++- Preserve `typeof` side effects while excluding unreachable awaits from ordinary-run function metadata.
++
 +- Remove unused private AOT byte-range host declarations that prevented the native compiler from linking.
 +
 +- Keep imported module namespaces unmarked and preserve live exports through the own `__esModule` marker of `require(esm)`, including compiled AOT modules.
@@ -12554,10 +12556,10 @@ index 13077b695a3a013e1174659f2883dcfbbef42f3d..63ea7096cc10dccd11e5597412d694ed
  
  use crate::atom::Interner;
 diff --git a/src/sema/file_analysis/source_tests/fold.rs b/src/sema/file_analysis/source_tests/fold.rs
-index ad77980983d3dc48c45923876de862890a5cfd41..e3fa7238d77f523a4c8e79b1e8f04d24c34b7755 100644
+index ad77980983d3dc48c45923876de862890a5cfd41..f7fb5683358527347e5a454c05b97658b4902aa8 100644
 --- a/src/sema/file_analysis/source_tests/fold.rs
 +++ b/src/sema/file_analysis/source_tests/fold.rs
-@@ -1448,6 +1448,65 @@ fn dead_code() {
+@@ -1448,6 +1448,84 @@ fn dead_code() {
      }
  }
  
@@ -12569,6 +12571,8 @@ index ad77980983d3dc48c45923876de862890a5cfd41..e3fa7238d77f523a4c8e79b1e8f04d24
 +        "if (!(void effect())) {} else await work();",
 +        "(void effect()) && await work();",
 +        "typeof effect() ? 1 : await work();",
++        "typeof effect() || await work();",
++        "typeof effect() ?? await work();",
 +    ] {
 +        let text = format!("async function f() {{ {body} }}");
 +        analyzed("a.mjs", &text, |s| {
@@ -12583,6 +12587,23 @@ index ad77980983d3dc48c45923876de862890a5cfd41..e3fa7238d77f523a4c8e79b1e8f04d24
 +                matches!(s.hir[s.hir[call].callee].kind, ExprKind::Ident(name) if s.workspace.atoms.bytes(name) == b"effect")
 +            }).expect("effect call");
 +            assert!(!decisions.is_dead_expr(effect), "{body}");
++        });
++    }
++}
++
++#[test]
++fn ordinary_run_typeof_keeps_reached_await_live() {
++    for body in [
++        "typeof effect() && await work();",
++        "typeof (await work()) ? 1 : 2;",
++    ] {
++        let text = format!("async function f() {{ {body} }}");
++        analyzed("a.mjs", &text, |s| {
++            let decisions = s.analysis.decisions.as_folded_by_bun_run();
++            assert!(
++                bun_sema::file_analysis::has_live_await(&s.hir, &decisions, s.function("f")),
++                "{body}"
++            );
 +        });
 +    }
 +}
@@ -12623,7 +12644,7 @@ index ad77980983d3dc48c45923876de862890a5cfd41..e3fa7238d77f523a4c8e79b1e8f04d24
  #[test]
  fn everything_below_is_marked() {
      let text = "if (false) { function g() { h(); } class K { m() { i(); } } var v; } v;";
-@@ -1524,11 +1583,22 @@ fn tests_of_runtime_values() {
+@@ -1524,11 +1602,22 @@ fn tests_of_runtime_values() {
          |s| {
              let type_test = last_expr(s, |kind| matches!(kind, ExprKind::Unary { .. }));
              let function = Constant::String(s.workspace.atom("function"));
@@ -13131,10 +13152,24 @@ index 68abf323eb93e932e3c1a8367bb63c9d3337785f..96197678eb7bdbe43217b88b29ddd64f
              }
          })
 diff --git a/src/sema/fold/folder_operators.rs b/src/sema/fold/folder_operators.rs
-index d1777422b699d1c6a740f21ee72bcf54a2008453..a8ca44c1a4392d44976b7ac380ef489c4b91cc4b 100644
+index d1777422b699d1c6a740f21ee72bcf54a2008453..caa3169d916f5ffb1e5d03033faa2a97f4e94cc0 100644
 --- a/src/sema/fold/folder_operators.rs
 +++ b/src/sema/fold/folder_operators.rs
-@@ -99,11 +99,12 @@ impl<'s> Folder<'_, 's> {
+@@ -28,7 +28,12 @@ impl<'s> Folder<'_, 's> {
+                 FoldedValue::Constant(constant) => Folded::constant(constant),
+                 FoldedValue::ConstantOutsideDeadZone(_) | FoldedValue::Unknown => Folded::UNKNOWN,
+             },
+-            ExprKind::Unary { op, operand } => self.fold_unary(op, operand),
++            ExprKind::Unary { op, operand } => {
++                if op == UnOp::Typeof {
++                    self.conditions.insert(e, true);
++                }
++                self.fold_unary(op, operand)
++            }
+             ExprKind::Binary { op, left, right } => self.fold_binary(e, op, left, right),
+             ExprKind::Cond { test, branches } => {
+                 self.fold_conditional(e, test, hir.branches(branches))
+@@ -99,11 +104,12 @@ impl<'s> Folder<'_, 's> {
          if op == UnOp::Typeof
              && let Some(kind) = self.find_runtime_value_kind(operand)
          {
@@ -13148,7 +13183,7 @@ index d1777422b699d1c6a740f21ee72bcf54a2008453..a8ca44c1a4392d44976b7ac380ef489c
          }
          if op == UnOp::Not
              && let Some(&is_truthy) = self.conditions.get(&operand)
-@@ -127,17 +128,22 @@ impl<'s> Folder<'_, 's> {
+@@ -127,17 +133,22 @@ impl<'s> Folder<'_, 's> {
                  Folded::new(right.value, left.effects.min(right.effects))
              }
              BinOp::EqEq | BinOp::EqEqEq => match self.find_main_module_equality(e) {
@@ -13173,7 +13208,7 @@ index d1777422b699d1c6a740f21ee72bcf54a2008453..a8ca44c1a4392d44976b7ac380ef489c
      fn fold_operands(&self, op: BinOp, left: ExprId, right: ExprId) -> Folded {
          let (left, right) = (self.folded(left), self.folded(right));
          let value = self.evaluator.binary(op, left.value, right.value);
-@@ -162,7 +168,7 @@ impl<'s> Folder<'_, 's> {
+@@ -162,7 +173,7 @@ impl<'s> Folder<'_, 's> {
          Folded::new(Value::from(Constant::Boolean(!answer_when_equal)), effects)
      }
  
@@ -13182,7 +13217,7 @@ index d1777422b699d1c6a740f21ee72bcf54a2008453..a8ca44c1a4392d44976b7ac380ef489c
          match self.folded(e).value {
              Value::Known(value) => Some(self.evaluator.is_nullish(value)),
              Value::Unknown => self
-@@ -187,7 +193,7 @@ impl<'s> Folder<'_, 's> {
+@@ -187,7 +198,7 @@ impl<'s> Folder<'_, 's> {
          };
          match is_decided_by_left {
              Some(true) => {
@@ -13191,7 +13226,7 @@ index d1777422b699d1c6a740f21ee72bcf54a2008453..a8ca44c1a4392d44976b7ac380ef489c
                  self.copy_condition(e, left);
                  self.folded(left)
              }
-@@ -234,7 +240,7 @@ impl<'s> Folder<'_, 's> {
+@@ -234,7 +245,7 @@ impl<'s> Folder<'_, 's> {
          };
          let Branches { yes, no } = branches;
          let (selected, excluded) = if is_true { (yes, no) } else { (no, yes) };

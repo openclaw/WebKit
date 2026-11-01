@@ -307,6 +307,7 @@ rust_env = dict(ENV, BUN_CODEGEN_DIR=str(BUILD / 'codegen'), TESTAOT=str(BUILD /
                 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS='-Cforce-frame-pointers=yes')
 rust_cases = [
     ('bun_sema_parser', 'analysis_fold', 'ordinary_run_await_branches_keep_test_effects'),
+    ('bun_sema_parser', 'analysis_fold', 'ordinary_run_typeof_keeps_reached_await_live'),
     ('bun_sema_parser', 'analysis_fold', 'build_only_conditions_leave_ordinary_run_await_live'),
     ('bun_aot', None, 'link::marks::tests::expected_result_keeps_its_layouts'),
     ('bun_aot', None, 'emit::tests::engine_prints_same_text'),
