@@ -9339,7 +9339,7 @@ index e3336300aa36607133357383b2693b32e5dd2a95..a6f27a0bd69380d492aa5e6d3fc01710
      }
  }
 diff --git a/src/aot/modules/imports.rs b/src/aot/modules/imports.rs
-index 465320d17fbef756fefd802fe5ed559889fb264d..bbed474e755319980eb1bd0f71d5eaadfc2a8a2e 100644
+index 465320d17fbef756fefd802fe5ed559889fb264d..41fe6bac91884e0578c92e79c29c34924d4423bc 100644
 --- a/src/aot/modules/imports.rs
 +++ b/src/aot/modules/imports.rs
 @@ -1,7 +1,7 @@
@@ -9383,7 +9383,28 @@ index 465320d17fbef756fefd802fe5ed559889fb264d..bbed474e755319980eb1bd0f71d5eaad
          let bindings = &mut self.imports.bindings;
          bindings.shared_sort_by_key(|&(symbol, _)| symbol);
          bindings.dedup_by_key(|&mut (symbol, _)| symbol);
-@@ -463,7 +463,11 @@ impl<'a, 's> FileBinder<'a, 's> {
+@@ -370,6 +370,20 @@ impl<'a, 's> FileBinder<'a, 's> {
+         names.any(|(_, resolved)| resolved.resolution == variable)
+     }
+ 
++    pub(super) fn marker(&self, module: ModuleRef) -> Option<bool> {
++        match self.context.modules.interop(module).kind {
++            ModuleKind::SourceText => {
++                if self.context.tables.has_dynamic_names(module) {
++                    None
++                } else {
++                    Some(self.resolve_name(module, known::default).is_ok())
++                }
++            }
++            ModuleKind::CommonJs => (self.context.marker)(module),
++            _ => None,
++        }
++    }
++
+     pub(super) fn resolve_name(
+         &self,
+         exporter: ModuleRef,
+@@ -463,7 +477,11 @@ impl<'a, 's> FileBinder<'a, 's> {
      }
  
      fn add_required_name(&mut self, required_name: RequiredName) {
@@ -9396,7 +9417,7 @@ index 465320d17fbef756fefd802fe5ed559889fb264d..bbed474e755319980eb1bd0f71d5eaad
              self.imports.required_names.push(required_name);
          }
      }
-@@ -502,21 +506,51 @@ impl<'a, 's> FileBinder<'a, 's> {
+@@ -502,21 +520,51 @@ impl<'a, 's> FileBinder<'a, 's> {
          }
      }
  
@@ -9592,25 +9613,25 @@ index b0277eb4caf2f3656a5e9ba4cbcfe2204191b79c..83bd55440de6901c15e17c560f808165
      let inner_requests = requests.inner_modules.into_iter();
      let parts = GraphParts {
 diff --git a/src/aot/modules/namespace_members.rs b/src/aot/modules/namespace_members.rs
-index 439a2b3ff59d7ac3971346bd205923abefd8c47f..1355b121680a6a11cad82ee07926d619ecc85309 100644
+index 439a2b3ff59d7ac3971346bd205923abefd8c47f..0f21ba16e19afabe1f06764410005b083b7b863d 100644
 --- a/src/aot/modules/namespace_members.rs
 +++ b/src/aot/modules/namespace_members.rs
-@@ -179,8 +179,13 @@ impl FileBinder<'_, '_> {
+@@ -177,15 +177,6 @@ impl FileBinder<'_, '_> {
+         }
+     }
  
-     fn marker(&self, module: ModuleRef) -> Option<bool> {
-         match self.context.modules.interop(module).kind {
+-    fn marker(&self, module: ModuleRef) -> Option<bool> {
+-        match self.context.modules.interop(module).kind {
 -            // From the first `require` on.
 -            ModuleKind::SourceText => Some(true),
-+            ModuleKind::SourceText => {
-+                if self.context.tables.has_dynamic_names(module) {
-+                    None
-+                } else {
-+                    Some(self.resolve_name(module, known::default).is_ok())
-+                }
-+            }
-             ModuleKind::CommonJs => (self.context.marker)(module),
-             _ => None,
-         }
+-            ModuleKind::CommonJs => (self.context.marker)(module),
+-            _ => None,
+-        }
+-    }
+-
+     fn is_esm_wrapper(&self, module: ModuleRef) -> bool {
+         let ModuleRef::Inner { file, callback } = module else {
+             return false;
 diff --git a/src/aot/modules/plan.rs b/src/aot/modules/plan.rs
 index afa3e2d0c492a26b178950a08910ab2f858f0870..4b5f42e9ba3f1be848f19f56cb33256a46f6c1cc 100644
 --- a/src/aot/modules/plan.rs

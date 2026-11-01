@@ -2,7 +2,7 @@
   "bun": "fd40ba44187c721ee023062fa153a6a27560e6b1",
   "webkit": "8e335354a58fa9a8eed14a70a8b9bf97b5d3073f",
   "prepare_only": false,
-  "patch_sha256": "93687dd70ec599e0c195280b987e80c44afbc4766a7dd57f4ca2abed9d5fe38d",
+  "patch_sha256": "125edec6575d689f73836e9e24548651c2e323a6f3f6f5724f1dd4807eaaedc9",
   "files": {
     "CHANGELOG.md": {
       "before": "aa3d183726734a0c1dd7f255d783b7e7b1946e4ff88e9432623e31556c206308",
@@ -1028,9 +1028,9 @@
     },
     "src/aot/modules/imports.rs": {
       "before": "4f5da6e69309a873d07a75f97e84bd47061bfb026c7f8dbf8412202660c0c56a",
-      "after": "e0bdeb450c203fe364bea5c3d7ef59324b27a06d6ce34c4d5aa6a63d24e63001",
+      "after": "59d32afa941fdd9c8b44d1be3bfa4b636603a04f80ded06998f5b0691223a063",
       "base_blob": "465320d17fbef756fefd802fe5ed559889fb264d",
-      "adapted_blob": "bbed474e755319980eb1bd0f71d5eaadfc2a8a2e",
+      "adapted_blob": "41fe6bac91884e0578c92e79c29c34924d4423bc",
       "mode": "100644"
     },
     "src/aot/modules/imports/tests.rs": {
@@ -1049,9 +1049,9 @@
     },
     "src/aot/modules/namespace_members.rs": {
       "before": "47c98f0e185094fad586450396fba73752acda8e8a56c223a7cb23ee27a545e9",
-      "after": "dc1f1969c5525e1d6ca49a50a85be955c1188c1086f16881d82a56e321dcf4d9",
+      "after": "5ff75f002dcf40c5d358798285e766658b3e0f7aac2cf29dabb79663c477050b",
       "base_blob": "439a2b3ff59d7ac3971346bd205923abefd8c47f",
-      "adapted_blob": "1355b121680a6a11cad82ee07926d619ecc85309",
+      "adapted_blob": "0f21ba16e19afabe1f06764410005b083b7b863d",
       "mode": "100644"
     },
     "src/aot/modules/plan.rs": {
