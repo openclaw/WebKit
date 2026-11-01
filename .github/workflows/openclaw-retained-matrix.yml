@@ -56,6 +56,9 @@ jobs:
         if: always()
         with:
           name: retained-matrix-assembly-inputs
-          path: ${{ runner.temp }}/inputs/assembly-inputs.json
+          path: |
+            ${{ runner.temp }}/inputs/assembly-inputs.json
+            ${{ runner.temp }}/assembled/manifest.json
+            ${{ runner.temp }}/assembled/SHA256SUMS
           if-no-files-found: warn
           retention-days: 7
