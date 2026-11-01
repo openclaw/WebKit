@@ -290,8 +290,25 @@ build_command = ['bun', 'scripts/build.ts', '--profile=release-local', '--webkit
                  '--os=linux', '--arch=aarch64', '--abi=gnu', '--build-dir=build/aot-linux-arm64', '-j2']
 run('configure', [*build_command, '--configure-only'], 600)
 source_state(True)
-run('generate-builtin-table', [*build_command, '--target=codegen/aot_builtin_table.json'], 600)
+rust_input_targets = [
+    'codegen/aot_schema.rs', 'codegen/aot_builtin_table.json',
+    'codegen/builtin_sources.bin', 'codegen/removable_features.rs',
+    'clone-zstd', 'clone-lolhtml', 'clone-rust-argon2',
+]
+run('generate-rust-test-inputs', [*build_command, *['--target=' + target for target in rust_input_targets]], 600)
 source_state(True)
+compile_env = dict(ENV, BUN_CODEGEN_DIR=str(BUILD / 'codegen'),
+                   CARGO_PROFILE_DEV_OPT_LEVEL='1', CARGO_BUILD_JOBS='2',
+                   CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS='-Cforce-frame-pointers=yes')
+for index, (package, target) in enumerate([
+    ('bun_sema_parser', ['--test', 'analysis_fold']),
+    ('bun_aot', ['--lib']),
+    ('bun_aot', ['--test', 'ir_tests']),
+    ('bun_trim', ['--lib']),
+]):
+    run('rust-compile-' + str(index), ['cargo', '+nightly-2026-09-15', 'test', '--locked',
+                                    '--no-run', '-p', package, *target], 1800, env=compile_env)
+    source_state(True)
 run('build', build_command, 14400)
 source_state(True)
 binary = BUILD / 'bun'

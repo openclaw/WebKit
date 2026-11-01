@@ -3512,10 +3512,10 @@ index 845837d1c4d195883bac108416a497b72dda374d..3825a94437d89b19560f0993f7b6d0a5
 +    );
  }
 diff --git a/src/aot/link/marks/tests.rs b/src/aot/link/marks/tests.rs
-index 39791f2055d64202fc94b00a41f5e721c8fab0d6..cc65f0aea6813a8d70e6bf6f79bbf8ec85602682 100644
+index 39791f2055d64202fc94b00a41f5e721c8fab0d6..80a90a410513f5bb3c9043645b9624146c8ccb75 100644
 --- a/src/aot/link/marks/tests.rs
 +++ b/src/aot/link/marks/tests.rs
-@@ -517,32 +517,53 @@ fn data_record_keeps_its_layout() {
+@@ -517,32 +517,52 @@ fn data_record_keeps_its_layout() {
  }
  
  #[test]
@@ -3524,7 +3524,7 @@ index 39791f2055d64202fc94b00a41f5e721c8fab0d6..cc65f0aea6813a8d70e6bf6f79bbf8ec
      with_test_files(|projects, [main, ..]| {
          let layout_keys = [1, 2].map(test_object_type_key);
          let mut unit = TestUnit::new(main);
-         let module = unit.module;
+-        let module = unit.module;
 -        let texts = [&b"Retained"[..], b"Dropped"].map(|text| unit.fragment.strings.intern(text));
 -        let sites = texts.map(|text| unit.fragment.add_type_site(create_type_site(module, text)));
          let mut expected_results = Vec::new();
@@ -3577,7 +3577,7 @@ index 39791f2055d64202fc94b00a41f5e721c8fab0d6..cc65f0aea6813a8d70e6bf6f79bbf8ec
          });
  
          let marked = mark_fragments(projects, [unit.finish()]);
-@@ -550,9 +571,6 @@ fn expected_result_keeps_its_layouts_and_site() {
+@@ -550,9 +570,6 @@ fn expected_result_keeps_its_layouts_and_site() {
          assert!(marked.errors.is_empty(), "{:?}", marked.errors);
          let marks = marked.unit_marks(main);
          assert_eq!(marks.expected_results, [true, false]);
@@ -4032,9 +4032,18 @@ index f1826de4f98f3a8d67702f215430244b2b1a8039..c2e1e31293239dbb55c5615f5b06b16f
          },
      }
 diff --git a/src/aot/load/fold_inputs.rs b/src/aot/load/fold_inputs.rs
-index 7aecf9627bbb385f08843cca28d0b43039810d36..4e6e0ce0bc09e4cc0608ae45cd6d11c05ca34dc4 100644
+index 7aecf9627bbb385f08843cca28d0b43039810d36..e746f4d0e97df9a87afa865e7105cfdb524b0cce 100644
 --- a/src/aot/load/fold_inputs.rs
 +++ b/src/aot/load/fold_inputs.rs
+@@ -200,7 +200,7 @@ mod tests {
+ 
+     use super::*;
+     use crate::builtins::RuntimeModule;
+-    use crate::compile::testing::{default_settings, with_bind_input, with_loaded_build};
++    use crate::compile::testing::{default_settings, with_loaded_build};
+     use crate::diagnostics::Diagnostics;
+     use crate::load::project::{PerProject, ProjectId};
+ 
 @@ -491,15 +491,6 @@ mod tests {
          assert!(below(b"Array") > 1);
      }
@@ -10884,10 +10893,21 @@ index 1fddbb69c9a2b946b4497548b820d536bfd1b183..5def2fc76d37f23deca7c71d9f2d89d3
  
  fn is_untyped_access(record: &AccessRecord) -> bool {
 diff --git a/src/aot/report/causes/tests.rs b/src/aot/report/causes/tests.rs
-index 2ab0a1fb1e98e56d00860083322ab76c8efc7a21..2800eb694e514fdb48cb3e3ae7689f76490373b6 100644
+index 2ab0a1fb1e98e56d00860083322ab76c8efc7a21..0d8e92c5a9b34900870d85cda83d8770884f2214 100644
 --- a/src/aot/report/causes/tests.rs
 +++ b/src/aot/report/causes/tests.rs
-@@ -355,15 +355,26 @@ fn free_access_has_no_cause() {
+@@ -41,6 +41,10 @@ fn access(
+         limit: LimitId::None,
+         layout: ABSENT_WORD,
+         copies: 1,
++        distance: 0,
++        has_other_roots: 0,
++        other_origins: 0,
++        heat: 0.0,
+         witness: Witness {
+             function: ABSENT_WORD,
+             value: ABSENT_WORD,
+@@ -355,15 +359,26 @@ fn free_access_has_no_cause() {
  }
  
  #[test]
@@ -10997,6 +11017,18 @@ index d19b39d25dbfb4b6a3efcecebee6a0bc032952b9..81b81bf32c1e49ede6787587f14c483f
      );
  }
  
+diff --git a/src/aot/report/runtime_use/tests.rs b/src/aot/report/runtime_use/tests.rs
+index 77f43899a723862b5d62ceefab01da691b9e6491..b24231ad43b1a7507e1cf0a8df42b74eda0591f1 100644
+--- a/src/aot/report/runtime_use/tests.rs
++++ b/src/aot/report/runtime_use/tests.rs
+@@ -141,6 +141,7 @@ fn blocker_codes_do_not_follow_enumerator_names() {
+             "eval",
+             "external-import",
+             "dynamic-import",
++            "dynamic-import",
+             "runtime-code",
+             "build-option",
+         ]
 diff --git a/src/aot/report/wording.rs b/src/aot/report/wording.rs
 index eece435c825a0c410a7ac1b9579a6c4f05d5c0f6..720df2bb3ef60a1c72b59a8da46f001eeaaf12f9 100644
 --- a/src/aot/report/wording.rs

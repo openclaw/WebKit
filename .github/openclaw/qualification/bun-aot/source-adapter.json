@@ -2,7 +2,7 @@
   "bun": "fd40ba44187c721ee023062fa153a6a27560e6b1",
   "webkit": "8e335354a58fa9a8eed14a70a8b9bf97b5d3073f",
   "prepare_only": false,
-  "patch_sha256": "cdb30b433834161f42d5f9926b0c1977eb443bc5cb4be7def90bb60fb800a231",
+  "patch_sha256": "864652a831741c3bcadb158560c931590d0b9cfd1ac27505d3ec0c9c8c02a708",
   "files": {
     "CHANGELOG.md": {
       "before": "aa3d183726734a0c1dd7f255d783b7e7b1946e4ff88e9432623e31556c206308",
@@ -454,9 +454,9 @@
     },
     "src/aot/link/marks/tests.rs": {
       "before": "de8e2d2bc7c6f67bf6eb4268cb1852cff581946192cb0fab7da2e1fd53fb4d4b",
-      "after": "8d5df7bd0d95e5e550805aa529a7244b190f6903b04b2ec2c8f35e9c13a38418",
+      "after": "77bfc30e03359ec5b5d2ee485261e4e2c748fe6e2e3d78a7ccd3fb23bb37ed4e",
       "base_blob": "39791f2055d64202fc94b00a41f5e721c8fab0d6",
-      "adapted_blob": "cc65f0aea6813a8d70e6bf6f79bbf8ec85602682",
+      "adapted_blob": "80a90a410513f5bb3c9043645b9624146c8ccb75",
       "mode": "100644"
     },
     "src/aot/link/marks/tests/modules.rs": {
@@ -524,9 +524,9 @@
     },
     "src/aot/load/fold_inputs.rs": {
       "before": "fd3d13aca307c371735657cf480e6d1b216eef53063817baf9993cf3f62971bf",
-      "after": "d423716514cbdb4cda23ffc05da49b5948f9ea1074ec37b091496bd80812946c",
+      "after": "db41ec0fc22dd19c064883d875055d7a017de654e98a6294c6be682a4916d6c2",
       "base_blob": "7aecf9627bbb385f08843cca28d0b43039810d36",
-      "adapted_blob": "4e6e0ce0bc09e4cc0608ae45cd6d11c05ca34dc4",
+      "adapted_blob": "e746f4d0e97df9a87afa865e7105cfdb524b0cce",
       "mode": "100644"
     },
     "src/aot/load/react_compiler/tests/types.rs": {
@@ -1112,9 +1112,9 @@
     },
     "src/aot/report/causes/tests.rs": {
       "before": "fdfe3cc93d36dceef4968fa6d2506a47fb020743aad37f98c2f2c7ed0e4ecb29",
-      "after": "f1954644dfad70d15fc63c466cbf84fb0535a47a8e3b02b85dfeae99a818a8c9",
+      "after": "bf846f87a0aa1858b48fc9dfc47111320068a8363a27259d5431b68f37b5472b",
       "base_blob": "2ab0a1fb1e98e56d00860083322ab76c8efc7a21",
-      "adapted_blob": "2800eb694e514fdb48cb3e3ae7689f76490373b6",
+      "adapted_blob": "0d8e92c5a9b34900870d85cda83d8770884f2214",
       "mode": "100644"
     },
     "src/aot/report/declines.rs": {
@@ -1130,6 +1130,13 @@
       "base_blob": "d19b39d25dbfb4b6a3efcecebee6a0bc032952b9",
       "adapted_blob": "81b81bf32c1e49ede6787587f14c483f203463d9",
       "mode": "100644"
+    },
+    "src/aot/report/runtime_use/tests.rs": {
+      "before": "daeda0397c22ff1fb7e9c224b6d80142d135b9f75eb786d556a68b2792e6e06a",
+      "base_blob": "77f43899a723862b5d62ceefab01da691b9e6491",
+      "mode": "100644",
+      "after": "1e37e2effff275a6d2b991011e913cac414e48fc8eb7f4658d83bbbe85a17456",
+      "adapted_blob": "b24231ad43b1a7507e1cf0a8df42b74eda0591f1"
     },
     "src/aot/report/wording.rs": {
       "before": "603b8e5973558bdba1743f0c8b1cec7f5ba837a52512a90886d8d088b1270db3",
