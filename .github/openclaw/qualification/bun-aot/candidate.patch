@@ -1,11 +1,13 @@
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0..6de2486af6b52b60fd08cb8cbb772d2f67ecf191 100644
+index ba6f622210f6efd4aa804f6f2bb76799fe3f5cb0..e3d0a20ab6f8ccffe09cb7137d9d19fdcf26ef21 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -2,6 +2,9 @@
+@@ -2,6 +2,11 @@
  
  ## Unreleased
  
++- Keep imported module namespaces unmarked and preserve live exports through the own `__esModule` marker of `require(esm)`, including compiled AOT modules.
++
 +- Align AOT module loading and code admission with the JavaScriptCore module-host interface.
 +- Keep AOT flow-report text and result sections aligned with the JavaScriptCore compiler interface.
 +- Align AOT builtin, parser, module, and retention contracts with the synchronized JavaScriptCore engine.
@@ -645,6 +647,32 @@ index c5094ae445d3af155342130b49c2a35e203e1fd6..295e0ec1552a3d6c0f6f344d8c619470
            },
            {
              "group": "Optimization",
+diff --git a/docs/runtime/module-resolution.mdx b/docs/runtime/module-resolution.mdx
+index 77760cb4b9adc0a152534355394023e409c681dd..8f6b999a1fbc82cf716b54b4dc40b5a448997b56 100644
+--- a/docs/runtime/module-resolution.mdx
++++ b/docs/runtime/module-resolution.mdx
+@@ -161,6 +161,8 @@ import Stuff from "./my-commonjs.cjs";
+ const myStuff = require("./my-commonjs.cjs");
+ ```
+ 
++When `require()` loads an ES module with a default export and no explicit `__esModule` export, it returns a namespace with an own, enumerable `__esModule: true` property. Its exports remain live. Importing the same module returns the original namespace without that added marker. Both namespace objects have a null prototype and reject property assignments.
++
+ ### Top level await
+ 
+ The only exception to this rule is top-level await. You can't `require()` a file that uses top-level await, since the `require()` function is inherently synchronous.
+diff --git a/docs/runtime/nodejs-compat.mdx b/docs/runtime/nodejs-compat.mdx
+index 2331b3a5a030157a7211d7388b630ad73f897669..b9a077ea1399e50e76bbfca676b425336567ae1c 100644
+--- a/docs/runtime/nodejs-compat.mdx
++++ b/docs/runtime/nodejs-compat.mdx
+@@ -9,6 +9,8 @@ Every day, Bun gets closer to 100% Node.js API compatibility. Popular frameworks
+ 
+ We update this page regularly. It reflects the latest version of Bun's compatibility with _Node.js v26_.
+ 
++Module namespaces have a null prototype. `require(esm)` adds an own enumerable `__esModule` marker only for modules with a default export and no explicit marker, without modifying the imported namespace. CommonJS namespaces preserve explicit markers.
++
+ ## Built-in Node.js modules
+ 
+ ### [`node:assert`](https://nodejs.org/api/assert.html)
 diff --git a/packages/bun-types/aot.d.ts b/packages/bun-types/aot.d.ts
 deleted file mode 100644
 index 00ec27a6c59620306d1575df2984bd8969939f1f..0000000000000000000000000000000000000000
@@ -2399,6 +2427,22 @@ index 8baa1f65df9d4b69eb2a4386e08aa117eafa17f3..cb85f4a981bd1b2804cfb407ea3e6442
          engine_options.check_only();
      }
      let engine = build.run_engine(bytes, &engine_options, &output);
+diff --git a/src/aot/compile/bind_stage.rs b/src/aot/compile/bind_stage.rs
+index 695d57354051f9614a95f4993675b588b627456f..e6f7a132ce3ff944f7ce277c0ea9e9c250a8464c 100644
+--- a/src/aot/compile/bind_stage.rs
++++ b/src/aot/compile/bind_stage.rs
+@@ -14,10 +14,9 @@ use bun_sema::check::aot::BuiltinTypeSymbols;
+ fn finish_modules(graph: &mut ModuleGraph, reached: &ReachedModules) {
+     for &module in &reached.looked_at {
+         match graph.shape(module) {
+-            Shape::EsModule => graph.set_namespace_is_seen(module),
+             // Of a module that hands on what another one exports, that one is in the list too.
+             Shape::Names | Shape::Value => graph.look_at(module),
+-            Shape::AsToday => {}
++            Shape::EsModule | Shape::AsToday => {}
+         }
+     }
+     for &module in &reached.with_module_objects {
 diff --git a/src/aot/compile/link_stage.rs b/src/aot/compile/link_stage.rs
 index 04a4beeb52edee8f4d281c417376e669e3e44bbd..95ae61eaa5b7d349fd063b766d5658a61667ab4b 100644
 --- a/src/aot/compile/link_stage.rs
@@ -8942,6 +8986,80 @@ index fe92272ad4d139ac3c12851088c251c151a4ab7d..df405217d689f82b81853eddc7bc6708
      pub fn require(target: ModuleRef, completes: bool) -> ModuleRequest {
          ModuleRequest {
              kind: ModuleRequestKind::Require,
+diff --git a/src/aot/modules/commonjs_exports.rs b/src/aot/modules/commonjs_exports.rs
+index c8015fce8a45e5dd3a2d638e26843d97a5041dc5..fca70eaf303d0bbce4696a94e6e7ff1da6ddf85c 100644
+--- a/src/aot/modules/commonjs_exports.rs
++++ b/src/aot/modules/commonjs_exports.rs
+@@ -244,6 +244,14 @@ fn create_entries(text: &OwnText) -> ModuleEntries {
+             }),
+         }
+     }
++    if let Marker::True { start } = text.marker {
++        names.push(NameEntry {
++            name: known::__esModule,
++            kind: OwnName::Stored,
++            created_at: start,
++            is_enumerable: true,
++        });
++    }
+     let file = file_of(text.module);
+     for alias in &text.aliases {
+         let kind = match (alias.target, file) {
+@@ -727,9 +735,14 @@ impl CommonJsExports {
+         let Some(number) = self.number_of(accessed) else {
+             return Member::OnObject;
+         };
+-        match self.keeps_names(number) && self.names_by_id.contains_key(&variable) {
+-            true => Member::Variable(variable),
+-            false => Member::OnObject,
++        match (self.keeps_names(number), self.names_by_id.get(&variable)) {
++            (true, Some(&(_, name)))
++                if name == known::__esModule && self.marker(accessed) == Some(true) =>
++            {
++                Member::Marker(true)
++            }
++            (true, Some(_)) => Member::Variable(variable),
++            _ => Member::OnObject,
+         }
+     }
+ 
+diff --git a/src/aot/modules/commonjs_exports/own_text.rs b/src/aot/modules/commonjs_exports/own_text.rs
+index 922e14cdb0f55428fa52c9b0c63ef78a6b0199a9..cb7158ce669ad0cf6a3c2243f60787f8b40dfb71 100644
+--- a/src/aot/modules/commonjs_exports/own_text.rs
++++ b/src/aot/modules/commonjs_exports/own_text.rs
+@@ -1148,11 +1148,11 @@ impl Scan<'_, '_, '_> {
+         let text = self.text;
+         let found = &self.drafts[index].found;
+         let creations: Vec<Creation> = found.creations_of(known::__esModule).copied().collect();
+-        let is_true = |value: ExprId| match value.some().and_then(|value| text.constant(value)) {
+-            Some(Constant::Boolean(flag)) => flag,
+-            Some(Constant::Number(number)) => number != 0.0 && !number.is_nan(),
+-            Some(Constant::String(string)) => !text.atoms.bytes(string).is_empty(),
+-            Some(Constant::Undefined | Constant::Null | Constant::BigInt(_)) | None => false,
++        let is_true = |value: ExprId| {
++            matches!(
++                value.some().and_then(|value| text.constant(value)),
++                Some(Constant::Boolean(true))
++            )
+         };
+         let marker = match &creations[..] {
+             [] => Marker::Absent,
+diff --git a/src/aot/modules/commonjs_exports/tests.rs b/src/aot/modules/commonjs_exports/tests.rs
+index 4d4a56109adff9e4ac6871d8a07cf6202317c7b2..d1855b7e1977179b2a6a0bef2d31254e9768149d 100644
+--- a/src/aot/modules/commonjs_exports/tests.rs
++++ b/src/aot/modules/commonjs_exports/tests.rs
+@@ -691,6 +691,11 @@ fn the_marker() {
+         marker("Object.defineProperty(exports, '__esModule', { value: true });"),
+         Some(true)
+     );
++    assert_eq!(marker("exports.__esModule = 1; exports.a = 1;"), None);
++    assert_eq!(
++        marker("exports.__esModule = 'custom'; exports.a = 1;"),
++        None
++    );
+     assert_eq!(marker("exports.__esModule = Math.random() < 1;"), None);
+     assert_eq!(
+         marker("if (Math.random()) exports.__esModule = true;"),
 diff --git a/src/aot/modules/exports.rs b/src/aot/modules/exports.rs
 index fab413b131635e92731e620c63ee633b4aa36d53..be35468697f08b689b84244fbbe5bccb918297db 100644
 --- a/src/aot/modules/exports.rs
@@ -9036,6 +9154,18 @@ index fab413b131635e92731e620c63ee633b4aa36d53..be35468697f08b689b84244fbbe5bccb
      pub(super) fn has_dynamic_names(&self, module: ModuleRef) -> bool {
          let Some(table) = find_table(&self.files, module) else {
              return true;
+diff --git a/src/aot/modules/exports/commonjs.rs b/src/aot/modules/exports/commonjs.rs
+index 98bc6a9822b73ecf9d04e540002bed789d57cfb1..d441b26ae61afb684dcb34179fe02a23859e6128 100644
+--- a/src/aot/modules/exports/commonjs.rs
++++ b/src/aot/modules/exports/commonjs.rs
+@@ -61,7 +61,6 @@ impl CommonJsNames {
+             .filter(|entry| entry.is_enumerable)
+             .map(|entry| entry.name);
+         let mut names: Vec<Atom> = own.collect();
+-        names.retain(|&name| name != known::__esModule);
+         if !names.contains(&known::default) {
+             names.push(known::default);
+         }
 diff --git a/src/aot/modules/exports/entries.rs b/src/aot/modules/exports/entries.rs
 index 3d5c0c3c86955353c0e39382aaf941653ac19fe2..7fb3fb739fc06dbc124f53957f4dc1c6714be73b 100644
 --- a/src/aot/modules/exports/entries.rs
@@ -9158,6 +9288,56 @@ index 991c5b8dcdbfe52e641ccb138c7b92fad36f0974..27c21484a7d1c05c1e8f5eee31203e63
      },
  }
  
+diff --git a/src/aot/modules/graph.rs b/src/aot/modules/graph.rs
+index 2f6cf7e7285652608d96ae077fbd696707e18c50..2053f3e1e245dcdedb609234801599dc79415045 100644
+--- a/src/aot/modules/graph.rs
++++ b/src/aot/modules/graph.rs
+@@ -118,25 +118,6 @@ fn spelled_in<'a>(row: &'a FileRow, range: &Range<u32>) -> &'a [SpelledModule] {
+     &row.spellings[range.start as usize..range.end as usize]
+ }
+ 
+-// The modules whose namespace object something in the file may look at.
+-fn add_seen_namespaces(file: &FileRow, seen: &mut Vec<ModuleRef>) {
+-    seen.extend_from_slice(&file.namespace_values);
+-    for (site, answer) in &file.sites {
+-        match (site, answer) {
+-            (ImportSiteKind::ImportCall(_), StoredSiteAnswer::Module(module)) => seen.push(*module),
+-            (ImportSiteKind::ImportCall(_), StoredSiteAnswer::Candidates(range)) => {
+-                seen.extend(spelled_in(file, range).iter().map(|spelled| spelled.module));
+-            }
+-            _ => {}
+-        }
+-    }
+-    for export in &file.exports {
+-        if let ExportBinding::Namespace { module, .. } = export.binding {
+-            seen.push(module);
+-        }
+-    }
+-}
+-
+ impl ModuleGraph {
+     pub fn project(&self) -> ProjectId {
+         self.project
+@@ -588,7 +569,6 @@ impl ModuleGraph {
+         let mut row_by_file = vec![None; parts.file_count];
+         for (index, row) in rows.iter_mut().enumerate() {
+             plan.named_members.append(&mut row.named_members);
+-            add_seen_namespaces(row, &mut plan.seen_namespaces);
+             row.sites.shared_sort_unstable_by_key(|&(kind, _)| kind);
+             row_by_file[row.file.idx()] = Some(to_u32(index));
+             row.check();
+diff --git a/src/aot/modules/graph/tests.rs b/src/aot/modules/graph/tests.rs
+index e3336300aa36607133357383b2693b32e5dd2a95..a6f27a0bd69380d492aa5e6d3fc017100aaf7ce3 100644
+--- a/src/aot/modules/graph/tests.rs
++++ b/src/aot/modules/graph/tests.rs
+@@ -103,7 +103,6 @@ fn graph_parts(file_count: usize, files: Vec<FileRow>) -> GraphParts {
+             order: OrderParts::without_sites(file_count),
+             erased_statements: Vec::new(),
+             named_members: Vec::new(),
+-            seen_namespaces: Vec::new(),
+         },
+     }
+ }
 diff --git a/src/aot/modules/imports.rs b/src/aot/modules/imports.rs
 index 465320d17fbef756fefd802fe5ed559889fb264d..bbed474e755319980eb1bd0f71d5eaadfc2a8a2e 100644
 --- a/src/aot/modules/imports.rs
@@ -9387,7 +9567,7 @@ index 5e2fa3d93657d2ea65008e7b310a4f4a0f356b20..85a77ac6833f5776405ca84adb8a5ba1
 +    });
 +}
 diff --git a/src/aot/modules/mod.rs b/src/aot/modules/mod.rs
-index b0277eb4caf2f3656a5e9ba4cbcfe2204191b79c..83c36326bee6da9ed7f8446ae44a55c4415a456e 100644
+index b0277eb4caf2f3656a5e9ba4cbcfe2204191b79c..83bd55440de6901c15e17c560f808165aaeeaba7 100644
 --- a/src/aot/modules/mod.rs
 +++ b/src/aot/modules/mod.rs
 @@ -26,9 +26,9 @@ mod unread_exports;
@@ -9403,11 +9583,147 @@ index b0277eb4caf2f3656a5e9ba4cbcfe2204191b79c..83c36326bee6da9ed7f8446ae44a55c4
  };
  pub use code_unit_order::compare_code_units;
  pub use commonjs_exports::CommonJsExports;
+@@ -167,7 +167,6 @@ pub fn bind_modules(input: &BindInput<'_, '_>) -> BoundModules {
+         order: order.into_parts(),
+         erased_statements,
+         named_members: Vec::new(),
+-        seen_namespaces: Vec::new(),
+     };
+     let inner_requests = requests.inner_modules.into_iter();
+     let parts = GraphParts {
+diff --git a/src/aot/modules/namespace_members.rs b/src/aot/modules/namespace_members.rs
+index 439a2b3ff59d7ac3971346bd205923abefd8c47f..1355b121680a6a11cad82ee07926d619ecc85309 100644
+--- a/src/aot/modules/namespace_members.rs
++++ b/src/aot/modules/namespace_members.rs
+@@ -179,8 +179,13 @@ impl FileBinder<'_, '_> {
+ 
+     fn marker(&self, module: ModuleRef) -> Option<bool> {
+         match self.context.modules.interop(module).kind {
+-            // From the first `require` on.
+-            ModuleKind::SourceText => Some(true),
++            ModuleKind::SourceText => {
++                if self.context.tables.has_dynamic_names(module) {
++                    None
++                } else {
++                    Some(self.resolve_name(module, known::default).is_ok())
++                }
++            }
+             ModuleKind::CommonJs => (self.context.marker)(module),
+             _ => None,
+         }
 diff --git a/src/aot/modules/plan.rs b/src/aot/modules/plan.rs
-index afa3e2d0c492a26b178950a08910ab2f858f0870..702491d7dd5416b6b1c1c1be6590dbaf67877ee3 100644
+index afa3e2d0c492a26b178950a08910ab2f858f0870..4b5f42e9ba3f1be848f19f56cb33256a46f6c1cc 100644
 --- a/src/aot/modules/plan.rs
 +++ b/src/aot/modules/plan.rs
-@@ -715,12 +715,11 @@ impl ModuleGraph {
+@@ -16,7 +16,7 @@ use super::wrapped::InnerModuleKind;
+ use crate::builtins::RuntimeModule;
+ use crate::ir::generated::ModuleRequestKind;
+ use crate::ir::parallel::{InParallel, for_each_mut};
+-use bun_sema::atom::Atom;
++use bun_sema::atom::{Atom, known};
+ use bun_sema::bind::SymbolId;
+ use bun_sema::hir::{ExprId, FnId, ImportEqualsId, StmtId};
+ use bun_sema::import_sites::ImportSiteKind;
+@@ -102,7 +102,6 @@ pub(super) struct Plan {
+     is_half: Vec<bool>,
+     keeps_module_object: Vec<bool>,
+     names_way_to_module_objects: Vec<bool>,
+-    is_namespace_seen: Vec<bool>,
+     prefix_roots: Vec<FileId>,
+     /// The statements that define inner modules.
+     erased_statements: Vec<(FileId, StmtId)>,
+@@ -119,7 +118,6 @@ pub(super) struct PlanParts {
+     pub order: OrderParts,
+     pub erased_statements: Vec<(FileId, StmtId)>,
+     pub named_members: Vec<((ModuleRef, Atom), NamedMember<ImportBinding>)>,
+-    pub seen_namespaces: Vec<ModuleRef>,
+ }
+ 
+ impl Plan {
+@@ -135,7 +133,7 @@ impl Plan {
+         let variables = synthetic_exports.iter().zip(ids);
+         let mut erased_statements = parts.erased_statements;
+         erased_statements.sort_unstable();
+-        let mut plan = Plan {
++        Plan {
+             inner_callbacks: numbers
+                 .inner_modules()
+                 .iter()
+@@ -143,7 +141,6 @@ impl Plan {
+                 .collect(),
+             keeps_module_object: vec![false; numbers.len()],
+             names_way_to_module_objects: vec![false; numbers.len()],
+-            is_namespace_seen: vec![false; numbers.len()],
+             numbers,
+             is_code_of_program,
+             is_exposed,
+@@ -158,11 +155,7 @@ impl Plan {
+             final_requests: Vec::new(),
+             final_ranges: FxHashMap::default(),
+             is_finished: false,
+-        };
+-        for module in parts.seen_namespaces {
+-            plan.add(|plan| &mut plan.is_namespace_seen, module);
+         }
+-        plan
+     }
+ 
+     fn has(&self, set: &[bool], module: ModuleRef) -> bool {
+@@ -268,15 +261,10 @@ impl ModuleGraph {
+             target,
+             is_bare,
+         } = site;
+-        // From the first `require` on the namespace object of an ES module has `__esModule`.
+-        let shows_mark = self.shape(target) == Shape::EsModule
+-            && self.plan().has(&self.plan().is_namespace_seen, target);
+         Site::Evaluate {
+             target,
+             is_bare,
+-            records: shows_mark
+-                || self.keeps_module_object(referrer)
+-                || self.keeps_module_object(target),
++            records: self.keeps_module_object(referrer) || self.keeps_module_object(target),
+         }
+     }
+ 
+@@ -437,7 +425,22 @@ impl ModuleGraph {
+     /// Whether whoever requires the module finds `__esModule` on it.
+     pub fn marker(&self, module: ModuleRef) -> Option<bool> {
+         match self.shape(module) {
+-            Shape::EsModule => Some(true),
++            Shape::EsModule => {
++                let ModuleRef::File(file) = module else {
++                    return None;
++                };
++                if !self.has_record(file) || self.has_dynamic_names(file) {
++                    return None;
++                }
++                let exports = self.exports(file);
++                if exports
++                    .iter()
++                    .any(|export| export.name == known::__esModule)
++                {
++                    return None;
++                }
++                Some(exports.iter().any(|export| export.name == known::default))
++            }
+             Shape::Names | Shape::Value => self.commonjs().marker(module),
+             Shape::AsToday => None,
+         }
+@@ -520,12 +523,6 @@ impl ModuleGraph {
+             .add(|plan| &mut plan.names_way_to_module_objects, module);
+     }
+ 
+-    /// Something looks at the namespace object of the ES module.
+-    pub fn set_namespace_is_seen(&mut self, module: ModuleRef) {
+-        self.plan_mut()
+-            .add(|plan| &mut plan.is_namespace_seen, module);
+-    }
+-
+     pub(super) fn mark_plan_unfinished(&mut self) {
+         self.plan_mut().is_finished = false;
+     }
+@@ -715,12 +712,11 @@ impl ModuleGraph {
              if is_prefix_root(file) {
                  let (root, prefix) = prefixes.next().expect("a prefix for each root");
                  debug_assert_eq!(root, file);
@@ -9422,7 +9738,7 @@ index afa3e2d0c492a26b178950a08910ab2f858f0870..702491d7dd5416b6b1c1c1be6590dbaf
              for &written in self.requests(file) {
                  let request = match written.kind {
                      ModuleRequestKind::Import => ModuleRequest {
-@@ -729,19 +728,7 @@ impl ModuleGraph {
+@@ -729,19 +725,7 @@ impl ModuleGraph {
                      },
                      ModuleRequestKind::Require => written,
                  };
@@ -9444,10 +9760,47 @@ index afa3e2d0c492a26b178950a08910ab2f858f0870..702491d7dd5416b6b1c1c1be6590dbaf
              ranges.insert(module, start as u32..requests.len() as u32);
          }
 diff --git a/src/aot/modules/plan/tests.rs b/src/aot/modules/plan/tests.rs
-index 76e99bf94e542160131c01b579961bb63eb34bb3..78c1878964ad94f18be8fc98dd358bd2fc0e83b5 100644
+index 76e99bf94e542160131c01b579961bb63eb34bb3..43de6d6354bd4199ce25f7993588c5346252c596 100644
 --- a/src/aot/modules/plan/tests.rs
 +++ b/src/aot/modules/plan/tests.rs
-@@ -472,8 +472,16 @@ fn the_commonjs_files_of_a_graph_run_first() {
+@@ -141,13 +141,35 @@ fn require_of_an_es_module_is_an_import_at_that_point() {
+         assert_eq!(plan.member("main.mjs", "missing"), Some(Member::Undefined));
+         assert_eq!(
+             plan.member("main.mjs", "__esModule"),
+-            Some(Member::Marker(true))
++            Some(Member::Marker(false))
+         );
+         assert_eq!(plan.reads_as_value("main.mjs"), [false]);
+         assert_eq!(plan.graph.shape(plan.module("m.mjs")), Shape::EsModule);
+     });
+ }
+ 
++#[test]
++fn a_commonjs_marker_copy_reads_the_constant_without_storage() {
++    let files = [
++        (
++            "main.mjs",
++            "import { __esModule } from './m.cjs'; console.log(__esModule);",
++        ),
++        (
++            "m.cjs",
++            "Object.defineProperty(exports, '__esModule', { value: true }); exports.default = 1;",
++        ),
++    ];
++    with_plan(&files, |plan| {
++        let module = plan.module("m.cjs");
++        assert_eq!(plan.graph.shape(module), Shape::Names);
++        assert_eq!(
++            plan.graph.member_named(module, plan.atom("__esModule")),
++            Some(Member::Marker(true))
++        );
++    });
++}
++
+ #[test]
+ fn require_of_a_commonjs_module_binds_its_names() {
+     let main = "
+@@ -472,8 +494,16 @@ fn the_commonjs_files_of_a_graph_run_first() {
              "request k2.cjs",
              "request k1.cjs",
              "request a.mjs",
@@ -11456,6 +11809,66 @@ index eba66eba32f38f0aff67ca7d597c005b1c30bf9d..33fb58ed3aad0de9d483ad6978ef8248
      ]),
    };
  }
+diff --git a/src/js/builtins/CommonJS.ts b/src/js/builtins/CommonJS.ts
+index 50fec30a8748e1535150d0840c5c472ef6a215dd..17840bc66cb2a82745a8129adf960eb4ad8c602b 100644
+--- a/src/js/builtins/CommonJS.ts
++++ b/src/js/builtins/CommonJS.ts
+@@ -134,26 +134,11 @@ export function overridableRequire(this: JSCommonJSModule, originalId: string, o
+ 
+     const namespace = out;
+     // In a require cycle the namespace is live while the module body is still
+-    // running, so an export named `__esModule` / `module.exports` may be in TDZ.
+-    let esModule, moduleExports;
++    // running, so an export named `module.exports` may be in TDZ.
++    let moduleExports;
+     try {
+-      esModule = namespace.__esModule;
+       moduleExports = namespace["module.exports"];
+     } catch {}
+-    // In Bun, when __esModule is not defined, it's a CustomAccessor on the prototype.
+-    // Various libraries expect __esModule to be set when using ESM from require().
+-    // We don't want to always inject the __esModule export into every module,
+-    // And creating an Object wrapper causes the actual exports to not be own properties.
+-    // So instead of either of those, we make it so that the __esModule property can be set at runtime.
+-    // It only supports "true" and undefined. Anything non-truthy is treated as undefined.
+-    // https://github.com/oven-sh/bun/issues/14411
+-    if (esModule === undefined) {
+-      try {
+-        namespace.__esModule = true;
+-      } catch {
+-        // https://github.com/oven-sh/bun/issues/17816
+-      }
+-    }
+ 
+     return (mod.exports = moduleExports ?? namespace);
+   }
+@@ -238,25 +223,10 @@ export function requireESMFromHijackedExtension(this: JSCommonJSModule, id: stri
+   const namespace = $requireESM(id, this);
+ 
+   // See `overridableRequire`: TDZ-safe reads for the require-cycle case.
+-  let esModule, moduleExports;
++  let moduleExports;
+   try {
+-    esModule = namespace.__esModule;
+     moduleExports = namespace["module.exports"];
+   } catch {}
+-  // In Bun, when __esModule is not defined, it's a CustomAccessor on the prototype.
+-  // Various libraries expect __esModule to be set when using ESM from require().
+-  // We don't want to always inject the __esModule export into every module,
+-  // And creating an Object wrapper causes the actual exports to not be own properties.
+-  // So instead of either of those, we make it so that the __esModule property can be set at runtime.
+-  // It only supports "true" and undefined. Anything non-truthy is treated as undefined.
+-  // https://github.com/oven-sh/bun/issues/14411
+-  if (esModule === undefined) {
+-    try {
+-      namespace.__esModule = true;
+-    } catch {
+-      // https://github.com/oven-sh/bun/issues/17816
+-    }
+-  }
+ 
+   this.exports = moduleExports ?? namespace;
+ }
 diff --git a/src/jsc/bindings/BunAOTCompile.cpp b/src/jsc/bindings/BunAOTCompile.cpp
 index 1b0f9adefe7424fcc2e4e1a8436f986f01e3c87c..0c33145b5accc54b31883532861d823ca864531d 100644
 --- a/src/jsc/bindings/BunAOTCompile.cpp
@@ -11549,7 +11962,7 @@ index 1b0f9adefe7424fcc2e4e1a8436f986f01e3c87c..0c33145b5accc54b31883532861d823c
      result->statistics = result->output->statistics.values();
      result->limitValues = result->output->limitValues;
 diff --git a/src/jsc/bindings/BunCompiledModules.cpp b/src/jsc/bindings/BunCompiledModules.cpp
-index f95186c1160315b8c8f385bf879ec9012e2cff4a..fd023d0093a1b1d051a93d659cfb665da897339b 100644
+index f95186c1160315b8c8f385bf879ec9012e2cff4a..495f4e1567e985b441fb61051930b70cba870a1e 100644
 --- a/src/jsc/bindings/BunCompiledModules.cpp
 +++ b/src/jsc/bindings/BunCompiledModules.cpp
 @@ -87,10 +87,10 @@ static std::optional<AOT::ModuleID> compiledModuleOf(JSCommonJSModule* module)
@@ -11580,6 +11993,15 @@ index f95186c1160315b8c8f385bf879ec9012e2cff4a..fd023d0093a1b1d051a93d659cfb665d
      // A module of the executable is in no cache. The next require() of the name asks the engine again, which answers what the module exports then.
      globalObject->requireMap()->remove(globalObject, jsString(vm, path));
      RETURN_IF_EXCEPTION(scope, false);
+@@ -125,7 +123,7 @@ JSValue loadCompiledModuleNamespace(Zig::GlobalObject* globalObject, const Strin
+     auto scope = DECLARE_THROW_SCOPE(getVM(globalObject));
+     AOT::evaluateModuleSynchronously(globalObject, *module);
+     RETURN_IF_EXCEPTION(scope, {});
+-    RELEASE_AND_RETURN(scope, AOT::moduleNamespace(globalObject, *module));
++    RELEASE_AND_RETURN(scope, AOT::moduleNamespaceForRequire(globalObject, *module));
+ }
+ 
+ bool evaluateCompiledFileForDefaultLoader(Zig::GlobalObject* globalObject, JSCommonJSModule* target, const String& path, bool isTypeScriptLoader)
 @@ -207,7 +205,7 @@ static void createModuleObject(JSGlobalObject* realm, JSString* path, AOT::Modul
      auto scope = DECLARE_THROW_SCOPE(vm);
      // putDirectCustomAccessor() is for a name that the object does not have yet.
@@ -11690,6 +12112,19 @@ index 2a5c6718e708ec71b47c765e7957fefc3a1adc65..7dfc3e979a245f895871802e9dc90e9c
  // Empty unless `path`, which names JavaScript, TypeScript, WebAssembly or a native addon that is not compiled into the executable, may not be loaded.
  enum class NotInExecutable : bool { Code,
      HostObject };
+diff --git a/src/jsc/bindings/BunWithoutAOT.h b/src/jsc/bindings/BunWithoutAOT.h
+index c687861a9827bf173cef9983ecb07ca6023c3525..8e4e9cf7eecec5631f4857591432f469144cd553 100644
+--- a/src/jsc/bindings/BunWithoutAOT.h
++++ b/src/jsc/bindings/BunWithoutAOT.h
+@@ -38,8 +38,6 @@ inline bool hasFileWithExtension(StringView) { return false; }
+ inline bool isCompiledModuleRecord(AbstractModuleRecord*) { return false; }
+ inline bool entryPointIsCommonJS(JSGlobalObject*) { return false; }
+ inline bool isModuleNamespace(JSCell*) { return false; }
+-inline bool hasESModuleMarker(JSCell*) { return false; }
+-inline void setESModuleMarker(JSCell*, bool) {}
+ 
+ inline void lockBuiltinsWithoutImage() {}
+ inline ASCIILiteral evaluationRefusedMessage() { return ""_s; }
 diff --git a/src/jsc/bindings/InternalModuleRegistry.cpp b/src/jsc/bindings/InternalModuleRegistry.cpp
 index 417bea38c8663d51241594ff84ab8aa10a429121..175e6ecd1ea2f76a8f21ac459ef1d021c583743f 100644
 --- a/src/jsc/bindings/InternalModuleRegistry.cpp
@@ -11703,8 +12138,58 @@ index 417bea38c8663d51241594ff84ab8aa10a429121..175e6ecd1ea2f76a8f21ac459ef1d021
      JSC::throwException(globalObject, scope, Bun::createError(globalObject, code, JSC::withAOTErrorNote(message)));
  }
  
+diff --git a/src/jsc/bindings/JSCommonJSModule.cpp b/src/jsc/bindings/JSCommonJSModule.cpp
+index 2a3b2dfced011ea0f81b50f3d6521d4a77e02c17..7d05f5209be5834b32427a55b1e8d8e8bad1724e 100644
+--- a/src/jsc/bindings/JSCommonJSModule.cpp
++++ b/src/jsc/bindings/JSCommonJSModule.cpp
+@@ -1149,7 +1149,8 @@ void populateESMExports(
+ 
+     if (auto* exports = result.getObject()) {
+         bool hasESModuleMarker = false;
+-        if (!ignoreESModuleAnnotation) {
++        // A native namespace forwarded by CJS keeps its default binding inside that namespace.
++        if (!ignoreESModuleAnnotation && !dynamicDowncast<JSModuleNamespaceObject>(exports) && !AOT::isModuleNamespace(exports)) {
+             PropertySlot slot(exports, PropertySlot::InternalMethodType::VMInquiry, &vm);
+             auto has = exports->getPropertySlot(globalObject, esModuleMarker, slot);
+             RETURN_IF_EXCEPTION(scope, );
+@@ -1174,7 +1175,7 @@ void populateESMExports(
+             if (canPerformFastEnumeration(structure)) {
+                 exports->structure()->forEachProperty(vm, [&](const PropertyTableEntry& entry) -> bool {
+                     auto key = entry.key();
+-                    if (key->isSymbol() || key == esModuleMarker)
++                    if (key->isSymbol())
+                         return true;
+ 
+                     needsToAssignDefault = needsToAssignDefault && key != vm.propertyNames->defaultKeyword;
+@@ -1191,7 +1192,7 @@ void populateESMExports(
+                 RETURN_IF_EXCEPTION(scope, );
+ 
+                 for (auto property : properties) {
+-                    if (property.isEmpty() || property.isNull() || property == esModuleMarker || property.isPrivateName() || property.isSymbol()) [[unlikely]]
++                    if (property.isEmpty() || property.isNull() || property.isPrivateName() || property.isSymbol()) [[unlikely]]
+                         continue;
+ 
+                     // ignore constructor
+diff --git a/src/jsc/bindings/NodeVMModule.cpp b/src/jsc/bindings/NodeVMModule.cpp
+index 55c8e21def90daf3ff8b8862136577edd7861da7..151e3073acde52740d960609057d3896ce5ff18c 100644
+--- a/src/jsc/bindings/NodeVMModule.cpp
++++ b/src/jsc/bindings/NodeVMModule.cpp
+@@ -361,13 +361,8 @@ JSModuleNamespaceObject* NodeVMModule::namespaceObject(JSC::JSGlobalObject* glob
+     object = amr->getModuleNamespace(globalObject);
+     RETURN_IF_EXCEPTION(scope, {});
+     if (object) {
+-        // The shared module namespace structure carries an __esModule accessor for
+-        // CJS interop, but a Module Namespace Exotic Object is specified to have a
+-        // null [[Prototype]], which is what vm modules must expose.
+-        object->setPrototypeDirect(vm, jsNull());
+         namespaceObject(vm, object);
+     }
+-    RETURN_IF_EXCEPTION(scope, {});
+ 
+     return object;
+ }
 diff --git a/src/jsc/bindings/ZigGlobalObject.cpp b/src/jsc/bindings/ZigGlobalObject.cpp
-index f8b13cf1ac2723adb6908b5095eacfa462c3b863..b7fd10726d8879ca59c0cb2da4b669e75b18ff4f 100644
+index f8b13cf1ac2723adb6908b5095eacfa462c3b863..800d65bd5d06d15254b6bb0ef58d2984216dbc48 100644
 --- a/src/jsc/bindings/ZigGlobalObject.cpp
 +++ b/src/jsc/bindings/ZigGlobalObject.cpp
 @@ -506,6 +506,8 @@ extern "C" void JSCInitialize(const char* envp[], size_t envc, void (*onCrash)(c
@@ -11716,6 +12201,98 @@ index f8b13cf1ac2723adb6908b5095eacfa462c3b863..b7fd10726d8879ca59c0cb2da4b669e7
              // This is the only assertOptionsAreCoherent() rule that BUN_JSC_* can break, and that assertion aborts.
              if (JSC::Options::useWasm() && !JSC::Options::useWasmIPInt() && !(JSC::Options::useBBQJIT() && JSC::Options::useJIT())) [[unlikely]] {
                  constexpr auto message = "BUN_JSC_useWasmIPInt=0 (needs useJIT and useBBQJIT, or BUN_JSC_useWasm=0)"_s;
+@@ -971,9 +973,11 @@ JSC_DEFINE_HOST_FUNCTION(functionEsmNamespaceForCjs, (JSC::JSGlobalObject * glob
+     RETURN_IF_EXCEPTION(scope, {});
+     if (!record)
+         return JSValue::encode(jsUndefined());
+-    auto* ns = record->getModuleNamespace(globalObject, false);
++    auto* ns = record->getModuleNamespace(globalObject);
+     RETURN_IF_EXCEPTION(scope, {});
+-    return JSValue::encode(ns);
++    auto* required = ns->createNamespaceForRequire(globalObject);
++    RETURN_IF_EXCEPTION(scope, {});
++    return JSValue::encode(required);
+ }
+ 
+ JSC_DEFINE_HOST_FUNCTION(functionEsmRegistryHasEvaluated, (JSC::JSGlobalObject * globalObject, JSC::CallFrame* callFrame))
+@@ -1078,9 +1082,11 @@ JSC_DEFINE_HOST_FUNCTION(functionEsmLoadSync, (JSC::JSGlobalObject * lexicalGlob
+     if (auto* entry = loader->registryEntry(key)) {
+         entryExistedBefore = true;
+         if (isModuleEvaluated(entry->record()) || isModuleEvaluatingSync(entry->record())) {
+-            auto* ns = entry->record()->getModuleNamespace(globalObject, false);
++            auto* ns = entry->record()->getModuleNamespace(globalObject);
++            RETURN_IF_EXCEPTION(scope, {});
++            auto* required = ns->createNamespaceForRequire(globalObject);
+             RETURN_IF_EXCEPTION(scope, {});
+-            return JSValue::encode(ns);
++            return JSValue::encode(required);
+         }
+         // Any other Evaluating record (one with top-level await) must not
+         // reach loadModuleSync: Link() and Evaluate() reject that status.
+@@ -1153,9 +1159,11 @@ JSC_DEFINE_HOST_FUNCTION(functionEsmLoadSync, (JSC::JSGlobalObject * lexicalGlob
+         }
+     }
+ 
+-    auto* ns = record->getModuleNamespace(globalObject, false);
++    auto* ns = record->getModuleNamespace(globalObject);
++    RETURN_IF_EXCEPTION(scope, {});
++    auto* required = ns->createNamespaceForRequire(globalObject);
+     RETURN_IF_EXCEPTION(scope, {});
+-    return JSValue::encode(ns);
++    return JSValue::encode(required);
+ }
+ 
+ #define WEBCORE_GENERATED_CONSTRUCTOR_GETTER(ConstructorName)                                                                                                            \
+@@ -2255,37 +2263,6 @@ extern "C" napi_env ZigGlobalObject__makeNapiEnvForFFI(Zig::GlobalObject* global
+ }
+ 
+ extern "C" JSC::EncodedJSValue CryptoObject__create(JSGlobalObject*);
+-JSC_DEFINE_CUSTOM_GETTER(moduleNamespacePrototypeGetESModuleMarker, (JSGlobalObject * globalObject, JSC::EncodedJSValue encodedThisValue, PropertyName))
+-{
+-    JSValue thisValue = JSValue::decode(encodedThisValue);
+-    if (thisValue.isCell() && JSC::AOT::isModuleNamespace(thisValue.asCell()))
+-        return JSC::JSValue::encode(JSC::AOT::hasESModuleMarker(thisValue.asCell()) ? jsBoolean(true) : jsUndefined());
+-    JSModuleNamespaceObject* moduleNamespaceObject = dynamicDowncast<JSModuleNamespaceObject>(thisValue);
+-    if (!moduleNamespaceObject || moduleNamespaceObject->m_hasESModuleMarker != WTF::TriState::True) {
+-        return JSC::JSValue::encode(jsUndefined());
+-    }
+-
+-    return JSC::JSValue::encode(jsBoolean(true));
+-}
+-
+-JSC_DEFINE_CUSTOM_SETTER(moduleNamespacePrototypeSetESModuleMarker, (JSGlobalObject * globalObject, JSC::EncodedJSValue encodedThisValue, JSC::EncodedJSValue encodedValue, PropertyName))
+-{
+-    auto& vm = JSC::getVM(globalObject);
+-    JSValue thisValue = JSValue::decode(encodedThisValue);
+-    if (thisValue.isCell() && JSC::AOT::isModuleNamespace(thisValue.asCell())) {
+-        JSC::AOT::setESModuleMarker(thisValue.asCell(), JSValue::decode(encodedValue).toBoolean(globalObject));
+-        return true;
+-    }
+-    JSModuleNamespaceObject* moduleNamespaceObject = dynamicDowncast<JSModuleNamespaceObject>(thisValue);
+-    if (!moduleNamespaceObject) {
+-        return false;
+-    }
+-    auto scope = DECLARE_THROW_SCOPE(vm);
+-    JSValue value = JSValue::decode(encodedValue);
+-    WTF::TriState triState = value.toBoolean(globalObject) ? WTF::TriState::True : WTF::TriState::False;
+-    moduleNamespaceObject->m_hasESModuleMarker = triState;
+-    return true;
+-}
+ 
+ namespace {
+ 
+@@ -2711,11 +2688,6 @@ void GlobalObject::finishCreation(VM& vm)
+                      init.vm, static_cast<Zig::GlobalObject*>(init.owner)));
+              BUN_END_REMOVABLE_ENTRY_POINT
+          } },
+-        { OBJECT_OFFSETOF(GlobalObject, m_moduleNamespaceObjectStructure), [](const LazyProperty<JSGlobalObject, Structure>::Initializer& init) {
+-             JSObject* moduleNamespacePrototype = JSC::constructEmptyObject(init.vm, init.owner->nullPrototypeObjectStructure());
+-             moduleNamespacePrototype->putDirectCustomAccessor(init.vm, init.vm.propertyNames->__esModule, CustomGetterSetter::create(init.vm, moduleNamespacePrototypeGetESModuleMarker, moduleNamespacePrototypeSetESModuleMarker), PropertyAttribute::DontEnum | PropertyAttribute::DontDelete | PropertyAttribute::CustomAccessor | 0);
+-             init.set(JSModuleNamespaceObject::createStructure(init.vm, init.owner, moduleNamespacePrototype));
+-         } },
+         { OBJECT_OFFSETOF(GlobalObject, m_JSBufferSubclassStructure), [](const LazyProperty<JSGlobalObject, Structure>::Initializer& init) {
+              auto scope = DECLARE_TOP_EXCEPTION_SCOPE(init.vm);
+              auto* globalObject = static_cast<Zig::GlobalObject*>(init.owner);
 diff --git a/src/runtime/cli/compile_command.rs b/src/runtime/cli/compile_command.rs
 index 7ff8c0519f7314f3bcfcc42fb819fd2790e146a5..2eb8d6294470b1292b094475b1a8dacde8bdf23b 100644
 --- a/src/runtime/cli/compile_command.rs
@@ -25503,6 +26080,207 @@ index 0000000000000000000000000000000000000000..27c504081d41df22ec33a3e5b6284517
 +    }
 +  }
 +}
+diff --git a/test/aot/programs/modules/require-and-resolve.json b/test/aot/programs/modules/require-and-resolve.json
+index d8bc02935be8333dcea1ecc485421f4f5f79c26f..4f93c742f9db1cfdc50301650b100c53e0e1660e 100644
+--- a/test/aot/programs/modules/require-and-resolve.json
++++ b/test/aot/programs/modules/require-and-resolve.json
+@@ -1,5 +1,15 @@
+ {
+   "entryPoints": [
++    "./cjs-true.cjs",
++    "./cjs-string.cjs",
++    "./cjs-false.cjs",
++    "./cjs-undefined.cjs",
++    "./cjs-markers.mjs",
++    "./esm-false.mjs",
++    "./esm-undefined.mjs",
++    "./esm-true.mjs",
++    "./esm-forward.cjs",
++    "./esm-import-first.mjs",
+     "./counted.cjs",
+     "./esm-flagged.mjs",
+     "./esm-module-exports.mjs",
+diff --git a/test/aot/programs/modules/require-and-resolve/cjs-false.cjs b/test/aot/programs/modules/require-and-resolve/cjs-false.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..cb8c29b00922c951183db4c0867c70f54679220e
+--- /dev/null
++++ b/test/aot/programs/modules/require-and-resolve/cjs-false.cjs
+@@ -0,0 +1,3 @@
++exports.__esModule = false;
++exports.default = "unmarked default";
++exports.value = 1;
+diff --git a/test/aot/programs/modules/require-and-resolve/cjs-known-true.cjs b/test/aot/programs/modules/require-and-resolve/cjs-known-true.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..69fa68d98d129bf1549bbac840bd2ad67f1ce250
+--- /dev/null
++++ b/test/aot/programs/modules/require-and-resolve/cjs-known-true.cjs
+@@ -0,0 +1,2 @@
++Object.defineProperty(exports, "__esModule", { value: true });
++exports.default = "optimized default";
+diff --git a/test/aot/programs/modules/require-and-resolve/cjs-markers.mjs b/test/aot/programs/modules/require-and-resolve/cjs-markers.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..19ba48414520b7493087086c506aacb095f7f6cf
+--- /dev/null
++++ b/test/aot/programs/modules/require-and-resolve/cjs-markers.mjs
+@@ -0,0 +1,7 @@
++import * as truthy from "./cjs-true.cjs";
++import * as falsy from "./cjs-false.cjs";
++import * as absentValue from "./cjs-undefined.cjs";
++import * as stringValue from "./cjs-string.cjs";
++export const namespaces = [truthy, falsy, absentValue, stringValue];
++import optimizedDefault, { __esModule as optimizedMarker } from "./cjs-known-true.cjs";
++export { optimizedDefault, optimizedMarker };
+diff --git a/test/aot/programs/modules/require-and-resolve/cjs-string.cjs b/test/aot/programs/modules/require-and-resolve/cjs-string.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..65465b7ec98eb1da2d7d8d7755db4e832ce6c96c
+--- /dev/null
++++ b/test/aot/programs/modules/require-and-resolve/cjs-string.cjs
+@@ -0,0 +1,3 @@
++exports.__esModule = "custom";
++exports.default = "marked default";
++exports.value = 1;
+diff --git a/test/aot/programs/modules/require-and-resolve/cjs-true.cjs b/test/aot/programs/modules/require-and-resolve/cjs-true.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c474f69a3ffa79ccfbbef52846d02c56319a3fcb
+--- /dev/null
++++ b/test/aot/programs/modules/require-and-resolve/cjs-true.cjs
+@@ -0,0 +1,3 @@
++Object.defineProperty(exports, "__esModule", { value: true });
++exports.default = "marked default";
++exports.value = 1;
+diff --git a/test/aot/programs/modules/require-and-resolve/cjs-undefined.cjs b/test/aot/programs/modules/require-and-resolve/cjs-undefined.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ad4dd14e764a89cdf2a6485d644a9ccf9ccf86dc
+--- /dev/null
++++ b/test/aot/programs/modules/require-and-resolve/cjs-undefined.cjs
+@@ -0,0 +1,3 @@
++exports.__esModule = undefined;
++exports.default = "unmarked default";
++exports.value = 1;
+diff --git a/test/aot/programs/modules/require-and-resolve/esm-false.mjs b/test/aot/programs/modules/require-and-resolve/esm-false.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5336d43127f2d05b004ef7898e282eccd0d2594b
+--- /dev/null
++++ b/test/aot/programs/modules/require-and-resolve/esm-false.mjs
+@@ -0,0 +1,2 @@
++export const __esModule = false;
++export default "explicit marker";
+diff --git a/test/aot/programs/modules/require-and-resolve/esm-forward.cjs b/test/aot/programs/modules/require-and-resolve/esm-forward.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9604f67c9e7886866f9b312f5712c7144469cc1b
+--- /dev/null
++++ b/test/aot/programs/modules/require-and-resolve/esm-forward.cjs
+@@ -0,0 +1 @@
++module.exports = require("./esm-import-first.mjs");
+diff --git a/test/aot/programs/modules/require-and-resolve/esm-import-first.mjs b/test/aot/programs/modules/require-and-resolve/esm-import-first.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..452ef729a506bb373531d9dbf1efbe0823d8ee13
+--- /dev/null
++++ b/test/aot/programs/modules/require-and-resolve/esm-import-first.mjs
+@@ -0,0 +1,5 @@
++export default "imported first";
++export let value = 1;
++export function bump() {
++  value++;
++}
+diff --git a/test/aot/programs/modules/require-and-resolve/esm-true.mjs b/test/aot/programs/modules/require-and-resolve/esm-true.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf1931f320ff43a7db8dfa627f02d2a0ee9a5351
+--- /dev/null
++++ b/test/aot/programs/modules/require-and-resolve/esm-true.mjs
+@@ -0,0 +1,2 @@
++export const __esModule = true;
++export default "explicit marker";
+diff --git a/test/aot/programs/modules/require-and-resolve/esm-undefined.mjs b/test/aot/programs/modules/require-and-resolve/esm-undefined.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..1ed862989fd7018c855e2267aac15f98104ce445
+--- /dev/null
++++ b/test/aot/programs/modules/require-and-resolve/esm-undefined.mjs
+@@ -0,0 +1,2 @@
++export const __esModule = undefined;
++export default "explicit marker";
+diff --git a/test/aot/programs/modules/require-and-resolve/main.js b/test/aot/programs/modules/require-and-resolve/main.js
+index ac31bec2d74c1455998262376629cdf8f6fc6f66..bb1dc45f80eb056b2117f835a30bb45099229634 100644
+--- a/test/aot/programs/modules/require-and-resolve/main.js
++++ b/test/aot/programs/modules/require-and-resolve/main.js
+@@ -1,5 +1,6 @@
+ // require of ES modules with and without "module.exports", __esModule, JSON twice, computed require, import, require.resolve and import.meta.resolve from a nested folder, and each of them on a missing file.
+ const { pathToFileURL } = require("node:url");
++const assert = require("node:assert/strict");
+ const nestedCommonJS = require("./nested/resolver.cjs");
+ 
+ const computed = name => "./" + name;
+@@ -113,8 +114,70 @@ async function missingFiles(nestedESM) {
+   );
+ }
+ 
++function checkMarker(namespace, present, value) {
++  assert.equal(Object.getPrototypeOf(namespace), null);
++  assert.equal(Object.isExtensible(namespace), false);
++  assert.equal("__esModule" in namespace, present);
++  assert.equal(Object.hasOwn(namespace, "__esModule"), present);
++  assert.deepEqual(Object.getOwnPropertyDescriptor(namespace, "__esModule"),
++    present ? { value, writable: true, enumerable: true, configurable: false } : undefined);
++  assert.equal(Reflect.set(namespace, "__esModule", value), false);
++  assert.equal(Reflect.defineProperty(namespace, "__esModule", { value }), present);
++  assert.equal(Reflect.deleteProperty(namespace, "__esModule"), !present);
++}
++
+ async function main() {
++  const importedFirst = await import("./esm-import-first.mjs");
++  checkMarker(importedFirst, false);
++  const requiredAfter = require("./esm-import-first.mjs");
++  checkMarker(importedFirst, false);
++  checkMarker(requiredAfter, true, true);
++  assert.notEqual(requiredAfter, importedFirst);
++  assert.equal(require("./esm-import-first.mjs"), requiredAfter);
++  assert.deepEqual(Object.keys(requiredAfter), ["__esModule", "bump", "default", "value"]);
++  importedFirst.bump();
++  assert.equal(requiredAfter.value, 2);
++  requiredAfter.bump();
++  assert.equal(importedFirst.value, 3);
++  Bun.gc(true);
++  assert.equal(requiredAfter.value, importedFirst.value);
++  assert.equal(({ ...requiredAfter }).__esModule, true);
++  assert.equal(Object.assign({}, requiredAfter).__esModule, true);
++  assert.equal(JSON.parse(JSON.stringify(requiredAfter)).__esModule, true);
++  const forwarded = await import("./esm-forward.cjs");
++  assert.equal(forwarded.default, requiredAfter);
++  assert.equal(forwarded.default.value, 3);
++  for (const [file, value] of [["esm-false.mjs", false], ["esm-undefined.mjs", undefined], ["esm-true.mjs", true]]) {
++    const imported = await import("./" + file);
++    checkMarker(imported, true, value);
++    const required = require("./" + file);
++    assert.equal(required, imported);
++    checkMarker(required, true, value);
++  }
++
+   const plain = requireESModules();
++  const importedAfter = await import("./esm-plain.mjs");
++  checkMarker(importedAfter, false);
++  checkMarker(plain, true, true);
++  assert.notEqual(plain, importedAfter);
++  const namedOnly = require("./esm-unflagged.mjs");
++  assert.equal(namedOnly.__esModule, undefined);
++  assert.equal(plain.__esModule, true);
++  const { namespaces, optimizedDefault, optimizedMarker } = await import("./cjs-markers.mjs");
++  assert.equal(optimizedMarker, true);
++  assert.equal(optimizedDefault, "optimized default");
++  for (const [index, name, value] of [[0, "cjs-true.cjs", true], [1, "cjs-false.cjs", false], [2, "cjs-undefined.cjs", undefined], [3, "cjs-string.cjs", "custom"]]) {
++    const namespace = namespaces[index];
++    checkMarker(namespace, true, value);
++    assert.equal(namespace.value, 1);
++    assert.equal(namespace.default, value ? "marked default" : require("./" + name));
++  }
++  const noDefault = await import("./esm-unflagged.mjs");
++  checkMarker(noDefault, false);
++  assert.equal(require("./esm-unflagged.mjs"), noDefault);
++  const explicit = await import("./esm-flagged.mjs");
++  checkMarker(explicit, true, "written by the module");
++  assert.equal(require("./esm-flagged.mjs"), explicit);
+   requireJSON();
+   requireCommonJS();
+   await importAll(plain);
 diff --git a/test/aot/programs/modules/stack-positions-in-typed-packages/main.ts b/test/aot/programs/modules/stack-positions-in-typed-packages/main.ts
 index b98feb51cdda53356789fb21255a3d331992aef7..1e69c99cf5bf43b66fac6efaff456eb4275c6e70 100644
 --- a/test/aot/programs/modules/stack-positions-in-typed-packages/main.ts
@@ -29160,3 +29938,302 @@ index 94235181ac80d7003a771321b3892b5bae45436f..cef51b3eed29c0e5f366964b7c4e6a0d
 +  // @ts-expect-error A declaration file runs without a type check.
 +  expect(() => b.called({ times: "Once" })).toThrow("a called function says what native code does afterwards");
  });
+diff --git a/test/js/bun/import-attributes/import-attributes.test.ts b/test/js/bun/import-attributes/import-attributes.test.ts
+index 2c1888662f74b93847949e010530c5a71d961d9a..00eef072d55758f3aa4492396364b2bfa98dde31 100644
+--- a/test/js/bun/import-attributes/import-attributes.test.ts
++++ b/test/js/bun/import-attributes/import-attributes.test.ts
+@@ -344,11 +344,11 @@ describe("other loaders do not crash", () => {
+ });
+ 
+ describe("?raw", () => {
+-  for (const [name, fn] of [
+-    ["bun run", testBunRun],
++  for (const [name, fn, expected] of [
++    ["bun run", testBunRun, {}],
+     // ["bun build", testBunBuild], // TODO: bun.build doesn't support query params at all yet
+-    ["bun run await import", testBunRunAwaitImport],
+-    ["require", testBunRunRequire],
++    ["bun run await import", testBunRunAwaitImport, {}],
++    ["require", testBunRunRequire, { __esModule: true }],
+     // ["bun build require", testBunBuildRequire], // TODO: bun.build doesn't support query params at all yet
+   ] as const) {
+     test(name, async () => {
+@@ -357,7 +357,7 @@ describe("?raw", () => {
+       await using question_raw = tempDir("import-attributes", {
+         [filename]: code,
+       });
+-      expect(await fn(question_raw, null, filename + "?raw")).toEqual({ default: code });
++      expect(await fn(question_raw, null, filename + "?raw")).toEqual({ ...expected, default: code });
+     });
+   }
+ });
+diff --git a/test/js/bun/namespace-prototype-pollution.test.ts b/test/js/bun/namespace-prototype-pollution.test.ts
+index 36c25f43652aaca0ecdf334df2571741a36f0bed..bb49b55c983e8660960dc560c5836ec7c534acf0 100644
+--- a/test/js/bun/namespace-prototype-pollution.test.ts
++++ b/test/js/bun/namespace-prototype-pollution.test.ts
+@@ -19,8 +19,9 @@ test("namespace imports should not inherit from Object.prototype", async () => {
+         console.log("PASS: prototype pollution prevented");
+       }
+ 
+-      // Verify __esModule still works
+-      console.log("__esModule settable:", (mod.__esModule = true, mod.__esModule === true));
++      console.log("Null prototype:", Object.getPrototypeOf(mod) === null);
++      console.log("__esModule absent:", !("__esModule" in mod));
++      console.log("__esModule immutable:", !Reflect.set(mod, "__esModule", true));
+ 
+       // Original exports should work
+       console.log("Original export:", mod.value);
+@@ -38,6 +39,8 @@ test("namespace imports should not inherit from Object.prototype", async () => {
+ 
+   expect(exitCode).toBe(0);
+   expect(stdout).toContain("PASS: prototype pollution prevented");
+-  expect(stdout).toContain("__esModule settable: true");
++  expect(stdout).toContain("Null prototype: true");
++  expect(stdout).toContain("__esModule absent: true");
++  expect(stdout).toContain("__esModule immutable: true");
+   expect(stdout).toContain("Original export: original");
+ });
+diff --git a/test/js/bun/resolve/esModule-annotation.test.js b/test/js/bun/resolve/esModule-annotation.test.js
+index 833cd287e004a10147165a0cfd138277522a396f..d2c3481e202139038df0fc2fc0f89578b1e10648 100644
+--- a/test/js/bun/resolve/esModule-annotation.test.js
++++ b/test/js/bun/resolve/esModule-annotation.test.js
+@@ -21,20 +21,20 @@ describe('without type: "module"', () => {
+       __esModule: true,
+     });
+ 
+-    // The module namespace object will not have the __esModule property.
+-    expect(WithoutTypeModuleExportEsModuleAnnotationNoDefault.__esModule).toBeUndefined();
++    expect(Object.hasOwn(WithoutTypeModuleExportEsModuleAnnotationNoDefault, "__esModule")).toBe(true);
++    expect(WithoutTypeModuleExportEsModuleAnnotationNoDefault.__esModule).toBeTrue();
+   });
+ 
+   test("exports.default = true; exports.__esModule = true;", () => {
+     expect(WithoutTypeModuleExportEsModuleAnnotation.default).toBeTrue();
+-    expect(WithoutTypeModuleExportEsModuleAnnotation.__esModule).toBeUndefined();
++    expect(WithoutTypeModuleExportEsModuleAnnotation.__esModule).toBeTrue();
+   });
+ 
+   test("exports.default = true;", () => {
+     expect(WithoutTypeModuleExportEsModuleNoAnnotation.default).toEqual({
+       default: true,
+     });
+-    expect(WithoutTypeModuleExportEsModuleAnnotation.__esModule).toBeUndefined();
++    expect(WithoutTypeModuleExportEsModuleNoAnnotation.__esModule).toBeUndefined();
+   });
+ });
+ 
+@@ -65,7 +65,7 @@ describe('with type: "module"', () => {
+     expect(WithTypeModuleExportEsModuleNoAnnotation.default).toEqual({
+       default: true,
+     });
+-    expect(WithTypeModuleExportEsModuleAnnotation.__esModule).toBeTrue();
++    expect(WithTypeModuleExportEsModuleNoAnnotation.__esModule).toBeUndefined();
+   });
+ });
+ 
+diff --git a/test/js/bun/resolve/esModule.test.ts b/test/js/bun/resolve/esModule.test.ts
+index 62aa6c60e0451556d799356b4ef82e9f080caf3c..6771da94036fe514e67bea6974771e0bada55abf 100644
+--- a/test/js/bun/resolve/esModule.test.ts
++++ b/test/js/bun/resolve/esModule.test.ts
+@@ -1,31 +1,146 @@
+ import { expect, test } from "bun:test";
+-
+-// Top-level `await import(self)` is a spec-level deadlock under the new
+-// pure-C++ module loader (Node prints an "unsettled top-level await" warning
+-// and exits). A static self-import yields the same namespace object without
+-// blocking evaluation on itself.
++import { bunEnv, bunExe, tempDir } from "harness";
+ import * as Self from "./esModule.test.ts";
+ 
+-test("__esModule defaults to undefined", () => {
+-  expect((Self as any).__esModule).toBeUndefined();
+-});
+-
+-test("__esModule is settable", () => {
+-  (Self as any).__esModule = true;
+-  expect((Self as any).__esModule).toBe(true);
+-  (Self as any).__esModule = false;
+-  expect((Self as any).__esModule).toBe(undefined);
+-  (Self as any).__esModule = true;
+-  expect((Self as any).__esModule).toBe(true);
+-  (Self as any).__esModule = undefined;
++test("an imported namespace has no inherited or writable __esModule marker", () => {
++  expect(Object.getPrototypeOf(Self)).toBeNull();
++  expect("__esModule" in Self).toBe(false);
++  expect(Object.hasOwn(Self, "__esModule")).toBe(false);
++  expect(Object.getOwnPropertyDescriptor(Self, "__esModule")).toBeUndefined();
++  expect(Reflect.ownKeys(Self)).toEqual([Symbol.toStringTag]);
++  expect(Reflect.set(Self, "__esModule", true)).toBe(false);
++  expect(Reflect.defineProperty(Self, "__esModule", { value: true })).toBe(false);
++  expect(require("./esModule.test.ts")).toBe(Self);
++  expect(Self.__esModule).toBeUndefined();
+ });
+ 
+-test("require of self sets __esModule", () => {
+-  expect((Self as any).__esModule).toBeUndefined();
+-  {
+-    const Self = require("./esModule.test.ts");
+-    expect(Self.__esModule).toBe(true);
++for (const order of ["import-first", "require-first", "cache-first"]) {
++  test.concurrent(`require(esm) marker reflection and live bindings (${order})`, async () => {
++    using dir = tempDir("namespace-marker", {
++      "default.mjs": "export default {}; export let value = 1; export function bump() { value++; }",
++      "none.mjs": "export const value = 1;",
++      "false.mjs": "export const __esModule = false; export default 1;",
++      "undefined.mjs": "export const __esModule = undefined; export default 1;",
++      "true.mjs": "export const __esModule = true; export default 1;",
++      "sorted.mjs": "export default 1; export const Alpha = 1, _a = 2, zzz = 3;",
++      "leaf.mjs": "export const value = 'synthetic-ok';",
++      "alias.mjs": "import * as z from './leaf.mjs'; export * from './leaf.mjs'; export { z, z as default };",
++      "entry.mjs": `
++import assert from 'node:assert/strict';
++import { createRequire } from 'node:module';
++const require = createRequire(import.meta.url);
++function marker(ns, present, value) {
++  assert.equal(Object.getPrototypeOf(ns), null);
++  assert.equal(Object.isExtensible(ns), false);
++  assert.equal('__esModule' in ns, present);
++  assert.equal(Object.hasOwn(ns, '__esModule'), present);
++  assert.equal(Object.prototype.hasOwnProperty.call(ns, '__esModule'), present);
++  assert.deepEqual(Object.getOwnPropertyDescriptor(ns, '__esModule'), present ? {
++    value, writable: true, enumerable: true, configurable: false,
++  } : undefined);
++  assert.equal(Reflect.set(ns, '__esModule', true), false);
++  assert.equal(Reflect.set(ns, '__esModule', value), false);
++  assert.equal(Reflect.defineProperty(ns, '__esModule', { value }), present);
++  for (const descriptor of [{ value: {} }, { writable: false }, { enumerable: false }, { configurable: true }, { get() {} }])
++    assert.equal(Reflect.defineProperty(ns, '__esModule', descriptor), false);
++  assert.equal(Reflect.deleteProperty(ns, '__esModule'), !present);
++}
++for (const [name, hasDefault, explicit, value] of [
++  ['default', true, false, undefined], ['none', false, false, undefined],
++  ['false', true, true, false], ['undefined', true, true, undefined], ['true', true, true, true],
++]) {
++  let imported, required;
++  if (${JSON.stringify(order)} !== 'require-first') {
++    imported = await import('./' + name + '.mjs');
++    marker(imported, explicit, value);
++    if (${JSON.stringify(order)} === 'cache-first') void require.cache[require.resolve('./' + name + '.mjs')];
++    required = require('./' + name + '.mjs');
++  } else {
++    required = require('./' + name + '.mjs');
++    imported = await import('./' + name + '.mjs');
+   }
+-  expect((Self as any).__esModule).toBe(true);
+-  expect(Object.getOwnPropertyNames(Self)).toBeEmpty();
++  marker(imported, explicit, value);
++  marker(required, explicit || hasDefault, explicit ? value : hasDefault ? true : undefined);
++  assert.equal(imported === required, explicit || !hasDefault);
++  assert.equal(require('./' + name + '.mjs'), required);
++  delete require.cache[require.resolve('./' + name + '.mjs')];
++  const reloaded = require('./' + name + '.mjs');
++  // Bun also evicts the ESM registry on cache deletion; only check the added facade's identity.
++  if (hasDefault && !explicit) assert.notEqual(reloaded, required);
++  marker(reloaded, explicit || hasDefault, explicit ? value : hasDefault ? true : undefined);
++  if (name === 'default') {
++    imported.bump();
++    assert.equal(required.value, 2);
++    assert.equal(({ ...required }).__esModule, true);
++    assert.equal(Object.assign({}, required).__esModule, true);
++    assert.equal(JSON.parse(JSON.stringify(required)).__esModule, true);
++    globalThis.Bun?.gc(true);
++    assert.equal(required.value, imported.value);
++  }
++}
++const sorted = require('./sorted.mjs');
++assert.deepEqual(Reflect.ownKeys(sorted), ['Alpha', '__esModule', '_a', 'default', 'zzz', Symbol.toStringTag]);
++assert.deepEqual(Object.keys(sorted), ['Alpha', '__esModule', '_a', 'default', 'zzz']);
++const alias = await import('./alias.mjs');
++const interop = alias.default && typeof alias.default === 'object' && '__esModule' in alias.default ? alias.default : alias;
++assert.equal(interop.z.value, 'synthetic-ok');
++assert.equal(require('./alias.mjs').__esModule, true);
++assert.equal('__esModule' in alias, false);
++console.log('ok');
++`,
++    });
++    await using proc = Bun.spawn({
++      cmd: [bunExe(), "entry.mjs"],
++      cwd: String(dir),
++      env: bunEnv,
++      stdout: "pipe",
++      stderr: "pipe",
++    });
++    const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
++    expect({ stdout, stderr, exitCode }).toEqual({ stdout: "ok\n", stderr: "", exitCode: 0 });
++  });
++}
++
++test.concurrent("CommonJS-as-ESM namespaces preserve explicit markers and own-key reflection", async () => {
++  using dir = tempDir("cjs-namespace-marker", {
++    "plain.cjs": "exports.value = 1;",
++    "true.cjs": "Object.defineProperty(exports, '__esModule', { value: true }); exports.value = 1;",
++    "false.cjs": "exports.__esModule = false; exports.value = 1;",
++    "undefined.cjs": "exports.__esModule = undefined; exports.value = 1;",
++    "forwarded.mjs": "export default 'kept'; export const value = 1;",
++    "forwarder.cjs": "module.exports = require('./forwarded.mjs');",
++    "entry.mjs": `
++import assert from 'node:assert/strict';
++import { createRequire } from 'node:module';
++const require = createRequire(import.meta.url);
++for (const [name, present, value] of [
++  ['plain', false], ['true', true, true], ['false', true, false], ['undefined', true, undefined],
++]) {
++  const ns = await import('./' + name + '.cjs');
++  assert.equal(Object.getPrototypeOf(ns), null);
++  assert.equal(Object.isExtensible(ns), false);
++  assert.equal('__esModule' in ns, present);
++  assert.equal(Object.hasOwn(ns, '__esModule'), present);
++  assert.equal(Object.prototype.hasOwnProperty.call(ns, '__esModule'), present);
++  assert.deepEqual(Object.getOwnPropertyDescriptor(ns, '__esModule'), present ? {
++    value, writable: true, enumerable: true, configurable: false,
++  } : undefined);
++  assert.deepEqual(Reflect.ownKeys(ns), [...(present ? ['__esModule'] : []), 'default', 'value', Symbol.toStringTag]);
++  assert.equal(Reflect.set(ns, '__esModule', true), false);
++}
++const forwarded = await import('./forwarder.cjs');
++assert.equal(forwarded.default, require('./forwarder.cjs'));
++assert.equal(forwarded.default.default, 'kept');
++console.log('ok');
++`,
++  });
++  await using proc = Bun.spawn({
++    cmd: [bunExe(), "entry.mjs"],
++    cwd: String(dir),
++    env: bunEnv,
++    stdout: "pipe",
++    stderr: "pipe",
++  });
++  const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
++  expect({ stdout, stderr, exitCode }).toEqual({ stdout: "ok\n", stderr: "", exitCode: 0 });
+ });
+diff --git a/test/js/bun/resolve/require-esm-evaluating-cycle.test.ts b/test/js/bun/resolve/require-esm-evaluating-cycle.test.ts
+index 4002df11c3ce0a8f93273376243c582468626440..ec50c1d7f70a54cce135ada5b60e7d7bcedb04fb 100644
+--- a/test/js/bun/resolve/require-esm-evaluating-cycle.test.ts
++++ b/test/js/bun/resolve/require-esm-evaluating-cycle.test.ts
+@@ -44,9 +44,10 @@ test("require(esm) inside a require cycle returns the live namespace, not an emp
+   expect(exitCode).toBe(0);
+ });
+ 
+-// The CommonJS side reads `__esModule` / `"module.exports"` off that live
+-// namespace; when the module happens to export a binding by that name that is
+-// still in TDZ, require() itself must not throw (reading it afterwards does).
++// The CommonJS side reads `"module.exports"` off that live namespace. Marker
++// selection checks export names without reading the bindings. When either
++// binding is still in TDZ, require() itself must not throw
++// (reading it afterwards does).
+ test("require(esm) inside a require cycle tolerates a TDZ `__esModule` export", async () => {
+   using dir = tempDir("require-esm-evaluating-cycle-tdz", {
+     "a.mjs": `
+diff --git a/test/js/node/module/require-extensions.test.ts b/test/js/node/module/require-extensions.test.ts
+index 430865f99c5ee6742ea6ef8c64168c847c9d7ad3..652f86d4411ad56980db6fa56c688a2fa5cdb3cc 100644
+--- a/test/js/node/module/require-extensions.test.ts
++++ b/test/js/node/module/require-extensions.test.ts
+@@ -156,7 +156,7 @@ test("wrapping an existing extension but it's secretly sync esm", () => {
+       original(module, filename);
+     }));
+     const mod = require("./extensions-fixture/secretly_esm");
+-    expect(mod).toEqual({ default: 1 });
++    expect({ ...mod }).toEqual({ __esModule: true, default: 1 });
+     expect(mocked).toBeCalled();
+   } finally {
+     require.extensions[".cjs"] = original;

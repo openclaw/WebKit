@@ -51,8 +51,7 @@ public:
     // Reads every export once, in the order of the keys, as [[OwnPropertyKeys]] and [[Get]] of each key would, without a lookup by name.
     bool tryReadExports(JSGlobalObject*, Vector<UniquedStringImpl*, 8>& names, MarkedArgumentBuffer& values);
 
-    bool hasESModuleMarker() const { return m_hasESModuleMarker; }
-    void setESModuleMarker(bool hasMarker) { m_hasESModuleMarker = hasMarker; }
+    ModuleNamespace* createNamespaceForRequire(JSGlobalObject*);
 
     bool hasOwnStructure() const { return m_hasOwnStructure; }
     void ensureOwnStructure(VM&);
@@ -74,10 +73,12 @@ private:
     bool isAmbiguousExport(unsigned index) const;
     bool isSymbolLikeKey(UniquedStringImpl*) const;
     bool isOrdinaryKey(PropertyName) const;
+    bool isESModuleMarker(PropertyName) const;
     bool isDynamicExport(UniquedStringImpl*) const;
     JSValue readDynamicExport(JSGlobalObject*, PropertyName);
     bool evaluateIfNeeded(JSGlobalObject*);
 
+    WriteBarrier<ModuleNamespace> m_requiredNamespace;
     WriteBarrier<JSCellButterfly> m_dynamicExportNames;
     WriteBarrier<JSObject> m_capturedValues;
     WriteBarrier<JSObject> m_liveSources;

@@ -135,6 +135,7 @@ JS_EXPORT_PRIVATE bool isCompiledModuleRecord(AbstractModuleRecord*);
 JS_EXPORT_PRIVATE JSPromise* importModule(JSGlobalObject*, ModuleID, std::optional<int64_t> referrerAsyncOrder);
 JS_EXPORT_PRIVATE void evaluateModuleSynchronously(JSGlobalObject*, ModuleID);
 JS_EXPORT_PRIVATE JSObject* moduleNamespace(JSGlobalObject*, ModuleID);
+JS_EXPORT_PRIVATE JSObject* moduleNamespaceForRequire(JSGlobalObject*, ModuleID);
 // False only if the namespace object of the module has no such name. Creates nothing.
 JS_EXPORT_PRIVATE bool mayExport(JSGlobalObject*, ModuleID, UniquedStringImpl* name);
 // The referrer is the file of the image whose require() the host answers.
@@ -146,8 +147,6 @@ JS_EXPORT_PRIVATE void willChangeRequireOverride(JSGlobalObject*, RequireOverrid
 JS_EXPORT_PRIVATE bool hasFileWithExtension(StringView);
 
 JS_EXPORT_PRIVATE bool isModuleNamespace(JSCell*);
-JS_EXPORT_PRIVATE bool hasESModuleMarker(JSCell* moduleNamespace);
-JS_EXPORT_PRIVATE void setESModuleMarker(JSCell* moduleNamespace, bool);
 
 JS_EXPORT_PRIVATE void setVerbose(bool);
 

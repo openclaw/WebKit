@@ -20,7 +20,7 @@ ENGINE = Path('/work/engine')
 OUT = Path('/work/aot-proof')
 INPUTS = Path(__file__).resolve().parent
 BUN = 'fd40ba44187c721ee023062fa153a6a27560e6b1'
-WEBKIT = '5ec9ac8557722128588184ed9cf77347d9a30cf1'
+WEBKIT = '8e335354a58fa9a8eed14a70a8b9bf97b5d3073f'
 PIPELINE = '7b573c05d0c52dffc67d4d25daf108bed5930cf2'
 BUILD = SOURCE / 'build/aot-linux-arm64'
 LIMIT = 128 * 1024**2
@@ -123,7 +123,7 @@ def restore_source():
     source_state(False)
 
 
-def junit(path, expected=None, selected=None):
+def junit(path, expected=None, selected=None, unique=True):
     cases = list(ElementTree.parse(path).iter('testcase'))
     if selected is not None:
         excluded = [case for case in cases if case.get('name') not in selected]
@@ -132,7 +132,7 @@ def junit(path, expected=None, selected=None):
         cases = [case for case in cases if case.get('name') in selected]
     assert cases and all(not any(c.find(tag) is not None for tag in ('skipped', 'failure', 'error')) for c in cases)
     names = [c.get('name') for c in cases]
-    assert len(names) == len(set(names)) and all(names)
+    assert all(names) and (not unique or len(names) == len(set(names)))
     if expected is not None:
         assert names == [expected], names
     return names
@@ -344,6 +344,14 @@ for index, (package, target, selector) in enumerate(rust_cases):
                1800, env=rust_env)
     rust_result(text)
     source_state(True)
+module_text = run('rust-module-contracts', ['cargo', '+nightly-2026-09-15', 'test', '--locked',
+                  '-p', 'bun_aot', '--lib', 'modules::', '--', '--nocapture'], 1800, env=rust_env)
+module_results = re.findall(r'^test result: ok\. ([1-9][0-9]*) passed; 0 failed; 0 ignored; 0 measured;', module_text, re.M)
+assert len(module_results) == 1, 'module contracts failed, were ignored, or selected no tests'
+assert re.search(r'^test modules::plan::tests::require_of_an_es_module_is_an_import_at_that_point \.\.\. ok$', module_text, re.M)
+assert re.search(r'^test modules::commonjs_exports::tests::the_marker \.\.\. ok$', module_text, re.M)
+assert re.search(r'^test modules::plan::tests::a_commonjs_marker_copy_reads_the_constant_without_storage \.\.\. ok$', module_text, re.M)
+source_state(True)
 ir_files = {}
 for index, selector in enumerate([
     'lower/coroutines/',
@@ -397,6 +405,28 @@ run('realm-contracts', [str(binary), 'test', 'test/aot/builtins/realm-agreement.
 realm_cases = junit(xml, selected=set(realm_names))
 assert set(realm_cases) == set(realm_names) and len(realm_cases) == 2
 internal_cases['aot/builtins/realm-agreement.test.ts'] = realm_cases
+namespace_cases = {}
+namespace_files = [
+    'test/js/bun/resolve/esModule.test.ts',
+    'test/js/bun/namespace-prototype-pollution.test.ts',
+    'test/js/bun/resolve/esModule-annotation.test.js',
+    'test/js/bun/resolve/require-esm-evaluating-cycle.test.ts',
+    'test/js/bun/import-attributes/import-attributes.test.ts',
+    'test/js/node/module/require-extensions.test.ts',
+]
+for index, file in enumerate(namespace_files):
+    xml = OUT / ('namespace-contracts-' + str(index) + '.xml')
+    run('namespace-contracts-' + str(index), [str(binary), 'test', file,
+        '--reporter=junit', '--reporter-outfile=' + str(xml)], 600)
+    # Separate describe groups may legitimately repeat the test's leaf name.
+    namespace_cases[file] = junit(xml, unique=False)
+marker_cases = set(namespace_cases[namespace_files[0]])
+assert {
+    'an imported namespace has no inherited or writable __esModule marker',
+    'CommonJS-as-ESM namespaces preserve explicit markers and own-key reflection',
+    *('require(esm) marker reflection and live bindings (' + order + ')'
+      for order in ['import-first', 'require-first', 'cache-first']),
+} <= marker_cases, marker_cases
 source_state(True)
 cases = []
 for part, name in [('calls-of-proxies', 'strict--empty--two'), ('calls-of-proxies', 'strict--trap--method'),
@@ -407,6 +437,7 @@ for part, name in [('calls-of-proxies', 'strict--empty--two'), ('calls-of-proxie
                    ('parsed-records', 'nested-objects-and-arrays'),
                    ('builtin-modules', 'sqlite-in-memory-with-no-optional-pass'),
                    ('modules', 'names-known-at-link'),
+                   ('modules', 'require-and-resolve'),
                    ('commonjs', 'computed-require-parent-and-children'),
                    ('commonjs', 'stands-place-list-children-every-returns'),
                    ('modules', 'code-outside-the-image-is-refused'),
@@ -446,6 +477,7 @@ restore_source()
 assert identities == {name: sha(BUILD / name) for name in identities}
 result = json.loads((OUT / 'proof.json').read_text())
 result.update(passed=True, binary_sha256=identities, program_cases=cases, build_contract_cases=internal_cases,
-              rust_contract_cases=rust_cases, ir_contract_files=ir_files,
+              rust_contract_cases=rust_cases, rust_module_cases=int(module_results[0]),
+              namespace_contract_cases=namespace_cases, ir_contract_files=ir_files,
               patch_sha256=spec['patch_sha256'], source_tree=original_tree, icu=icu)
 (OUT / 'proof.json').write_text(json.dumps(result, indent=2) + '\n')

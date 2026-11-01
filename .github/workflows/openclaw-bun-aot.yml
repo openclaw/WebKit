@@ -40,7 +40,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 5ec9ac8557722128588184ed9cf77347d9a30cf1
+          ref: 8e335354a58fa9a8eed14a70a8b9bf97b5d3073f
           path: engine
           persist-credentials: false
       - name: Free disposable runner space
@@ -102,7 +102,7 @@ jobs:
           out = Path('aot-proof')
           out.mkdir(exist_ok=True)
           files = sorted(out.iterdir()) + sorted(Path('controls/.github/openclaw/qualification/bun-aot').iterdir())
-          assert 0 < len(files) <= 96 and all(stat.S_ISREG(p.lstat().st_mode) for p in files)
+          assert 0 < len(files) <= 112 and all(stat.S_ISREG(p.lstat().st_mode) for p in files)
           assert sum(p.stat().st_size for p in files) <= 128 * 1024**2
           def sha(path):
               with path.open('rb') as stream: return hashlib.file_digest(stream, 'sha256').hexdigest()

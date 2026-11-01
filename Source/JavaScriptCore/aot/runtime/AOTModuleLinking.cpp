@@ -732,7 +732,7 @@ JSValue Modules::capturedField(const LoadedModule& loaded, UniquedStringImpl* na
     // Without the mark the module itself is the default export, whatever it has under that name.
     if (!isOfRuntimeModule && isDefault && !isMarked)
         return &source;
-    if (!isOfRuntimeModule && ((isMarked && name == names.__esModule.impl()) || (stars && name == names.constructor.impl())))
+    if (!isOfRuntimeModule && stars && name == names.constructor.impl())
         return { };
     const LayoutData& layout = source.layout();
     const FieldData* field = m_state.objects->layouts.field(vm, layout, name);
