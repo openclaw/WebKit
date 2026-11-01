@@ -55,13 +55,14 @@
       "build": {
         "kind": "source-compatibility",
         "patch": "harness-adapters/candidate-build.patch",
-        "sha256": "6d67a4027df0f3081443c2348ac27efd73f786035ea38c02f2b41eeb0138e928",
+        "sha256": "a83d29b694c0ae06158eb8412ed664913257cfe730418f164f37c52bd91fd0a6",
         "compiled_inputs": [
           "src/codegen/bindgen-lib-internal.ts",
           "src/codegen/bundle-functions.ts",
           "src/jsc/JSType.rs",
           "src/jsc/JSValue.rs",
           "src/jsc/bindings/BunProcess.cpp",
+          "src/jsc/bindings/CodeCoverage.cpp",
           "src/jsc/bindings/JSBuffer.cpp",
           "src/jsc/bindings/JSCTestingHelpers.cpp",
           "src/jsc/bindings/bindings.cpp",
@@ -160,6 +161,13 @@
             "after": "9d7f181a63d2a3ccdf014057a531fd11503fed3ccf7b0119799b2fc3ae1566a7",
             "base_blob": "9fd38a5d2be4570d105fb1612003537c2794c4dc",
             "adapted_blob": "06be1374e4b23348297e6f3e74af844c220d10e9",
+            "mode": "100644"
+          },
+          "src/jsc/bindings/CodeCoverage.cpp": {
+            "before": "e92545d56f26db1e95ae61437a44aa6e61461f68586f4b2d41a465fe0785af07",
+            "after": "49e6095309ca2f57fe84c25b226d736cc88683da15f314ba3c09438aa6e9938b",
+            "base_blob": "eb829838e3c35cf318ffa5df574bb813eb1b8233",
+            "adapted_blob": "85581c9f25f9ad8c54907d2bc98409fe21a72f91",
             "mode": "100644"
           }
         }
