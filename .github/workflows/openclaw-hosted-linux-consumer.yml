@@ -5,6 +5,8 @@ on:
     paths:
       - .github/workflows/openclaw-hosted-linux-consumer.yml
       - .github/openclaw/qualification/resume-consumer.py
+      - .github/openclaw/qualification/continue-consumer.py
+      - .github/openclaw/qualification/probe-allocator.cpp
       - .github/openclaw/qualification/consumer-repair.json
       - .github/openclaw/qualification/harness-adapters.json
       - .github/openclaw/qualification/harness_adapters.py
@@ -55,7 +57,14 @@ jobs:
           persist-credentials: false
           path: carrier
           sparse-checkout: .github/openclaw
-      - name: Make room for an independent candidate build
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: openclaw/bun
+          ref: d9be087429c21e563bb5ac29f8a11805e64b56a3
+          fetch-depth: 1
+          persist-credentials: false
+          path: retained-bun-source
+      - name: Prepare the fixed-run continuation workspace
         shell: bash
         run: |
           set -euo pipefail
@@ -68,7 +77,7 @@ jobs:
           import json, os, shutil
           from pathlib import Path
           capacity = dict(cpus=os.cpu_count(), disk_free_bytes=shutil.disk_usage('.').free)
-          assert capacity['disk_free_bytes'] >= 40 * 1024**3, 'candidate build and retained baseline need 40 GiB free'
+          assert capacity['disk_free_bytes'] >= 40 * 1024**3, 'retained source, executables and engine need 40 GiB free'
           Path(os.environ['QUALIFICATION_DIR']).mkdir()
           Path(os.environ['QUALIFICATION_DIR'], 'carrier.json').write_text(json.dumps(dict(
               carrier=os.environ['CARRIER_COMMIT'], sync=os.environ['SYNC_COMMIT'],
@@ -147,7 +156,7 @@ jobs:
           curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o "$RUNNER_TEMP/bun.zip"
           unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bootstrap"
           echo "$RUNNER_TEMP/bootstrap/bun-linux-x64" >> "$GITHUB_PATH"
-      - name: Download unchanged engine and baseline evidence
+      - name: Download the exact completed build and runtime evidence
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
@@ -155,15 +164,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/retained"
-          gh api repos/openclaw/WebKit/actions/artifacts/13068952583 > "$RUNNER_TEMP/retained/proof.metadata.json"
-          gh api repos/openclaw/WebKit/actions/artifacts/13068952583/zip > "$RUNNER_TEMP/retained/proof.zip"
-          gh api repos/openclaw/WebKit/actions/artifacts/13068828135 > "$RUNNER_TEMP/retained/binaries.metadata.json"
-          gh api repos/openclaw/WebKit/actions/artifacts/13068828135/zip > "$RUNNER_TEMP/retained/binaries.zip"
-      - name: Admit baseline proof and install the integrated consumer controls
+          gh api repos/openclaw/WebKit/actions/artifacts/13074375041 > "$RUNNER_TEMP/retained/proof.metadata.json"
+          gh api repos/openclaw/WebKit/actions/artifacts/13074375041/zip > "$RUNNER_TEMP/retained/proof.zip"
+          gh api repos/openclaw/WebKit/actions/artifacts/13073981057 > "$RUNNER_TEMP/retained/binaries.metadata.json"
+          gh api repos/openclaw/WebKit/actions/artifacts/13073981057/zip > "$RUNNER_TEMP/retained/binaries.zip"
+      - name: Install the reviewed continuation and unchanged consumer policy
         shell: bash
         run: |
           set -euo pipefail
-          python3 carrier/.github/openclaw/qualification/resume-consumer.py "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/carrier" "$RUNNER_TEMP/retained" "$QUALIFICATION_DIR" "$ARTIFACT_DIR"
+          python3 carrier/.github/openclaw/qualification/resume-consumer.py install "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/carrier"
       - name: Verify contracts with the reviewed adapters
         shell: bash
         run: |
@@ -175,22 +184,18 @@ jobs:
           python3 .github/openclaw/test_consumer_identity.py
           python3 .github/openclaw/test_verify_jsc_results.py
           bash .github/openclaw/preflight.sh
-      - name: Build and qualify the integrated consumer from source
+      - name: Admit the retained suites and finish both native probes
         shell: bash
         run: |
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
           export INSPECTOR_RUNTIME="$(realpath "$(command -v bun)")"
-          tail -n +1 -F "$QUALIFICATION_DIR/build-candidate.log" &
-          tail_pid=$!
-          (while sleep 60; do date -u; free -m; df -h /; done) &
-          monitor_pid=$!
-          trap 'kill "$tail_pid" "$monitor_pid" 2>/dev/null || true' EXIT
-          bash "$QUALIFICATION_DIR/qualify-candidate-fresh.sh"
+          python3 .github/openclaw/qualification/continue-consumer.py prepare \
+            "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/carrier" "$RUNNER_TEMP/retained" \
+            "$QUALIFICATION_DIR" "$ARTIFACT_DIR" "$GITHUB_WORKSPACE/retained-bun-source" "$INSPECTOR_RUNTIME"
           export CANDIDATE_BUN="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
           export CANDIDATE_RECEIPT="$QUALIFICATION_DIR/candidate-identity.json"
-          bash .github/openclaw/qualify-sync-compatibility.sh
-          bash .github/openclaw/qualify-sync.sh
+          bash .github/openclaw/qualify-sync.sh --retained-probes
       - name: Retain the exact qualified Bun executables
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

@@ -28,6 +28,38 @@ def read(path):
     return json.loads(path.read_text())
 
 
+def install_controls(pipeline, carrier, identity):
+    frozen = pipeline / ".github/openclaw/qualification"
+    reviewed = carrier / ".github/openclaw/qualification"
+    source_manifest = read(reviewed / "consumer-repair.json")
+    assert source_manifest["source"] == SOURCE and source_manifest["engine"] == SYNC
+    expected_paths = {"harness-adapters.json", "harness_adapters.py",
+                      "harness-adapters/candidate-build.patch", "harness-adapters/candidate-test.patch",
+                      "test_consumer_identity.py", "variants.json", "qualify-sync.sh", "verify-sync.py",
+                      "continue-consumer.py", "probe-allocator.cpp"}
+    assert set(source_manifest["files"]) == expected_paths
+    new_adapters = read(reviewed / "harness-adapters.json")
+    assert new_adapters["arms"]["baseline"] == identity.ADAPTERS["arms"]["baseline"]
+    assert new_adapters["origins"] == identity.ADAPTERS["origins"]
+    variants = read(reviewed.parent / "variants.json")
+    original_variants = identity.CONFIG
+    assert {k: v for k, v in variants.items() if k != "candidate"} == {
+        k: v for k, v in original_variants.items() if k != "candidate"}
+    assert variants["candidate"] == {
+        "commit": "d9be087429c21e563bb5ac29f8a11805e64b56a3",
+        "tree": "980068aa5aa9f51f40fc4125114a68fccd9bc9dc",
+        "manifest_blob": "e9544c96d5cd9a5e5f6b0245ed5c8dd78fb1a218"}
+    assert new_adapters["arms"]["candidate"]["pin"] == variants["candidate"]["commit"]
+    parent_files = {"test_consumer_identity.py", "variants.json", "qualify-sync.sh"}
+    for name, digest in source_manifest["files"].items():
+        source = reviewed.parent / name if name in parent_files else reviewed / name
+        target = frozen.parent / name if name in parent_files else frozen / name
+        assert sha(source) == digest, name
+        shutil.copyfile(source, target)
+
+    return source_manifest
+
+
 def main():
     pipeline, carrier, retained, root, artifacts = [Path(p).resolve() for p in sys.argv[1:]]
     assert subprocess.check_output(["git", "-C", str(pipeline), "rev-parse", "HEAD"], text=True).strip() == SYNC
@@ -85,30 +117,7 @@ def main():
     subprocess.run(["tar", "-xzf", str(artifacts / (identity.LANE + ".tar.gz")),
                     "-C", str(engine_directory)], check=True)
 
-    source_manifest = read(reviewed / "consumer-repair.json")
-    assert source_manifest["source"] == SOURCE and source_manifest["engine"] == SYNC
-    expected_paths = {"harness-adapters.json", "harness_adapters.py",
-                      "harness-adapters/candidate-build.patch", "harness-adapters/candidate-test.patch",
-                      "test_consumer_identity.py", "variants.json", "qualify-sync.sh", "verify-sync.py"}
-    assert set(source_manifest["files"]) == expected_paths
-    new_adapters = read(reviewed / "harness-adapters.json")
-    assert new_adapters["arms"]["baseline"] == identity.ADAPTERS["arms"]["baseline"]
-    assert new_adapters["origins"] == identity.ADAPTERS["origins"]
-    variants = read(reviewed.parent / "variants.json")
-    original_variants = identity.CONFIG
-    assert {k: v for k, v in variants.items() if k != "candidate"} == {
-        k: v for k, v in original_variants.items() if k != "candidate"}
-    assert variants["candidate"] == {
-        "commit": "d9be087429c21e563bb5ac29f8a11805e64b56a3",
-        "tree": "980068aa5aa9f51f40fc4125114a68fccd9bc9dc",
-        "manifest_blob": "e9544c96d5cd9a5e5f6b0245ed5c8dd78fb1a218"}
-    assert new_adapters["arms"]["candidate"]["pin"] == variants["candidate"]["commit"]
-    parent_files = {"test_consumer_identity.py", "variants.json", "qualify-sync.sh"}
-    for name, digest in source_manifest["files"].items():
-        source = reviewed.parent / name if name in parent_files else reviewed / name
-        target = frozen.parent / name if name in parent_files else frozen / name
-        assert sha(source) == digest, name
-        shutil.copyfile(source, target)
+    source_manifest = install_controls(pipeline, carrier, identity)
 
     # Candidate receipts and executables are deliberately not copied across source changes.
     # Keep the normal build, identity creation, selection and every later gate.
@@ -138,4 +147,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 4 and sys.argv[1] == "install":
+        pipeline, carrier = [Path(p).resolve() for p in sys.argv[2:]]
+        assert subprocess.check_output(["git", "-C", str(pipeline), "rev-parse", "HEAD"], text=True).strip() == SYNC
+        sys.path.insert(0, str(pipeline / ".github/openclaw/qualification"))
+        import consumer_identity as identity
+        install_controls(pipeline, carrier, identity)
+    else:
+        main()

@@ -8,7 +8,9 @@
     "harness-adapters/candidate-test.patch": "a85d6648cff0bd041a19be98a21d1d299da3704198b9c876ff683dd1182162d7",
     "test_consumer_identity.py": "f6163dea3b0c5111e5df3c9914486cde11befbfad4d9eabd7ef55e194b610afc",
     "variants.json": "a181182de15f50d6c30d4d185a9d21cdea2093236dc17aa66628e65008c57bc7",
-    "qualify-sync.sh": "65d3d21f0b944e06c10b9b5521182048d6988f81f15859f29cf9a07464cf90cd",
-    "verify-sync.py": "e9aeb350b0de5e5b5962af9934985805985a2291b3e90ff0302fd6c427a1db23"
+    "qualify-sync.sh": "b124b19863695fbd67564e82531459ced2470b9000a6a4f04ae3dc40534ab33d",
+    "verify-sync.py": "e9aeb350b0de5e5b5962af9934985805985a2291b3e90ff0302fd6c427a1db23",
+    "continue-consumer.py": "a55846cee405937df5249ef56614ca81b0328dfa19d7398604523c7be9332a4a",
+    "probe-allocator.cpp": "d8d650722503c009a39a8a36e3c25b6a9c6c2a15e535377c39e30cea27455ba1"
   }
 }
