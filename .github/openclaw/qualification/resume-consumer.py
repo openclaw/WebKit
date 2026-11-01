@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Admit successful builds and rerun the candidate through the frozen gates."""
+"""Admit completed native proof and run the remaining frozen gates."""
 import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -11,11 +12,11 @@ import sys
 SYNC = "42e4245f4180941634b482a7e8ef7fca47467de5"
 SOURCE = "6e0c032a394820b65278943bd3a4e793718a97ca"
 DIAGNOSTIC_SHA = "18857aa910f38803aca4f9578fac86d7e42b83792931d582272b3ffeebcb3144"
-PREVIOUS_RUN = 41267060695
-PREVIOUS_CARRIER = "e3df8cfa54c394697bcfa45cbe4f9fd33d08f1f3"
+PREVIOUS_RUN = 41269886896
+PREVIOUS_CARRIER = "e3dc9d3be7d3a6cff1996ab68da3057e14e006ad"
 RETAINED = {
-    "proof": (13068660557, 146302, "ddea8c8cd0522ca98356108ca2a3217e9cf0f7df4d0d9b08991ff54d8a226097"),
-    "binaries": (13067819853, 181870231, "4a5b5d1063ef2a6d337e982556a5d1afd953a91625cdafdd5a88cf1846816232"),
+    "proof": (13068952583, 149694, "b6097d6a0b6ceb8267228c5a90e6355742d22c1b75303040366d022d9ab46cb8"),
+    "binaries": (13068828135, 181870231, "ecd304f17a76299f15d1dcd65843af4ca6b5fe075c26f10ea82394f9c52e314f"),
 }
 CANDIDATE_SHA = "afab308b7280bda93a116d4f5208e201b7ee09ccc537d61ea8399ef7ce87090f"
 
@@ -107,13 +108,32 @@ def main():
     identity.validate_evidence(candidate, SYNC, engine, binaries, proof)
     identity.validate_invocation(proof, "candidate")
     assert candidate["executable"]["sha256"] == CANDIDATE_SHA
+    # Admit the completed selection with the same comparison policy used by the driver.
+    import compare_fork_ci
+    faith = compare_fork_ci.compare(proof / "baseline", proof / "candidate")
+    assert faith == read(proof / "faithfulness.json")
+    assert faith["policy"] == compare_fork_ci.POLICY and faith["passed"]
+    assert faith["candidate_all_passed"] and faith["selected_files"] == 44 and faith["result_files"] == 46
+    assert read(proof / "candidate/runner-terminal.json") == {"status": 0, "signal": None, "spawnError": False}
+    assert read(proof / "candidate/wrapper-terminal.json") == {"status": 0}
+    shutil.copytree(proof / "candidate", root / "candidate")
+    # This exact set-e driver reached the next, failing proxy command after these checks.
+    assert sha(proof / "qualify-candidate-reuse.sh") == "f29d4aab64002dedbc13f1111292aa95e02d93e7287e06bafcf8be41e9c139de"
+    proxy = (proof / "proxy.log").read_text()
+    assert 'ENOENT reading "bun:internal-for-testing"' in proxy
+    for name, count in (("namespace", 44), ("stack-positions", 99)):
+        text = (proof / (name + ".log")).read_text()
+        assert re.search(rf"\b{count} pass\b", text) and re.search(r"\b0 fail\b", text)
+        shutil.copyfile(proof / (name + ".log"), root / (name + ".log"))
+    assert (proof / "segmenter.log").stat().st_size == 0
+    shutil.copyfile(proof / "segmenter.log", root / "segmenter.log")
     for name in ("candidate-build-tools.json", "candidate-identity.json", "build-candidate.log"):
         shutil.copyfile(proof / name, root / name)
     retained_candidate = root / "retained-candidate-bun"
     shutil.copyfile(binaries / identity.EXECUTABLE, retained_candidate)
     assert sha(retained_candidate) == CANDIDATE_SHA
 
-    # Preserve source preparation and every test gate; reuse only the admitted builds.
+    # Preserve source preparation and remaining gates; retain admitted native results.
     source = subprocess.check_output(["git", "-C", str(pipeline), "show", SYNC + ":.github/openclaw/qualify.sh"])
     assert source == (pipeline / ".github/openclaw/qualify.sh").read_bytes()
     anchor = b"for arm in baseline candidate; do"
@@ -127,6 +147,20 @@ def main():
     create = b'    python3 "$inputs/consumer_identity.py" create --root '
     assert source.count(create) == 1
     source = source.replace(create, b'    python3 "$inputs/consumer_identity.py" verify --root ')
+    test_start = b'  if python3 "$inputs/harness_adapters.py" test --name "$arm"'
+    test_end = b'  case "$selection_exit" in 0|2) ;; *) exit "$selection_exit" ;; esac\n'
+    assert source.count(test_start) == source.count(test_end) == 1
+    start = source.index(test_start)
+    end = source.index(test_end, start) + len(test_end)
+    source = source[:start] + b'  # Completed 44-file native results were admitted before this driver.\n' + source[end:]
+    for name in ("namespace", "stack-positions", "segmenter"):
+        lines = [line for line in source.splitlines(keepends=True)
+                 if line.endswith(('$QUALIFICATION_DIR/' + name + '.log" 2>&1\n').encode())]
+        assert len(lines) == 1, name
+        source = source.replace(lines[0], b'# Retained native ' + name.encode() + b' proof was admitted before this driver.\n')
+    proxy_command = b'"$candidate" test test/js/node/vm/vm.test.ts'
+    assert source.count(proxy_command) == 1
+    source = source.replace(proxy_command, b'"$candidate" test --expose-internals test/js/node/vm/vm.test.ts')
     driver = root / "qualify-candidate-reuse.sh"
     driver.write_bytes(source)
     (root / "reuse.json").write_text(json.dumps({
@@ -142,6 +176,9 @@ def main():
         "candidate_build_tools_sha256": sha(root / "candidate-build-tools.json"),
         "candidate_executable_sha256": CANDIDATE_SHA,
         "candidate_build_reused": True,
+        "candidate_selection_reused": True,
+        "candidate_invocation_sha256": sha(root / "candidate/invocation.json"),
+        "post_compare_reused": {name: sha(root / (name + ".log")) for name in ("namespace", "stack-positions", "segmenter")},
         "repair": source_manifest,
     }, indent=2) + "\n")
 

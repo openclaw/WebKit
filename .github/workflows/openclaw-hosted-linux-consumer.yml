@@ -152,11 +152,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/retained"
-          gh api repos/openclaw/WebKit/actions/artifacts/13068660557 > "$RUNNER_TEMP/retained/proof.metadata.json"
-          gh api repos/openclaw/WebKit/actions/artifacts/13068660557/zip > "$RUNNER_TEMP/retained/proof.zip"
-          gh api repos/openclaw/WebKit/actions/artifacts/13067819853 > "$RUNNER_TEMP/retained/binaries.metadata.json"
-          gh api repos/openclaw/WebKit/actions/artifacts/13067819853/zip > "$RUNNER_TEMP/retained/binaries.zip"
-      - name: Admit retained proof and install the reviewed consumer repair
+          gh api repos/openclaw/WebKit/actions/artifacts/13068952583 > "$RUNNER_TEMP/retained/proof.metadata.json"
+          gh api repos/openclaw/WebKit/actions/artifacts/13068952583/zip > "$RUNNER_TEMP/retained/proof.zip"
+          gh api repos/openclaw/WebKit/actions/artifacts/13068828135 > "$RUNNER_TEMP/retained/binaries.metadata.json"
+          gh api repos/openclaw/WebKit/actions/artifacts/13068828135/zip > "$RUNNER_TEMP/retained/binaries.zip"
+      - name: Admit completed native proof and install the reviewed consumer repair
         shell: bash
         run: |
           set -euo pipefail
@@ -172,7 +172,7 @@ jobs:
           python3 .github/openclaw/test_consumer_identity.py
           python3 .github/openclaw/test_verify_jsc_results.py
           bash .github/openclaw/preflight.sh
-      - name: Qualify the retained corrected candidate against the retained baseline
+      - name: Finish qualification with the admitted native selection
         shell: bash
         run: |
           set -euo pipefail
