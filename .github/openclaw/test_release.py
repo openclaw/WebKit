@@ -28,8 +28,16 @@ class ReleaseIntegrity(unittest.TestCase):
         q=self.inputs/'qualification';q.mkdir()
         for lane in config['lanes']:
             label=lane['label'];d=self.inputs/label;d.mkdir();(d/'provenance').mkdir()
-            f=d/(label+'.tar.gz');f.write_bytes(label.encode())
-            (d/(label+'.manifest.json')).write_text(json.dumps({'source':SOURCE,'base':release.artifact_source.BASE,'history_floor':release.artifact_source.HISTORY_FLOOR,'patches':PATCHES,'lane':{'label':label},'files':{f.name:{'sha256':release.sha(f),'size':f.stat().st_size}}}))
+            metadata={'label':label}
+            payloads={label+'.tar.gz':label.encode()}
+            if label=='bun-webkit-linux-amd64-lto-aot':
+                metadata['sources']='bun-webkit-aot-sources'
+                payloads['bun-webkit-aot-sources.tar.gz']=b'built AOT sources'
+            files={}
+            for name,data in payloads.items():
+                f=d/name;f.write_bytes(data)
+                files[name]={'sha256':release.sha(f),'size':f.stat().st_size}
+            (d/(label+'.manifest.json')).write_text(json.dumps({'source':SOURCE,'base':release.artifact_source.BASE,'history_floor':release.artifact_source.HISTORY_FLOOR,'patches':PATCHES,'lane':metadata,'files':files}))
         release_fixture(self.inputs,SOURCE)
         w=self.inputs/'windows-arm64-qualification';w.mkdir()
         archive=self.inputs/'bun-webkit-windows-arm64/bun-webkit-windows-arm64.tar.gz'
@@ -138,19 +146,17 @@ class ReleaseIntegrity(unittest.TestCase):
                     for path,data in originals.items():(proof/path).write_bytes(data)
 
     def test_complete_set_roundtrip(self):
-        self.assemble();self.assertEqual(len(release.verify(self.out,SOURCE)['artifacts']),10)
+        self.assemble();self.assertEqual(len(release.verify(self.out,SOURCE)['artifacts']),22)
 
     def test_aot_source_producer_roundtrip_and_integrity(self):
         config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())
         label='bun-webkit-linux-amd64-lto-aot'
         source_name='bun-webkit-aot-sources.tar.gz'
-        config['lanes'].append({'label':label})
         root=self.root/'source'
         config_path=root/'.github/openclaw/variants.json'
         config_path.parent.mkdir(parents=True)
         config_path.write_text(json.dumps(config))
         directory=self.inputs/label
-        directory.mkdir();(directory/'provenance').mkdir()
         declaration='bun-webkit/Source/JavaScriptCore/aot/builtins/generated/AOTBuiltinEngineDeclarations.json'
         generated=b'{"origin":"built-engine-declarations"}\n'
         for name,members in [

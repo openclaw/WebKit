@@ -154,11 +154,13 @@ def build(label, destination):
         'provenance_files':{p.name:digest(p) for p in provenance.iterdir() if p.is_file()}}
     write(destination/(label+'.manifest.json'), manifest)
     (destination/'SHA256SUMS').write_text(''.join(files[name]['sha256']+'  '+name+'\n' for name in names))
-    if label == 'bun-webkit-linux-amd64':
+    if label in ('bun-webkit-linux-amd64', 'bun-webkit-linux-amd64-aot', 'bun-webkit-linux-amd64-debug-asan-aot'):
         run(str(artifact/'bin/jsc'), '-e', 'print("OpenClaw WebKit ready")')
         run(str(artifact/'bin/testFFI'))
-        run(str(artifact/'bin/testMimallocExit'))
-        run(str(artifact/'bin/testMimallocExitInFlight'))
+        # ASan uses the system allocator; only the release lanes build these probes.
+        if label in ('bun-webkit-linux-amd64', 'bun-webkit-linux-amd64-aot'):
+            run(str(artifact/'bin/testMimallocExit'))
+            run(str(artifact/'bin/testMimallocExitInFlight'))
         run(str(artifact/'bin/testVMEntryRecord'))
         run(str(artifact/'bin/testVMEntryScope'))
         run(str(artifact / 'bin/testForeignStackSuspension'))
