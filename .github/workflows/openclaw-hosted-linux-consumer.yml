@@ -72,6 +72,24 @@ jobs:
           PY
       - name: Prove namespace isolation red/green and the integrated native contracts
         run: python3 controls/.github/openclaw/qualification/upstream-regressions/qualify.py
+      - name: Measure the matching native diagnostic tool
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, stat
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          out = root / 'maintainer-native-proof'
+          out.mkdir(exist_ok=True)
+          tool = root / 'maintainer-native-build/bin/testaot'
+          facts = {'diagnostic_only': True, 'control_head': os.environ['GITHUB_SHA'], 'tool': None}
+          if tool.exists():
+              assert stat.S_ISREG(tool.lstat().st_mode) and 0 < tool.stat().st_size <= 2 * 1024**3
+              with tool.open('rb') as stream:
+                  digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+              facts['tool'] = {'path': 'bin/testaot', 'bytes': tool.stat().st_size, 'sha256': digest}
+          (out / 'native-tools.json').write_text(json.dumps(facts, indent=2) + '\n')
+          PY
       - name: Bound and record the evidence
         id: evidence
         if: always()
@@ -94,4 +112,18 @@ jobs:
           name: integrated-engine-regression-proof
           path: ${{ runner.temp }}/maintainer-native-proof/
           if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: integrated-native-diagnostic-tools
+          path: |
+            ${{ runner.temp }}/maintainer-native-build/bin/testaot
+            ${{ runner.temp }}/maintainer-native-build/CMakeCache.txt
+            ${{ runner.temp }}/maintainer-native-proof/native-tools.json
+            ${{ runner.temp }}/maintainer-native-proof/proof.json
+            controls/.github/openclaw/qualification/upstream-regressions/source-adapter.json
+            controls/.github/openclaw/qualification/upstream-regressions/AOTSharingModeAndNamespaceTests.cpp
+          compression-level: 0
+          if-no-files-found: warn
           retention-days: 7

@@ -149,10 +149,10 @@ function f0 name="main" kind=Module results=[{type=anything}] {
     v0 = Builtin builtin=GlobalThis
     v1 = ModuleNamespace module=m2
     PropSet v0, v1 key="capturedNamespace"
-    v2 = PropGet v0 key="registry" [isFreeName]
-    v3 = NewClosure function=f3
-    PropSet v2, v3 key="readCaptured"
-    v5 = Call v3, -, v1 [isNeverInlined]
+    v3 = PropGet v0 key="registry" [isFreeName]
+    v4 = NewClosure function=f3
+    PropSet v3, v4 key="readCaptured"
+    v6 = Call v4, -, v1 [isNeverInlined]
     Return
 }
 function f1 name="value" module=m1 kind=CommonJsModule flags=[IsSloppy] results=[{type=anything}] {

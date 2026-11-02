@@ -47,15 +47,15 @@
       },
       "after": {
         "bytes": 30054,
-        "sha256": "f483b3b52a4851feabd2f89efbf9793e56271edbe1392433051c7332affc89d7",
-        "blob": "7d644a0910158b6e196735dd3ca042381a785b9c"
+        "sha256": "592e5e22def43affa31a33f77d1d5fa8192572d6bae11546ed7617a08543c28c",
+        "blob": "2e947dbf2939721335b442602858f2a94bd0a6fa"
       },
       "control": "AOTSharingModeAndNamespaceTests.cpp",
       "kind": "test",
       "host": {
         "bytes": 30250,
-        "sha256": "abcda5974b6fdb2890157a6354a0a3ee7429ef25b04a311870a7bd78b52b7016",
-        "blob": "78351073f53803e11f566955bb482747634d99bc"
+        "sha256": "79e10a2d53a0c4f808e04a9716c0f590457da40ef3deec0338f1ad2015889c27",
+        "blob": "22cacbfc0524466b2f4ef9c15640eee7dc68ce08"
       }
     },
     "Source/JavaScriptCore/aot/runtime/AOTModuleNamespace.h": {
@@ -251,7 +251,7 @@
       },
       {
         "original": "    PropSet v0, v1 key=\"capturedNamespace\"\n    v3 = NewClosure function=f3\n    PropSet v0, v3 key=\"readCaptured\"\n",
-        "current": "    PropSet v0, v1 key=\"capturedNamespace\"\n    v2 = PropGet v0 key=\"registry\" [isFreeName]\n    v3 = NewClosure function=f3\n    PropSet v2, v3 key=\"readCaptured\"\n    v5 = Call v3, -, v1 [isNeverInlined]\n"
+        "current": "    PropSet v0, v1 key=\"capturedNamespace\"\n    v3 = PropGet v0 key=\"registry\" [isFreeName]\n    v4 = NewClosure function=f3\n    PropSet v3, v4 key=\"readCaptured\"\n    v6 = Call v4, -, v1 [isNeverInlined]\n"
       },
       {
         "original": "    evaluateModuleSynchronously(program.realm(), ModuleID(0u));\n",
