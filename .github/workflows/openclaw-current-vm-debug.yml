@@ -1,8 +1,5 @@
 name: OpenClaw current ordinary Bun VM debug proof
 on:
-  push:
-    branches: [claude/hosted-linux-consumer-20261031]
-    paths: [.github/workflows/openclaw-current-vm-debug.yml]
   workflow_dispatch:
 permissions:
   contents: read
@@ -17,7 +14,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           path: controls
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: 0e5b180de777933c359ef7bdb4d4f6d4a3e58522
           persist-credentials: false
           sparse-checkout: .github/openclaw/qualification
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1

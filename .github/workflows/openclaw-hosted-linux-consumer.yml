@@ -1,19 +1,6 @@
 name: OpenClaw hosted Linux consumer qualification
 
 on:
-  pull_request:
-    paths:
-      - .github/workflows/openclaw-hosted-linux-consumer.yml
-      - .github/openclaw/qualification/resume-consumer.py
-      - .github/openclaw/qualification/continue-consumer.py
-      - .github/openclaw/qualification/probe-allocator.cpp
-      - .github/openclaw/qualification/consumer-repair.json
-      - .github/openclaw/qualification/harness-adapters.json
-      - .github/openclaw/qualification/harness_adapters.py
-      - .github/openclaw/qualification/harness-adapters/**
-      - .github/openclaw/variants.json
-      - .github/openclaw/qualify-sync.sh
-      - .github/openclaw/qualification/verify-sync.py
   workflow_dispatch:
     inputs:
       assemble_retained:
@@ -44,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: 0e5b180de777933c359ef7bdb4d4f6d4a3e58522
           persist-credentials: false
           sparse-checkout: |
             .github

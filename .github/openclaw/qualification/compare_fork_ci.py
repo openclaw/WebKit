@@ -67,8 +67,8 @@ def file_suite(value, name):
     return value['failures'] > 0 or bool(value['cases'])
 
 
-def validate_arm(root, expected, baseline=False):
-    invocation = identity.validate_invocation(root.parent, root.name)
+def validate_arm(root, expected, baseline=False, lane=identity.LANE):
+    invocation = identity.validate_invocation(root.parent, root.name, lane=lane)
     require((root.name == 'baseline') == baseline, 'wrong arm invocation')
     chosen = selection(read_json(root / 'selected.json'))
     require(chosen == selection(expected), 'selection differs from trusted ordered input')

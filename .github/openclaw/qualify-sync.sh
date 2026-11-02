@@ -15,17 +15,6 @@ unset BUN_BUILD_PREFETCH_DIR BUN_BUILD_CACHE_DIR BUN_WEBKIT_ARTIFACT_MANIFEST
 export CI=1 PUPPETEER_SKIP_DOWNLOAD=1
 cd "$repo"
 results="$QUALIFICATION_DIR/sync"
-probe_only=0
-case "${1:-}" in
-  "") test "$#" -eq 0 ;;
-  --retained-probes)
-    test "$#" -eq 1
-    python3 "$inputs/continue-consumer.py" admit "$pipeline" "$QUALIFICATION_DIR" "$ARTIFACT_DIR" "$INSPECTOR_RUNTIME"
-    probe_only=1
-    ;;
-  *) echo "unknown sync qualification entry point" >&2; exit 2 ;;
-esac
-if test "$probe_only" -eq 0; then
 mkdir -p "$results/home" "$results/tmp" "$results/bin"
 chmod 700 "$results/home" "$results/tmp"
 "$candidate" --revision > "$results/revision.log"
@@ -75,6 +64,8 @@ python3 "$inputs/compile_cache.py" /tmp "$junit_prefix" "$results/module-junit.x
 # Run these unchanged upstream tests explicitly as well, so skips cannot satisfy the gate.
 "$candidate" test test/js/web/atomics.test.ts test/js/bun/wasm/compile-rss.test.ts -t 'Atomics.wait lets mimalloc|a notify that arrives while Atomics.wait|WebAssembly.compile does not retain' > "$results/memory-release.log" 2>&1
 "$candidate" test test/js/bun/jsc/webkit-upgrade-23b0720b40.test.ts > "$results/webkit-upgrade.log" 2>&1
+# Compile and execute images through the current candidate; this is separate from the historical selection.
+"$candidate" test test/aot/every-platform.test.ts > "$results/aot-every-platform.log" 2>&1
 "$candidate" test --expose-internals test/js/node/v8/capture-stack-trace.test.js test/js/node/util/util.test.js test/js/bun/sourcemap > "$results/stack-positions.log" 2>&1
 "$candidate" test test/bundler/bundler_minify.test.ts > "$results/stack-minifier.log" 2>&1
 python3 "$inputs/stack/check-runtime-cache.py" --baseline "$QUALIFICATION_DIR/bun-baseline/build/qualify-baseline/bun" --candidate "$candidate" --fixture "$inputs/stack/observe-regressions.js" --output "$results/runtime-cache" --expected-version 45 > "$results/stack-cache.json"
@@ -94,16 +85,15 @@ python3 "$inputs/stack/check-runtime-cache.py" --baseline "$QUALIFICATION_DIR/bu
 BUN_JSC_collectContinuously=1 "$candidate" "$inputs/module-context.mjs" matrix > "$results/als-gc.json"
 "$candidate" "$inputs/als/realm-require.mjs" > "$results/als-realm.log" 2>&1
 "$candidate" "$inputs/als/retention.mjs" > "$results/als-retention.json" 2>&1
-fi
 WK="$QUALIFICATION_DIR/engine/bun-webkit"
-clang++-23 -std=c++23 -O2 -DNDEBUG -DBUILDING_WITH_CMAKE=1 -DHAVE_CONFIG_H=1 \
+clang++ -std=c++23 -O2 -DNDEBUG -DBUILDING_WITH_CMAKE=1 -DHAVE_CONFIG_H=1 \
   -I"$WK/include" -I"$WK/include/JavaScriptCore" -I"$WK/include/wtf" -I"$pipeline/Source/JavaScriptCore" \
   "$pipeline/Source/JavaScriptCore/aot/runtime/AOTNoFeatureRemoved.cpp" \
   "$inputs/engine-limit-probe.cpp" "$inputs/probe-allocator.cpp" "$repo/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o" \
   -Wl,--start-group "$WK"/lib/*.a -Wl,--end-group -lpthread -ldl -lm -latomic \
   -o "$results/engine-limit-probe" > "$results/engine-limit-build.log" 2>&1
 "$results/engine-limit-probe" > "$results/engine-limits.log" 2>&1
-clang++-23 -std=c++23 -O2 -DNDEBUG -DBUILDING_WITH_CMAKE=1 -DHAVE_CONFIG_H=1 \
+clang++ -std=c++23 -O2 -DNDEBUG -DBUILDING_WITH_CMAKE=1 -DHAVE_CONFIG_H=1 \
   -I"$WK/include" -I"$WK/include/JavaScriptCore" -I"$WK/include/wtf" -I"$pipeline/Source/JavaScriptCore" \
   "$pipeline/Source/JavaScriptCore/aot/runtime/AOTNoFeatureRemoved.cpp" \
   "$inputs/engine-gc-progress-probe.cpp" "$inputs/probe-allocator.cpp" "$repo/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o" \
@@ -111,6 +101,3 @@ clang++-23 -std=c++23 -O2 -DNDEBUG -DBUILDING_WITH_CMAKE=1 -DHAVE_CONFIG_H=1 \
   -o "$results/engine-gc-progress-probe" > "$results/engine-gc-progress-build.log" 2>&1
 "$results/engine-gc-progress-probe" > "$results/engine-gc-progress.json" 2> "$results/engine-gc-progress.log"
 python3 "$inputs/verify-sync.py" "$QUALIFICATION_DIR" "$SOURCE_SHA" "$ARTIFACT_DIR" "$CANDIDATE_RECEIPT" "$INSPECTOR_RUNTIME"
-if test "$probe_only" -eq 1; then
-  python3 "$inputs/continue-consumer.py" seal "$pipeline" "$QUALIFICATION_DIR" "$ARTIFACT_DIR" "$INSPECTOR_RUNTIME"
-fi

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Require complete upstream-sync and patch evidence before release assembly."""
 import json,re,sys
-from consumer_identity import engine_input,verify,sha
+from consumer_identity import engine_input,verify,sha,aot_evidence
 from compile_cache import evidence as compile_cache_evidence
 from compare_fork_ci import validate_arm
 from pathlib import Path
@@ -67,8 +67,9 @@ assert type(gc_progress['helperCount']) is int and gc_progress['helperCount']>0,
 engine=json.loads((root/'engine-gate.json').read_text())
 assert engine['passed'] and engine['source']==sys.argv[2]
 receipt=Path(sys.argv[4]);artifacts=Path(sys.argv[3])
-measured=engine_input(artifacts/'bun-webkit-linux-amd64.tar.gz',artifacts/'bun-webkit-linux-amd64.manifest.json',sys.argv[2])
-verify(root,measured,receipt,Path(sys.argv[5]))
+measured=engine_input(artifacts/'bun-webkit-linux-amd64-aot.tar.gz',artifacts/'bun-webkit-linux-amd64-aot.manifest.json',sys.argv[2])
+identity=verify(root,measured,receipt,Path(sys.argv[5]))
+aot=aot_evidence(root,root,identity)
 identity_sha=sha(receipt)
 compatibility=json.loads((root/'compatibility-gate.json').read_text())
 assert compatibility['passed'] and compatibility['source']==sys.argv[2]
@@ -76,7 +77,7 @@ assert compatibility['candidate_identity_sha256']==identity_sha
 assert compatibility['memory_tests']==3 and compatibility['startup'] is True
 record={'passed':True,'source':sys.argv[2],'candidate_identity_sha256':identity_sha,
         'historical_selected_files':82,'selected_files':len(selected),'result_rows':len(rows),'regressions':0,'tests':counts,
-        'gc_progress':gc_progress,'compile_cache':compile_cache_evidence(out/'module-junit.xml'),
+        'gc_progress':gc_progress,'aot':aot,'compile_cache':compile_cache_evidence(out/'module-junit.xml'),
         'invocation':observed['invocation']}
 (root/'sync-gate.json').write_text(json.dumps(record,indent=2)+'\n')
 gate=json.loads((root/'gate.json').read_text())

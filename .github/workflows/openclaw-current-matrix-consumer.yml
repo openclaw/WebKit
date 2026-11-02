@@ -1,11 +1,6 @@
 name: OpenClaw current matrix consumer continuation
 
 on:
-  push:
-    branches: [claude/hosted-linux-consumer-20261031]
-    paths:
-      - .github/workflows/openclaw-current-matrix-consumer.yml
-      - .github/openclaw/qualification/resume-consumer.py
   workflow_dispatch:
 
 permissions:
@@ -35,7 +30,7 @@ jobs:
             Source/JavaScriptCore
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.sha }}
+          ref: 0e5b180de777933c359ef7bdb4d4f6d4a3e58522
           path: carrier
           persist-credentials: false
           sparse-checkout: .github/openclaw

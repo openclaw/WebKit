@@ -65,7 +65,7 @@ def prepare(root, name, phase, engine, inspector, command, prefix=None):
     arm = 'baseline' if name == 'baseline' else 'candidate'
     identity.require(phase != 'build' or name != 'sync', 'invalid build arm')
     repo = root / ('bun-baseline' if arm == 'baseline' else 'bun')
-    spec = identity.adapter_spec(arm, phase, engine['source'])
+    spec = identity.adapter_spec(arm, phase)
     receipt = root / (arm + '-build-tools.json' if phase == 'build' else name + '/invocation.json')
     pending = receipt.with_suffix('.pending.json')
     identity.require(not receipt.exists() and not pending.exists(), 'adapter receipt already exists')
@@ -98,7 +98,7 @@ def prepare(root, name, phase, engine, inspector, command, prefix=None):
 def restore(root, name, phase, engine, inspector, status, active, completed):
     arm = 'baseline' if name == 'baseline' else 'candidate'
     repo = root / ('bun-baseline' if arm == 'baseline' else 'bun')
-    spec = identity.adapter_spec(arm, phase, engine['source'])
+    spec = identity.adapter_spec(arm, phase)
     receipt = root / (arm + '-build-tools.json' if phase == 'build' else name + '/invocation.json')
     pending = receipt.with_suffix('.pending.json')
     record, digest, inode = active
@@ -166,10 +166,14 @@ def run_with_deadline(command, *, cwd, env, stream, seconds):
 def run(root, name, phase, engine, inspector, prefix=None):
     arm = 'baseline' if name == 'baseline' else 'candidate'
     repo = root / ('bun-baseline' if arm == 'baseline' else 'bun')
+    identity.require(engine['lane'] in identity.TARGETS and (engine['lane'] == identity.LANE or name == 'candidate'),
+                     'invalid native adapter lane')
+    platform = identity.TARGETS[engine['lane']][0]
     env = os.environ.copy()
     if phase == 'build':
         revision = identity.CONFIG['baseline']['engine'] if arm == 'baseline' else engine['source']
-        command = [str(inspector), 'run', 'build:release', '--lto=off', '--webkit-version=' + revision,
+        flags = ['--lto=off'] if arm == 'baseline' else ['--aot=on', '--lto=off']
+        command = [str(inspector), 'run', 'build:release', *flags, '--webkit-version=' + revision,
                    '--buildDir=' + str(repo / 'build' / ('qualify-' + arm)), '--timings']
         for key in ('GITHUB_SHA', 'BUILDKITE_COMMIT', 'GIT_SHA'):
             env.pop(key, None)
@@ -183,12 +187,12 @@ def run(root, name, phase, engine, inspector, prefix=None):
             env.pop(key, None)
         if name != 'sync':
             env.update(HOME=str(root / name / 'home'), TMPDIR=str(root / name / 'tmp'),
-                       PATH=str(root / name / 'bin') + os.pathsep + env['PATH'], OPENCLAW_CI_PLATFORM='linux')
+                       PATH=str(root / name / 'bin') + os.pathsep + env['PATH'], OPENCLAW_CI_PLATFORM=platform)
         else:
             identity.require(env.get('HOME') == str(root / name / 'home')
                              and env.get('TMPDIR') == str(root / name / 'tmp')
                              and env['PATH'].startswith(str(root / name / 'bin') + os.pathsep)
-                             and env.get('OPENCLAW_CI_PLATFORM') == 'linux', 'sync environment drift')
+                             and env.get('OPENCLAW_CI_PLATFORM') == platform, 'sync environment drift')
         log = root / name / 'tests.log'
     active = prepare(root, name, phase, engine, inspector, command, prefix)
     status, completed = None, False
@@ -232,12 +236,13 @@ def main():
     parser.add_argument('--name', choices=['baseline', 'candidate', 'sync'], required=True)
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--source', required=True)
+    parser.add_argument('--lane', choices=identity.TARGETS, default=identity.LANE)
     parser.add_argument('--artifacts', type=Path, required=True)
     parser.add_argument('--inspector-runtime', type=Path, required=True)
     parser.add_argument('--junit-prefix')
     args = parser.parse_args()
-    engine = identity.engine_input(args.artifacts / (identity.LANE + '.tar.gz'),
-                                   args.artifacts / (identity.LANE + '.manifest.json'), args.source)
+    engine = identity.engine_input(args.artifacts / (args.lane + '.tar.gz'),
+                                   args.artifacts / (args.lane + '.manifest.json'), args.source, args.lane)
     return run(args.root, args.name, args.phase, engine, args.inspector_runtime, args.junit_prefix)
 
 

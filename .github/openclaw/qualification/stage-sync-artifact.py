@@ -4,15 +4,16 @@ import argparse
 import json
 import shutil
 from pathlib import Path
-from consumer_identity import engine_input, overlay_manifest
+from consumer_identity import engine_input, overlay_manifest, LANE, TARGETS
 
 parser = argparse.ArgumentParser()
 parser.add_argument('archive', type=Path)
 parser.add_argument('--lane-manifest', required=True, type=Path)
 parser.add_argument('--version', required=True)
+parser.add_argument('--lane', choices=TARGETS, default=LANE)
 parser.add_argument('--output', required=True, type=Path)
 args = parser.parse_args()
-engine = engine_input(args.archive, args.lane_manifest, args.version)
+engine = engine_input(args.archive, args.lane_manifest, args.version, args.lane)
 cache = args.output / 'prefetch/by-sha256'
 cache.mkdir(parents=True, exist_ok=False)
 shutil.copyfile(args.archive, cache / engine['archive']['sha256'])

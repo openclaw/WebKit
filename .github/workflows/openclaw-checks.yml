@@ -129,25 +129,48 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           retention-days: 7
+      - name: Build native Linux AOT engine for the current Bun candidate
+        env:
+          BUILDX_METADATA_PROVENANCE: max
+        run: python3 .github/openclaw/artifacts.py build --lane bun-webkit-linux-amd64-aot --output "$RUNNER_TEMP/linux-aot-artifact"
+      - name: Retain native Linux AOT engine artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: bun-webkit-linux-amd64-aot
+          path: ${{ runner.temp }}/linux-aot-artifact
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
       - name: Install pinned Bun and JSC test tools
         run: |
-          curl -fsSL --retry 5 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
-          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cmake ninja-build nasm ccache golang-go clang-23 lld-23 llvm-23 unzip ruby ruby-highline libjson-pp-perl
+          sudo apt-get install -y --no-install-recommends ninja-build nasm ccache golang-go unzip ruby ruby-highline libjson-pp-perl
+          tools="$RUNNER_TEMP/bun-tools"
+          mkdir -p "$tools/llvm" "$tools/cmake"
+          curl -fSL --retry 5 https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.1/LLVM-23.1.1-Linux-X64.tar.xz -o "$tools/llvm.tar.xz"
+          echo '832aeb58d105de1cabc7b982dd2c65de0610f7377df48ae8fc2dd8e97420a15c  '"$tools/llvm.tar.xz" | sha256sum -c -
+          tar -xJf "$tools/llvm.tar.xz" --strip-components=1 -C "$tools/llvm" LLVM-23.1.1-Linux-X64/bin LLVM-23.1.1-Linux-X64/lib/clang/23
+          curl -fSL --retry 5 https://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu70_70.1-2_amd64.deb -o "$tools/libicu70.deb"
+          echo '58a154f6307289813da2276f900498ef536ae7c0522d2cf31a3c3c5cf62dfd9a  '"$tools/libicu70.deb" | sha256sum -c -
+          sudo dpkg -i "$tools/libicu70.deb"
+          curl -fSL --retry 5 https://github.com/Kitware/CMake/releases/download/v3.30.5/cmake-3.30.5-linux-x86_64.sh -o "$tools/cmake.sh"
+          echo '83de8839f3fb0d9caf982a0435da3fa8c4fbe2c817dfec99def310dc7e6a8404  '"$tools/cmake.sh" | sha256sum -c -
+          sh "$tools/cmake.sh" --skip-license --prefix="$tools/cmake"
           rustup toolchain install nightly-2026-09-15 --profile minimal --component rust-src
           echo 'RUSTUP_TOOLCHAIN=nightly-2026-09-15' >> "$GITHUB_ENV"
-          echo '/usr/lib/llvm-23/bin' >> "$GITHUB_PATH"
-          curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o "$RUNNER_TEMP/bun.zip"
+          echo "$tools/llvm/bin" >> "$GITHUB_PATH"
+          echo "$tools/cmake/bin" >> "$GITHUB_PATH"
+          curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64.zip -o "$RUNNER_TEMP/bun.zip"
+          echo 'bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c  '"$RUNNER_TEMP/bun.zip" | sha256sum -c -
           unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bootstrap"
           echo "$RUNNER_TEMP/bootstrap/bun-linux-x64" >> "$GITHUB_PATH"
       - name: Qualify the exact Bun candidate and fork selection
         env:
-          ARTIFACT_DIR: ${{ runner.temp }}/linux-artifact
+          ARTIFACT_DIR: ${{ runner.temp }}/linux-aot-artifact
           QUALIFICATION_DIR: ${{ runner.temp }}/qualification
         run: |
           export INSPECTOR_RUNTIME="$(realpath "$(command -v bun)")"
-          bash .github/openclaw/qualify-engine.sh
+          ARTIFACT_DIR="$RUNNER_TEMP/linux-artifact" bash .github/openclaw/qualify-engine.sh
           bash .github/openclaw/qualify.sh
           export CANDIDATE_BUN="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
           export CANDIDATE_RECEIPT="$QUALIFICATION_DIR/candidate-identity.json"
@@ -163,6 +186,7 @@ jobs:
             ${{ runner.temp }}/qualification/bun/build/qualify-candidate/bun
             ${{ runner.temp }}/qualification/bun/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o
             ${{ runner.temp }}/qualification/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
+            ${{ runner.temp }}/qualification/bun/test/aot/every-platform.test.ts
             ${{ runner.temp }}/qualification/*.sha256
           compression-level: 0
           if-no-files-found: error

@@ -9,9 +9,11 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-from qualification import consumer_identity as consumer, compile_cache, harness_adapters as harness
+from qualification import consumer_identity as consumer, compile_cache, harness_adapters as harness, darwin
 import xml.etree.ElementTree as ET
 
+
+AOT_FIXTURE = b'pinned AOT test fixture\n'
 
 
 def seed_build_tools(root, arm, record):
@@ -19,11 +21,12 @@ def seed_build_tools(root, arm, record):
     cwd = Path('/fixture') / ('bun-baseline' if arm == 'baseline' else 'bun')
     before = {'index_tree': consumer.CONFIG[arm]['tree'], 'other_patch_sha256':
               record['tracked_patch_sha256'] if arm == 'baseline' else record['overlay']['patch_sha256']}
+    flags = ['--lto=off'] if arm == 'baseline' else ['--aot=on', '--lto=off']
     tools = {'schema_version': 1, 'arm': arm, 'phase': 'build', 'source': consumer.CONFIG[arm],
              'adapter': consumer.adapter_spec(arm, 'build'), 'restored': True, 'status': 0,
              'before': before, 'after': before, 'compiled_inputs_sha256': '1'*64,
              'engine_source': record['runtime']['webkit'], 'executable': record['executable'],
-             'cwd': str(cwd), 'argv': ['/fixture/bootstrap-bun', 'run', 'build:release', '--lto=off',
+             'cwd': str(cwd), 'argv': ['/fixture/bootstrap-bun', 'run', 'build:release', *flags,
              '--webkit-version='+record['runtime']['webkit'], '--buildDir='+str(cwd/'build'/('qualify-'+arm)), '--timings'],
              'bootstrap': {'path': '/fixture/bootstrap-bun', 'size': 1, 'sha256': '2'*64}}
     path = arm+'-build-tools.json'
@@ -73,7 +76,7 @@ def write_invocation(root, name, records):
     argv = [str(cwd/'build'/('qualify-'+arm)/'bun'), 'scripts/openclaw-ci/tests.ts', 'test']
     if name == 'sync': argv += ['--junit-prefix', 'openclaw-sync-junit-'+'1'*32+'-']
     invocation = {'schema_version': 1, 'phase': 'test', 'arm': arm, 'source': consumer.CONFIG[arm],
-                  'adapter': consumer.adapter_spec(arm, 'test', record['runtime']['webkit']), 'restored': True, 'before': before, 'after': before,
+                  'adapter': consumer.adapter_spec(arm, 'test'), 'restored': True, 'before': before, 'after': before,
                   'compiled_inputs_sha256': '1'*64, 'cwd': str(cwd), 'argv': argv,
                   'identity': consumer.file_record(root, arm+'-identity.json'), 'executable': record['executable'],
                   'selection': consumer.file_record(root, name+'/selected.json'), 'evidence': {}}
@@ -89,7 +92,8 @@ def release_fixture(inputs, source):
     lane=inputs/consumer.LANE
     engine=consumer.engine_input(lane/(consumer.LANE+'.tar.gz'),lane/(consumer.LANE+'.manifest.json'),source)
     for path,data in [(consumer.EXECUTABLE,b'candidate'),(consumer.BASELINE_EXECUTABLE,b'baseline'),
-                      (consumer.FIXTURE,(consumer.INPUTS/'worker-resource-limits.test.ts').read_bytes())]:
+                      (consumer.FIXTURE,(consumer.INPUTS/'worker-resource-limits.test.ts').read_bytes()),
+                      (consumer.AOT_TEST,AOT_FIXTURE)]:
         file=binaries/path;file.parent.mkdir(parents=True,exist_ok=True);file.write_bytes(data)
     overlay=proof/'candidate-input/artifacts.json';overlay.parent.mkdir();overlay.write_text(json.dumps(consumer.overlay_manifest(engine)))
     (proof/'candidate-manifest.patch').write_bytes(b'candidate overlay patch\n')
@@ -106,7 +110,10 @@ def release_fixture(inputs, source):
     seed_build_tools(proof,'candidate',identity);seed_build_tools(proof,'baseline',baseline)
     consumer.write_once(proof/'candidate-identity.json',identity);consumer.write_once(proof/'baseline-identity.json',baseline)
     digest=consumer.sha(proof/'candidate-identity.json')
-    report=proof/'sync/module-junit.xml';report.parent.mkdir()
+    (proof/'sync').mkdir()
+    (proof/consumer.AOT_LOG).write_text('bun test fixture\n 4 pass\n 0 fail\n')
+    aot=consumer.aot_evidence(proof,binaries,identity)
+    report=proof/'sync/module-junit.xml'
     suites=ET.Element('testsuites');suite=ET.SubElement(suites,'testsuite',name=compile_cache.MODULE)
     for classname,name in compile_cache.CASES:
         ET.SubElement(suite,'testcase',classname=classname,name=name,file=compile_cache.MODULE)
@@ -122,9 +129,39 @@ def release_fixture(inputs, source):
     gate={'passed':True,'source':source,'comparison':'bun-plus-engine-upgrade','selected_files':44,'result_files':46,
         'comparison_policy':comparison.POLICY,'faithfulness_sha256':consumer.sha(proof/'faithfulness.json'),
         'candidate_identity_sha256':digest,'baseline_identity_sha256':consumer.sha(proof/'baseline-identity.json'),
-        'upstream_sync':{'passed':True,'source':source,'candidate_identity_sha256':digest,'historical_selected_files':82,'selected_files':85,'result_rows':87,'regressions':0,'compile_cache':compile_cache.evidence(report),'invocation':consumer.file_record(proof,'sync/invocation.json')},
+        'upstream_sync':{'passed':True,'source':source,'candidate_identity_sha256':digest,'historical_selected_files':82,'selected_files':85,'result_rows':87,'regressions':0,'aot':aot,'compile_cache':compile_cache.evidence(report),'invocation':consumer.file_record(proof,'sync/invocation.json')},
         'engine':{'passed':True,'source':source},'compatibility':{'passed':True,'source':source,'candidate_identity_sha256':digest,'memory_tests':3,'startup':True}}
     (proof/'gate.json').write_text(json.dumps(gate))
+    darwin_release_fixture(inputs, source)
+
+
+
+def darwin_release_fixture(inputs, source):
+    """Distinct native-platform receipts and binaries; never execute fixture bytes."""
+    proof = inputs / 'darwin-qualification'; proof.mkdir()
+    binaries = inputs / 'darwin-bun-executables'
+    lane = inputs / darwin.LANE
+    engine = consumer.engine_input(lane / (darwin.LANE + '.tar.gz'),
+                                   lane / (darwin.LANE + '.manifest.json'), source, darwin.LANE)
+    for name, data in [(consumer.EXECUTABLE, b'darwin candidate'),
+                       (consumer.FIXTURE, (consumer.INPUTS / 'worker-resource-limits.test.ts').read_bytes()),
+                       (consumer.AOT_TEST, AOT_FIXTURE)]:
+        file = binaries / name; file.parent.mkdir(parents=True, exist_ok=True); file.write_bytes(data)
+    overlay = proof / 'candidate-input/artifacts.json'; overlay.parent.mkdir()
+    overlay.write_text(json.dumps(consumer.overlay_manifest(engine)))
+    (proof / 'candidate-manifest.patch').write_bytes(b'darwin manifest overlay\n')
+    identity = json.loads((inputs / 'qualification/candidate-identity.json').read_text())
+    identity.update(engine=engine, executable=consumer.file_record(binaries, consumer.EXECUTABLE),
+                    fixture=consumer.file_record(binaries, consumer.FIXTURE))
+    identity['runtime'].update(platform='darwin', architecture='arm64')
+    identity['overlay'].update(sha256=consumer.sha(overlay), patch_sha256=consumer.sha(proof / 'candidate-manifest.patch'))
+    seed_build_tools(proof, 'candidate', identity)
+    consumer.write_once(proof / 'candidate-identity.json', identity)
+    from test_compare_fork_ci import evidence
+    selected = json.loads((consumer.INPUTS / 'darwin-selected.json').read_text())
+    write_invocation(proof, 'candidate', evidence(selected=selected))
+    log = proof / consumer.AOT_LOG; log.parent.mkdir(); log.write_text(' 4 pass\n 0 fail\n')
+    consumer.write_once(proof / 'gate.json', darwin.evidence(proof, binaries, source, engine))
 
 
 class ConsumerIdentity(unittest.TestCase):
@@ -185,14 +222,59 @@ class ConsumerIdentity(unittest.TestCase):
     def record(self):
         record=consumer.capture(self.root,self.engine,self.inspector);consumer.write_once(self.receipt,record);return record
 
-    def test_cycle_adapter_matches_the_engine_generation(self):
-        legacy = consumer.adapter_spec('candidate', 'test', '42e4245f4180941634b482a7e8ef7fca47467de5')
-        current = consumer.adapter_spec('candidate', 'test', self.source)
-        path = 'test/js/node/module/node-module-module.test.js'
-        self.assertNotIn(path, legacy['files'])
-        self.assertEqual(current['files'][path]['before'], '83dda3bff94343176a1faa677723f5826dc612e376963192e3ca2400cc6aba45')
-        self.assertNotEqual(legacy['sha256'], current['sha256'])
-        self.assertEqual(consumer.adapter_spec('candidate', 'test'), legacy)
+    def test_native_darwin_identity_requires_explicit_lane_and_matching_runtime(self):
+        record = self.record()
+        native = copy.deepcopy(record)
+        native['engine']['lane'] = consumer.DARWIN_LANE
+        native['engine']['archive']['path'] = consumer.DARWIN_LANE + '.tar.gz'
+        native['runtime'].update(platform='darwin', architecture='arm64')
+        with self.assertRaises(ValueError): consumer.validate(native, self.engine['source'])
+        consumer.validate(native, self.engine['source'], lane=consumer.DARWIN_LANE)
+        for field, value in [('platform', 'linux'), ('architecture', 'x64')]:
+            with self.subTest(field=field):
+                changed = copy.deepcopy(native); changed['runtime'][field] = value
+                with self.assertRaises(ValueError):
+                    consumer.validate(changed, self.engine['source'], lane=consumer.DARWIN_LANE)
+        for field, value in [('lane', consumer.LANE), ('archive', record['engine']['archive'])]:
+            with self.subTest(field=field):
+                changed = copy.deepcopy(native); changed['engine'][field] = value
+                with self.assertRaises(ValueError):
+                    consumer.validate(changed, self.engine['source'], lane=consumer.DARWIN_LANE)
+        with self.assertRaisesRegex(ValueError, 'unsupported native consumer lane'):
+            consumer.validate(native, self.engine['source'], lane='bun-webkit-macos-amd64-aot')
+
+    def test_current_candidate_rejects_legacy_build_profile(self):
+        record=json.loads((self.root/'candidate-build-tools.json').read_text())
+        for flags in [[], ['--aot=off'], ['--aot=on','--lto=on']]:
+            with self.subTest(flags=flags):
+                changed=copy.deepcopy(record)
+                changed['argv']=[*record['argv'][:3],*flags,*record['argv'][5:]]
+                with self.assertRaisesRegex(ValueError,'build argv'):
+                    consumer.validate_build_tools(changed,'candidate',record['executable'])
+        baseline=seed_consumer(self.root,'baseline')
+        tools=json.loads((self.root/'baseline-build-tools.json').read_text())
+        self.assertEqual(len(tools['argv']),7)
+        self.assertEqual(tools['argv'][3],'--lto=off')
+        consumer.validate_build_tools(tools,'baseline',baseline['executable'])
+
+    def test_aot_gate_requires_four_completed_cases_and_measured_inputs(self):
+        record=self.record()
+        test=self.root/consumer.AOT_TEST;test.parent.mkdir(parents=True);test.write_bytes(AOT_FIXTURE)
+        log=self.root/consumer.AOT_LOG;log.parent.mkdir();log.write_text(' 4 pass\n 0 fail\n')
+        with patch.object(consumer,'AOT_TEST_SHA256',__import__('hashlib').sha256(AOT_FIXTURE).hexdigest()):
+            evidence=consumer.aot_evidence(self.root,self.root,record)
+            self.assertEqual(evidence['candidate_identity_sha256'],consumer.sha(self.receipt))
+            self.assertEqual(evidence['log'],consumer.file_record(self.root,consumer.AOT_LOG))
+            for text in [' 0 pass\n 0 fail\n',' 5 pass\n 0 fail\n',' 4 pass\n 1 fail\n',
+                         ' 4 pass\n 0 fail\n 1 skip\n',' 4 pass\n 0 fail\n 1 todo\n',
+                         ' 4 pass\n 0 fail\n 4 pass\n']:
+                with self.subTest(text=text):
+                    log.write_text(text)
+                    with self.assertRaisesRegex(ValueError,'AOT every-platform'):consumer.aot_evidence(self.root,self.root,record)
+            log.write_text(' 4 pass\n 0 fail\n');test.write_bytes(AOT_FIXTURE+b'changed')
+            with self.assertRaisesRegex(ValueError,'AOT test source'):consumer.aot_evidence(self.root,self.root,record)
+        changed=copy.deepcopy(record);changed['executable']['sha256']='f'*64
+        with self.assertRaisesRegex(ValueError,'AOT candidate executable'):consumer.aot_evidence(self.root,self.root,changed)
 
     def test_measured_receipt_written_once_and_reused(self):
         record=self.record()
@@ -253,6 +335,7 @@ class ConsumerIdentity(unittest.TestCase):
         record=consumer.capture(self.root,self.engine,self.inspector)
         for section,key,value in [('candidate','commit','f'*40),('candidate','tree','f'*40),('candidate','index_tree','f'*40),
             ('overlay','tracked_changed_paths',[consumer.MANIFEST,'source.js']),('fixture','sha256','f'*64),
+            ('candidate','commit','7b573c05d0c52dffc67d4d25daf108bed5930cf2'),('engine','lane','bun-webkit-linux-amd64'),
             ('runtime','webkit','f'*40),('runtime','bun_revision','f'*40)]:
             with self.subTest(section=section,key=key):
                 changed=copy.deepcopy(record);changed[section][key]=value
@@ -391,7 +474,7 @@ class HarnessAdapters(unittest.TestCase):
         self.file.write_text('original harness\n')
         spec={'patch':str(self.adapter),'sha256':consumer.sha(self.adapter),
               'files':{'harness.js':{'before':before,'after':after,'mode':'100644'}}}
-        consumer.ADAPTERS['arms']['candidate']={'pin':pin['commit'],'build':spec,'test':spec,'current_test':spec}
+        consumer.ADAPTERS['arms']['candidate']={'pin':pin['commit'],'build':spec,'test':spec}
         (self.root/'candidate-build-tools.json').unlink()
         _,overlay=consumer.source_identity(self.repo,self.engine,self.inspector)
         seed_build_tools(self.root,'candidate',{'executable':consumer.file_record(self.root,consumer.EXECUTABLE),
@@ -455,7 +538,7 @@ class HarnessAdapters(unittest.TestCase):
             self.assertEqual(self.run_owner('build'),0)
             self.assertTrue(all(os.environ[key]==value for key,value in values.items()))
         argv,options=self.calls[0]
-        self.assertEqual(argv,[str(self.inspector),'run','build:release','--lto=off','--webkit-version='+self.source,
+        self.assertEqual(argv,[str(self.inspector),'run','build:release','--aot=on','--lto=off','--webkit-version='+self.source,
             '--buildDir='+str(self.repo/'build/qualify-candidate'),'--timings'])
         self.assertFalse(any(key in options['env'] for key in values))
         record=json.loads(receipt.read_text());self.assertEqual(record['argv'],argv)
@@ -641,7 +724,7 @@ class HarnessAdapters(unittest.TestCase):
         original=copy.deepcopy(consumer.ADAPTERS)
         valid={'patch':None,'sha256':None,'files':{}}
         cases=[('candidate','build',{**valid,'sha256':'0'*64}),
-               ('candidate','build',{**valid,'files':original['arms']['candidate']['build']['files']}),
+               ('candidate','build',{**valid,'files':original['arms']['baseline']['build']['files']}),
                ('candidate','build',{**valid,'extra':True}),
                ('candidate','build',{'patch':None,'sha256':None}),
                ('candidate','test',valid),('baseline','build',valid)]
