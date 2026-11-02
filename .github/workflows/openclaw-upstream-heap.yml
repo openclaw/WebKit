@@ -1,0 +1,76 @@
+name: OpenClaw upstream heap teardown proof
+on:
+  pull_request:
+    branches: [claude/sync-webkit-upstream-20261014]
+    paths:
+      - .github/workflows/openclaw-upstream-heap.yml
+      - .github/openclaw/qualification/upstream-heap/**
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: openclaw-upstream-heap-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native-heap-teardown:
+    if: >-
+      github.repository == 'openclaw/WebKit' &&
+      (github.event.pull_request.head.ref || github.ref_name) == 'claude/upstream-heap-proof-20261031' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: controls
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: .github/openclaw/qualification/upstream-heap
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: e66916298091dd12469076fd854e135b03fb16ff
+          path: upstream
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/LayoutTests/
+            !/JSTests/
+            !/PerformanceTests/
+            !/Websites/
+            !/ManualTests/
+            !/WebDriverTests/
+      - name: Install the existing native ARM64 toolchain
+        run: |
+          test "$(uname -m)" = aarch64
+          curl -fsSL --retry 5 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake ninja-build clang-23 lld-23 libicu-dev ruby ruby-highline libjson-pp-perl
+      - name: Prove both liveness failures and the exact heap fix
+        env:
+          PIPELINE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python3 controls/.github/openclaw/qualification/upstream-heap/qualify.py
+      - name: Bound and record the evidence
+        id: evidence
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, stat
+          from pathlib import Path
+          out = Path(os.environ['RUNNER_TEMP']) / 'upstream-heap-proof'
+          out.mkdir(exist_ok=True)
+          files = sorted(out.iterdir())
+          assert len(files) <= 32 and all(stat.S_ISREG(p.lstat().st_mode) for p in files)
+          assert sum(p.stat().st_size for p in files) <= 64 * 1024**2
+          def sha(path):
+              with path.open('rb') as stream: return hashlib.file_digest(stream, 'sha256').hexdigest()
+          (out / 'archive-manifest.json').write_text(json.dumps({p.name: {'bytes': p.stat().st_size, 'sha256': sha(p)} for p in files}, indent=2) + '\n')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always() && steps.evidence.outcome == 'success'
+        with:
+          name: upstream-heap-teardown-proof
+          path: ${{ runner.temp }}/upstream-heap-proof/
+          if-no-files-found: error
+          retention-days: 7
