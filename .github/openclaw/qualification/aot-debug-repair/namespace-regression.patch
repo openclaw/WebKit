@@ -1,0 +1,62 @@
+--- a/test/aot/run-aot.test.ts
++++ b/test/aot/run-aot.test.ts
+@@ -489,6 +489,59 @@
+ });
+ 
+ describe("bun test", () => {
++  test("host require keeps compiled namespace markers and defaults separate from imports", async () => {
++    const { stderr, exitCode } = await ranWithBunTypes(
++      {
++        "subject.ts": `
++          export default { label: "kept" };
++          export let value = 1;
++          export function bump() { value++; }`,
++        "one.test.ts": `
++          import { expect, mock, test } from "bun:test";
++          import * as subject from "./subject.ts";
++          test("namespace facade", async () => {
++            const first = await import("bun:jsc");
++            mock.module("bun:jsc", () => ({ ...first, heapSize: () => 73 }));
++            const hostPath = import.meta.dir + "/written-" + process.pid + ".mjs";
++            await Bun.write(hostPath, 'export const required = require("./subject.ts"); export const again = require("./subject.ts"); export const mocked = require("bun:jsc"); export const mockedAgain = require("bun:jsc");');
++            const host = await import(hostPath);
++            expect(host.required).not.toBe(subject);
++            expect(host.again).toBe(host.required);
++            expect(host.required.__esModule).toBe(true);
++            expect(Object.hasOwn(host.required, "__esModule")).toBe(true);
++            expect(Reflect.get(subject, "__esModule")).toBeUndefined();
++            expect(Object.hasOwn(subject, "__esModule")).toBe(false);
++            expect(host.required.default).toBe(subject.default);
++            expect(host.required.value).toBe(1);
++            subject.bump();
++            expect(subject.value).toBe(2);
++            expect(host.required.value).toBe(2);
++            const current = await import("bun:jsc");
++            expect(host.mocked).not.toBe(current);
++            expect(host.mockedAgain).toBe(host.mocked);
++            expect(host.mocked.__esModule).toBe(true);
++            expect(Object.hasOwn(host.mocked, "__esModule")).toBe(true);
++            expect(Reflect.get(current, "__esModule")).toBeUndefined();
++            expect(Object.hasOwn(current, "__esModule")).toBe(false);
++            expect(host.mocked.default).toBe(Reflect.get(current, "default"));
++            expect(host.mocked.heapSize()).toBe(73);
++            expect(current.heapSize()).toBe(73);
++            const forwarderPath = import.meta.dir + "/forward-" + process.pid + ".cjs";
++            await Bun.write(forwarderPath, 'module.exports = require("./subject.ts");');
++            const forwarded = await import(forwarderPath);
++            expect(forwarded.default).toBe(host.required);
++            expect(forwarded["module.exports"]).toBe(host.required);
++            expect(forwarded.default.default).toBe(subject.default);
++            expect(forwarded.default.value).toBe(2);
++          });`,
++      },
++      ["test", ...flags, "one.test.ts"],
++    );
++    expect(stderr, stderr).toMatch(/^\s*1 pass$/m);
++    expect(stderr).toMatch(/^\s*0 fail$/m);
++    expect(stderr).not.toMatch(/^\s*\d+ (?:skip|todo)/m);
++    expect(exitCode).toBe(0);
++  });
+   const price = {
+     "price.ts": `export function price(id: string): number { return id.length; }\nexport const rate = { of(id: string): number { return id.length * 2; } };`,
+   };

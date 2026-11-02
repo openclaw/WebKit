@@ -1,0 +1,84 @@
+--- a/src/jsc/bindings/BunCompiledModules.cpp
++++ b/src/jsc/bindings/BunCompiledModules.cpp
+@@ -18,6 +18,7 @@
+ #include "ZigGlobalObject.h"
+ #if ENABLE(AOT)
+ #include <JavaScriptCore/AOTImage.h>
++#include <JavaScriptCore/AOTModuleHost.h>
+ #include <JavaScriptCore/AOTPropertyWalk.h>
+ #endif
+ #include <JavaScriptCore/AOTSchemaEnums.h>
+@@ -434,7 +435,7 @@
+     auto scope = DECLARE_THROW_SCOPE(getVM(globalObject));
+     AOT::evaluateModuleSynchronously(globalObject, *module);
+     RETURN_IF_EXCEPTION(scope, {});
+-    RELEASE_AND_RETURN(scope, AOT::moduleNamespace(globalObject, *module));
++    RELEASE_AND_RETURN(scope, AOT::moduleNamespaceForRequire(globalObject, *module));
+ }
+ 
+ bool evaluateCompiledFileForDefaultLoader(Zig::GlobalObject* globalObject, JSCommonJSModule* target, const String& path, bool isTypeScriptLoader)
+--- a/src/jsc/bindings/JSCommonJSModule.cpp
++++ b/src/jsc/bindings/JSCommonJSModule.cpp
+@@ -93,6 +93,7 @@
+ #include "GeneratedJest.h"
+ #include "WebCoreJSBuiltins.h"
+ #if ENABLE(AOT)
++#include <JavaScriptCore/AOTModuleHost.h>
+ #include <JavaScriptCore/AOTPropertyWalk.h>
+ #endif
+ 
+@@ -1276,7 +1277,11 @@
+     if (auto* exports = result.getObject()) {
+         bool hasESModuleMarker = false;
+         // A native namespace forwarded by CJS keeps its default binding inside that namespace.
+-        if (!ignoreESModuleAnnotation && !dynamicDowncast<JSModuleNamespaceObject>(exports)) {
++        bool isModuleNamespace = !!dynamicDowncast<JSModuleNamespaceObject>(exports);
++#if ENABLE(AOT)
++        isModuleNamespace |= AOT::isModuleNamespace(exports);
++#endif
++        if (!ignoreESModuleAnnotation && !isModuleNamespace) {
+             PropertySlot slot(exports, PropertySlot::InternalMethodType::VMInquiry, &vm);
+             auto has = exports->getPropertySlot(globalObject, esModuleMarker, slot);
+             RETURN_IF_EXCEPTION(scope, );
+--- a/src/jsc/bindings/ZigGlobalObject.cpp
++++ b/src/jsc/bindings/ZigGlobalObject.cpp
+@@ -9,6 +9,7 @@
+ #include "PathInlines.h"
+ #include "helpers.h"
+ #include "JavaScriptCore/AOTHost.h"
++#include "JavaScriptCore/AOTModuleHost.h"
+ #include "JavaScriptCore/ArgList.h"
+ #include "JavaScriptCore/JSCellButterfly.h"
+ #include "wtf/text/Base64.h"
+@@ -1241,8 +1242,13 @@
+     if (auto* entry = entryBefore) {
+         if (isModuleEvaluated(entry->record()) || isModuleEvaluatingSync(entry->record())) {
+             // A mock answers for a module of native code that compiled code has imported: the entry is the image's, and so is its namespace object.
+-            if (Bun::isRecordOfCompiledModule(entry->record())) [[unlikely]]
+-                RELEASE_AND_RETURN(scope, JSValue::encode(entry->record()->moduleNamespaceObject(globalObject)));
++#if ENABLE(AOT)
++            if (Bun::isRecordOfCompiledModule(entry->record())) [[unlikely]] {
++                auto* ns = entry->record()->moduleNamespaceObject(globalObject);
++                RETURN_IF_EXCEPTION(scope, {});
++                RELEASE_AND_RETURN(scope, JSValue::encode(AOT::moduleNamespaceForRequire(globalObject, ns)));
++            }
++#endif
+             auto* ns = entry->record()->getModuleNamespace(globalObject, false);
+             RETURN_IF_EXCEPTION(scope, {});
+             auto* required = ns->createNamespaceForRequire(globalObject);
+@@ -1325,8 +1331,13 @@
+         }
+     }
+ 
+-    if (Bun::isRecordOfCompiledModule(record)) [[unlikely]]
+-        RELEASE_AND_RETURN(scope, JSValue::encode(record->moduleNamespaceObject(globalObject)));
++#if ENABLE(AOT)
++    if (Bun::isRecordOfCompiledModule(record)) [[unlikely]] {
++        auto* ns = record->moduleNamespaceObject(globalObject);
++        RETURN_IF_EXCEPTION(scope, {});
++        RELEASE_AND_RETURN(scope, JSValue::encode(AOT::moduleNamespaceForRequire(globalObject, ns)));
++    }
++#endif
+     auto* ns = record->getModuleNamespace(globalObject, false);
+     RETURN_IF_EXCEPTION(scope, {});
+     Bun::evictModulesThatHaveLoaded(globalObject);

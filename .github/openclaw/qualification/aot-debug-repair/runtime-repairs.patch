@@ -1,0 +1,196 @@
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,6 +1,12 @@
+ # OpenClaw Bun fork changelog
+ 
+ ## Unreleased
++
++- Keep host `require()` facades for compiled modules separate from import namespaces, including forwarded CommonJS exports and native-module mocks.
++
++- Keep bare plugin loading separate from filelike resolver probes so builtin and recursive resolutions retain their guards.
++
++- Preserve `lstat` ENOTDIR errors with `throwIfNoEntry: false` while retaining `stat` no-entry behavior.
+ 
+ - Remove obsolete missing-script handling reintroduced by the upstream sync while preserving Node-compatible stdin and REPL dispatch.
+ 
+--- a/src/jsc/ModuleLoader.rs
++++ b/src/jsc/ModuleLoader.rs
+@@ -460,7 +460,11 @@
+ }
+ 
+ pub(crate) fn on_load_namespace_and_path(key: &[u8]) -> Option<(&[u8], &[u8])> {
+-    has_extension_or_namespace(key).then(|| namespace_and_path(key))
++    (has_extension_or_namespace(key)
++        || (!bun_paths::is_absolute(key)
++            && !key.starts_with(b"./")
++            && !key.starts_with(b"../")))
++    .then(|| namespace_and_path(key))
+ }
+ 
+ /// C++ entry point: length of `key`'s `onLoad` namespace (0 for `file`), or -1 if no `onLoad` runs for it.
+@@ -506,6 +510,5 @@
+         }
+     }
+     !bun_paths::is_absolute(specifier)
+-        && (bun_core::strings::index_of_char_usize(specifier, b':').is_some()
+-            || (!specifier.starts_with(b"./") && !specifier.starts_with(b"../")))
+-}
++        && bun_core::strings::index_of_char_usize(specifier, b':').is_some()
++}
+--- a/src/jsc/VirtualMachine.rs
++++ b/src/jsc/VirtualMachine.rs
+@@ -6200,14 +6200,16 @@
+                     let is_bare = bun_resolver::is_package_path(&answer_utf8)
+                         && ModuleLoader::on_load_namespace_and_path(&answer_utf8)
+                             .is_some_and(|(namespace, _)| namespace.is_empty());
++                    let probe_filelike = ModuleLoader::has_extension_or_namespace(&answer_utf8);
+                     drop(answer_utf8);
+                     let is_own = is_bare
+                         && (answer.eql(specifier)
+-                            || match run_on_resolve(global, &answer, source, mode.import_kind())? {
+-                                None => false,
+-                                Some(Ok(_)) => true,
+-                                Some(Err(error)) => return Ok(Some(Err(error))),
+-                            });
++                            || (probe_filelike
++                                && match run_on_resolve(global, &answer, source, mode.import_kind())? {
++                                    None => false,
++                                    Some(Ok(_)) => true,
++                                    Some(Err(error)) => return Ok(Some(Err(error))),
++                                }));
+                     let global_cache = if is_own {
+                         bun_resolver::GlobalCache::disable
+                     } else {
+--- a/src/runtime/node/node_fs.rs
++++ b/src/runtime/node/node_fs.rs
+@@ -479,7 +479,10 @@
+             return Ok(stats);
+         }
+     }
+-    if matches!(err.get_errno(), E::ENOENT | E::ENOTDIR) && !args.throw_if_no_entry {
++    if !args.throw_if_no_entry
++        && (err.get_errno() == E::ENOENT
++            || (err.get_errno() == E::ENOTDIR && err.syscall == sys::Tag::stat))
++    {
+         return Ok(StatOrNotFound::NotFound);
+     }
+     Err(err.with_path(written))
+--- a/test/js/bun/plugin/plugins.test.ts
++++ b/test/js/bun/plugin/plugins.test.ts
+@@ -2824,7 +2824,7 @@
+         expect.stringMatching(/^file:.*\/not-there\.js$/),
+         "onResolve /not/there",
+         expect.stringMatching(/^file:\/\/\/(\w:\/)?not\/there$/),
+-        expect.stringMatching(/^onResolve (\w:)?[\\/]not[\\/]there\.js$/),
++        expect.stringMatching(/^onResolve file:\/\/\/(\w:\/)?not\/there\.js$/),
+         expect.stringMatching(/^file:\/\/\/(\w:\/)?not\/there\.js$/),
+       ],
+       stderr: "",
+@@ -3298,20 +3298,20 @@
+       "js",
+       `export const a = 1; export default { b: 2 };`,
+       { a: 1, default: { b: 2 } },
+-      { a: 1, default: { b: 2 } },
++      { __esModule: true, a: 1, default: { b: 2 } },
+     ],
+     "a CommonJS module": [
+       "js",
+       "js",
+       `module.exports = { a: 1, b: { c: 2 } };`,
+-      { ...object, default: object },
++      { ...object, default: object, "module.exports": object },
+       object,
+     ],
+     "a CommonJS module that exports a function": [
+       "js",
+       "cjs",
+       `module.exports = function f() {}; module.exports.x = 1;`,
+-      { default: "function f", length: 0, name: "f", prototype: {}, x: 1 },
++      { default: "function f", "module.exports": "function f", length: 0, name: "f", prototype: {}, x: 1 },
+       "function f",
+     ],
+     "JSX": [
+@@ -3319,20 +3319,20 @@
+       "jsx",
+       `/** @jsxRuntime classic */ /** @jsx h */ const h = tag => tag; export default <div />;`,
+       { default: "div" },
+-      { default: "div" },
++      { __esModule: true, default: "div" },
+     ],
+     "TypeScript": [
+       "ts",
+       "ts",
+       `export const a: number = 1; export default { b: 2 } as object;`,
+       { a: 1, default: { b: 2 } },
+-      { a: 1, default: { b: 2 } },
++      { __esModule: true, a: 1, default: { b: 2 } },
+     ],
+     "TypeScript that is CommonJS": [
+       "ts",
+       "cts",
+       `const a: number = 1; module.exports = { a };`,
+-      { a: 1, default: { a: 1 } },
++      { a: 1, default: { a: 1 }, "module.exports": { a: 1 } },
+       { a: 1 },
+     ],
+     "TSX": [
+@@ -3340,7 +3340,7 @@
+       "tsx",
+       `/** @jsxRuntime classic */ /** @jsx h */ const h = (tag: string) => tag; export default <div />;`,
+       { default: "div" },
+-      { default: "div" },
++      { __esModule: true, default: "div" },
+     ],
+     "a JSON object": [
+       "json",
+@@ -3384,13 +3384,13 @@
+       { a: { b: { "@c": "2", "#text": "t" } }, default: { a: { b: { "@c": "2", "#text": "t" } } } },
+       { a: { b: { "@c": "2", "#text": "t" } } },
+     ],
+-    "text": ["text", "txt", `hello\nwörld`, { default: "hello\nwörld" }, { default: "hello\nwörld" }],
++    "text": ["text", "txt", `hello\nwörld`, { default: "hello\nwörld" }, { __esModule: true, default: "hello\nwörld" }],
+     "Markdown": [
+       "md",
+       "md",
+       `# hi\n\ntext`,
+       { default: "<h1>hi</h1>\n<p>text</p>\n" },
+-      { default: "<h1>hi</h1>\n<p>text</p>\n" },
++      { __esModule: true, default: "<h1>hi</h1>\n<p>text</p>\n" },
+     ],
+     "CSS": ["css", "css", `.a { color: red }`, { __esModule: true, default: {} }, {}],
+   };
+@@ -3616,7 +3616,10 @@
+     `;
+     const { stdout, stderr, exitCode } = await run({ "entry.ts": entry }, ["entry.ts"]);
+     const namespace = { ...object, default: { ...object, default: 3 } };
+-    const each = { json: [namespace, namespace], cjs: [object, { ...object, default: object }, true] };
++    const each = {
++      json: [namespace, { __esModule: true, ...namespace }],
++      cjs: [object, { ...object, default: object, "module.exports": object }, true],
++    };
+     expect({ loaded: JSON.parse(stdout || "null"), stderr, exitCode }).toEqual({
+       loaded: { file: each, ".virtual": each },
+       stderr: "",
+@@ -3684,7 +3687,7 @@
+           { v: 1 },
+           { default: { v: 2 }, v: 2 },
+           { v: 3 },
+-          { default: { v: 3 }, v: 3 },
++          { default: { v: 3 }, "module.exports": { v: 3 }, v: 3 },
+         ]) + "\n",
+       stderr: "",
+       exitCode: 0,
+--- a/test/js/node/module/node-module-module.test.js
++++ b/test/js/node/module/node-module-module.test.js
+@@ -68,9 +68,8 @@
+     // Known divergence: Bun's single import/require registry reuses a completed record.
+     // Node runs load again for require() and can return distinct CommonJS-request source ("outer").
+     ["record-identity-completed-handoff", '{"values":["one","one"],"loads":1}'],
+-    // Known JSC divergence: hostLoadImportedModule repeats pending cycle edges before loadedModules is populated.
+-    ["static-cycle-import", '{"answer":42,"leafResolves":2}'],
+-    ["static-cycle-require", '{"answer":42,"leafResolves":2}'],
++    ["static-cycle-import", '{"answer":42,"leafResolves":1}'],
++    ["static-cycle-require", '{"answer":42,"leafResolves":1}'],
+     // Known JSC divergence: hostLoadImportedModule chooses the registry type before host resolution.
+     [
+       "attributes-static-returned-identity",

@@ -1,0 +1,99 @@
+{
+  "bun": "c6a7bf9d8dc4d44db9f826e47a5ae7645ea6e8c9",
+  "bun_tree": "ef814c1b5ef7731d6373cfacb8c88b0227a670aa",
+  "engine": "1281a1be4796f541bcaf0ef751941c41dfbf7817",
+  "groups": {
+    "runtime-repairs.patch": {
+      "repo": "source",
+      "sha256": "6aa3f73b7b1c5e08b88cfead5516a9eb41689d18787ddf64b8fe5da826c275a7",
+      "files": {
+        "CHANGELOG.md": {
+          "before": "94e32e3d3137165298ffdb6c95b26687596f0e5133d62fa8c26a7e0a9413a2b0",
+          "after": "ab7eced88543d0569f1779a507979a6e6fea2039d9237f6dd253dc8727d35eff"
+        },
+        "src/jsc/ModuleLoader.rs": {
+          "before": "fdec413765c3f19e1b2260248c5cdc53f8d406aef302acb8a2a4ca412a404560",
+          "after": "071070975aeb0768cd25f9d6811b25a241543504c235c3be003c947a680f9331"
+        },
+        "src/jsc/VirtualMachine.rs": {
+          "before": "539acca6617c0d2fc023f9bcb9406565f5eed1efb158d38923bce568b14dd9a7",
+          "after": "feea6b75ef6fe75a72413a821ff1dcfc6961bd63addbef3c8d26fd549ed8061b"
+        },
+        "src/runtime/node/node_fs.rs": {
+          "before": "deeb5167313b012231cdbfd0868c1ab85c3ed420bf44d8ab46d804a8b2f2260c",
+          "after": "093bc50aa1c4dc17ad6fc86a241d86b227520f94a3c4d7e99895e932b9c7ce5b"
+        },
+        "test/js/bun/plugin/plugins.test.ts": {
+          "before": "7fcfc8b8191e21323cd460cec1f1501608efefd318dc56e79741af17f2b67528",
+          "after": "8f9564e69bac5f1a3622f7fe74c54a68bbe4f6884016b4d190d281d8d590ae6b"
+        },
+        "test/js/node/module/node-module-module.test.js": {
+          "before": "83dda3bff94343176a1faa677723f5826dc612e376963192e3ca2400cc6aba45",
+          "after": "a7f0f6ab3a18b9e15ac5629eacdbe42a4657fd1d52304dc38c5bf92b1da761cc"
+        }
+      }
+    },
+    "namespace-regression.patch": {
+      "repo": "source",
+      "sha256": "a386bb4c357e287dff29cc043913883115498ef6aee47619019d1249ce30efd5",
+      "files": {
+        "test/aot/run-aot.test.ts": {
+          "before": "f80978e02e9f28b660211c01752fe156c03ddc5b161bbe7c77b292a6e66b0556",
+          "after": "84c969401b9e0ddcc4a99d37096c4466dbfb312f63ca0f7864639f0ce23ca698"
+        }
+      }
+    },
+    "namespace-host.patch": {
+      "repo": "source",
+      "sha256": "d71a4753064c18a3f68c093460171be91ef6edfb44fabc8d058964bbc5509438",
+      "files": {
+        "src/jsc/bindings/BunCompiledModules.cpp": {
+          "before": "1cb35fa3ca361ddfab59a40f0f59db5007e81fd414fe232c8efaef63b88e3da0",
+          "after": "659803b8f32721bdb16afb7e83e5e5c614a493c429bbf2f1fd17bcbed61adfe4"
+        },
+        "src/jsc/bindings/JSCommonJSModule.cpp": {
+          "before": "c983a52a6b3a02cc752313fd7a1b31cb39ae58738ae448a82329a85708978657",
+          "after": "832c3352cb2043dea82ff2a0c9f2b9b09ec66047135c64528428edecea267c06"
+        },
+        "src/jsc/bindings/ZigGlobalObject.cpp": {
+          "before": "9a1fc6ba4c5153362483b4fc06c43b0384ab580182724259fec891d22e950dcf",
+          "after": "777dd9afae816ac5aa90f7b960e0ae1e2d4cba64b36542dc8ad4781b6730ca18"
+        }
+      }
+    },
+    "engine-require-facade.patch": {
+      "repo": "engine",
+      "sha256": "a2f0425f12998d7b5eeff2a83b39e4d421e0b43b4504436b43fceef371ad83d0",
+      "files": {
+        "Source/JavaScriptCore/aot/runtime/AOTModuleNamespace.h": {
+          "before": "78c0cd38b915341159936b4e6fed76b185ebbd600cc097d866fd08d807135cb9",
+          "after": "27ebe4c5abc8dff89fa2ff11eca6424ffa15b91cdf7f967e9aa44f881745464e"
+        },
+        "Source/JavaScriptCore/aot/runtime/AOTModules.cpp": {
+          "before": "fc958469e7c01b2cb7cdd513364f9924ea669ba70b9655b802dc9e459c78272d",
+          "after": "34ec56257be9ed651d60d4fc224acce73c053d51798d0fec3d2d9631f568bf28"
+        },
+        "Source/JavaScriptCore/aot/runtime/AOTModuleEvaluation.cpp": {
+          "before": "9a0191909e5699aaacc588e8bc107b364cb141bc9357cf0d825a2db9c0adaa38",
+          "after": "e1209ba153c537b5936377a96d1b7674f0d04623b87e9cb2c4a0feff5f680a64"
+        },
+        "Source/JavaScriptCore/aot/runtime/AOTModules.h": {
+          "before": "70ebc5db0b1c22aca28d24dc7db804910ae1c5d24e8f0a1159643a47c2b5790c",
+          "after": "68e851742c2e52ad7327b8ec2ef51d7c82a83607a0d7b7dc627025d4dc35cc8f"
+        },
+        "Source/JavaScriptCore/aot/runtime/AOTModuleHost.h": {
+          "before": "97aede2dfa54a56eb289956e2f998bb9c244ae23663b97e1cb67ab0946176732",
+          "after": "bae88edb8ea5db134fd5b869d950123854d939dc0a938102da527792bcf8c26d"
+        },
+        "Source/JavaScriptCore/aot/passes/AOTCallModules.cpp": {
+          "before": "c78e5ea890885526ce4e8fea8fe3c726974da1a93dc86b83cceb563e645bd0df",
+          "after": "ec991b7a69b8723235a1c05714fa9ddcfa71d06e0fc893388d88405f71c3a2f0"
+        },
+        "Source/JavaScriptCore/aot/runtime/AOTModuleLinking.cpp": {
+          "before": "01718c8d8844abffe38b6b0d69afff2946a65f7fb2ba5ba7c23ed9db31b6d5cc",
+          "after": "cf74e8b272d4479ebd54abf1258b885bca30bbeb64c5a0a578c68c1180e32574"
+        }
+      }
+    }
+  }
+}
