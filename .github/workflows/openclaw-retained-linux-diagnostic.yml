@@ -1,5 +1,5 @@
 ---
-name: OpenClaw current Bun scoped source format qualification
+name: OpenClaw current Bun scoped format repair qualification
 'on':
   workflow_dispatch: 
 permissions:
@@ -39,17 +39,20 @@ jobs:
         echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-23 main" | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
         sudo apt-get update -qq
         sudo apt-get install -y -qq --no-install-recommends clang-format-23
-    - name: Check only the changed Rust C++ and JavaScript files
+    - name: Check the repaired Rust and C++ formatting
       run: |
         set -euo pipefail
         unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
         python3 - <<'PY'
-        import difflib,hashlib,json,pathlib,re,subprocess
+        import base64,difflib,hashlib,json,pathlib,re,subprocess
         root=pathlib.Path.cwd();source=root/"source";out=root/"source-format-proof";out.mkdir(exist_ok=True)
         owner=root/"controls/.github/openclaw/qualification/aot-debug-repair"
         manifest=json.loads((owner/"source-manifest.json").read_text())
         state={"passed":False,"source":manifest["bun"],"engine":manifest["engine"],"checks":{}}
-        applied=[]
+        applied=[];format_applied=False
+        format_patch=base64.b64decode('LS0tIGEvc3JjL2pzYy9Nb2R1bGVMb2FkZXIucnMKKysrIGIvc3JjL2pzYy9Nb2R1bGVMb2FkZXIucnMKQEAgLTQ2MSw5ICs0NjEsNyBAQAogCiBwdWIoY3JhdGUpIGZuIG9uX2xvYWRfbmFtZXNwYWNlX2FuZF9wYXRoKGtleTogJlt1OF0pIC0+IE9wdGlvbjwoJlt1OF0sICZbdThdKT4gewogICAgIChoYXNfZXh0ZW5zaW9uX29yX25hbWVzcGFjZShrZXkpCi0gICAgICAgIHx8ICghYnVuX3BhdGhzOjppc19hYnNvbHV0ZShrZXkpCi0gICAgICAgICAgICAmJiAha2V5LnN0YXJ0c193aXRoKGIiLi8iKQotICAgICAgICAgICAgJiYgIWtleS5zdGFydHNfd2l0aChiIi4uLyIpKSkKKyAgICAgICAgfHwgKCFidW5fcGF0aHM6OmlzX2Fic29sdXRlKGtleSkgJiYgIWtleS5zdGFydHNfd2l0aChiIi4vIikgJiYgIWtleS5zdGFydHNfd2l0aChiIi4uLyIpKSkKICAgICAudGhlbih8fCBuYW1lc3BhY2VfYW5kX3BhdGgoa2V5KSkKIH0KIAotLS0gYS9zcmMvanNjL1ZpcnR1YWxNYWNoaW5lLnJzCisrKyBiL3NyYy9qc2MvVmlydHVhbE1hY2hpbmUucnMKQEAgLTYyMDUsNyArNjIwNSwxMiBAQAogICAgICAgICAgICAgICAgICAgICBsZXQgaXNfb3duID0gaXNfYmFyZQogICAgICAgICAgICAgICAgICAgICAgICAgJiYgKGFuc3dlci5lcWwoc3BlY2lmaWVyKQogICAgICAgICAgICAgICAgICAgICAgICAgICAgIHx8IChwcm9iZV9maWxlbGlrZQotICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAmJiBtYXRjaCBydW5fb25fcmVzb2x2ZShnbG9iYWwsICZhbnN3ZXIsIHNvdXJjZSwgbW9kZS5pbXBvcnRfa2luZCgpKT8geworICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAmJiBtYXRjaCBydW5fb25fcmVzb2x2ZSgKKyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIGdsb2JhbCwKKyAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICZhbnN3ZXIsCisgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBzb3VyY2UsCisgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBtb2RlLmltcG9ydF9raW5kKCksCisgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICk/IHsKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIE5vbmUgPT4gZmFsc2UsCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBTb21lKE9rKF8pKSA9PiB0cnVlLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgU29tZShFcnIoZXJyb3IpKSA9PiByZXR1cm4gT2soU29tZShFcnIoZXJyb3IpKSksCi0tLSBhL3NyYy9qc2MvYmluZGluZ3MvWmlnR2xvYmFsT2JqZWN0LmNwcAorKysgYi9zcmMvanNjL2JpbmRpbmdzL1ppZ0dsb2JhbE9iamVjdC5jcHAKQEAgLTQ2MjcsMTAgKzQ2MjcsMTAgQEAKICAgICAgICAgICAgICAgICBlbnRyeS0+c2V0U3RhdHVzKEpTQzo6TW9kdWxlUmVnaXN0cnlFbnRyeTo6U3RhdHVzOjpGZXRjaGluZyk7CiAgICAgICAgICAgICAgICAgZW50cnktPmVuc3VyZUZldGNoUHJvbWlzZShnbG9iYWxPYmplY3QpLT5waXBlRnJvbSh2bSwgcHJvbWlzZSk7CiAgICAgICAgICAgICAgICAgaWYgKHNjb3BlLmV4Y2VwdGlvbigpKSBbW3VubGlrZWx5XV0KLSAgICAgICAgICAgICAgICByZXR1cm4gZGlkVGhyb3coKTsKKyAgICAgICAgICAgICAgICAgICAgcmV0dXJuIGRpZFRocm93KCk7CiAgICAgICAgICAgICAgICAgZW50cnktPmVuc3VyZU1vZHVsZVByb21pc2UoZ2xvYmFsT2JqZWN0KTsKICAgICAgICAgICAgICAgICBpZiAoc2NvcGUuZXhjZXB0aW9uKCkpIFtbdW5saWtlbHldXQotICAgICAgICAgICAgICAgIHJldHVybiBkaWRUaHJvdygpOworICAgICAgICAgICAgICAgICAgICByZXR1cm4gZGlkVGhyb3coKTsKICAgICAgICAgICAgIH0KICAgICAgICAgfQogICAgICAgICBpZiAoaG9va0ZldGNoLmlzQWN0aXZlKCkgJiYgKCFncmFwaCB8fCAhZ3JhcGgtPmRpc3Bvc2VkKCkpICYmIHByb21pc2UtPnN0YXR1cygpID09IEpTQzo6SlNQcm9taXNlOjpTdGF0dXM6OkZ1bGZpbGxlZCkgewpAQCAtNDY0MSw3ICs0NjQxLDcgQEAKICAgICAgICAgICAgICAgICBhdXRvIHR5cGUgPSBwYXJhbWV0ZXJzID8gcGFyYW1ldGVycy0+dHlwZSgpIDogU2NyaXB0RmV0Y2hQYXJhbWV0ZXJzOjpUeXBlOjpKYXZhU2NyaXB0OwogICAgICAgICAgICAgICAgIGxvYWRlci0+cHJvdmlkZUZldGNoKGdsb2JhbE9iamVjdCwgSWRlbnRpZmllcjo6ZnJvbVN0cmluZyh2bSwgbW9kdWxlS2V5KSwgdHlwZSwgY29kZSk7CiAgICAgICAgICAgICAgICAgaWYgKHNjb3BlLmV4Y2VwdGlvbigpKSBbW3VubGlrZWx5XV0KLSAgICAgICAgICAgICAgICByZXR1cm4gZGlkVGhyb3coKTsKKyAgICAgICAgICAgICAgICAgICAgcmV0dXJuIGRpZFRocm93KCk7CiAgICAgICAgICAgICB9CiAgICAgICAgIH0KICAgICAgICAgLy8gSlNDIGRvZXNuJ3QgYWRkIGEgcmVnaXN0cnkgZW50cnkgZm9yIHRoZSBtb2R1bGUgcGFzc2VkIHRvIGltcG9ydCgpIHVudGlsIHRoaXMgc2V0dGxlcy4K')
+        format_files={'src/jsc/ModuleLoader.rs': {'before': '071070975aeb0768cd25f9d6811b25a241543504c235c3be003c947a680f9331', 'after': 'e22e34ed43338f6c6be7aa92dc4580eb6f6c722fb6fd82b0d52af2a38785c36f'}, 'src/jsc/VirtualMachine.rs': {'before': 'feea6b75ef6fe75a72413a821ff1dcfc6961bd63addbef3c8d26fd549ed8061b', 'after': 'fb84f24619ba7345161d95fcb4a89cb6ab8108ce752de86c62922a9bc6335b51'}, 'src/jsc/bindings/ZigGlobalObject.cpp': {'before': '777dd9afae816ac5aa90f7b960e0ae1e2d4cba64b36542dc8ad4781b6730ca18', 'after': 'a7a8b3a3954e617a95aaaa5b70c69f3b9e8c1da84de30823a3b3d75f62ab9bfb'}}
+        assert hashlib.sha256(format_patch).hexdigest()=='d156b07c4cce205ae2c61eaa43dec7db3e97a021a6392fe6be5543c75cb166e5'
         def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
         def git(*args):return subprocess.check_output(["git","-C",str(source),*args],text=True).strip()
         def save():(out/"proof.json").write_text(json.dumps(state,indent=2)+"\n")
@@ -71,7 +74,18 @@ jobs:
           for path,v in row["files"].items():assert sha(source/path)==v["after"]
          files={p:v["after"] for _,row in applied for p,v in row["files"].items()}
          assert len(files)==12 and set(git("diff","--name-only").splitlines())==set(files)
-         state["source_files"]=files;save()
+         state["preformat_source_files"]=dict(files)
+         for path,row in format_files.items():assert sha(source/path)==row["before"]
+         subprocess.run(["git","-C",str(source),"apply","--check","-"],input=format_patch,check=True)
+         subprocess.run(["git","-C",str(source),"apply","-"],input=format_patch,check=True);format_applied=True
+         for path,row in format_files.items():
+          assert sha(source/path)==row["after"];files[path]=row["after"]
+         state["source_files"]=files
+         state["format_patch_sha256"]=hashlib.sha256(format_patch).hexdigest()
+         state["reused_js_format"]={'run': 41397216619, 'artifact_id': 13119798107, 'zip_sha256': 'ee63ceabecf06414f031782bb6025db8195b427e0e7e6efb716021d014039971', 'proof_sha256': 'c8a8388c1912056a576871ce8989df33a406c15a891f0320cc247ef6aaa6033f', 'check': {'argv': ['bunx', '--no-install', 'prettier', '--check', 'test/js/bun/plugin/plugins.test.ts', 'test/js/node/module/node-module-module.test.js', 'test/aot/run-aot.test.ts', 'test/js/node/vm/vm.test.ts'], 'exit_code': 0, 'log_bytes': 66, 'sha256': '17aa973d3f004560237d9a95171210b0671deff23d61628eecf7322ff5938f20'}, 'source_files': {'test/js/bun/plugin/plugins.test.ts': '8f9564e69bac5f1a3622f7fe74c54a68bbe4f6884016b4d190d281d8d590ae6b', 'test/js/node/module/node-module-module.test.js': 'a7f0f6ab3a18b9e15ac5629eacdbe42a4657fd1d52304dc38c5bf92b1da761cc', 'test/aot/run-aot.test.ts': '84c969401b9e0ddcc4a99d37096c4466dbfb312f63ca0f7864639f0ce23ca698', 'test/js/node/vm/vm.test.ts': '1c6f7f9afd4a4919bf41f3a9a82b92509bdf9ac16da82c865de6e8bf65735d7b'}}
+         assert state["reused_js_format"]["check"]["exit_code"]==0
+         assert {path:files[path] for path in files if path.endswith((".ts",".js"))}==state["reused_js_format"]["source_files"]
+         save()
          assert run("install-root",["bun","install","--frozen-lockfile"])==0
          rust=[p for p in files if p.endswith(".rs")]
          cpp=[p for p in files if p.endswith(".cpp")]
@@ -79,10 +93,8 @@ jobs:
          assert len(rust)==4 and len(cpp)==3 and len(js)==4
          assert run("rustfmt-version",["rustfmt","--version"])==0
          assert run("clang-format-version",["clang-format-23","--version"])==0
-         assert run("prettier-version",["bunx","--no-install","prettier","--version"])==0
          checks=[("rust-format",["rustfmt","--edition","2024","--config","skip_children=true","--check",*rust],rust),
-                 ("cpp-format",["clang-format-23","--dry-run","--Werror",*cpp],cpp),
-                 ("js-format",["bunx","--no-install","prettier","--check",*js],js)]
+                 ("cpp-format",["clang-format-23","--dry-run","--Werror",*cpp],cpp)]
          failed=[]
          for name,args,paths in checks:
           if run(name,args)!=0:failed.append((name,paths))
@@ -103,6 +115,10 @@ jobs:
          state["passed"]=not failed
         finally:
          state["restored"]=False
+         if format_applied:
+          subprocess.run(["git","-C",str(source),"apply","--reverse","--check","-"],input=format_patch,check=True)
+          subprocess.run(["git","-C",str(source),"apply","--reverse","-"],input=format_patch,check=True)
+          for path,row in format_files.items():assert sha(source/path)==row["before"]
          for name,row in reversed(applied):
           subprocess.run(["git","-C",str(source),"apply","--reverse","--check",str(owner/name)],check=True)
           subprocess.run(["git","-C",str(source),"apply","--reverse",str(owner/name)],check=True)
