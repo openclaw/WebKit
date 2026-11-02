@@ -46,7 +46,7 @@ mkdir -p "$results/home" "$results/tmp" "$results/bin" "$QUALIFICATION_DIR/sync"
 chmod 700 "$results/home" "$results/tmp"
 ln -s "$repo/build/qualify-candidate/bun" "$results/bin/bun"
 # Recompute with the pinned selection owner; reject drift from the reviewed ordered list.
-"$bootstrap" --eval 'import {selectTests} from "./scripts/openclaw-ci/tests.ts";const tracked=Bun.spawnSync(["git","ls-files","-z"]);if(tracked.exitCode!==0)throw new Error("tracked source inventory failed");console.log(JSON.stringify(selectTests(["scripts/build/deps/webkit.ts"],tracked.stdout.toString().split("\0").filter(Boolean),true,"darwin"),null,2));' > build/openclaw-ci/selected.json
+"$bootstrap" --eval 'import {selectTests} from "./scripts/openclaw-ci/tests.ts";const tracked=Bun.spawnSync(["git","ls-files","-z"]);if(tracked.exitCode!==0)throw new Error("tracked source inventory failed");console.log(JSON.stringify(selectTests(["scripts/build/deps/webkit.ts", "test/js/bun/resolve/esModule.test.ts"],tracked.stdout.toString().split("\0").filter(Boolean),true,"darwin"),null,2));' > build/openclaw-ci/selected.json
 cmp "$inputs/darwin-selected.json" build/openclaw-ci/selected.json
 cp build/openclaw-ci/selected.json "$results/selected.json"
 python3 "$inputs/harness_adapters.py" test --name candidate --lane "$lane" --root "$QUALIFICATION_DIR" \

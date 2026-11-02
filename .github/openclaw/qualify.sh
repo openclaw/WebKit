@@ -60,6 +60,10 @@ for arm in baseline candidate; do
   mkdir -p "$results" "$results/home" "$results/tmp" "$results/bin"
   chmod 700 "$results/home" "$results/tmp"
   ln -s "$candidate" "$results/bin/bun"
+  if test "$arm" = baseline; then reference_node="${BASELINE_REFERENCE_NODE:?}"; expected_node=v26.3.0;
+  else reference_node="${CANDIDATE_REFERENCE_NODE:?}"; expected_node=v26.12.1; fi
+  test "$("$reference_node" --version)" = "$expected_node"
+  ln -s "$reference_node" "$results/bin/node"
   mkdir -p build/openclaw-ci
   cp "$inputs/selected.json" build/openclaw-ci/selected.json
   cp "$inputs/selected.json" "$results/selected.json"
@@ -77,7 +81,7 @@ unset BUN_WEBKIT_ARTIFACT_MANIFEST BUN_BUILD_CACHE_DIR BUN_BUILD_PREFETCH_DIR
 "$candidate" test test/js/bun/resolve/esModule.test.ts test/js/bun/namespace-prototype-pollution.test.ts test/js/bun/resolve/require-esm-evaluating-cycle.test.ts test/js/bun/import-attributes/import-attributes.test.ts test/js/node/module/require-extensions.test.ts > "$QUALIFICATION_DIR/namespace.log" 2>&1
 "$candidate" test --expose-internals test/js/node/v8/capture-stack-trace.test.js test/js/bun/sourcemap/internal-sourcemap.test.ts > "$QUALIFICATION_DIR/stack-positions.log" 2>&1
 "$candidate" "$inputs/segmenter.js" > "$QUALIFICATION_DIR/segmenter.log" 2>&1
-"$candidate" test test/js/node/vm/vm.test.ts -t 'a Proxy in the prototype chain' > "$QUALIFICATION_DIR/proxy.log" 2>&1
+"$candidate" test --expose-internals test/js/node/vm/vm.test.ts -t 'a Proxy in the prototype chain' > "$QUALIFICATION_DIR/proxy.log" 2>&1
 "$candidate" test test/js/node/process/process.test.js -t 'ArrayBuffer memory ownership' > "$QUALIFICATION_DIR/arraybuffer.log" 2>&1
 "$candidate" test test/js/node/worker_threads/worker_threads.test.ts -t 'getHeapStatistics' > "$QUALIFICATION_DIR/worker-statistics.log" 2>&1
 "$candidate" test test/js/node/worker_threads/openclaw-resource-limits.test.ts -t 'resourceLimits' > "$QUALIFICATION_DIR/resource-limits.log" 2>&1

@@ -17,7 +17,7 @@ def evidence(proof, binaries, source, engine):
     consumer = json.loads((proof / 'candidate-identity.json').read_text())
     identity.validate_evidence(consumer, source, engine, binaries, proof, lane=LANE)
     selected = compare_fork_ci.selection(compare_fork_ci.read_json(identity.INPUTS / 'darwin-selected.json'))
-    identity.require(len(selected) == 52, 'Darwin trusted selection drift')
+    identity.require(len(selected) == 53, 'Darwin trusted selection drift')
     observed = compare_fork_ci.validate_arm(proof / 'candidate', selected, lane=LANE)
     identity.require(observed['all_passed'], 'native Darwin selected tests failed')
     return {'passed': True, 'source': source, 'lane': LANE,

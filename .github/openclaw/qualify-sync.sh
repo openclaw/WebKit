@@ -20,6 +20,9 @@ chmod 700 "$results/home" "$results/tmp"
 "$candidate" --revision > "$results/revision.log"
 "$candidate" -e 'const server=Bun.serve({port:0,fetch(){return new Response("ready")}});try{if(await(await fetch(server.url)).text()!=="ready")throw Error("startup");console.log("build/startup/http passed")}finally{await server.stop(true)}' > "$results/startup.log" 2>&1
 ln -s "$candidate" "$results/bin/bun"
+reference_node="${CANDIDATE_REFERENCE_NODE:-$(command -v node)}"
+test "$("$reference_node" --version)" = v26.12.1
+ln -s "$reference_node" "$results/bin/node"
 export HOME="$results/home" TMPDIR="$results/tmp" PATH="$results/bin:$PATH" OPENCLAW_CI_PLATFORM=linux
 # Retain all 82 historical cases and the three additions selected by the frozen candidate.
 "$candidate" --eval 'import {selectTests} from "./scripts/openclaw-ci/tests.ts"; import{$}from"bun";import{readFileSync,writeFileSync,mkdirSync}from"node:fs";const tracked=(await $`git ls-files -z test`.text()).split("\0").filter(Boolean);const historical=[...new Set(process.argv.slice(1).flatMap(path=>JSON.parse(readFileSync(path,"utf8"))))];if(historical.length!==82)throw Error("historical selection drift");const selected=[...new Set([...historical,...selectTests(["scripts/build/deps/webkit.ts"],tracked,true,"linux")])].sort();for(const file of selected)if(!tracked.includes(file))throw Error("missing historical/current selected test "+file);if(selected.length!==85)throw Error("frozen candidate selection drift");mkdirSync("build/openclaw-ci",{recursive:true});writeFileSync("build/openclaw-ci/selected.json",JSON.stringify(selected,null,2)+"\n");' "$inputs/selected.json" "$inputs/sync/selected.json"
@@ -32,9 +35,16 @@ else
   selection_exit=$?
 fi
 if test "$selection_exit" -ne 0; then exit "$selection_exit"; fi
-"$candidate" test --expose-gc test/js/node/sqlite/node-sqlite.test.ts test/js/node/test/parallel/test-sqlite-statement-sync.js \
-  -t "rejects oversized BigInt with ERR_INVALID_ARG_VALUE|bind error messages match node's exactly|database-level defaults flow to prepared statements|BigInts support can be toggled|BigInt is required for reading large integers|BigInts are returned when input is true" \
+"$candidate" test --expose-internals test/js/node/quic/quic-sni.test.ts > "$results/quic-sni.log" 2>&1
+"$candidate" test --expose-gc test/js/node/sqlite/node-sqlite.test.ts \
+  -t "rejects oversized BigInt with ERR_INVALID_ARG_VALUE|bind error messages match node's exactly|database-level defaults flow to prepared statements" \
+  --reporter=junit --reporter-outfile="$results/sqlite-bigint.xml" \
   > "$results/sqlite-bigint.log" 2>&1
+"$candidate" test --expose-gc --config="$repo/bunfig.node-test.toml" \
+  "$repo/test/js/node/test/parallel/test-sqlite-statement-sync.js" \
+  -t 'BigInts support can be toggled|BigInt is required for reading large integers|BigInts are returned when input is true' \
+  --reporter=junit --reporter-outfile="$results/sqlite-bigint-node.xml" \
+  > "$results/sqlite-bigint-node.log" 2>&1
 "$candidate" test test/bake/dev/production.test.ts \
   -t 'builds a framework without server components and keeps its client entry point' \
   > "$results/bake-builtin.log" 2>&1
@@ -58,9 +68,9 @@ python3 "$inputs/compile_cache.py" /tmp "$junit_prefix" "$results/module-junit.x
 "$candidate" test test/aot/every-platform.test.ts > "$results/aot-every-platform.log" 2>&1
 "$candidate" test --expose-internals test/js/node/v8/capture-stack-trace.test.js test/js/node/util/util.test.js test/js/bun/sourcemap > "$results/stack-positions.log" 2>&1
 "$candidate" test test/bundler/bundler_minify.test.ts > "$results/stack-minifier.log" 2>&1
-python3 "$inputs/stack/check-runtime-cache.py" --baseline "$QUALIFICATION_DIR/bun-baseline/build/qualify-baseline/bun" --candidate "$candidate" --fixture "$inputs/stack/observe-regressions.js" --output "$results/runtime-cache" --expected-version 45 > "$results/stack-cache.json"
+python3 "$inputs/stack/check-runtime-cache.py" --baseline "$QUALIFICATION_DIR/bun-baseline/build/qualify-baseline/bun" --candidate "$candidate" --fixture "$inputs/stack/observe-regressions.js" --output "$results/runtime-cache" --expected-baseline-version 36 --expected-version 52 > "$results/stack-cache.json"
 "$candidate" "$inputs/segmenter.js" > "$results/segmenter.log" 2>&1
-"$candidate" test test/js/node/vm/vm.test.ts -t 'a Proxy in the prototype chain' > "$results/proxy.log" 2>&1
+"$candidate" test --expose-internals test/js/node/vm/vm.test.ts -t 'a Proxy in the prototype chain' > "$results/proxy.log" 2>&1
 "$candidate" test test/js/node/worker_threads/openclaw-resource-limits.test.ts -t resourceLimits > "$results/resource-limits.log" 2>&1
 "$candidate" test test/js/bun/resolve/esModule.test.ts test/js/bun/namespace-prototype-pollution.test.ts test/js/bun/resolve/require-esm-evaluating-cycle.test.ts test/js/bun/import-attributes/import-attributes.test.ts test/js/node/module/require-extensions.test.ts > "$results/namespace.log" 2>&1
 "$candidate" test test/js/node/process/process.test.js -t 'ArrayBuffer memory ownership' > "$results/arraybuffer.log" 2>&1
@@ -79,14 +89,14 @@ WK="$QUALIFICATION_DIR/engine/bun-webkit"
 clang++ -std=c++23 -O2 -DNDEBUG -DBUILDING_WITH_CMAKE=1 -DHAVE_CONFIG_H=1 \
   -I"$WK/include" -I"$WK/include/JavaScriptCore" -I"$WK/include/wtf" -I"$pipeline/Source/JavaScriptCore" \
   "$pipeline/Source/JavaScriptCore/aot/runtime/AOTNoFeatureRemoved.cpp" \
-  "$inputs/engine-limit-probe.cpp" "$repo/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o" \
+  "$inputs/engine-limit-probe.cpp" "$inputs/probe-allocator.cpp" "$repo/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o" \
   -Wl,--start-group "$WK"/lib/*.a -Wl,--end-group -lpthread -ldl -lm -latomic \
   -o "$results/engine-limit-probe" > "$results/engine-limit-build.log" 2>&1
 "$results/engine-limit-probe" > "$results/engine-limits.log" 2>&1
 clang++ -std=c++23 -O2 -DNDEBUG -DBUILDING_WITH_CMAKE=1 -DHAVE_CONFIG_H=1 \
   -I"$WK/include" -I"$WK/include/JavaScriptCore" -I"$WK/include/wtf" -I"$pipeline/Source/JavaScriptCore" \
   "$pipeline/Source/JavaScriptCore/aot/runtime/AOTNoFeatureRemoved.cpp" \
-  "$inputs/engine-gc-progress-probe.cpp" "$repo/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o" \
+  "$inputs/engine-gc-progress-probe.cpp" "$inputs/probe-allocator.cpp" "$repo/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o" \
   -Wl,--start-group "$WK"/lib/*.a -Wl,--end-group -lpthread -ldl -lm -latomic \
   -o "$results/engine-gc-progress-probe" > "$results/engine-gc-progress-build.log" 2>&1
 "$results/engine-gc-progress-probe" > "$results/engine-gc-progress.json" 2> "$results/engine-gc-progress.log"
