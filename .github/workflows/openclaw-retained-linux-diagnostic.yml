@@ -1,4 +1,4 @@
-name: OpenClaw retained Debug mock path diagnostic
+name: OpenClaw retained Debug failure and remaining-gate diagnostic
 'on':
   workflow_dispatch:
 permissions:
@@ -15,7 +15,9 @@ jobs:
           ref: ${{ github.sha }}
           path: controls
           persist-credentials: false
-          sparse-checkout: .github/openclaw/qualification/current-mock-path-probe.py
+          sparse-checkout: |
+            .github/openclaw/qualification/current-debug-replay.py
+            .github/openclaw/qualification/aot-debug-repair
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: 097247bced3ff346a39e6b699ba707ad63a9cd07
@@ -38,14 +40,14 @@ jobs:
           def get(route):
               # gh strips API authorization when following the signed artifact redirect.
               return subprocess.check_output(["gh","api","repos/openclaw/WebKit/"+route])
-          run=json.loads(get("actions/runs/41396456930"))
-          assert run["head_sha"]=="1047ca3631645484e812e55b6a665413941f9879" and run["conclusion"]=="failure"
-          row=json.loads(get("actions/artifacts/13120786072"))
-          assert not row["expired"] and row["name"]=="current-bun-aot-debug-executable" and row["size_in_bytes"]==1700157004
-          assert row["workflow_run"]["id"]==41396456930
-          assert row["workflow_run"]["head_sha"]==run["head_sha"] and row["digest"]=="sha256:8485099bd006b7dc7111e6cd7536e4e77cee1214512a2b1875478edd59805032"
-          raw=get("actions/artifacts/13120786072/zip")
-          assert len(raw)==1700157004 and hashlib.sha256(raw).hexdigest()=="8485099bd006b7dc7111e6cd7536e4e77cee1214512a2b1875478edd59805032"
+          run=json.loads(get("actions/runs/41403914224"))
+          assert run["head_sha"]=="a8f9875aa8bc094d9e27d445dee98c1597082c57" and run["conclusion"]=="failure"
+          row=json.loads(get("actions/artifacts/13124226627"))
+          assert not row["expired"] and row["name"]=="current-bun-aot-debug-executable" and row["size_in_bytes"]==1700143548
+          assert row["workflow_run"]["id"]==41403914224
+          assert row["workflow_run"]["head_sha"]==run["head_sha"] and row["digest"]=="sha256:5e2e6325294a93e96105476e20e7cc4fe72df78a563b6884f31f80dee8bd937c"
+          raw=get("actions/artifacts/13124226627/zip")
+          assert len(raw)==1700143548 and hashlib.sha256(raw).hexdigest()=="5e2e6325294a93e96105476e20e7cc4fe72df78a563b6884f31f80dee8bd937c"
           z=zipfile.ZipFile(io.BytesIO(raw)); assert z.testzip() is None
           assert len(z.infolist())==1
           item=z.infolist()[0]
@@ -56,17 +58,17 @@ jobs:
               while data:=source.read(1024**2): sink.write(data)
           target.chmod(0o755)
           PY
-      - name: Probe the actual ordinary and AOT mock boundary
+      - name: Replay measured Debug failures and remaining gates
         run: |
           set -euo pipefail
-          mkdir -p mock-path-proof
+          mkdir -p debug-replay-proof
           docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work \
             docker.io/library/debian:13@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c \
-            sh -euc 'apt-get update >/dev/null; apt-get install --yes --no-install-recommends python3 git ca-certificates libicu76 libatomic1 >/dev/null; unset CI BUILDKITE GITHUB_ACTIONS GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN; git config --global --add safe.directory /work/source; python3 /work/controls/.github/openclaw/qualification/current-mock-path-probe.py'
+            sh -euc 'apt-get update >/dev/null; apt-get install --yes --no-install-recommends python3 git ca-certificates libicu76 libatomic1 >/dev/null; unset CI BUILDKITE GITHUB_ACTIONS GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN; git config --global --add safe.directory /work/source; python3 /work/controls/.github/openclaw/qualification/current-debug-replay.py'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: retained-debug-mock-path-proof
-          path: mock-path-proof
+          name: retained-debug-debug-replay-proof
+          path: debug-replay-proof
           if-no-files-found: error
           retention-days: 7
