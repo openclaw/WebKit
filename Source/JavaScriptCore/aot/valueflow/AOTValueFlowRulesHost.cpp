@@ -1261,7 +1261,10 @@ static void handOverLoadersOn(ValueFlowRuleContext& context, ValueFlowObjectID h
 bool askLoaderFunctionsOfProgram(ValueFlowRuleContext& context, ModuleID asking, RequestAtRunTime request)
 {
     const BuiltinTable& builtins = context.program().builtins();
-    bool asksProgram = false;
+    bool asksProgram = context.anyMember(context.valueOf(context.nodes().ofHost(ValueFlowHostNode::RunBuiltins)), [&](ValueFlowObjectID object) {
+        BuiltinID builtin = context.universe().builtinOf(object);
+        return builtin && builtins.has(BuiltinMark::RegistersModuleHooks, builtins.canonicalID(builtin));
+    });
     for (const BuiltinMarkedEntry& resolver : builtins.marked(BuiltinMark::IsResolverThatLoaderCalls)) {
         if (!isSeenToStoreLoaderFunction(context, resolver.builtin))
             continue;
