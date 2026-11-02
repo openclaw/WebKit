@@ -60,3 +60,5 @@ Consumer comparison and assembly use the same raw-evidence validator. The policy
 The completed historical ten-lane qualification is bound to engine `42e4245f4180941634b482a7e8ef7fca47467de5`, consumer replay41294955235 and assembly41296642691. Historical continuation uses immutable controls `5e586e4ce8bd9f3f3703af98983f7f13fb58c242`; it does not qualify the combined21-lane production configuration or authorize publication.
 
 Linux qualification now binds the historical and candidate Node references explicitly. A fixed-run continuation reuses admitted current-matrix engine and baseline builds while running baseline and candidate tests fresh.
+
+The current 21-lane qualification can assemble the retained build artifacts with a separately admitted fresh Linux consumer proof. The fixed-run continuation keeps the original build and proof identities, verifies all 22 archives through the existing assembly owner, and does not publish a release or update consumer pins. Historical ten-lane assembly retains its original admission limits.
