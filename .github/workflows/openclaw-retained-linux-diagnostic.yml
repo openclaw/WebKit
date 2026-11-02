@@ -1,108 +1,73 @@
-name: OpenClaw retained Linux consumer diagnostic
-
+name: OpenClaw repaired Bun Node reference
 on:
-  pull_request:
-    paths:
-      - .github/workflows/openclaw-retained-linux-diagnostic.yml
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
-  group: openclaw-retained-linux-diagnostic-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
-
+  group: openclaw-c6-node-reference-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  tls-session-baseline:
+  reference:
+    if: github.repository == 'openclaw/WebKit' && github.ref == 'refs/heads/claude/bun-c6-node-reference-20261102'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          repository: openclaw/bun
-          ref: 191755ec115ece3dd642eba3cb0143cecb5e5d7a
           persist-credentials: false
-      - name: Download the exact shipped baseline
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
+          sparse-checkout: .github/openclaw
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.12.1'
+      - name: Acquire the exact unchanged Bun fixture source
         run: |
           set -euo pipefail
-          mkdir diagnostics
-          gh api repos/openclaw/bun/releases/assets/679971474 -H 'Accept: application/octet-stream' > diagnostics/manifest.json
-          gh api repos/openclaw/bun/releases/assets/679971203 -H 'Accept: application/octet-stream' > baseline.zip
-      - name: Verify shipping identity and replay the unchanged TLS context file
-        shell: bash
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          mkdir reference-proof
+          python3 .github/openclaw/qualification/acquire-bun-snapshot.py source > reference-proof/source.json
+      - name: Observe the pinned Node reference through the real fixtures
         run: |
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
           python3 - <<'PY'
-          import hashlib, json, os, stat, subprocess, sys, zipfile
-          from pathlib import Path, PurePosixPath
-          from xml.etree import ElementTree
-
-          def sha(path):
-              with path.open('rb') as stream:
-                  return hashlib.file_digest(stream, 'sha256').hexdigest()
-
-          commit = '191755ec115ece3dd642eba3cb0143cecb5e5d7a'
-          webkit = 'b82bc917e99110b61c3a21202d6def7457aa194c'
-          assert subprocess.check_output(['git', 'rev-parse', 'HEAD', 'HEAD^{tree}'], text=True).splitlines() == [commit, '656ed5260b61d9063f546f837238661a19514c1f']
-          assert not subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'], text=True)
-          report = Path('diagnostics').resolve()
-          manifest = report / 'manifest.json'
-          assert sha(manifest) == '8c3a9d87f37832fa07173635af52d53b813e29470afa4afdb49a83033fed039e'
-          data = json.loads(manifest.read_text())
-          assert data['bun']['commit'] == commit and data['webkit']['version'] == webkit
-          assets = [a for a in data['assets'] if a['target'] == 'linux-x64']
-          assert len(assets) == 1
-          asset = assets[0]
-          archive = Path('baseline.zip')
-          assert archive.stat().st_size == asset['size'] == 51053995
-          assert sha(archive) == asset['sha256'] == 'a59df8273c232782c16a6c0e680511becd9a49ba08fa6a1adc7baea1a632de0b'
-          executable = asset['executable']['path']
-          with zipfile.ZipFile(archive) as bundle:
-              entries = bundle.infolist()
-              path = PurePosixPath(executable)
-              assert not path.is_absolute() and '..' not in path.parts and '\\' not in executable
-              directory = str(path.parent) + '/'
-              assert len(entries) == 2 and {e.filename for e in entries} == {directory, executable}
-              folder = bundle.getinfo(directory)
-              assert folder.is_dir() and folder.file_size == 0 and stat.S_IFMT(folder.external_attr >> 16) in (0, stat.S_IFDIR)
-              entry = bundle.getinfo(executable)
-              assert stat.S_IFMT(entry.external_attr >> 16) in (0, stat.S_IFREG)
-              assert entry.file_size == asset['executable']['size'] < 256 * 1024**2
-              bundle.extract(entry, 'baseline')
-          exe = (Path('baseline') / executable).resolve()
-          assert sha(exe) == asset['executable']['sha256']
-          exe.chmod(0o700)
-          facts = json.loads(subprocess.check_output([str(exe), '-e', 'console.log(JSON.stringify({commit:Bun.revision,webkit:process.versions.webkit,platform:process.platform,arch:process.arch}))'], text=True, timeout=30))
-          assert facts == {'commit': commit, 'webkit': webkit, 'platform': 'linux', 'arch': 'x64'}
-          fixture = Path('test/js/node/tls/node-tls-context.test.ts')
-          digest = sha(fixture)
-          assert digest == '0f6ba03e222d53279f9fa553cc3390bdd9707fc7ab382294f18d292ec8ad0bb3'
-          env = dict(os.environ, CI='1', BUN_RUNTIME_TRANSPILER_CACHE_PATH='0')
-          with (report / 'stdout.log').open('xb') as stdout, (report / 'stderr.log').open('xb') as stderr:
-              result = subprocess.run([str(exe), 'test', '--expose-internals', str(fixture), '--reporter=junit', '--reporter-outfile=' + str(report / 'result.xml')],
-                  env=env, stdout=stdout, stderr=stderr, timeout=120)
-          tree = ElementTree.parse(report / 'result.xml')
-          cases = list(tree.iter('testcase'))
-          failures = [{'name': c.get('name'), 'classname': c.get('classname')} for c in cases if c.find('failure') is not None or c.find('error') is not None]
-          outcome = {'qualification': False, 'identity': facts, 'executable_sha256': sha(exe), 'fixture_sha256': digest,
-                     'exitCode': result.returncode, 'cases': len(cases), 'skipped': sum(c.find('skipped') is not None for c in cases), 'failures': failures}
-          (report / 'outcome.json').write_text(json.dumps(outcome, indent=2) + '\n')
-          print(json.dumps(outcome), flush=True)
-          assert len(cases) == 83 and outcome['skipped'] == 0, 'baseline file did not execute completely'
-          assert result.returncode in (0, 1) and bool(failures) == (result.returncode == 1)
-          assert sha(fixture) == digest and sha(exe) == asset['executable']['sha256']
-          sys.exit(result.returncode)
+          import hashlib, json, subprocess, tempfile
+          from pathlib import Path
+          source = Path('source').resolve()
+          out = Path('reference-proof').resolve()
+          def git(*args):
+              return subprocess.check_output(['git', '-C', str(source), *args], text=True, timeout=30).strip()
+          assert git('rev-parse', 'HEAD') == 'c6a7bf9d8dc4d44db9f826e47a5ae7645ea6e8c9'
+          assert not git('status', '--porcelain', '--untracked-files=no')
+          node = subprocess.check_output(['which', 'node'], text=True).strip()
+          version = subprocess.check_output([node, '--version'], text=True).strip()
+          assert version == 'v26.12.1'
+          fixture = source / 'test/js/node/module/register-hooks-parity.fixture.mjs'
+          assert hashlib.sha256(fixture.read_bytes()).hexdigest() == '296acaaa7cad638d68a8ae365f498d9acff57576fcf2600773984dac25905e59'
+          records = []
+          for mode in ['static-cycle-import', 'static-cycle-require', 'stat-noentry']:
+              target = source / 'test/js/node/fs/fixtures/stat-noentry-oracle.mjs' if mode == 'stat-noentry' else fixture
+              with tempfile.TemporaryDirectory(prefix='node-reference-') as directory:
+                  argv = [node, str(target)] + ([directory] if mode == 'stat-noentry' else [mode, directory])
+                  result = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+              assert len(result.stdout.encode()) + len(result.stderr.encode()) < 1024**2
+              (out / (mode + '.stdout.log')).write_text(result.stdout)
+              (out / (mode + '.stderr.log')).write_text(result.stderr)
+              records.append({'mode': mode, 'argv': argv, 'exit_code': result.returncode,
+                              'stdout': result.stdout, 'stderr': result.stderr,
+                              'fixture_sha256': hashlib.sha256(target.read_bytes()).hexdigest()})
+          receipt = {'reference_only': True, 'node': version, 'node_sha256': hashlib.sha256(Path(node).read_bytes()).hexdigest(),
+                     'bun_source': git('rev-parse', 'HEAD'), 'records': records}
+          (out / 'reference.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          print(json.dumps(receipt), flush=True)
+          assert all(row['exit_code'] == 0 and row['stderr'] == '' for row in records), 'reference fixture failed; no parity verdict'
+          assert records[-1]['stdout'] == 'stat oracle passed\n'
+          assert all(set(json.loads(row['stdout'])) == {'answer', 'leafResolves'} and json.loads(row['stdout'])['answer'] == 42 for row in records[:-1])
+          assert not git('status', '--porcelain', '--untracked-files=no')
           PY
-      - name: Retain the baseline result and unchanged assertions
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: tls-session-baseline-linux-x64
-          path: diagnostics
-          if-no-files-found: error
+          name: c6-node-reference-proof
+          path: reference-proof
           retention-days: 7
+          if-no-files-found: error
