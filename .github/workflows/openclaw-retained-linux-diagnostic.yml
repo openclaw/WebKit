@@ -1,0 +1,109 @@
+---
+name: OpenClaw retained native host entry diagnostic
+'on':
+  workflow_dispatch: 
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: openclaw-native-entry-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  native-entry:
+    if: github.repository == 'openclaw/WebKit' && github.ref == 'refs/heads/claude/integrated-engine-regressions-20261101'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        path: controls
+        persist-credentials: false
+        sparse-checkout: ".github/openclaw/qualification/upstream-regressions"
+    - name: Install the matching native ICU runtime
+      run: |-
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends libicu74
+    - name: Admit the retained exact native executable
+      env:
+        GH_TOKEN: "${{ github.token }}"
+      run: |
+        set -euo pipefail
+        python3 - <<'PY'
+        import hashlib,json,os,pathlib,subprocess
+        def api(route):return json.loads(subprocess.check_output(["gh","api","repos/openclaw/WebKit/"+route],timeout=120))
+        r=api("actions/runs/41387838627")
+        assert r["head_sha"]=="18e252ec80362d119cf155c782fd32d4f33293fd" and r["conclusion"]=="failure" and r["status"]=="completed"
+        a=api("actions/artifacts/13119753794")
+        digest="82d2eccf5b2aa6064913844b8153e403127e7d1055fcc7d314d0a5ae69a01de8"
+        assert a["name"]=="integrated-native-diagnostic-tools" and a["size_in_bytes"]==85635691 and a["digest"]=="sha256:"+digest and a["expired"] is False
+        assert a["workflow_run"]["id"]==r["id"] and a["workflow_run"]["head_sha"]==r["head_sha"]
+        p=pathlib.Path(os.environ["RUNNER_TEMP"])/"retained-native-tools.zip"
+        with p.open("xb") as f:subprocess.run(["gh","api","repos/openclaw/WebKit/actions/artifacts/13119753794/zip"],stdout=f,check=True,timeout=180)
+        assert p.stat().st_size==85635691 and hashlib.sha256(p.read_bytes()).hexdigest()==digest
+        PY
+    - name: Compile the host entry fixture and replay the unchanged assertion
+      run: |
+        set -euo pipefail
+        unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+        python3 - <<'PY'
+        import hashlib,json,os,pathlib,re,resource,stat,subprocess,zipfile
+        root=pathlib.Path(os.environ["RUNNER_TEMP"]);out=root/"native-entry-proof";out.mkdir(exist_ok=True)
+        resource.setrlimit(resource.RLIMIT_CORE,(0,0))
+        archive=root/"retained-native-tools.zip"
+        assert archive.stat().st_size==85635691 and hashlib.sha256(archive.read_bytes()).hexdigest()=="82d2eccf5b2aa6064913844b8153e403127e7d1055fcc7d314d0a5ae69a01de8"
+        with zipfile.ZipFile(archive) as z:
+         entries=z.infolist();names=z.namelist()
+         assert len(names)==len(set(names)) and 0<len(names)<=24 and sum(x.file_size for x in entries)<=256*1024**2
+         assert all(not pathlib.PurePosixPath(n).is_absolute() and ".." not in pathlib.PurePosixPath(n).parts for n in names)
+         assert all(stat.S_IFMT(x.external_attr>>16) in (0,stat.S_IFREG) for x in entries) and z.testzip() is None
+         def member(base):
+          matches=[n for n in names if pathlib.PurePosixPath(n).name==base];assert len(matches)==1
+          return z.read(matches[0])
+         binary=member("testaot");oldfixture=member("AOTSharingModeAndNamespaceTests.cpp")
+         assert len(binary)==85482272 and hashlib.sha256(binary).hexdigest()=="469744fcff59b38a0d13acf4a623e17d18d108e3f12614fc79c033a64b501bff"
+         assert hashlib.sha256(oldfixture).hexdigest()=="592e5e22def43affa31a33f77d1d5fa8192572d6bae11546ed7617a08543c28c"
+         tool=root/"retained-testaot";tool.write_bytes(binary);tool.chmod(0o755)
+        fixture=pathlib.Path("controls/.github/openclaw/qualification/upstream-regressions/AOTSharingModeAndNamespaceTests.cpp").read_bytes()
+        assert len(fixture)==30176 and hashlib.sha256(fixture).hexdigest()=='815588e97437bc4ee51a361a9fc2d4c160f59ff822f29c47038067c8eb16c190'
+        assert b"entry module=m0\nentry module=m1\n" not in oldfixture
+        expected=oldfixture.replace(b"entry module=m0\n",b"entry module=m0\nentry module=m1\n",1)
+        assert expected.count(b'    AOT_TEST_CHECK(output->entryModuleIDs.size() == 1);\n')==1
+        expected=expected.replace(b'    AOT_TEST_CHECK(output->entryModuleIDs.size() == 1);\n',b'    AOT_TEST_CHECK(output->entryModuleIDs.size() == 2);\n    AOT_TEST_CHECK(output->entryModuleIDs[0] == 1u);\n    AOT_TEST_CHECK(output->entryModuleIDs[1] == 2u);\n',1)
+        assert fixture==expected
+        pattern=rb'static constexpr ASCIILiteral programText = R"IR\((.*?)\)IR"_s;'
+        old=re.search(pattern,oldfixture,re.S);new=re.search(pattern,fixture,re.S);assert old and new
+        old_ir,new_ir=old[1],new[1]
+        assert re.findall(rb"^entry module=(m[0-9]+)$",new_ir,re.M)==[b"m0",b"m1"]
+        assert new_ir==old_ir.replace(b"entry module=m0\n",b"entry module=m0\nentry module=m1\n",1)
+        ir=root/"entry-program.ir";image=root/"entry-program.image";ir.write_bytes(new_ir)
+        case="sharing-mode-and-namespace/require-namespace-does-not-mutate-imports"
+        proof={"passed":False,"diagnostic_only":True,"control_head":os.environ["GITHUB_SHA"],"tool_sha256":hashlib.sha256(binary).hexdigest(),"fixture_sha256":hashlib.sha256(fixture).hexdigest(),"program_sha256":hashlib.sha256(new_ir).hexdigest(),"entry_modules":["m0","m1"],"case":case,"steps":{}}
+        def save():(out/"proof.json").write_text(json.dumps(proof,indent=2)+"\n")
+        def run(name,args):
+         save()
+         with (out/(name+".log")).open("xb") as f:r=subprocess.run(args,stdout=f,stderr=subprocess.STDOUT,timeout=180)
+         proof["steps"][name]={"argv":args,"exit_code":r.returncode};save();assert r.returncode==0,name
+        run("compile-entry",[str(tool),"compile",str(ir),"--output="+str(image)])
+        proof["image_sha256"]=hashlib.sha256(image.read_bytes()).hexdigest()
+        run("native-entry",[str(tool),"native",case,"--single-process","--aotImagePath="+str(image)])
+        text=(out/"native-entry.log").read_text()
+        assert re.findall(r"^(sharing-mode-and-namespace/[^\r\n]+)$",text,re.M)==[case]
+        assert len(re.findall(r"^1 passed, 0 failed, 0 todo$",text,re.M))==1
+        proof["passed"]=True;save()
+        PY
+    - name: Seal bounded diagnostic proof
+      if: always()
+      run: |
+        python3 - <<'PY'
+        import pathlib,hashlib,json,os,stat
+        p=pathlib.Path(os.environ["RUNNER_TEMP"])/"native-entry-proof";p.mkdir(exist_ok=True)
+        files=list(p.iterdir());assert len(files)<=8 and all(stat.S_ISREG(f.lstat().st_mode) for f in files) and sum(f.stat().st_size for f in files)<=8*1024**2
+        (p/"archive-manifest.json").write_text(json.dumps({f.name:{"bytes":f.stat().st_size,"sha256":hashlib.sha256(f.read_bytes()).hexdigest()} for f in files},indent=2)+"\n")
+        PY
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      if: always()
+      with:
+        name: native-host-entry-diagnostic-proof
+        path: "${{ runner.temp }}/native-entry-proof/"
+        if-no-files-found: error
+        retention-days: 7

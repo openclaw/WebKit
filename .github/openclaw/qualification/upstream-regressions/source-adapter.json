@@ -46,16 +46,16 @@
         "blob": "319330ac912ef2ab7b09c71040a45955d437d21f"
       },
       "after": {
-        "bytes": 30054,
-        "sha256": "592e5e22def43affa31a33f77d1d5fa8192572d6bae11546ed7617a08543c28c",
-        "blob": "2e947dbf2939721335b442602858f2a94bd0a6fa"
+        "bytes": 30176,
+        "sha256": "815588e97437bc4ee51a361a9fc2d4c160f59ff822f29c47038067c8eb16c190",
+        "blob": "8ad22f933d726367a53ed8e00f3d6596a23e26c9"
       },
       "control": "AOTSharingModeAndNamespaceTests.cpp",
       "kind": "test",
       "host": {
-        "bytes": 30250,
-        "sha256": "79e10a2d53a0c4f808e04a9716c0f590457da40ef3deec0338f1ad2015889c27",
-        "blob": "22cacbfc0524466b2f4ef9c15640eee7dc68ce08"
+        "bytes": 30372,
+        "sha256": "2db4908b7514d1a3cb2c098cb3be3febb4cfa2bce5128ec39b763962485a4a4d",
+        "blob": "134a529dfe4dde8e0badc7949027cd2198e03112"
       }
     },
     "Source/JavaScriptCore/aot/runtime/AOTModuleNamespace.h": {
@@ -175,7 +175,7 @@
     "file": "Source/JavaScriptCore/aot/tests/AOTSharingModeAndNamespaceTests.cpp",
     "case": "sharing-mode-and-namespace/require-namespace-does-not-mutate-imports",
     "failure_expression": "required.get() != imported.get()",
-    "failure_line": 277,
+    "failure_line": 278,
     "limits": [
       "live module-binding update",
       "late namespace face assignment",
@@ -206,7 +206,7 @@
     "file": "Source/JavaScriptCore/aot/tests/AOTSharingModeAndNamespaceTests.cpp",
     "case": "sharing-mode-and-namespace/require-facade-invalidates-captured-exports",
     "failure_expression": "evaluate(program, \"readCaptured(requiredNamespace)\"_s) == jsNumber(2)",
-    "failure_line": 339,
+    "failure_line": 340,
     "baseline": "pre-repair namespace port; unchanged163 has no separate facade"
   },
   "cache_fix_patch": {
@@ -260,6 +260,14 @@
       {
         "original": "    JSValue reader = program.realm()->get(program.realm(), readerName);\n",
         "current": "    JSValue reader = registry->getDirect(vm, readerName);\n"
+      },
+      {
+        "original": "entry module=m0\n",
+        "current": "entry module=m0\nentry module=m1\n"
+      },
+      {
+        "original": "    AOT_TEST_CHECK(output->entryModuleIDs.size() == 1);\n",
+        "current": "    AOT_TEST_CHECK(output->entryModuleIDs.size() == 2);\n    AOT_TEST_CHECK(output->entryModuleIDs[0] == 1u);\n    AOT_TEST_CHECK(output->entryModuleIDs[1] == 2u);\n"
       }
     ]
   }

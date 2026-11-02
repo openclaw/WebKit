@@ -52,6 +52,7 @@ module m0 path="/main.js" displayPath="main.js" body=f0 requests=[{target=m1 com
 module m1 path="/first.js" displayPath="first.js" requireResult=Namespace body=f1 exports=[{name="a" variable=g0}, {name="default" variable=g0}]
 module m2 path="/second.js" displayPath="second.js" body=f2 exports=[{name="a" variable=g1}]
 entry module=m0
+entry module=m1
 function f0 name="main" kind=Module results=[{type=anything}] {
     v0 = Builtin builtin=GlobalThis
     v1 = PropGet v0 key="registry" [isFreeName]
@@ -563,7 +564,9 @@ static std::unique_ptr<CompileOutput> compileOnThisThread(std::initializer_list<
     if (output->image.isEmpty())
         Typed::printDiagnostics(output->diagnostics, WTF::dataFile());
     AOT_TEST_CHECK(!output->image.isEmpty());
-    AOT_TEST_CHECK(output->entryModuleIDs.size() == 1);
+    AOT_TEST_CHECK(output->entryModuleIDs.size() == 2);
+    AOT_TEST_CHECK(output->entryModuleIDs[0] == 1u);
+    AOT_TEST_CHECK(output->entryModuleIDs[1] == 2u);
     return output;
 }
 
