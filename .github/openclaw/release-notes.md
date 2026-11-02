@@ -62,3 +62,5 @@ The completed historical ten-lane qualification is bound to engine `42e4245f4180
 Linux qualification now binds the historical and candidate Node references explicitly. A fixed-run continuation reuses admitted current-matrix engine and baseline builds while running baseline and candidate tests fresh.
 
 The current 21-lane qualification can assemble the retained build artifacts with a separately admitted fresh Linux consumer proof. The fixed-run continuation keeps the original build and proof identities, verifies all 22 archives through the existing assembly owner, and does not publish a release or update consumer pins. Historical ten-lane assembly retains its original admission limits.
+
+The ordinary VM-cache Debug qualification builds its matching non-AOT engine through the frozen Bun local-build owner, with the AOT macro disabled for both engine and consumer. It verifies the real two-case cache-eviction test, Debug/ASAN/assertion compile flags, source receipts and runtime identities rather than substituting an AOT archive.
