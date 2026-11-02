@@ -13,7 +13,9 @@ p.add_argument('--candidate', required=True)
 p.add_argument('--fixture', required=True, type=Path)
 p.add_argument('--output', required=True, type=Path)
 p.add_argument('--expected-version', required=True, type=int)
+p.add_argument('--expected-baseline-version', required=True, type=int)
 a = p.parse_args()
+assert a.expected_baseline_version != a.expected_version, 'cache migration requires distinct versions'
 a.output.mkdir(parents=True, exist_ok=False)
 source_marker = 'W152_CACHE_SOURCE'
 replay_marker = 'W152_CACHE_REPLAY'
@@ -70,8 +72,8 @@ for arm, repeat in [('baseline', 'cold'), ('baseline', 'warm'), ('candidate', 'o
     assert result.stderr.strip() == expected_marker, ('cache output was not replayed', repeat, result.stderr)
     rows = json.loads(result.stdout)
     files = snapshot()
-    if arm == 'candidate':
-        assert all(f['version'] == a.expected_version for f in files), files
+    expected_version = a.expected_baseline_version if arm == 'baseline' else a.expected_version
+    assert all(f['version'] == expected_version for f in files), files
     if marked_entry:
         assert files == before_warm, 'warm run replaced the marked cache instead of loading it'
     receipt = {'arm': arm, 'repeat': repeat,
