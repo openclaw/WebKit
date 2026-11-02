@@ -19,7 +19,7 @@ SOURCE = Path('engine').resolve()
 BUILD = Path(os.environ['RUNNER_TEMP']) / 'maintainer-native-build'
 OUT = Path(os.environ['RUNNER_TEMP']) / 'maintainer-native-proof'
 SPEC = json.loads((INPUTS / 'source-adapter.json').read_text())
-ENGINE = '163b3f42dbe9003508597eaa4c52f6b28ebd533d'
+ENGINE = '1281a1be4796f541bcaf0ef751941c41dfbf7817'
 RECORD = {'passed': False, 'engine': ENGINE, 'pipeline': os.environ['GITHUB_SHA'], 'steps': {}}
 OUT.mkdir()
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
@@ -186,7 +186,7 @@ with zipfile.ZipFile(archive) as prior:
         data = prior.read(name)
         assert len(data) == expected['bytes'] and hashlib.sha256(data).hexdigest() == expected['sha256']
     proof = json.loads(prior.read('proof.json'))
-    assert proof['passed'] is False and proof['engine'] == ENGINE and proof['pipeline'] == baseline['pipeline']
+    assert proof['passed'] is False and proof['engine'] == baseline['engine'] and proof['pipeline'] == baseline['pipeline']
     assert proof['controls']['AOTSharingModeAndNamespaceTests.cpp'] == baseline['fixture']['sha256']
     for name in ('configure', 'baseline-build', 'baseline-full-aot-admission'):
         row = proof['steps'][name]
@@ -248,49 +248,55 @@ def admit_full_aot(label):
     run(label + '-full-aot-admission', [*argv, '-E', '-x', 'c++', str(probe), '-o', '/dev/null'], cwd=Path(row['directory']))
 
 
-def expected_native_failure(name, regression):
-    run(name, [str(BUILD / paths['testaot']), 'native', regression['case'], '--single-process'],
-        300, expected_failure=True)
-    text = (OUT / (name + '.log')).read_text(errors='replace')
-    assert re.search(r'^' + re.escape(regression['case']) + r'$', text, re.M)
-    assert 'ASSERTION FAILED: ' + regression['failure_expression'] in text
-    assert re.search(re.escape(Path(regression['file']).name) + r'\(' + str(regression['failure_line']) + r'\)\s*:\s*native test', text)
-
-
-run('ported-build', ['cmake', '--build', str(BUILD), '--target', *targets, '-j2'], 7200)
-admit_full_aot('ported')
-state('ported')
-ported_binaries = binary_hashes()
-RECORD['ported_binary_sha256'] = ported_binaries
+reuse = SPEC['reused_cache']
+archive = Path(os.environ['RUNNER_TEMP']) / 'namespace-cache-prior.zip'
+assert archive.stat().st_size == reuse['bytes'] and sha(archive) == reuse['sha256']
+current = (INPUTS / 'AOTSharingModeAndNamespaceTests.cpp').read_text()
+for edit in reuse['fixture_edits']:
+    assert current.count(edit['current']) == 1
+    current = current.replace(edit['current'], edit['original'], 1)
+assert hashlib.sha256(current.encode()).hexdigest() == reuse['fixture_sha256']
+assert {name: row.get('host', row['after']) for name, row in SPEC['files'].items() if row['kind'] == 'production'} == reuse['production']
+with zipfile.ZipFile(archive) as prior:
+    entries = prior.infolist()
+    names = {entry.filename for entry in entries}
+    assert len(names) == len(entries) == 20 and sum(entry.file_size for entry in entries) <= 64 * 1024**2
+    for entry in entries:
+        name = PurePosixPath(entry.filename)
+        assert not name.is_absolute() and len(name.parts) == 1 and '..' not in name.parts
+        assert stat.S_IFMT(entry.external_attr >> 16) in (0, stat.S_IFREG)
+    assert prior.testzip() is None
+    manifest = json.loads(prior.read('archive-manifest.json'))
+    assert set(manifest) == names - {'archive-manifest.json'}
+    for name, expected in manifest.items():
+        data = prior.read(name)
+        assert len(data) == expected['bytes'] and hashlib.sha256(data).hexdigest() == expected['sha256']
+    proof = json.loads(prior.read('proof.json'))
+    assert proof['passed'] is False and proof['engine'] == reuse['engine'] and proof['pipeline'] == reuse['pipeline']
+    assert proof['controls']['AOTSharingModeAndNamespaceTests.cpp'] == reuse['fixture_sha256']
+    assert proof['controls']['source-adapter.json'] == reuse['source_adapter_sha256']
+    assert proof['cache_red_green'] is True and proof['cache_expected_failure'] == reuse['regression']
+    for name in ('ported-build', 'ported-full-aot-admission', 'fixed-build', 'fixed-full-aot-admission', 'host-build', 'host-full-aot-admission', 'namespace-cache-after-repair'):
+        row = proof['steps'][name]
+        assert row['returncode'] == 0 and row['timed_out'] is False
+    row = proof['steps']['namespace-cache-before-repair']
+    assert row['returncode'] == -6 and row['timed_out'] is False
+    red = prior.read('namespace-cache-before-repair.log').decode()
+    regression = reuse['regression']
+    assert 'ASSERTION FAILED: ' + regression['failure_expression'] in red
+    assert re.search(re.escape(Path(regression['file']).name) + r'\(' + str(regression['failure_line']) + r'\)\s*:\s*native test', red)
+    green = prior.read('namespace-cache-after-repair.log').decode()
+    assert re.findall(r'^(sharing-mode-and-namespace/[^\r\n]+)$', green, re.M) == [regression['case']]
+    assert len(re.findall(r'^1 passed, 0 failed, 0 todo$', green, re.M)) == 1
+    RECORD['reused_cache_red_green'] = dict(reuse, proof_sha256=hashlib.sha256(prior.read('proof.json')).hexdigest())
+    RECORD['cache_red_green'] = True
 save()
-expected_native_failure('namespace-cache-before-repair', SPEC['cache_regression'])
-state('ported')
-assert binary_hashes() == ported_binaries
-RECORD['cache_expected_failure'] = SPEC['cache_regression']
-save()
-patch = INPUTS / SPEC['cache_fix_patch']['control']
-identity(patch, SPEC['cache_fix_patch'])
-run('namespace-cache-fix-check', ['git', 'apply', '--check', str(patch)])
-run('namespace-cache-fix-apply', ['git', 'apply', str(patch)])
-state('fixed')
-run('fixed-build', ['cmake', '--build', str(BUILD), '--target', *targets, '-j2'], 7200)
-admit_full_aot('fixed')
-state('fixed')
-cache_binaries = binary_hashes()
-run('namespace-cache-after-repair', [str(BUILD / paths['testaot']), 'native', SPEC['cache_regression']['case'], '--single-process'], 300)
-text = (OUT / 'namespace-cache-after-repair.log').read_text(errors='replace')
-assert re.findall(r'^(sharing-mode-and-namespace/[^\r\n]+)$', text, re.M) == [SPEC['cache_regression']['case']]
-assert len(re.findall(r'^1 passed, 0 failed, 0 todo$', text, re.M)) == 1
-assert not re.search(r'^(FAIL |LEFT OUT )', text, re.M)
-state('fixed')
-assert binary_hashes() == cache_binaries
-RECORD['cache_red_green'] = True
-save()
-patch = INPUTS / SPEC['host_api_patch']['control']
-identity(patch, SPEC['host_api_patch'])
-run('namespace-host-api-check', ['git', 'apply', '--check', str(patch)])
-run('namespace-host-api-apply', ['git', 'apply', str(patch)])
-state('host')
+for label, stage in (('cache_fix_patch', 'fixed'), ('host_api_patch', 'host')):
+    patch = INPUTS / SPEC[label]['control']
+    identity(patch, SPEC[label])
+    run('namespace-' + stage + '-check', ['git', 'apply', '--check', str(patch)])
+    run('namespace-' + stage + '-apply', ['git', 'apply', str(patch)])
+    state(stage)
 run('host-build', ['cmake', '--build', str(BUILD), '--target', *targets, '-j2'], 7200)
 admit_full_aot('host')
 state('host')

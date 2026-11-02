@@ -1,6 +1,5 @@
-name: OpenClaw integrated engine regression proof
-on:
-  workflow_dispatch:
+---
+name: OpenClaw corrected native host entry qualification
 permissions:
   contents: read
   actions: read
@@ -12,118 +11,141 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          path: controls
-          persist-credentials: false
-          sparse-checkout: .github/openclaw/qualification/upstream-regressions
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: 163b3f42dbe9003508597eaa4c52f6b28ebd533d
-          path: engine
-          persist-credentials: false
-          sparse-checkout-cone-mode: false
-          sparse-checkout: |
-            /*
-            !/LayoutTests/
-            !/JSTests/*
-            /JSTests/stress/
-            !/JSTests/stress/*
-            /JSTests/stress/basic-eden-gc-test.js
-            /JSTests/stress/weakmap-gc.js
-            /JSTests/stress/error-stack-async-relative-resume-target.js
-            !/PerformanceTests/
-            !/Websites/
-            !/ManualTests/
-            !/WebDriverTests/
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: '26.12.1'
-      - name: Install the existing native ARM64 toolchain
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = aarch64
-          curl -fsSL --retry 5 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
-          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cmake ninja-build clang-23 lld-23 libicu-dev ruby ruby-highline libjson-pp-perl
-      - name: Admit the failed run's immutable baseline evidence
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import hashlib, json, os, subprocess
-          from pathlib import Path
-          def api(route):
-              return json.loads(subprocess.check_output(['gh', 'api', 'repos/openclaw/WebKit/' + route], timeout=120))
-          run = api('actions/runs/41318143757')
-          assert run['id'] == 41318143757 and run['head_sha'] == '8a2a37cee27e7d457c894c4a95b3a5fd9047e365'
-          assert run['path'] == '.github/workflows/openclaw-hosted-linux-consumer.yml'
-          assert run['status'] == 'completed' and run['conclusion'] == 'failure'
-          artifact = api('actions/artifacts/13091741325')
-          digest = '2ddb7a2aa808630fb780b69e7138a1261106fcb9bbb3f6a23770f127249494af'
-          assert artifact['id'] == 13091741325 and artifact['name'] == 'integrated-engine-regression-proof'
-          assert artifact['workflow_run']['id'] == run['id'] and artifact['workflow_run']['head_sha'] == run['head_sha']
-          assert artifact['expired'] is False and artifact['size_in_bytes'] == 121981 and artifact['digest'] == 'sha256:' + digest
-          path = Path(os.environ['RUNNER_TEMP']) / 'namespace-baseline.zip'
-          with path.open('xb') as output:
-              subprocess.run(['gh', 'api', 'repos/openclaw/WebKit/actions/artifacts/13091741325/zip'], stdout=output, check=True, timeout=180)
-          assert path.stat().st_size == 121981 and hashlib.sha256(path.read_bytes()).hexdigest() == digest
-          PY
-      - name: Prove namespace isolation red/green and the integrated native contracts
-        run: python3 controls/.github/openclaw/qualification/upstream-regressions/qualify.py
-      - name: Measure the matching native diagnostic tool
-        if: always()
-        run: |
-          python3 - <<'PY'
-          import hashlib, json, os, stat
-          from pathlib import Path
-          root = Path(os.environ['RUNNER_TEMP'])
-          out = root / 'maintainer-native-proof'
-          out.mkdir(exist_ok=True)
-          tool = root / 'maintainer-native-build/bin/testaot'
-          facts = {'diagnostic_only': True, 'control_head': os.environ['GITHUB_SHA'], 'tool': None}
-          if tool.exists():
-              assert stat.S_ISREG(tool.lstat().st_mode) and 0 < tool.stat().st_size <= 2 * 1024**3
-              with tool.open('rb') as stream:
-                  digest = hashlib.file_digest(stream, 'sha256').hexdigest()
-              facts['tool'] = {'path': 'bin/testaot', 'bytes': tool.stat().st_size, 'sha256': digest}
-          (out / 'native-tools.json').write_text(json.dumps(facts, indent=2) + '\n')
-          PY
-      - name: Bound and record the evidence
-        id: evidence
-        if: always()
-        run: |
-          python3 - <<'PY'
-          import hashlib, json, os, stat
-          from pathlib import Path
-          out = Path(os.environ['RUNNER_TEMP']) / 'maintainer-native-proof'
-          out.mkdir(exist_ok=True)
-          files = sorted(out.iterdir())
-          assert len(files) <= 48 and all(stat.S_ISREG(p.lstat().st_mode) for p in files)
-          assert sum(p.stat().st_size for p in files) <= 64 * 1024**2
-          def sha(path):
-              with path.open('rb') as stream: return hashlib.file_digest(stream, 'sha256').hexdigest()
-          (out / 'archive-manifest.json').write_text(json.dumps({p.name: {'bytes': p.stat().st_size, 'sha256': sha(p)} for p in files}, indent=2) + '\n')
-          PY
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always() && steps.evidence.outcome == 'success'
-        with:
-          name: integrated-engine-regression-proof
-          path: ${{ runner.temp }}/maintainer-native-proof/
-          if-no-files-found: error
-          retention-days: 7
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
-        with:
-          name: integrated-native-diagnostic-tools
-          path: |
-            ${{ runner.temp }}/maintainer-native-build/bin/testaot
-            ${{ runner.temp }}/maintainer-native-build/CMakeCache.txt
-            ${{ runner.temp }}/maintainer-native-proof/native-tools.json
-            ${{ runner.temp }}/maintainer-native-proof/proof.json
-            controls/.github/openclaw/qualification/upstream-regressions/source-adapter.json
-            controls/.github/openclaw/qualification/upstream-regressions/AOTSharingModeAndNamespaceTests.cpp
-          compression-level: 0
-          if-no-files-found: warn
-          retention-days: 7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        path: controls
+        persist-credentials: false
+        sparse-checkout: ".github/openclaw/qualification/upstream-regressions"
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: 1281a1be4796f541bcaf0ef751941c41dfbf7817
+        path: engine
+        persist-credentials: false
+        sparse-checkout-cone-mode: false
+        sparse-checkout: |
+          /*
+          !/LayoutTests/
+          !/JSTests/*
+          /JSTests/stress/
+          !/JSTests/stress/*
+          /JSTests/stress/basic-eden-gc-test.js
+          /JSTests/stress/weakmap-gc.js
+          /JSTests/stress/error-stack-async-relative-resume-target.js
+          !/PerformanceTests/
+          !/Websites/
+          !/ManualTests/
+          !/WebDriverTests/
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      with:
+        node-version: 26.12.1
+    - name: Install the existing native ARM64 toolchain
+      run: |
+        set -euo pipefail
+        test "$(uname -m)" = aarch64
+        curl -fsSL --retry 5 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+        echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends cmake ninja-build clang-23 lld-23 libicu-dev ruby ruby-highline libjson-pp-perl
+    - name: Admit the failed run's immutable baseline evidence
+      env:
+        GH_TOKEN: "${{ github.token }}"
+      run: |
+        python3 - <<'PY'
+        import hashlib, json, os, subprocess
+        from pathlib import Path
+        def api(route):
+            return json.loads(subprocess.check_output(['gh', 'api', 'repos/openclaw/WebKit/' + route], timeout=120))
+        run = api('actions/runs/41318143757')
+        assert run['id'] == 41318143757 and run['head_sha'] == '8a2a37cee27e7d457c894c4a95b3a5fd9047e365'
+        assert run['path'] == '.github/workflows/openclaw-hosted-linux-consumer.yml'
+        assert run['status'] == 'completed' and run['conclusion'] == 'failure'
+        artifact = api('actions/artifacts/13091741325')
+        digest = '2ddb7a2aa808630fb780b69e7138a1261106fcb9bbb3f6a23770f127249494af'
+        assert artifact['id'] == 13091741325 and artifact['name'] == 'integrated-engine-regression-proof'
+        assert artifact['workflow_run']['id'] == run['id'] and artifact['workflow_run']['head_sha'] == run['head_sha']
+        assert artifact['expired'] is False and artifact['size_in_bytes'] == 121981 and artifact['digest'] == 'sha256:' + digest
+        path = Path(os.environ['RUNNER_TEMP']) / 'namespace-baseline.zip'
+        with path.open('xb') as output:
+            subprocess.run(['gh', 'api', 'repos/openclaw/WebKit/actions/artifacts/13091741325/zip'], stdout=output, check=True, timeout=180)
+        assert path.stat().st_size == 121981 and hashlib.sha256(path.read_bytes()).hexdigest() == digest
+        PY
+    - name: Admit completed cache red and green evidence
+      env:
+        GH_TOKEN: "${{ github.token }}"
+      run: |
+        set -euo pipefail
+        python3 - <<'PY'
+        import hashlib,json,os,pathlib,subprocess
+        def api(route):return json.loads(subprocess.check_output(["gh","api","repos/openclaw/WebKit/"+route],timeout=120))
+        r=api("actions/runs/41387838627")
+        assert r["head_sha"]=="18e252ec80362d119cf155c782fd32d4f33293fd" and r["status"]=="completed" and r["conclusion"]=="failure"
+        a=api("actions/artifacts/13120205833")
+        digest="3a59b3f39c5119ca8f0ecfd1d4d45d62336151e939009a43465d58997ca0334f"
+        assert a["name"]=="integrated-engine-regression-proof" and a["size_in_bytes"]==241206 and a["digest"]=="sha256:"+digest and a["expired"] is False
+        assert a["workflow_run"]["id"]==r["id"] and a["workflow_run"]["head_sha"]==r["head_sha"]
+        p=pathlib.Path(os.environ["RUNNER_TEMP"])/"namespace-cache-prior.zip"
+        with p.open("xb") as f:subprocess.run(["gh","api","repos/openclaw/WebKit/actions/artifacts/13120205833/zip"],stdout=f,check=True,timeout=180)
+        assert p.stat().st_size==241206 and hashlib.sha256(p.read_bytes()).hexdigest()==digest
+        PY
+    - name: Prove corrected host entry and remaining native contracts
+      run: python3 controls/.github/openclaw/qualification/upstream-regressions/qualify.py
+    - name: Measure the matching native diagnostic tool
+      if: always()
+      run: |
+        python3 - <<'PY'
+        import hashlib, json, os, stat
+        from pathlib import Path
+        root = Path(os.environ['RUNNER_TEMP'])
+        out = root / 'maintainer-native-proof'
+        out.mkdir(exist_ok=True)
+        tool = root / 'maintainer-native-build/bin/testaot'
+        facts = {'diagnostic_only': True, 'control_head': os.environ['GITHUB_SHA'], 'tool': None}
+        if tool.exists():
+            assert stat.S_ISREG(tool.lstat().st_mode) and 0 < tool.stat().st_size <= 2 * 1024**3
+            with tool.open('rb') as stream:
+                digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+            facts['tool'] = {'path': 'bin/testaot', 'bytes': tool.stat().st_size, 'sha256': digest}
+        (out / 'native-tools.json').write_text(json.dumps(facts, indent=2) + '\n')
+        PY
+    - name: Bound and record the evidence
+      id: evidence
+      if: always()
+      run: |
+        python3 - <<'PY'
+        import hashlib, json, os, stat
+        from pathlib import Path
+        out = Path(os.environ['RUNNER_TEMP']) / 'maintainer-native-proof'
+        out.mkdir(exist_ok=True)
+        files = sorted(out.iterdir())
+        assert len(files) <= 48 and all(stat.S_ISREG(p.lstat().st_mode) for p in files)
+        assert sum(p.stat().st_size for p in files) <= 64 * 1024**2
+        def sha(path):
+            with path.open('rb') as stream: return hashlib.file_digest(stream, 'sha256').hexdigest()
+        (out / 'archive-manifest.json').write_text(json.dumps({p.name: {'bytes': p.stat().st_size, 'sha256': sha(p)} for p in files}, indent=2) + '\n')
+        PY
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      if: always() && steps.evidence.outcome == 'success'
+      with:
+        name: integrated-engine-regression-proof
+        path: "${{ runner.temp }}/maintainer-native-proof/"
+        if-no-files-found: error
+        retention-days: 7
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      if: always()
+      with:
+        name: integrated-native-diagnostic-tools
+        path: |-
+          ${{ runner.temp }}/maintainer-native-build/bin/testaot
+          ${{ runner.temp }}/maintainer-native-build/CMakeCache.txt
+          ${{ runner.temp }}/maintainer-native-proof/native-tools.json
+          ${{ runner.temp }}/maintainer-native-proof/proof.json
+          controls/.github/openclaw/qualification/upstream-regressions/source-adapter.json
+          controls/.github/openclaw/qualification/upstream-regressions/AOTSharingModeAndNamespaceTests.cpp
+
+          ${{ runner.temp }}/maintainer-native-build/bin/jsc
+          ${{ runner.temp }}/maintainer-native-build/bin/TestWebKitAPI/TestJavaScriptCore
+        compression-level: 0
+        if-no-files-found: warn
+        retention-days: 7
+'on':
+  workflow_dispatch: 

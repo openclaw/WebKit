@@ -1,5 +1,5 @@
 {
-  "engine": "163b3f42dbe9003508597eaa4c52f6b28ebd533d",
+  "engine": "1281a1be4796f541bcaf0ef751941c41dfbf7817",
   "files": {
     "Tools/TestWebKitAPI/CMakeLists.txt": {
       "before": {
@@ -269,6 +269,71 @@
         "original": "    AOT_TEST_CHECK(output->entryModuleIDs.size() == 1);\n",
         "current": "    AOT_TEST_CHECK(output->entryModuleIDs.size() == 2);\n    AOT_TEST_CHECK(output->entryModuleIDs[0] == 1u);\n    AOT_TEST_CHECK(output->entryModuleIDs[1] == 2u);\n"
       }
-    ]
+    ],
+    "engine": "163b3f42dbe9003508597eaa4c52f6b28ebd533d"
+  },
+  "reused_cache": {
+    "run": 41387838627,
+    "pipeline": "18e252ec80362d119cf155c782fd32d4f33293fd",
+    "artifact": 13120205833,
+    "bytes": 241206,
+    "sha256": "3a59b3f39c5119ca8f0ecfd1d4d45d62336151e939009a43465d58997ca0334f",
+    "fixture_sha256": "592e5e22def43affa31a33f77d1d5fa8192572d6bae11546ed7617a08543c28c",
+    "source_adapter_sha256": "47f9e8c5678fbc5c68ccba13f07bf2e49cbced0aeb45b07fa307efb94578f727",
+    "regression": {
+      "file": "Source/JavaScriptCore/aot/tests/AOTSharingModeAndNamespaceTests.cpp",
+      "case": "sharing-mode-and-namespace/require-facade-invalidates-captured-exports",
+      "failure_expression": "evaluate(program, \"readCaptured(requiredNamespace)\"_s) == jsNumber(2)",
+      "failure_line": 339,
+      "baseline": "pre-repair namespace port; unchanged163 has no separate facade"
+    },
+    "production": {
+      "Source/JavaScriptCore/aot/runtime/AOTModuleNamespace.h": {
+        "bytes": 5269,
+        "sha256": "27ebe4c5abc8dff89fa2ff11eca6424ffa15b91cdf7f967e9aa44f881745464e",
+        "blob": "a95f8c2190c33c1a93aabbed85d695facdea4881"
+      },
+      "Source/JavaScriptCore/aot/runtime/AOTModules.cpp": {
+        "bytes": 263920,
+        "sha256": "34ec56257be9ed651d60d4fc224acce73c053d51798d0fec3d2d9631f568bf28",
+        "blob": "0dd82e68d934df33d207aebd96659c3bbdae9241"
+      },
+      "Source/JavaScriptCore/aot/runtime/AOTModuleEvaluation.cpp": {
+        "bytes": 181804,
+        "sha256": "e1209ba153c537b5936377a96d1b7674f0d04623b87e9cb2c4a0feff5f680a64",
+        "blob": "be76c151ea552102a1d92c00ea8b52b38649ac8d"
+      },
+      "Source/JavaScriptCore/aot/runtime/AOTModules.h": {
+        "bytes": 63427,
+        "sha256": "68e851742c2e52ad7327b8ec2ef51d7c82a83607a0d7b7dc627025d4dc35cc8f",
+        "blob": "635d6cb9e5f59760f9e33b481630a5df531ec200"
+      },
+      "Source/JavaScriptCore/aot/runtime/AOTModuleHost.h": {
+        "bytes": 21539,
+        "sha256": "bae88edb8ea5db134fd5b869d950123854d939dc0a938102da527792bcf8c26d",
+        "blob": "ce1eb4a73a37827dd5713e51c1ac58f8e1aa55d9"
+      },
+      "Source/JavaScriptCore/aot/passes/AOTCallModules.cpp": {
+        "bytes": 49127,
+        "sha256": "ec991b7a69b8723235a1c05714fa9ddcfa71d06e0fc893388d88405f71c3a2f0",
+        "blob": "72f15b3b24c3dbeb9b992fa204ff6452466faff1"
+      },
+      "Source/JavaScriptCore/aot/runtime/AOTModuleLinking.cpp": {
+        "bytes": 58548,
+        "sha256": "cf74e8b272d4479ebd54abf1258b885bca30bbeb64c5a0a578c68c1180e32574",
+        "blob": "e0a6dec86749bac39917b9265f027731df257a1b"
+      }
+    },
+    "fixture_edits": [
+      {
+        "original": "entry module=m0\n",
+        "current": "entry module=m0\nentry module=m1\n"
+      },
+      {
+        "original": "    AOT_TEST_CHECK(output->entryModuleIDs.size() == 1);\n",
+        "current": "    AOT_TEST_CHECK(output->entryModuleIDs.size() == 2);\n    AOT_TEST_CHECK(output->entryModuleIDs[0] == 1u);\n    AOT_TEST_CHECK(output->entryModuleIDs[1] == 2u);\n"
+      }
+    ],
+    "engine": "163b3f42dbe9003508597eaa4c52f6b28ebd533d"
   }
 }
