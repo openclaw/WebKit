@@ -2,7 +2,7 @@ Linux qualification binds Node 26.3.0 for the historical baseline and Node 26.12
 
 The current Bun candidate preserves bare-plugin resolution guards, lstat ENOTDIR errors, Darwin hard-link path spelling and Node-compatible trailing-path resolution. Compiled CommonJS forwarding preserves the namespace default, and native-module mocks keep their raw factory exports. Candidate builds use public signed Git history without a source compatibility adapter. Fresh paired native and downstream qualification is required; historical receipts do not qualify this candidate.
 
-Native Darwin ARM64 qualification builds the frozen Bun candidate against the same-run macOS AOT archive, completes the reviewed 52-file selection, and runs all four AOT platform cases before assembly. Linux historical comparison and native Windows ARM64 engine gates remain required.
+Native Darwin ARM64 qualification builds the frozen Bun candidate against the same-run macOS AOT archive, completes the reviewed 53-file selection, and runs all four AOT platform cases before assembly. Linux historical comparison and native Windows ARM64 engine gates remain required.
 
 The AOT builtin-table collector now recognizes native data properties declared with `CustomValue`. Getter and setter symbols remain available to code generation; Bun's `process.ppid` and `process.title` keep their existing data descriptors. Unknown table attributes still fail validation.
 
