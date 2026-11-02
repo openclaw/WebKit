@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import signal
 import subprocess
 if __package__:
     from . import consumer_identity as identity
@@ -145,6 +146,23 @@ def restore(root, name, phase, engine, inspector, status, active, completed):
         identity.write_once(receipt, record)
 
 
+def run_with_deadline(command, *, cwd, env, stream, seconds):
+    process = subprocess.Popen(command, cwd=cwd, env=env, stdout=stream,
+                               stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        return process.wait(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        stream.write('Fixed qualification command exceeded its external deadline\n')
+        stream.flush()
+        return 124
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=5)
+
+
 def run(root, name, phase, engine, inspector, prefix=None):
     arm = 'baseline' if name == 'baseline' else 'candidate'
     repo = root / ('bun-baseline' if arm == 'baseline' else 'bun')
@@ -193,7 +211,9 @@ def run(root, name, phase, engine, inspector, prefix=None):
                                 str(repo / 'scripts/buildkite.ts')], cwd=repo, env=env,
                                stdout=stream, stderr=subprocess.STDOUT, check=True)
             try:
-                status = subprocess.run(command, cwd=repo, env=env, stdout=stream, stderr=subprocess.STDOUT).returncode
+                status = (run_with_deadline(command, cwd=repo, env=env, stream=stream, seconds=1800)
+                          if phase == 'test' else subprocess.run(command, cwd=repo, env=env, stdout=stream,
+                                                                 stderr=subprocess.STDOUT).returncode)
             except OSError as error:
                 stream.write('Failed to start fixed qualification command: ' + type(error).__name__ + '\n')
         if phase == 'test':

@@ -44,7 +44,7 @@ jobs:
             !/WebDriverTests/
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version: '26.3.0'
+          node-version: '26.12.1'
       - name: Test publication integrity gates
         run: |
           python3 .github/openclaw/test_artifacts.py
@@ -84,7 +84,7 @@ jobs:
             !/WebDriverTests/
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version: '26.3.0'
+          node-version: '26.12.1'
       - name: Build unchanged upstream lane and record provenance
         env:
           LANE: ${{ matrix.lane }}
@@ -109,14 +109,25 @@ jobs:
           sparse-checkout: |
             /.github/
             /Tools/
-            /Source/JavaScriptCore/aot/runtime/AOTNoFeatureRemoved.cpp
+            /Source/JavaScriptCore/
             /JSTests/stress/
             /JSTests/modules/
             /JSTests/*.yaml
             /JSTests/BUN-TEST-DIFFERENCES.md
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
+          node-version: '26.3.0'
+      - name: Bind the historical Node reference
+        run: |
+          test "$(node --version)" = v26.3.0
+          echo "BASELINE_REFERENCE_NODE=$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
           node-version: '26.12.1'
+      - name: Bind the candidate Node reference
+        run: |
+          test "$(node --version)" = v26.12.1
+          echo "CANDIDATE_REFERENCE_NODE=$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: bun-webkit-linux-amd64-aot
@@ -154,12 +165,15 @@ jobs:
           echo 'bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c  '"$RUNNER_TEMP/bun.zip" | sha256sum -c -
           unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bootstrap"
           echo "$RUNNER_TEMP/bootstrap/bun-linux-x64" >> "$GITHUB_PATH"
-      - name: Build baseline and candidate Bun, then qualify the same candidate
+      - name: Qualify the new engine archive and build the exact candidate
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/linux-artifact
           QUALIFICATION_DIR: ${{ runner.temp }}/qualification
         run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
           export INSPECTOR_RUNTIME="$(realpath "$(command -v bun)")"
+          test "$(node --version)" = v26.12.1
           ARTIFACT_DIR="$RUNNER_TEMP/linux-legacy-artifact" bash .github/openclaw/qualify-engine.sh
           bash .github/openclaw/qualify.sh
           export CANDIDATE_BUN="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
@@ -174,6 +188,7 @@ jobs:
           path: |
             ${{ runner.temp }}/qualification/bun-baseline/build/qualify-baseline/bun
             ${{ runner.temp }}/qualification/bun/build/qualify-candidate/bun
+            ${{ runner.temp }}/qualification/bun/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o
             ${{ runner.temp }}/qualification/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
             ${{ runner.temp }}/qualification/bun/test/aot/every-platform.test.ts
             ${{ runner.temp }}/qualification/*.sha256

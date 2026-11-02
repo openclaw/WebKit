@@ -97,7 +97,18 @@ jobs:
             /JSTests/BUN-TEST-DIFFERENCES.md
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
+          node-version: '26.3.0'
+      - name: Bind the historical baseline Node reference
+        run: |
+          test "$(node --version)" = v26.3.0
+          echo "BASELINE_REFERENCE_NODE=$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
           node-version: '26.12.1'
+      - name: Bind the candidate Node reference
+        run: |
+          test "$(node --version)" = v26.12.1
+          echo "CANDIDATE_REFERENCE_NODE=$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
       - name: Verify pipeline integrity and runner support
         run: |
           python3 .github/openclaw/test_artifacts.py
@@ -173,6 +184,7 @@ jobs:
           path: |
             ${{ runner.temp }}/qualification/bun-baseline/build/qualify-baseline/bun
             ${{ runner.temp }}/qualification/bun/build/qualify-candidate/bun
+            ${{ runner.temp }}/qualification/bun/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o
             ${{ runner.temp }}/qualification/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
             ${{ runner.temp }}/qualification/bun/test/aot/every-platform.test.ts
             ${{ runner.temp }}/qualification/*.sha256
@@ -227,3 +239,15 @@ jobs:
           node-version: '26.3.0'
       - name: Build the macOS fork artifact on Linux without publishing
         run: python3 .github/openclaw/artifacts.py build --lane bun-webkit-macos-arm64 --output "$RUNNER_TEMP/macos-fork-artifact"
+      - name: Build the current Bun macOS AOT engine without publishing
+        env:
+          BUILDX_METADATA_PROVENANCE: max
+        run: python3 .github/openclaw/artifacts.py build --lane bun-webkit-macos-arm64-aot --output "$RUNNER_TEMP/macos-aot-artifact"
+      - name: Retain the exact macOS AOT engine and provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: bun-webkit-macos-arm64-aot
+          path: ${{ runner.temp }}/macos-aot-artifact
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7

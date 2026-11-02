@@ -5,6 +5,7 @@ from consumer_identity import engine_input,verify,sha,aot_evidence
 from compile_cache import evidence as compile_cache_evidence
 from compare_fork_ci import validate_arm
 from pathlib import Path
+from xml.etree import ElementTree
 root=Path(sys.argv[1]);out=root/'sync'
 selected=json.loads((out/'selected.json').read_text())
 rows=json.loads((out/'results.json').read_text())
@@ -14,15 +15,42 @@ observed=validate_arm(out,selected)
 assert observed['all_passed'],'sync CI failures'
 assert {'test/js/web/atomics.test.ts','test/js/bun/wasm/compile-rss.test.ts'}<=set(selected)
 counts={}
-for name,minimum in [('memory-release',3),('webkit-upgrade',11),('proxy',4),('resource-limits',16),('namespace',41),('inspector',78),('als-suites',223),('stack-positions',343),('stack-minifier',68),('arraybuffer',19),('worker-statistics',7),('arraybuffer-native',1),('arraybuffer-serializer',60),('inspection-idle',1),('sqlite-bigint',6),('bake-builtin',1),('bigint-matchers',2),('lazy-process-builtins',3),('bigint-serialization',18),('untrimmed-collator',1)]:
+for name,minimum in [('quic-sni',19),('memory-release',3),('webkit-upgrade',11),('proxy',4),('resource-limits',16),('namespace',41),('inspector',78),('als-suites',223),('stack-positions',343),('stack-minifier',68),('arraybuffer',19),('worker-statistics',7),('arraybuffer-native',1),('arraybuffer-serializer',60),('inspection-idle',1),('bake-builtin',1),('bigint-matchers',2),('lazy-process-builtins',3),('bigint-serialization',18),('untrimmed-collator',1)]:
     text=(out/(name+'.log')).read_text()
     passes=re.findall(r'(\d+) pass',text)
     assert passes and int(passes[-1])>=minimum,name+' incomplete'
     assert re.search(r'\b0 fail\b',text),name+' failed'
+    if name=='quic-sni':assert int(passes[-1])==19,'QUIC SNI selection drift'
     if name=='webkit-upgrade':assert int(passes[-1])==11,'WebKit upgrade selection drift'
     if name=='untrimmed-collator':assert int(passes[-1])==1,'collator selection drift'
-    if name in ('memory-release','webkit-upgrade','bigint-matchers','bigint-serialization','lazy-process-builtins','untrimmed-collator'):assert not re.search(r'\b[1-9]\d* skip\b',text),name+' tests skipped'
+    if name in ('quic-sni','memory-release','webkit-upgrade','bigint-matchers','bigint-serialization','lazy-process-builtins','untrimmed-collator'):assert not re.search(r'\b[1-9]\d* skip\b',text),name+' tests skipped'
     counts[name]=int(passes[-1])
+sqlite_cases = {
+    'sqlite-bigint.xml': ('test/js/node/sqlite/node-sqlite.test.ts', {
+        'rejects oversized BigInt with ERR_INVALID_ARG_VALUE',
+        "bind error messages match node's exactly (trailing period)",
+        'database-level defaults flow to prepared statements',
+    }),
+    'sqlite-bigint-node.xml': ('test/js/node/test/parallel/test-sqlite-statement-sync.js', {
+        'BigInts support can be toggled',
+        'BigInt is required for reading large integers',
+        'BigInts are returned when input is true',
+    }),
+}
+sqlite_count = 0
+for report, (file, expected) in sqlite_cases.items():
+    cases = list(ElementTree.parse(out/report).iter('testcase'))
+    assert cases and all(case.find('failure') is None and case.find('error') is None for case in cases),report+' failed'
+    selected_cases = [case for case in cases if case.get('name') in expected]
+    assert len(selected_cases)==len(expected)==3 and {case.get('name') for case in selected_cases}==expected,report+' selection drift'
+    assert all(case.find('skipped') is not None for case in cases if case.get('name') not in expected),report+' unexpected case'
+    for case in selected_cases:
+        assert case.find('skipped') is None,report+' selected case skipped'
+        location = Path(case.attrib['file'])
+        assert location == (root/'bun'/file if location.is_absolute() else Path(file)),report+' wrong source file'
+    sqlite_count += len(selected_cases)
+assert sqlite_count==6,'SQLite BigInt qualification incomplete'
+counts['sqlite-bigint']=sqlite_count
 assert (out/'untrimmed-getters.log').read_text().strip()=='native URL getters passed','native URL getter smoke incomplete'
 for name in ['als-plugin','als-native','als-gc']:
     matrix=json.loads((out/(name+'.json')).read_text())['results']
