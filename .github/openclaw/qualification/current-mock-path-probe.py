@@ -41,12 +41,14 @@ test("mock path probe",async()=>{
 });
 """)
 proof={"diagnostic_only":True,"passed":False,"artifact":13120786072,"artifact_run":41396456930,"binary":{"bytes":exe.stat().st_size,"sha256":hashlib.file_digest(exe.open("rb"),"sha256").hexdigest()},"steps":{}}
+(out/"proof.json").write_text(json.dumps(proof,indent=2)+"\n")
 for name,args in [("ordinary",["test","one.test.ts"]),("aot",["test","--debug-aot","one.test.ts"])]:
  with (out/(name+".log")).open("wb") as log:
   result=subprocess.run([str(exe),*args],cwd=probe,stdout=log,stderr=subprocess.STDOUT)
  data=(out/(name+".log")).read_bytes()
  assert len(data)<=1024**2
  proof["steps"][name]={"exit_code":result.returncode,"bytes":len(data),"sha256":hashlib.sha256(data).hexdigest()}
+ (out/"proof.json").write_text(json.dumps(proof,indent=2)+"\n")
  assert result.returncode==0
  assert b"FIRST " in data and b"IDENTITIES " in data and b"FORWARDED " in data
 proof["passed"]=True

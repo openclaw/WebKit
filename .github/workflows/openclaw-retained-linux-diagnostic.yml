@@ -33,16 +33,17 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import hashlib,io,json,os,stat,urllib.request,zipfile
+          import hashlib,io,json,stat,subprocess,zipfile
           from pathlib import Path
           def get(route):
-              request=urllib.request.Request("https://api.github.com/repos/openclaw/WebKit/"+route,headers={"Authorization":"Bearer "+os.environ["GH_TOKEN"],"Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"})
-              with urllib.request.urlopen(request) as r: return r.read()
+              # gh strips API authorization when following the signed artifact redirect.
+              return subprocess.check_output(["gh","api","repos/openclaw/WebKit/"+route])
           run=json.loads(get("actions/runs/41396456930"))
           assert run["head_sha"]=="1047ca3631645484e812e55b6a665413941f9879" and run["conclusion"]=="failure"
           row=json.loads(get("actions/artifacts/13120786072"))
           assert not row["expired"] and row["name"]=="current-bun-aot-debug-executable" and row["size_in_bytes"]==1700157004
           assert row["workflow_run"]["id"]==41396456930
+          assert row["workflow_run"]["head_sha"]==run["head_sha"] and row["digest"]=="sha256:8485099bd006b7dc7111e6cd7536e4e77cee1214512a2b1875478edd59805032"
           raw=get("actions/artifacts/13120786072/zip")
           assert len(raw)==1700157004 and hashlib.sha256(raw).hexdigest()=="8485099bd006b7dc7111e6cd7536e4e77cee1214512a2b1875478edd59805032"
           z=zipfile.ZipFile(io.BytesIO(raw)); assert z.testzip() is None
