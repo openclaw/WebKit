@@ -17,7 +17,13 @@ concurrency:
   cancel-in-progress: false
 jobs:
   preflight:
-    if: github.repository == 'openclaw/WebKit' && (github.ref == 'refs/heads/openclaw/main' || github.ref == 'refs/heads/openclaw/batch-1')
+    if: >-
+      github.repository == 'openclaw/WebKit' &&
+      (github.ref == 'refs/heads/openclaw/main' ||
+       github.ref == 'refs/heads/openclaw/batch-1' ||
+       github.ref == 'refs/heads/openclaw/release-5718a6ec' ||
+       (github.ref == 'refs/heads/claude/sync-webkit-upstream-20261014' &&
+        inputs.publish == false))
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 10
     outputs:
@@ -25,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 16
+          fetch-depth: 0
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: |
@@ -40,13 +46,19 @@ jobs:
         with:
           node-version: '26.3.0'
       - name: Test publication integrity gates
-        run: python3 .github/openclaw/test_release.py
+        run: |
+          python3 .github/openclaw/test_artifacts.py
+          python3 .github/openclaw/test_compare_fork_ci.py
+          python3 .github/openclaw/test_release.py
+          python3 .github/openclaw/test_consumer_identity.py
+          python3 .github/openclaw/test_verify_jsc_results.py
       - name: Measure runner capacity and Docker support
         run: bash .github/openclaw/preflight.sh
       - name: Validate reviewed source and exact consumer matrix
         id: source
         env:
           INPUT_SHA: ${{ inputs.sha }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
         run: python3 .github/openclaw/artifacts.py preflight
   build:
     needs: preflight
@@ -59,7 +71,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 16
+          fetch-depth: 0
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: |
@@ -93,42 +105,77 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          sparse-checkout: .github
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.github/
+            /Tools/
+            /Source/JavaScriptCore/aot/runtime/AOTNoFeatureRemoved.cpp
+            /JSTests/stress/
+            /JSTests/modules/
+            /JSTests/*.yaml
+            /JSTests/BUN-TEST-DIFFERENCES.md
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version: '26.3.0'
+          node-version: '26.12.1'
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: bun-webkit-linux-amd64
+          name: bun-webkit-linux-amd64-aot
           path: ${{ runner.temp }}/linux-artifact
       - name: Verify artifact bytes
         working-directory: ${{ runner.temp }}/linux-artifact
         run: sha256sum -c SHA256SUMS
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: bun-webkit-linux-amd64
+          path: ${{ runner.temp }}/linux-legacy-artifact
+      - name: Verify legacy engine artifact bytes
+        working-directory: ${{ runner.temp }}/linux-legacy-artifact
+        run: sha256sum -c SHA256SUMS
       - name: Install pinned Bun build tools
         run: |
-          curl -fsSL --retry 5 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
-          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cmake ninja-build nasm ccache golang-go clang-23 lld-23 llvm-23 unzip
+          sudo apt-get install -y --no-install-recommends ninja-build nasm ccache golang-go unzip ruby ruby-highline libjson-pp-perl
+          tools="$RUNNER_TEMP/bun-tools"
+          mkdir -p "$tools/llvm" "$tools/cmake"
+          curl -fSL --retry 5 https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.1/LLVM-23.1.1-Linux-X64.tar.xz -o "$tools/llvm.tar.xz"
+          echo '832aeb58d105de1cabc7b982dd2c65de0610f7377df48ae8fc2dd8e97420a15c  '"$tools/llvm.tar.xz" | sha256sum -c -
+          tar -xJf "$tools/llvm.tar.xz" --strip-components=1 -C "$tools/llvm" LLVM-23.1.1-Linux-X64/bin LLVM-23.1.1-Linux-X64/lib/clang/23
+          curl -fSL --retry 5 https://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu70_70.1-2_amd64.deb -o "$tools/libicu70.deb"
+          echo '58a154f6307289813da2276f900498ef536ae7c0522d2cf31a3c3c5cf62dfd9a  '"$tools/libicu70.deb" | sha256sum -c -
+          sudo dpkg -i "$tools/libicu70.deb"
+          curl -fSL --retry 5 https://github.com/Kitware/CMake/releases/download/v3.30.5/cmake-3.30.5-linux-x86_64.sh -o "$tools/cmake.sh"
+          echo '83de8839f3fb0d9caf982a0435da3fa8c4fbe2c817dfec99def310dc7e6a8404  '"$tools/cmake.sh" | sha256sum -c -
+          sh "$tools/cmake.sh" --skip-license --prefix="$tools/cmake"
           rustup toolchain install nightly-2026-09-15 --profile minimal --component rust-src
           echo 'RUSTUP_TOOLCHAIN=nightly-2026-09-15' >> "$GITHUB_ENV"
-          echo '/usr/lib/llvm-23/bin' >> "$GITHUB_PATH"
-          curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o "$RUNNER_TEMP/bun.zip"
+          echo "$tools/llvm/bin" >> "$GITHUB_PATH"
+          echo "$tools/cmake/bin" >> "$GITHUB_PATH"
+          curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64.zip -o "$RUNNER_TEMP/bun.zip"
+          echo 'bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c  '"$RUNNER_TEMP/bun.zip" | sha256sum -c -
           unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bootstrap"
           echo "$RUNNER_TEMP/bootstrap/bun-linux-x64" >> "$GITHUB_PATH"
-      - name: Build matched Bun and run faithfulness and batch regressions
+      - name: Build baseline and candidate Bun, then qualify the same candidate
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/linux-artifact
           QUALIFICATION_DIR: ${{ runner.temp }}/qualification
-        run: bash .github/openclaw/qualify.sh
+        run: |
+          export INSPECTOR_RUNTIME="$(realpath "$(command -v bun)")"
+          ARTIFACT_DIR="$RUNNER_TEMP/linux-legacy-artifact" bash .github/openclaw/qualify-engine.sh
+          bash .github/openclaw/qualify.sh
+          export CANDIDATE_BUN="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
+          export CANDIDATE_RECEIPT="$QUALIFICATION_DIR/candidate-identity.json"
+          bash .github/openclaw/qualify-sync-compatibility.sh
+          bash .github/openclaw/qualify-sync.sh
       - name: Retain qualified Linux Bun executables
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: linux-bun-executables
           path: |
-            ${{ runner.temp }}/qualification/bun/build/qualify-baseline/bun
+            ${{ runner.temp }}/qualification/bun-baseline/build/qualify-baseline/bun
             ${{ runner.temp }}/qualification/bun/build/qualify-candidate/bun
+            ${{ runner.temp }}/qualification/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
+            ${{ runner.temp }}/qualification/bun/test/aot/every-platform.test.ts
             ${{ runner.temp }}/qualification/*.sha256
           compression-level: 0
           if-no-files-found: error
@@ -142,14 +189,136 @@ jobs:
             ${{ runner.temp }}/qualification/*.log
             ${{ runner.temp }}/qualification/*.sha256
             ${{ runner.temp }}/qualification/*.patch
+            ${{ runner.temp }}/qualification/candidate-input/artifacts.json
             ${{ runner.temp }}/qualification/baseline/*.json
             ${{ runner.temp }}/qualification/baseline/*.log
             ${{ runner.temp }}/qualification/candidate/*.json
             ${{ runner.temp }}/qualification/candidate/*.log
+            ${{ runner.temp }}/qualification/compatibility/*.log
+            ${{ runner.temp }}/qualification/sync/*.json
+            ${{ runner.temp }}/qualification/sync/*.xml
+            ${{ runner.temp }}/qualification/sync/*.log
+            ${{ runner.temp }}/qualification/jsc-*/results
+            ${{ runner.temp }}/qualification/jsc-stack/*.log
+            ${{ runner.temp }}/qualification/jsc-stack/*.json
+            ${{ runner.temp }}/qualification/sync/runtime-cache/*.json
+          if-no-files-found: error
+          retention-days: 7
+  darwin-arm64:
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 115
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: "1"
+      OPENCLAW_CI_PLATFORM: darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github
+      - name: Read the frozen Bun candidate
+        id: consumer
+        run: python3 -c 'import json,os; p=json.load(open(".github/openclaw/variants.json"))["candidate"]; print("commit="+p["commit"],file=open(os.environ["GITHUB_OUTPUT"],"a"))'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: openclaw/bun
+          ref: ${{ steps.consumer.outputs.commit }}
+          path: consumer/bun
+          persist-credentials: false
+      - uses: ./consumer/bun/.github/actions/setup-bun
+        with:
+          bun-version: "1.4.4"
+      - name: Read the candidate toolchain pins
+        id: pins
+        working-directory: consumer/bun
+        run: |
+          # shellcheck disable=SC2016
+          bun -e 'import { pins } from "./scripts/build/ci-images/spec.ts"; console.log(`llvm=${pins.llvm.version.split(".")[0]}\nnode=${pins.nodejs.version}\nrust=${pins.rust.channel}`)' >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ steps.pins.outputs.node }}
+      - name: Install native build tools
+        timeout-minutes: 15
+        env:
+          LLVM_MAJOR: ${{ steps.pins.outputs.llvm }}
+          RUST_TOOLCHAIN: ${{ steps.pins.outputs.rust }}
+        run: |
+          test "$(uname -s)" = Darwin && test "$(uname -m)" = arm64
+          python3 -c 'import hashlib; assert callable(hashlib.file_digest)'
+          brew install cmake ninja nasm ccache go llvm
+          llvm_bin="$(brew --prefix llvm)/bin"
+          "$llvm_bin/clang" --version | grep -F "clang version ${LLVM_MAJOR}."
+          echo "$llvm_bin" >> "$GITHUB_PATH"
+          echo "CC=$llvm_bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=$llvm_bin/clang++" >> "$GITHUB_ENV"
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rust-src
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: bun-webkit-macos-arm64-aot
+          path: ${{ runner.temp }}/darwin-artifact
+      - name: Build and qualify the exact native Darwin candidate
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/darwin-artifact
+          QUALIFICATION_DIR: ${{ github.workspace }}/consumer
+        run: |
+          export INSPECTOR_RUNTIME="$(python3 -c 'import pathlib,shutil; print(pathlib.Path(shutil.which("bun")).resolve())')"
+          bash .github/openclaw/qualify-darwin.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: darwin-bun-executables
+          path: |
+            ${{ github.workspace }}/consumer/bun/build/qualify-candidate/bun
+            ${{ github.workspace }}/consumer/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
+            ${{ github.workspace }}/consumer/bun/test/aot/every-platform.test.ts
+            ${{ github.workspace }}/consumer/*.sha256
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: darwin-qualification
+          path: |
+            ${{ github.workspace }}/consumer/*.json
+            ${{ github.workspace }}/consumer/*.log
+            ${{ github.workspace }}/consumer/*.patch
+            ${{ github.workspace }}/consumer/candidate-input/artifacts.json
+            ${{ github.workspace }}/consumer/candidate/*.json
+            ${{ github.workspace }}/consumer/candidate/*.log
+            ${{ github.workspace }}/consumer/sync/*.log
+          if-no-files-found: error
+          retention-days: 7
+  windows-arm64:
+    needs: build
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github
+            JSTests/stress
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: bun-webkit-windows-arm64
+          path: ${{ runner.temp }}/windows-artifact
+      - name: Qualify native ARM64 engine
+        shell: pwsh
+        run: ./.github/openclaw/qualify-windows-arm64.ps1 -ArtifactDirectory "$env:RUNNER_TEMP/windows-artifact" -OutputDirectory "$env:RUNNER_TEMP/windows-proof" -Source $env:GITHUB_SHA
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: windows-arm64-qualification
+          path: |
+            ${{ runner.temp }}/windows-proof/gate.json
+            ${{ runner.temp }}/windows-proof/accounting-*.log
           if-no-files-found: error
           retention-days: 7
   assemble:
-    needs: [build, test]
+    needs: [build, test, darwin-arm64, windows-arm64]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -176,8 +345,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
   publish:
-    if: inputs.publish == true && (github.ref == 'refs/heads/openclaw/main' || github.ref == 'refs/heads/openclaw/batch-1')
-    needs: [build, test, assemble]
+    if: inputs.publish == true && (github.ref == 'refs/heads/openclaw/main' || github.ref == 'refs/heads/openclaw/batch-1' || github.ref == 'refs/heads/openclaw/release-5718a6ec')
+    needs: [build, test, darwin-arm64, windows-arm64, assemble]
     environment: openclaw-artifacts
     permissions:
       contents: write

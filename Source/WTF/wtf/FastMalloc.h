@@ -177,6 +177,8 @@ WTF_EXPORT_PRIVATE size_t fastMallocGoodSize(size_t);
 
 WTF_EXPORT_PRIVATE void releaseFastMallocFreeMemory();
 WTF_EXPORT_PRIVATE void releaseFastMallocFreeMemoryForThisThread();
+// For a thread that is idle and about to block for a while. See bmalloc::api::scavengeThisThreadOnIdle.
+WTF_EXPORT_PRIVATE void releaseFastMallocFreeMemoryForIdleThread();
 
 WTF_EXPORT_PRIVATE void fastCommitAlignedMemory(void*, size_t);
 WTF_EXPORT_PRIVATE void fastDecommitAlignedMemory(void*, size_t);
@@ -199,7 +201,7 @@ struct FastMallocStatistics {
 };
 WTF_EXPORT_PRIVATE FastMallocStatistics fastMallocStatistics();
 
-WTF_EXPORT_PRIVATE void NODELETE fastMallocDumpMallocStats();
+WTF_EXPORT_PRIVATE void LEGACY_NODELETE fastMallocDumpMallocStats();
 
 // This defines a type which holds an unsigned integer and is the same
 // size as the minimally aligned memory allocation.
@@ -427,15 +429,15 @@ using __thisIsAlsoHereToForceASemicolonAfterThisMacro UNUSED_TYPE_ALIAS = int
 template<typename T>
 inline constexpr bool allowCompactPointers()
 {
-    if constexpr (WTF::IsTypeComplete<std::remove_pointer_t<T>>)
+    // We want to support compact pointers to incomplete types too, so AllowCompactPointers can be
+    // specialized on their pointer type. This is mostly accomplished using the above
+    // WTF_ALLOW_COMPACT_POINTERS_TO_INCOMPLETE_TYPE macro, which must precede any compact pointer to the type.
+    if constexpr (AllowCompactPointers<std::remove_cv_t<std::remove_pointer_t<T>>*>::value)
+        return true;
+    else if constexpr (WTF::IsTypeComplete<std::remove_pointer_t<T>>)
         return std::remove_pointer_t<T>::allowCompactPointers;
-    else {
-        // We want to support compact pointers to incomplete types too, so we have this fallback:
-        // if a type is incomplete, AllowCompactPointers can be specialized on its pointer type,
-        // in which case we'll return its value. This is mostly accomplished using the below
-        // WTF_ALLOW_COMPACT_POINTERS_TO_INCOMPLETE_TYPE macro.
-        return AllowCompactPointers<std::remove_const_t<std::remove_pointer_t<T>>*>::value;
-    }
+    else
+        return false;
 }
 
 using WTF::FastAlignedMalloc;

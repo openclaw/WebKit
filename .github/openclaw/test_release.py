@@ -1,30 +1,281 @@
 import importlib.util
 import json
+import io
+import tarfile
+import base64
+import hashlib
+import xml.etree.ElementTree as ET
 from pathlib import Path
 import subprocess
 import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from test_consumer_identity import release_fixture, AOT_FIXTURE
 
 spec=importlib.util.spec_from_file_location('release',Path(__file__).with_name('release.py'))
 release=importlib.util.module_from_spec(spec);spec.loader.exec_module(release)
 SOURCE='a'*40
+PATCHES=[{'commit':commit,'subject':'fixture'+str(index),'patch_sha256':str(index+1)*64}
+    for index,commit in enumerate(['b'*40,'c'*40,SOURCE])]
 
 class ReleaseIntegrity(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name);self.inputs=self.root/'inputs';self.inputs.mkdir()
         self.out=self.root/'release'
+        aot_pin=patch.object(release.consumer_identity,'AOT_TEST_SHA256',hashlib.sha256(AOT_FIXTURE).hexdigest())
+        aot_pin.start();self.addCleanup(aot_pin.stop)
         config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())
-        q=self.inputs/'qualification';q.mkdir();(q/'gate.json').write_text(json.dumps({'passed':True,'source':SOURCE,'bun_commit':config['bun_commit']}))
+        q=self.inputs/'qualification';q.mkdir()
         for lane in config['lanes']:
             label=lane['label'];d=self.inputs/label;d.mkdir();(d/'provenance').mkdir()
-            f=d/(label+'.tar.gz');f.write_bytes(label.encode())
-            (d/(label+'.manifest.json')).write_text(json.dumps({'source':SOURCE,'lane':{'label':label},'files':{f.name:{'sha256':release.sha(f),'size':f.stat().st_size}}}))
+            metadata={'label':label}
+            payloads={label+'.tar.gz':label.encode()}
+            if label=='bun-webkit-linux-amd64-lto-aot':
+                metadata['sources']='bun-webkit-aot-sources'
+                payloads['bun-webkit-aot-sources.tar.gz']=b'built AOT sources'
+            files={}
+            for name,data in payloads.items():
+                f=d/name;f.write_bytes(data)
+                files[name]={'sha256':release.sha(f),'size':f.stat().st_size}
+            (d/(label+'.manifest.json')).write_text(json.dumps({'source':SOURCE,'base':release.artifact_source.BASE,'history_floor':release.artifact_source.HISTORY_FLOOR,'patches':PATCHES,'lane':metadata,'files':files}))
+        release_fixture(self.inputs,SOURCE)
+        w=self.inputs/'windows-arm64-qualification';w.mkdir()
+        archive=self.inputs/'bun-webkit-windows-arm64/bun-webkit-windows-arm64.tar.gz'
+        (w/'gate.json').write_text(json.dumps({'passed':True,'source':SOURCE,'lane':'bun-webkit-windows-arm64','architecture':'arm64','sha256':release.sha(archive),'startup':True,'dfg':True,'ffi':True,'arraybuffer_accounting':True,'arraybuffer_modes':5}))
+    def test_native_darwin_gate_is_required(self):
+        (self.inputs / 'darwin-qualification/gate.json').unlink()
+        with self.assertRaises(FileNotFoundError): self.assemble()
+
+    def test_native_darwin_inputs_and_execution_are_revalidated(self):
+        from test_consumer_identity import write_invocation
+        proof = self.inputs / 'darwin-qualification'
+        originals = {path: path.read_bytes() for folder in
+                     (proof, self.inputs / 'darwin-bun-executables', self.inputs / release.darwin.LANE)
+                     for path in folder.rglob('*') if path.is_file()}
+        for case in ('binary', 'archive', 'runtime', 'missing-result', 'skipped-aot'):
+            with self.subTest(case=case):
+                try:
+                    if case == 'binary':
+                        (self.inputs / 'darwin-bun-executables' / release.consumer_identity.EXECUTABLE).write_bytes(b'replaced')
+                    elif case == 'archive':
+                        lane = self.inputs / release.darwin.LANE
+                        archive = lane / (release.darwin.LANE + '.tar.gz'); archive.write_bytes(b'replaced')
+                        manifest = lane / (release.darwin.LANE + '.manifest.json'); value = json.loads(manifest.read_text())
+                        value['files'][archive.name] = {'size': archive.stat().st_size, 'sha256': release.sha(archive)}
+                        manifest.write_text(json.dumps(value))
+                    elif case == 'runtime':
+                        path = proof / 'candidate-identity.json'; value = json.loads(path.read_text())
+                        value['runtime']['platform'] = 'linux'; path.write_text(json.dumps(value))
+                    elif case == 'missing-result':
+                        records = {name: json.loads((proof / 'candidate' / name).read_text()) for name in
+                                   ('selected.json', 'results.json', 'runner-terminal.json', 'wrapper-terminal.json')}
+                        records['results.json'].pop()
+                        write_invocation(proof, 'candidate', records)
+                    else:
+                        (proof / release.consumer_identity.AOT_LOG).write_text(' 4 pass\n 0 fail\n 1 skip\n')
+                    with self.assertRaises(ValueError):
+                        release.assemble(self.inputs, self.root / ('darwin-invalid-' + case), SOURCE)
+                finally:
+                    for path, data in originals.items(): path.write_bytes(data)
+
+    def test_windows_gate_rejects_wrong_source_digest_or_failed_probe(self):
+        p=self.inputs/'windows-arm64-qualification/gate.json';original=json.loads(p.read_text())
+        for key,value in [('source','b'*40),('sha256','0'*64),('architecture','x64'),('startup',False),('dfg',False),('ffi',False),('arraybuffer_accounting',False),('arraybuffer_accounting',None),('arraybuffer_modes',4),('arraybuffer_modes',None)]:
+            with self.subTest(key=key):
+                p.write_text(json.dumps({**original,key:value}))
+                with self.assertRaisesRegex(ValueError,'native Windows ARM64'):self.assemble()
+                import shutil
+                shutil.rmtree(self.out)
+    def test_windows_gate_is_required(self):
+        (self.inputs/'windows-arm64-qualification/gate.json').unlink()
+        with self.assertRaises(FileNotFoundError):self.assemble()
     def assemble(self):release.assemble(self.inputs,self.out,SOURCE)
+    def test_invalid_lane_history_provenance_rejected(self):
+        p=next(self.inputs.glob('*/*.manifest.json'));original_text=p.read_text();original=json.loads(original_text)
+        cases=[]
+        for key in ['base','history_floor','patches']:
+            manifest={**original};del manifest[key];cases.append(('missing-'+key,manifest))
+        for key,value in [('base','0'*40),('history_floor','0'*40),('patches',{}),('patches',None),('patches',[])]:
+            cases.append(('wrong-'+key+'-'+repr(value),{**original,key:value}))
+        cases.append(('nonobject-row',{**original,'patches':[None,*PATCHES[1:]]}))
+        for key,value in [('commit','A'*40),('commit',None),('subject',None),('patch_sha256','0'*63),('patch_sha256',None)]:
+            cases.append(('bad-row-'+key+'-'+repr(value),{**original,'patches':[{**PATCHES[0],key:value},*PATCHES[1:]]}))
+        missing={**PATCHES[0]};del missing['subject']
+        cases.extend([
+            ('missing-row-key',{**original,'patches':[missing,*PATCHES[1:]]}),
+            ('extra-row-key',{**original,'patches':[{**PATCHES[0],'extra':True},*PATCHES[1:]]}),
+            ('duplicate-commit',{**original,'patches':[PATCHES[0],PATCHES[0],PATCHES[2]]}),
+            ('missing-final-source',{**original,'patches':PATCHES[:-1]}),
+        ])
+        for index,(name,manifest) in enumerate(cases):
+            with self.subTest(name=name):
+                try:
+                    p.write_text(json.dumps(manifest))
+                    with self.assertRaisesRegex(ValueError,'invalid lane history provenance'):
+                        release.assemble(self.inputs,self.root/('invalid-history-'+str(index)),SOURCE)
+                finally:
+                    p.write_text(original_text)
+
+    def test_lane_patch_provenance_must_match_exactly(self):
+        label=sorted(lane['label'] for lane in release.consumer_identity.CONFIG['lanes']
+            if lane['label']!=release.consumer_identity.LANE)[0]
+        p=self.inputs/label/(label+'.manifest.json');original_text=p.read_text();original=json.loads(original_text)
+        records=[
+            [{**PATCHES[0],'subject':'different'},*PATCHES[1:]],
+            [{**PATCHES[0],'patch_sha256':'f'*64},*PATCHES[1:]],
+            [{**PATCHES[0],'commit':'d'*40},*PATCHES[1:]],
+            [PATCHES[1],PATCHES[0],PATCHES[2]],
+            PATCHES[1:],
+        ]
+        for index,patches in enumerate(records):
+            with self.subTest(index=index):
+                try:
+                    p.write_text(json.dumps({**original,'patches':patches}))
+                    with self.assertRaisesRegex(ValueError,'lane patch provenance mismatch'):
+                        release.assemble(self.inputs,self.root/('mismatched-history-'+str(index)),SOURCE)
+                finally:
+                    p.write_text(original_text)
+
+    def test_candidate_lane_patch_provenance_is_bound_to_receipt(self):
+        for lane in release.consumer_identity.CONFIG['lanes']:
+            label=lane['label'];p=self.inputs/label/(label+'.manifest.json')
+            manifest=json.loads(p.read_text());manifest['patches'][0]['subject']='different'
+            p.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError,'candidate archive identity mismatch'):self.assemble()
+
+    def test_base_source_allows_empty_patch_history(self):
+        manifest={'base':release.artifact_source.BASE,'history_floor':release.artifact_source.HISTORY_FLOOR,'patches':[]}
+        self.assertEqual(release.lane_patch_records(manifest,release.artifact_source.BASE),[])
+
+
+    def test_baseline_gap_is_retained_without_requiring_first_attempt_equivalence(self):
+        from test_compare_fork_ci import failed_baseline
+        from test_consumer_identity import write_invocation
+        proof=self.inputs/'qualification'
+        write_invocation(proof,'baseline',failed_baseline(True))
+        comparison=release.compare_fork_ci.compare(proof/'baseline',proof/'candidate')
+        self.assertTrue(comparison['passed']);self.assertFalse(comparison['all_passed'])
+        self.assertEqual(len(comparison['baseline_unreported']),1)
+        (proof/'faithfulness.json').write_text(json.dumps(comparison))
+        gate=json.loads((proof/'gate.json').read_text());gate['faithfulness_sha256']=release.sha(proof/'faithfulness.json')
+        (proof/'gate.json').write_text(json.dumps(gate));self.assemble()
+
+    def test_assembly_rechecks_raw_facts_after_plausible_redigested_summaries(self):
+        from test_consumer_identity import write_invocation
+        proof=self.inputs/'qualification'
+        for name in ('baseline','candidate','sync'):
+            with self.subTest(name=name):
+                originals={str(path.relative_to(proof)):path.read_bytes() for path in proof.rglob('*.json')}
+                try:
+                    records={filename:json.loads((proof/name/filename).read_text()) for filename in
+                             ('selected.json','results.json','runner-terminal.json','wrapper-terminal.json')}
+                    records['results.json'][0]['groupedProcess']['timedOut']=True
+                    write_invocation(proof,name,records)
+                    gate=json.loads((proof/'gate.json').read_text())
+                    if name=='sync':gate['upstream_sync']['invocation']=release.consumer_identity.file_record(proof,'sync/invocation.json')
+                    else:
+                        value=json.loads((proof/'faithfulness.json').read_text())
+                        value['invocations'][name]=release.consumer_identity.file_record(proof,name+'/invocation.json')
+                        (proof/'faithfulness.json').write_text(json.dumps(value));gate['faithfulness_sha256']=release.sha(proof/'faithfulness.json')
+                    (proof/'gate.json').write_text(json.dumps(gate))
+                    with self.assertRaises(ValueError):release.assemble(self.inputs,self.root/('raw-tamper-'+name),SOURCE)
+                finally:
+                    for path,data in originals.items():(proof/path).write_bytes(data)
+
+    def test_aot_gate_rechecks_raw_log_and_pinned_test(self):
+        proof=self.inputs/'qualification';gate_path=proof/'gate.json'
+        original_gate=gate_path.read_text();log=proof/release.consumer_identity.AOT_LOG;original_log=log.read_text()
+        test=self.inputs/'linux-bun-executables'/release.consumer_identity.AOT_TEST;original_test=test.read_bytes()
+        cases=['missing','identity','binary','log','source','failed','skipped','todo']
+        for case in cases:
+            with self.subTest(case=case):
+                gate=json.loads(original_gate)
+                try:
+                    if case=='missing':del gate['upstream_sync']['aot']
+                    elif case=='identity':gate['upstream_sync']['aot']['candidate_identity_sha256']='f'*64
+                    elif case=='binary':gate['upstream_sync']['aot']['executable']['sha256']='f'*64
+                    elif case=='log':log.write_text(original_log+'extra log bytes\n')
+                    elif case=='source':test.write_bytes(original_test+b'changed')
+                    else:
+                        log.write_text(' 4 pass\n '+('1' if case=='failed' else '0')+' fail\n'
+                            + (' 1 '+('skip' if case=='skipped' else 'todo')+'\n' if case!='failed' else ''))
+                        gate['upstream_sync']['aot']['log']=release.consumer_identity.file_record(proof,release.consumer_identity.AOT_LOG)
+                    gate_path.write_text(json.dumps(gate))
+                    with self.assertRaisesRegex(ValueError,'AOT'):
+                        release.assemble(self.inputs,self.root/('bad-aot-'+case),SOURCE)
+                finally:
+                    gate_path.write_text(original_gate);log.write_text(original_log);test.write_bytes(original_test)
+
     def test_complete_set_roundtrip(self):
-        self.assemble();self.assertEqual(len(release.verify(self.out,SOURCE)['artifacts']),9)
+        self.assemble();self.assertEqual(len(release.verify(self.out,SOURCE)['artifacts']),22)
+
+    def test_aot_source_producer_roundtrip_and_integrity(self):
+        config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())
+        label='bun-webkit-linux-amd64-lto-aot'
+        source_name='bun-webkit-aot-sources.tar.gz'
+        root=self.root/'source'
+        config_path=root/'.github/openclaw/variants.json'
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(json.dumps(config))
+        directory=self.inputs/label
+        declaration='bun-webkit/Source/JavaScriptCore/aot/builtins/generated/AOTBuiltinEngineDeclarations.json'
+        generated=b'{"origin":"built-engine-declarations"}\n'
+        for name,members in [
+            (label+'.tar.gz',{'bun-webkit/lib/libJavaScriptCore.a':b'native-library',declaration:generated}),
+            (source_name,{declaration:generated}),
+        ]:
+            with tarfile.open(directory/name,'w:gz') as archive:
+                for member,data in members.items():
+                    info=tarfile.TarInfo(member);info.size=len(data)
+                    archive.addfile(info,io.BytesIO(data))
+        manifest={'source':SOURCE,'base':release.artifact_source.BASE,
+            'history_floor':release.artifact_source.HISTORY_FLOOR,'patches':PATCHES,
+            'lane':{'label':label,'sources':'bun-webkit-aot-sources'},
+            'files':{name:{'sha256':release.sha(directory/name),'size':(directory/name).stat().st_size}
+                for name in (label+'.tar.gz',source_name)}}
+        manifest_path=directory/(label+'.manifest.json')
+        manifest_path.write_text(json.dumps(manifest))
+        source_path=directory/source_name
+        original=source_path.read_bytes()
+
+        with patch.object(release,'ROOT',root):
+            release.assemble(self.inputs,self.out,SOURCE)
+            result=release.verify(self.out,SOURCE)
+            self.assertEqual(len(result['lanes']),len(config['lanes']))
+            self.assertEqual(len(result['artifacts']),len(config['lanes'])+1)
+            self.assertEqual(result['artifacts'][source_name],{
+                'url':f'https://github.com/openclaw/WebKit/releases/download/autobuild-{SOURCE}/{source_name}',
+                'sha256':hashlib.sha256(original).hexdigest(),'size':len(original)})
+            self.assertEqual((self.out/source_name).read_bytes(),original)
+            with tarfile.open(self.out/source_name) as archive:
+                self.assertEqual(archive.extractfile(declaration).read(),generated)
+            with tarfile.open(self.out/'provenance.tar.gz') as archive:
+                recorded=json.loads(archive.extractfile(label+'/'+label+'.manifest.json').read())
+                self.assertEqual(recorded,manifest)
+            for index,case in enumerate(('missing-file','missing-entry','changed-bytes','wrong-size','missing-sources','duplicate')):
+                with self.subTest(case=case):
+                    source_path.write_bytes(original)
+                    changed=json.loads(json.dumps(manifest))
+                    expected=ValueError
+                    if case=='missing-file':
+                        source_path.unlink();expected=FileNotFoundError
+                    elif case=='missing-entry':
+                        del changed['files'][source_name]
+                    elif case=='changed-bytes':
+                        source_path.write_bytes(bytes([original[0]^1])+original[1:])
+                    elif case=='wrong-size':
+                        changed['files'][source_name]['size']+=1
+                    elif case=='missing-sources':
+                        del changed['lane']['sources']
+                    elif case=='duplicate':
+                        config['lanes'].append({'label':label})
+                        config_path.write_text(json.dumps(config))
+                    manifest_path.write_text(json.dumps(changed))
+                    with self.assertRaises(expected):
+                        release.assemble(self.inputs,self.root/('invalid-source-'+str(index)),SOURCE)
+
     def test_changed_lane_bytes_rejected(self):
         next(self.inputs.glob('*/*.tar.gz')).write_bytes(b'tampered')
         with self.assertRaises(ValueError):self.assemble()
@@ -77,7 +328,7 @@ class ReleaseIntegrity(unittest.TestCase):
     def test_authorization_accepts_ref_qualified_path(self):
         run={'head_sha':SOURCE,'head_branch':'openclaw/main','event':'workflow_dispatch','path':'.github/workflows/openclaw-artifacts.yml@openclaw/main','run_attempt':1}
         config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())
-        names=['preflight','test','assemble']+['build ('+l['label']+')' for l in config['lanes']]
+        names=['preflight','test','darwin-arm64','windows-arm64','assemble']+['build ('+l['label']+')' for l in config['lanes']]
         jobs={'jobs':[{'name':n,'conclusion':'success','run_attempt':1} for n in names]}
         pending=[{'environment':{'name':'openclaw-artifacts','id':99},'current_user_can_approve':True}]
         with patch.object(release,'api',side_effect=[{'enabled':True},run,jobs,pending,{}]) as api,patch.object(release,'execute') as execute:
@@ -88,7 +339,132 @@ class ReleaseIntegrity(unittest.TestCase):
     def test_authorization_accepts_protected_batch_branch(self):
         run={'head_sha':SOURCE,'head_branch':'openclaw/batch-1','event':'workflow_dispatch','path':'.github/workflows/openclaw-artifacts.yml@openclaw/batch-1','run_attempt':1}
         config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())
-        names=['preflight','test','assemble']+['build ('+l['label']+')' for l in config['lanes']]
+        names=['preflight','test','darwin-arm64','windows-arm64','assemble']+['build ('+l['label']+')' for l in config['lanes']]
+        jobs={'jobs':[{'name':n,'conclusion':'success','run_attempt':1} for n in names]}
+        pending=[{'environment':{'name':'openclaw-artifacts','id':99},'current_user_can_approve':True}]
+        with patch.object(release,'api',side_effect=[{'enabled':True},run,jobs,pending,{}]),patch.object(release,'execute') as execute:
+            release.authorize(SOURCE,42)
+            self.assertEqual(execute.call_count,1)
+    def test_missing_upstream_sync_gate_rejected(self):
+        p=self.inputs/'qualification/gate.json';m=json.loads(p.read_text());del m['upstream_sync'];p.write_text(json.dumps(m))
+        with self.assertRaisesRegex(ValueError,'upstream-sync'):self.assemble()
+    def test_missing_paired_compatibility_rejected(self):
+        p=self.inputs/'qualification/gate.json';m=json.loads(p.read_text());del m['compatibility'];p.write_text(json.dumps(m))
+        with self.assertRaisesRegex(ValueError,'candidate compatibility'):self.assemble()
+    def test_missing_or_failed_startup_rejected(self):
+        p=self.inputs/'qualification/gate.json'
+        for value in [None,False]:
+            with self.subTest(startup=value):
+                m=json.loads(p.read_text())
+                if value is None:m['compatibility'].pop('startup',None)
+                else:m['compatibility']['startup']=value
+                p.write_text(json.dumps(m))
+                with self.assertRaisesRegex(ValueError,'candidate compatibility'):self.assemble()
+                if self.out.exists():self.out.rmdir()
+    def test_candidate_receipt_rejects_wrong_source_tree_index_or_runtime(self):
+        p=self.inputs/'qualification/candidate-identity.json';original=p.read_text()
+        for index,(section,key,value) in enumerate([
+            ('candidate','commit','b'*40),('candidate','tree','b'*40),('candidate','index_tree','b'*40),
+            ('overlay','tracked_changed_paths',['other.cpp']),('runtime','webkit','b'*40),
+            ('runtime','bun_revision','b'*40),('fixture','sha256','0'*64)]):
+            with self.subTest(section=section,key=key):
+                try:
+                    record=json.loads(original);record[section][key]=value;p.write_text(json.dumps(record))
+                    with self.assertRaises(ValueError):
+                        release.assemble(self.inputs,self.root/('bad-identity-'+str(index)),SOURCE)
+                finally:p.write_text(original)
+    def test_actual_consumer_bytes_and_overlay_are_required(self):
+        paths=[
+            'linux-bun-executables/'+release.consumer_identity.EXECUTABLE,
+            'linux-bun-executables/'+release.consumer_identity.BASELINE_EXECUTABLE,
+            'linux-bun-executables/'+release.consumer_identity.FIXTURE,
+            'qualification/candidate-input/artifacts.json',
+            'qualification/candidate-manifest.patch','qualification/baseline-adapters.patch']
+        for index,path in enumerate(paths):
+            file=self.inputs/path;original=file.read_bytes()
+            with self.subTest(path=path):
+                try:
+                    file.write_bytes(original+b'tampered')
+                    with self.assertRaises(ValueError):
+                        release.assemble(self.inputs,self.root/('bad-bytes-'+str(index)),SOURCE)
+                finally:file.write_bytes(original)
+    def test_qualification_cannot_substitute_for_binary_artifact_root(self):
+        import shutil
+        binary=self.inputs/'linux-bun-executables'/release.consumer_identity.EXECUTABLE
+        misplaced=self.inputs/'qualification'/release.consumer_identity.EXECUTABLE
+        misplaced.parent.mkdir(parents=True);shutil.move(binary,misplaced)
+        with self.assertRaises(ValueError):self.assemble()
+    def test_stale_receipt_binding_rejected_in_every_gate(self):
+        p=self.inputs/'qualification/gate.json';original=p.read_text()
+        for index,section in enumerate([None,'compatibility','upstream_sync']):
+            with self.subTest(section=section):
+                try:
+                    gate=json.loads(original);target=gate if section is None else gate[section]
+                    target['candidate_identity_sha256']='0'*64;p.write_text(json.dumps(gate))
+                    with self.assertRaises(ValueError):
+                        release.assemble(self.inputs,self.root/('stale-receipt-'+str(index)),SOURCE)
+                finally:p.write_text(original)
+    def test_candidate_archive_must_match_assembled_lane(self):
+        lane=self.inputs/release.consumer_identity.LANE
+        archive=lane/(release.consumer_identity.LANE+'.tar.gz');archive.write_bytes(b'replaced archive')
+        manifest=lane/(release.consumer_identity.LANE+'.manifest.json');record=json.loads(manifest.read_text())
+        record['files'][archive.name]={'size':archive.stat().st_size,'sha256':release.sha(archive)}
+        manifest.write_text(json.dumps(record))
+        with self.assertRaises(ValueError):self.assemble()
+    def test_wrong_engine_gate_source_rejected(self):
+        p=self.inputs/'qualification/gate.json';m=json.loads(p.read_text());m['engine']['source']='b'*40;p.write_text(json.dumps(m))
+        with self.assertRaisesRegex(ValueError,'upstream-sync'):self.assemble()
+    def test_compile_cache_case_and_digest_binding(self):
+        report=self.inputs/'qualification/sync/module-junit.xml';original=report.read_bytes()
+        cases=[('missing',lambda r,s:s.remove(r)),
+               ('skipped',lambda r,s:ET.SubElement(r,'skipped')),
+               ('failure',lambda r,s:ET.SubElement(r,'failure')),
+               ('error',lambda r,s:ET.SubElement(r,'error')),
+               ('duplicate',lambda r,s:s.append(ET.fromstring(ET.tostring(r)))),
+               ('wrong-file',lambda r,s:r.set('file','other.test.js')),
+               ('wrong-class',lambda r,s:r.set('classname','other')),
+               ('other-failure',lambda r,s:ET.SubElement(ET.SubElement(s,'testcase',name='other'),'failure')),
+               ('digest',lambda r,s:r.set('assertions','1'))]
+        for name,change in cases:
+            with self.subTest(name=name):
+                try:
+                    root=ET.fromstring(original);suite=root.find('testsuite');row=suite.find('testcase');change(row,suite)
+                    ET.ElementTree(root).write(report,encoding='utf-8',xml_declaration=True)
+                    with self.assertRaises(ValueError):release.assemble(self.inputs,self.root/('cache-'+name),SOURCE)
+                finally:report.write_bytes(original)
+        report.unlink()
+        with self.assertRaises(FileNotFoundError):release.assemble(self.inputs,self.root/'cache-no-report',SOURCE)
+
+    def test_compile_cache_receipt_required(self):
+        p=self.inputs/'qualification/gate.json';gate=json.loads(p.read_text())
+        del gate['upstream_sync']['compile_cache'];p.write_text(json.dumps(gate))
+        with self.assertRaisesRegex(ValueError,'compile-cache'):self.assemble()
+
+    def test_compile_cache_collection_requires_this_runs_native_report(self):
+        temp=self.root/'native-junit';temp.mkdir();prefix='openclaw-sync-junit-'+'1'*32+'-'
+        output=self.root/'module-junit.xml';gate=release.compile_cache
+        fixture=(self.inputs/'qualification/sync/module-junit.xml').read_bytes()
+        hashed=base64.urlsafe_b64encode(hashlib.sha1(gate.MODULE.encode()).digest()).decode().rstrip('=')
+        filename='test-'+hashed+'.xml'
+        stale=temp/('openclaw-sync-junit-'+'0'*32+'-old');stale.mkdir();(stale/filename).write_bytes(fixture)
+        with self.assertRaisesRegex(ValueError,'current-run'):gate.collect(temp,prefix,output)
+        current=temp/(prefix+'native');current.mkdir()
+        with self.assertRaisesRegex(ValueError,'report missing'):gate.collect(temp,prefix,output)
+        report=current/filename;report.symlink_to(stale/filename)
+        with self.assertRaisesRegex(ValueError,'report missing'):gate.collect(temp,prefix,output)
+        report.unlink();report.write_bytes(fixture)
+        duplicate=temp/(prefix+'duplicate');duplicate.mkdir()
+        with self.assertRaisesRegex(ValueError,'current-run'):gate.collect(temp,prefix,output)
+        duplicate.rmdir();gate.collect(temp,prefix,output)
+        self.assertEqual(output.read_bytes(),fixture)
+        self.assertEqual(gate.evidence(output),gate.evidence(report))
+        with self.assertRaises(FileExistsError):gate.collect(temp,prefix,output)
+        with self.assertRaisesRegex(ValueError,'prefix'):gate.collect(temp,'../',self.root/'invalid.xml')
+
+    def test_authorization_accepts_rebased_release_branch(self):
+        run={'head_sha':SOURCE,'head_branch':'openclaw/release-5718a6ec','event':'workflow_dispatch','path':'.github/workflows/openclaw-artifacts.yml','run_attempt':1}
+        config=json.loads((release.ROOT/'.github/openclaw/variants.json').read_text())
+        names=['preflight','test','darwin-arm64','windows-arm64','assemble']+['build ('+l['label']+')' for l in config['lanes']]
         jobs={'jobs':[{'name':n,'conclusion':'success','run_attempt':1} for n in names]}
         pending=[{'environment':{'name':'openclaw-artifacts','id':99},'current_user_can_approve':True}]
         with patch.object(release,'api',side_effect=[{'enabled':True},run,jobs,pending,{}]),patch.object(release,'execute') as execute:
