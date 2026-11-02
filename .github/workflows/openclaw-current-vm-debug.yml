@@ -1,0 +1,132 @@
+name: OpenClaw Node hook builtin Debug red green
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: openclaw-hook-builtin-debug-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  linux-x64:
+    if: github.repository == 'openclaw/WebKit' && github.ref == 'refs/heads/claude/bun-hook-builtin-debug-20261102'
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: openclaw/bun
+          ref: 5eb28a7eed5e53cfb155aac43344f56ddc40d755
+          path: source
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: proposal
+          persist-credentials: false
+          sparse-checkout: .github/openclaw/qualification/hook-builtin-repair
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 736052944d7ff2403726ad8eefeab798f0e308e8
+          path: engine
+          persist-credentials: false
+      - uses: ./source/.github/actions/setup-bun
+        with:
+          bun-version: '1.4.4'
+      - name: Generate the frozen provisioning script
+        id: provision
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p hook-builtin-proof
+          bun source/scripts/build/ci-images/spec.ts linux-x64-debian
+          script=$(bun -e '
+            import { readFileSync, writeFileSync } from "node:fs";
+            import { resolve, join } from "node:path";
+            import { provisionScript, sectionsFor } from "./source/scripts/openclaw-release/release.ts";
+            const dir = resolve("source/build/ci-images/linux-x64-debian");
+            const out = join(dir, "openclaw-provision.sh");
+            writeFileSync(out, provisionScript(readFileSync(join(dir, "bootstrap.sh"), "utf8"), sectionsFor([])));
+            console.log(out);
+          ')
+          test -f "$script"
+          script_relative=${script#"$GITHUB_WORKSPACE/"}
+          test "$script_relative" != "$script"
+          echo "script=/work/$script_relative" >> "$GITHUB_OUTPUT"
+      - name: Provision the pinned native x64 toolchain
+        id: container
+        timeout-minutes: 45
+        shell: bash
+        env:
+          SCRIPT: ${{ steps.provision.outputs.script }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          test "$(df --output=avail -B1 "$GITHUB_WORKSPACE" | tail -1)" -ge 68719476736
+          cat /proc/meminfo > hook-builtin-proof/runner-memory.log
+          df -B1 "$GITHUB_WORKSPACE" > hook-builtin-proof/runner-disk.log
+          container_id=$(docker run --detach --name bun-hook-debug-consumer -e CI=true -v "$GITHUB_WORKSPACE:/work" -w /work \
+            docker.io/library/debian:13@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c sleep infinity)
+          echo "id=$container_id" >> "$GITHUB_OUTPUT"
+          docker exec -e SCRIPT bun-hook-debug-consumer sh -euc 'sh "$SCRIPT" 5eb28a7eed5e53cfb155aac43344f56ddc40d755 openclaw-release'
+          docker exec bun-hook-debug-consumer sh -euc 'apt-get update; apt-get install --yes --no-install-recommends python3 ruby bison gawk perl libxml2-dev pkg-config libicu-dev'
+      - name: Prove Node hook dispatch and ordinary plugin guards through bun bd
+        shell: bash
+        env:
+          QUALIFICATION_CONTROLS: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker exec -e QUALIFICATION_CONTROLS bun-hook-debug-consumer bash -e -lc '
+            . /etc/profile.d/bun-ci.sh
+            for repo in /work/source /work/engine /work/proposal; do git config --global --add safe.directory "$repo"; done
+            unset CI BUILDKITE GITHUB_ACTIONS GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+            export BUN_WEBKIT_PATH=/work/engine CMAKE_BUILD_PARALLEL_LEVEL=4 CARGO_BUILD_JOBS=4
+            python3 /work/proposal/.github/openclaw/qualification/hook-builtin-repair/qualify.py
+          '
+      - name: Retain bounded source and native proof
+        if: always()
+        shell: bash
+        env:
+          CONTAINER_ID: ${{ steps.container.outputs.id }}
+        run: |
+          set -euo pipefail
+          if test -n "$CONTAINER_ID"; then
+            [[ "$CONTAINER_ID" =~ ^[0-9a-f]{64}$ ]]
+            docker stop --time 30 "$CONTAINER_ID" > /dev/null
+            test "$(docker inspect --format '{{.State.Running}}' "$CONTAINER_ID")" = false
+          fi
+          python3 - <<'PY'
+          import hashlib, json, stat, subprocess
+          from pathlib import Path
+          out = Path('hook-builtin-proof')
+          out.mkdir(exist_ok=True)
+          files = sorted(out.iterdir()) + sorted(Path('proposal/.github/openclaw/qualification/hook-builtin-repair').iterdir())
+          assert 0 < len(files) <= 112 and all(stat.S_ISREG(p.lstat().st_mode) for p in files)
+          assert sum(p.stat().st_size for p in files) <= 128 * 1024**2
+          def sha(path):
+              with path.open('rb') as stream: return hashlib.file_digest(stream, 'sha256').hexdigest()
+          manifest = out / 'archive-manifest.json'
+          manifest.write_text(json.dumps({str(p): {'bytes': p.stat().st_size, 'sha256': sha(p)} for p in files}, indent=2) + '\n')
+          files.append(manifest)
+          archive = Path('bun-hook-builtin-proof.tar.gz.partial')
+          subprocess.run(['tar', '-czf', str(archive), '--', *map(str, files)], check=True)
+          assert archive.stat().st_size <= 32 * 1024**2
+          archive.rename('bun-hook-builtin-proof.tar.gz')
+          Path('bun-aot-debug-SHA256SUMS').write_text(sha(Path('bun-hook-builtin-proof.tar.gz')) + '  bun-hook-builtin-proof.tar.gz\n')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: current-bun-hook-builtin-proof
+          path: |
+            bun-hook-builtin-proof.tar.gz
+            bun-aot-debug-SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: current-bun-hook-debug-executable
+          path: source/build/debug-hooks/bun-debug
+          compression-level: 0
+          if-no-files-found: warn
+          retention-days: 7

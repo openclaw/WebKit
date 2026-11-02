@@ -1,0 +1,32 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 43493ad41e..77bf4a0ba3 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,7 +6,7 @@
+ 
+ - Preserve compiled namespace defaults when CommonJS forwards them, while retaining raw native-module mock exports.
+ 
+-- Keep bare plugin loading separate from filelike resolver probes so builtin and recursive resolutions retain their guards.
++- Preserve plugin replacements of bare builtin names during Node hook default resolution while keeping ordinary builtin and recursive-resolution guards.
+ 
+ - Preserve `lstat` ENOTDIR errors with `throwIfNoEntry: false` while retaining `stat` no-entry behavior.
+ 
+diff --git a/src/jsc/VirtualMachine.rs b/src/jsc/VirtualMachine.rs
+index 6700103da1..3a93db46b4 100644
+--- a/src/jsc/VirtualMachine.rs
++++ b/src/jsc/VirtualMachine.rs
+@@ -9003,10 +9003,12 @@ fn run_on_resolve(
+     let vm = global.bun_vm();
+     // "virtual:thing" is offered as "thing" in namespace "virtual", then as "virtual:thing" in namespace "file".
+     let asks_namespace = in_another_namespace && !namespace.is_empty();
+-    // Without an extension, skip builtins and anything a callback resolves, or a catch-all filter would recurse forever.
++    // Node hook defaults may replace bare builtins; nested extensionless resolves still skip callbacks.
+     let asks_file_namespace = in_file_namespace
+         && !specifier.is_empty()
+-        && ((namespace.is_empty() && ModuleLoader::has_extension_or_namespace(&specifier))
++        && ((namespace.is_empty()
++            && (ModuleLoader::has_extension_or_namespace(&specifier)
++                || (vm.module_hooks_skip && !vm.is_in_on_resolve.get())))
+             || !(vm.is_in_on_resolve.get() || ModuleLoader::bun_aliases_get(&specifier).is_some()))
+         // If an `onLoad` in namespace "virtual" matches "thing", "virtual:thing" is already a module key.
+         && !(namespace.len() > 1 && global.has_on_load(&specifier)?);

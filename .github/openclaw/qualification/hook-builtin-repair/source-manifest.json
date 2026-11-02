@@ -1,0 +1,16 @@
+{
+  "bun": "5eb28a7eed5e53cfb155aac43344f56ddc40d755",
+  "bun_tree": "c55efadc47d49d40e9d37cabefe26b8f7a7df764",
+  "engine": "736052944d7ff2403726ad8eefeab798f0e308e8",
+  "patch_sha256": "afa5512505b4b20767d4cdeaeaad1d2261d8251050c37138f4537f80c0e85411",
+  "files": {
+    "src/jsc/VirtualMachine.rs": {
+      "before": "fb84f24619ba7345161d95fcb4a89cb6ab8108ce752de86c62922a9bc6335b51",
+      "after": "45686060f306af9a61ae4ab1dc7e3042653bbf1eb6df05a06ef3a4b5e0ab679a"
+    },
+    "CHANGELOG.md": {
+      "before": "8c181aca267a37f2ec835c99435542bcc7aee91c26107b2cb5128ce1dbc29b61",
+      "after": "0949b3f020015bd92cd31adb378264de2bcf9bce631240af0c9ba1da395e8cac"
+    }
+  }
+}
