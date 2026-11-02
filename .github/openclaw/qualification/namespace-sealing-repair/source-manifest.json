@@ -1,0 +1,16 @@
+{
+  "bun": "28b6101e24b93b4a222b03fc5a6a83cd4d1c2653",
+  "bun_tree": "49f313d246312149a63874f5b8a5c5b01b987b2b",
+  "engine": "5e7f7f530fa77e832238fb2f93ac4dc6e48d926b",
+  "patch_sha256": "21709d3600583a8a79e4e33cb5186ca103b9cb29a755bd28813eacb34d673481",
+  "files": {
+    "src/jsc/bindings/ZigGlobalObject.cpp": {
+      "before": "853eeee61b31aea9ae80526ce1cc1e7cf935df937dfa5a5990de21926493c6a7",
+      "after": "834b380d58bff5ec3b8312941f2694a7f26bb05b3c52d9b2da45468c840c1650"
+    },
+    "CHANGELOG.md": {
+      "before": "0949b3f020015bd92cd31adb378264de2bcf9bce631240af0c9ba1da395e8cac",
+      "after": "80eff4bcf2124211533087226c5b887b2a19dbde4f65efe9f69e78d5d85a0f76"
+    }
+  }
+}
