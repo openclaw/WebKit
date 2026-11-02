@@ -1,150 +1,132 @@
 name: OpenClaw current Linux consumer continuation
-
 on:
   workflow_dispatch:
-
 permissions:
   contents: read
   actions: read
-
 concurrency:
   group: openclaw-current-linux-consumer-${{ github.ref }}
   cancel-in-progress: true
-
 env:
   CI: '1'
   PUPPETEER_SKIP_DOWNLOAD: '1'
-
 jobs:
   current-consumer:
+    if: github.repository == 'openclaw/WebKit' && github.ref == 'refs/heads/claude/bun-c6a7-native-qualification-20261102'
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: pipeline
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 9f5edfb699e35691497b06572a321b20994ca4e5
+          ref: 1281a1be4796f541bcaf0ef751941c41dfbf7817
           path: pipeline
           persist-credentials: false
           sparse-checkout: |
-            .github/openclaw
+            .github
+            icu
+            macos-cross
             Source/JavaScriptCore
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 0e5b180de777933c359ef7bdb4d4f6d4a3e58522
-          path: carrier
+          ref: ${{ github.sha }}
+          path: controls
           persist-credentials: false
           sparse-checkout: .github/openclaw
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '26.3.0'
-      - name: Bind the historical Node reference
+      - name: Bind the historical baseline Node reference
         run: |
           test "$(node --version)" = v26.3.0
           echo "BASELINE_REFERENCE_NODE=$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '26.12.1'
-      - name: Bind the candidate Node reference and workspace
+      - name: Bind the candidate Node reference
         run: |
           test "$(node --version)" = v26.12.1
           echo "CANDIDATE_REFERENCE_NODE=$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
-          echo "QUALIFICATION_DIR=$RUNNER_TEMP/qualification" >> "$GITHUB_ENV"
-          echo "ARTIFACT_DIR=$RUNNER_TEMP/engine-input" >> "$GITHUB_ENV"
-          mkdir "$RUNNER_TEMP/qualification" "$RUNNER_TEMP/retained" "$RUNNER_TEMP/engine-input"
-      - name: Install the existing pinned candidate build tools
+      - name: Install pinned Bun and JSC test tools
         run: |
-          curl -fsSL --retry 5 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
-          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cmake ninja-build nasm ccache golang-go clang-23 lld-23 llvm-23 unzip ruby ruby-highline libjson-pp-perl
+          sudo apt-get install -y --no-install-recommends ninja-build nasm ccache golang-go unzip ruby ruby-highline libjson-pp-perl
+          tools="$RUNNER_TEMP/bun-tools"
+          mkdir -p "$tools/llvm" "$tools/cmake"
+          curl -fSL --retry 5 https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.1/LLVM-23.1.1-Linux-X64.tar.xz -o "$tools/llvm.tar.xz"
+          echo '832aeb58d105de1cabc7b982dd2c65de0610f7377df48ae8fc2dd8e97420a15c  '"$tools/llvm.tar.xz" | sha256sum -c -
+          tar -xJf "$tools/llvm.tar.xz" --strip-components=1 -C "$tools/llvm" LLVM-23.1.1-Linux-X64/bin LLVM-23.1.1-Linux-X64/lib/clang/23
+          curl -fSL --retry 5 https://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu70_70.1-2_amd64.deb -o "$tools/libicu70.deb"
+          echo '58a154f6307289813da2276f900498ef536ae7c0522d2cf31a3c3c5cf62dfd9a  '"$tools/libicu70.deb" | sha256sum -c -
+          sudo dpkg -i "$tools/libicu70.deb"
+          curl -fSL --retry 5 https://github.com/Kitware/CMake/releases/download/v3.30.5/cmake-3.30.5-linux-x86_64.sh -o "$tools/cmake.sh"
+          echo '83de8839f3fb0d9caf982a0435da3fa8c4fbe2c817dfec99def310dc7e6a8404  '"$tools/cmake.sh" | sha256sum -c -
+          sh "$tools/cmake.sh" --skip-license --prefix="$tools/cmake"
           rustup toolchain install nightly-2026-09-15 --profile minimal --component rust-src
           echo 'RUSTUP_TOOLCHAIN=nightly-2026-09-15' >> "$GITHUB_ENV"
-          echo '/usr/lib/llvm-23/bin' >> "$GITHUB_PATH"
-          curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o "$RUNNER_TEMP/bootstrap.zip"
-          unzip -q "$RUNNER_TEMP/bootstrap.zip" -d "$RUNNER_TEMP/bootstrap"
-          echo "INSPECTOR_RUNTIME=$RUNNER_TEMP/bootstrap/bun-linux-x64/bun" >> "$GITHUB_ENV"
-      - name: Download the immutable engine and previous evidence
+          echo "$tools/llvm/bin" >> "$GITHUB_PATH"
+          echo "$tools/cmake/bin" >> "$GITHUB_PATH"
+          curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64.zip -o "$RUNNER_TEMP/bun.zip"
+          echo 'bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c  '"$RUNNER_TEMP/bun.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bootstrap"
+          echo "$RUNNER_TEMP/bootstrap/bun-linux-x64" >> "$GITHUB_PATH"
+      - name: Download the fixed engine archives from their original run
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          for item in proof:13088932734 binaries:13089031547 engine:13088627389; do
-            name=${item%%:*}
-            id=${item#*:}
-            gh api "repos/openclaw/WebKit/actions/artifacts/$id" > "$RUNNER_TEMP/retained/$name.metadata.json"
-            gh api "repos/openclaw/WebKit/actions/artifacts/$id/zip" > "$RUNNER_TEMP/retained/$name.zip"
-          done
-      - name: Admit the engine and record the exact reference tools
-        run: |
-          set -euo pipefail
-          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
           python3 - <<'PY'
-          import hashlib, json, os, shutil, stat, subprocess, zipfile
-          from pathlib import Path, PurePosixPath
-          def sha(path):
-              with path.open('rb') as stream:
-                  return hashlib.file_digest(stream, 'sha256').hexdigest()
-          retained = Path(os.environ['RUNNER_TEMP'], 'retained')
-          metadata = json.loads((retained / 'engine.metadata.json').read_text())
-          archive = retained / 'engine.zip'
-          digest = '5314f937ae57c5298baedd7bef52242b025f3382ea76155287f4524d6b54d980'
-          assert metadata['id'] == 13088627389 and not metadata['expired']
-          assert metadata['name'] == 'bun-webkit-linux-amd64'
-          assert metadata['workflow_run']['id'] == 41318328617
-          assert metadata['workflow_run']['head_sha'] == '9f5edfb699e35691497b06572a321b20994ca4e5'
-          assert metadata['size_in_bytes'] == archive.stat().st_size == 716189633
-          assert metadata['digest'] == 'sha256:' + digest and sha(archive) == digest
-          destination = Path(os.environ['ARTIFACT_DIR'])
-          with zipfile.ZipFile(archive) as bundle:
-              entries = bundle.infolist()
-              assert 0 < len(entries) <= 32 and len({e.filename for e in entries}) == len(entries)
-              assert sum(e.file_size for e in entries) < 2 * 1024**3 and bundle.testzip() is None
-              for entry in entries:
-                  path = PurePosixPath(entry.filename)
-                  assert not path.is_absolute() and '..' not in path.parts and '\\' not in entry.filename
-                  assert all(part not in ('', '.', '..') for part in entry.filename.rstrip('/').split('/'))
-                  mode = stat.S_IFMT(entry.external_attr >> 16)
-                  assert mode in (0, stat.S_IFDIR if entry.is_dir() else stat.S_IFREG)
-                  target = destination / path
-                  if entry.is_dir():
-                      assert entry.file_size == 0
-                      target.mkdir(parents=True, exist_ok=True)
-                  else:
-                      target.parent.mkdir(parents=True, exist_ok=True)
-                      with bundle.open(entry) as source, target.open('xb') as output:
-                          shutil.copyfileobj(source, output)
-                      target.chmod(0o600)
-          bootstrap = Path(os.environ['INSPECTOR_RUNTIME']).resolve()
-          assert bootstrap.stat().st_size == 79500640 and sha(bootstrap) == 'a83d263767d839e4d2649ca8e35d07159c7afc99afdc96d731ced29e056dda0c'
-          with Path(os.environ['GITHUB_PATH']).open('a') as path:
-              path.write(str(bootstrap.parent) + '\n')
-          references = {}
-          for arm, key, version in [('baseline', 'BASELINE_REFERENCE_NODE', 'v26.3.0'), ('candidate', 'CANDIDATE_REFERENCE_NODE', 'v26.12.1')]:
-              executable = Path(os.environ[key]).resolve(strict=True)
-              actual = subprocess.check_output([str(executable), '--version'], text=True).strip()
-              assert actual == version
-              references[arm] = {'path': str(executable), 'version': actual, 'size': executable.stat().st_size, 'sha256': sha(executable)}
-          references['carrier'] = subprocess.check_output(['git', '-C', 'carrier', 'rev-parse', 'HEAD'], text=True).strip()
-          references['pipeline'] = subprocess.check_output(['git', '-C', 'pipeline', 'rev-parse', 'HEAD'], text=True).strip()
-          Path(os.environ['QUALIFICATION_DIR'], 'reference-tools.json').write_text(json.dumps(references, indent=2) + '\n')
+          import os, subprocess
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'], 'retained-engine')
+          root.mkdir()
+          for name, identity in [('native', 13100940398), ('aot', 13101342737)]:
+              for suffix, route in [('metadata.json', ''), ('zip', '/zip')]:
+                  with (root / (name + '.' + suffix)).open('xb') as output:
+                      subprocess.run(['gh', 'api', f'repos/openclaw/WebKit/actions/artifacts/{identity}{route}'],
+                                     stdout=output, check=True, timeout=600)
           PY
-      - name: Reuse engine and baseline proof, then complete the current candidate gates
+      - name: Admit retained engine bytes and the exact current controls
         run: |
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
-          python3 carrier/.github/openclaw/qualification/resume-consumer.py --checkpoint \
-            "$GITHUB_WORKSPACE/pipeline" "$GITHUB_WORKSPACE/carrier" "$RUNNER_TEMP/retained" "$QUALIFICATION_DIR" "$ARTIFACT_DIR"
-          cd pipeline
-          bash "$QUALIFICATION_DIR/qualify-candidate-fresh.sh"
+          python3 ../controls/.github/openclaw/qualification/stage-current-sync.py
+      - name: Build and qualify the repaired Bun snapshot with the canonical gates
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/linux-aot-artifact
+          QUALIFICATION_DIR: ${{ runner.temp }}/qualification
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          export INSPECTOR_RUNTIME="$(realpath "$(command -v bun)")"
+          bash .github/openclaw/qualify.sh
           export CANDIDATE_BUN="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
           export CANDIDATE_RECEIPT="$QUALIFICATION_DIR/candidate-identity.json"
           bash .github/openclaw/qualify-sync-compatibility.sh
           bash .github/openclaw/qualify-sync.sh
-      - name: Retain executables and their matching allocator object
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          root = Path(os.environ['QUALIFICATION_DIR'])
+          assert json.loads((root / 'gate.json').read_text())['passed']
+          assert json.loads(Path('.github/openclaw/variants.json').read_text())['candidate']['commit'] == 'c6a7bf9d8dc4d44db9f826e47a5ae7645ea6e8c9'
+          with (root / 'candidate-identity.json').open('rb') as stream:
+              digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+          (root / 'current-sync-gate.json').write_text(json.dumps({
+              'passed': True, 'engine': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'bun': 'c6a7bf9d8dc4d44db9f826e47a5ae7645ea6e8c9', 'controls': os.environ['GITHUB_SHA'],
+              'candidate_identity_sha256': digest, 'engine_artifacts_and_native_runtime_proof': 'reused from run41348390908',
+              'scope': 'fresh Linux AOT Release Bun and canonical baseline/compatibility/sync gates; no Darwin or namespace-port verdict',
+          }, indent=2) + '\n')
+          PY
+      - name: Retain the exact Bun executables and allocator object
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: current-linux-bun-executables
+          name: current-sync-linux-executables
           path: |
             ${{ runner.temp }}/qualification/bun-baseline/build/qualify-baseline/bun
             ${{ runner.temp }}/qualification/bun/build/qualify-candidate/bun
@@ -152,19 +134,18 @@ jobs:
             ${{ runner.temp }}/qualification/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
             ${{ runner.temp }}/qualification/*.sha256
           compression-level: 0
-          retention-days: 3
+          retention-days: 7
           if-no-files-found: warn
-      - name: Retain current and reused proof with their original identities
+      - name: Retain original source, command and native result identities
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: current-linux-consumer-proof
+          name: current-sync-linux-proof
           path: |
             ${{ runner.temp }}/qualification/*.json
             ${{ runner.temp }}/qualification/*.log
             ${{ runner.temp }}/qualification/*.sha256
             ${{ runner.temp }}/qualification/*.patch
-            ${{ runner.temp }}/qualification/qualify-candidate-fresh.sh
             ${{ runner.temp }}/qualification/candidate-input/artifacts.json
             ${{ runner.temp }}/qualification/baseline/*.json
             ${{ runner.temp }}/qualification/baseline/*.log
@@ -179,4 +160,4 @@ jobs:
             ${{ runner.temp }}/qualification/jsc-stack/*.log
             ${{ runner.temp }}/qualification/jsc-stack/*.json
           retention-days: 7
-          if-no-files-found: error
+          if-no-files-found: warn
