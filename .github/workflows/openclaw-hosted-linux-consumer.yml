@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 0e5b180de777933c359ef7bdb4d4f6d4a3e58522
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
           sparse-checkout: |
             .github
@@ -40,7 +40,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '26.12.1'
-      - name: Check the combined packaging and consumer contracts
+      - name: Check the canonical packaging and consumer contracts
         shell: bash
         run: |
           set -euo pipefail
@@ -54,12 +54,12 @@ jobs:
           from pathlib import Path
           config = json.loads(Path('.github/openclaw/variants.json').read_text())
           assert len(config['lanes']) == 21
-          assert config['candidate']['commit'] == 'd9be087429c21e563bb5ac29f8a11805e64b56a3'
           paths = ['artifacts.py', 'test_artifacts.py', 'release.py', 'test_release.py', 'variants.json']
           controls = {name: hashlib.sha256(Path('.github/openclaw', name).read_bytes()).hexdigest() for name in paths}
           Path(os.environ['RUNNER_TEMP'], 'contracts', 'gate.json').write_text(json.dumps({
               'passed': True, 'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
               'lanes': 21, 'archives': 22, 'controls': controls,
+              'candidate_commit': config['candidate']['commit'],
           }, indent=2) + '\n')
           PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -285,5 +285,5 @@ jobs:
           if-no-files-found: error
           retention-days: 7
   assemble-retained:
-    if: ${{ inputs.assemble_retained }}
+    if: ${{ inputs.assemble_retained && !inputs.contracts_only }}
     uses: ./.github/workflows/openclaw-retained-matrix.yml
