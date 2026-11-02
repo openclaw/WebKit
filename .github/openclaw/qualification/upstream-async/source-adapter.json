@@ -1,0 +1,92 @@
+{
+  "base": "e66916298091dd12469076fd854e135b03fb16ff",
+  "head": "540ee746090a24a8d9df95cba19fd489307fb06b",
+  "build_adapter": "31b03fa17b3a9133d5240d593fa464b5825a2e33",
+  "build_patch_sha256": "133ca9e02fb4a4468b2b67e5b394de10189b2f9e80373f94c4be800e9d0127e9",
+  "files": {
+    "Source/JavaScriptCore/CMakeLists.txt": {
+      "before": {
+        "sha256": "d078629c3f9d836547bac77b825bebc628737e98cfe0950265803a9e2984da43",
+        "blob": "e494e54647762bb924fd59e86a4c3394202264fe"
+      },
+      "after": {
+        "sha256": "e056db85d8191e4acb378a3ac8c9b64419a3ccffdf73cd61adbb2ea3d63fe610",
+        "blob": "f006de8331a8004df768646789420d4d202fb5db"
+      },
+      "mode": "100644"
+    },
+    "Source/JavaScriptCore/shell/CMakeLists.txt": {
+      "before": {
+        "sha256": "304742d8d2bc099f63a9b3e3d402da8d372fbe20ddce76343100a288eae48e2d",
+        "blob": "c98c2f57bc0309b792ad448855c1596940ed2137"
+      },
+      "after": {
+        "sha256": "c0dfcefdbd4a8df56c833e067193a7cd4363dbeb8ffd6854e8ac1a54dd13319a",
+        "blob": "5f37e68d2b0b384cbcfba64dec0f574790c6d6fb"
+      },
+      "mode": "100644"
+    },
+    "Tools/TestWebKitAPI/PlatformJSCOnly.cmake": {
+      "before": {
+        "sha256": "5162644e9b92741f37bab0d40ed0ea2b5e3a97af22e335a010f476f391300f53",
+        "blob": "4abc96e1832cd3688f025695df63e98522702ea0"
+      },
+      "after": {
+        "sha256": "f795559d56d68425415a10c749340d513df89ce437707cce61ccdaec19109ad0",
+        "blob": "ba2beda1bd013116456226d6c09f0f7b34c4cd4d"
+      },
+      "mode": "100644"
+    }
+  },
+  "fixture": {
+    "sha256": "fdd809f40f171b69a6db64c4486feedb06834ee7f17145d68031d9579d93fe33",
+    "blob": "40343fdd9de395f88ea8fc6e129da84d115fa5bf"
+  },
+  "registration": {
+    "before": {
+      "sha256": "1e35901914c0bb859aba14f2294e9a027c07afd62047b6f9e4199f322bd32efc",
+      "blob": "01ea15a0d6d806c0d28d15d4c1c32e1bfceae9cd"
+    },
+    "after": {
+      "sha256": "c9583ccb34bf7fba52940da50764711e89d53debd985e1767eabb69331bfc840",
+      "blob": "dcda0812cb045667292ad40deb0046b5ea13a8b3"
+    }
+  },
+  "configure": [
+    "-G",
+    "Ninja",
+    "-DPORT=JSCOnly",
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DDEVELOPER_MODE=ON",
+    "-DCMAKE_COMPILE_WARNING_AS_ERROR=OFF",
+    "-DENABLE_STATIC_JSC=ON",
+    "-DUSE_BUN_JSC_ADDITIONS=ON",
+    "-DUSE_BUN_EVENT_LOOP=ON",
+    "-DUSE_MIMALLOC=ON",
+    "-DUSE_EXTERNAL_MIMALLOC=OFF",
+    "-DENABLE_FTL_JIT=ON",
+    "-DENABLE_BUN_SKIP_FAILING_ASSERTIONS=ON",
+    "-DALLOW_LINE_AND_COLUMN_NUMBER_IN_BUILTINS=ON",
+    "-DENABLE_REMOTE_INSPECTOR=ON",
+    "-DCMAKE_C_COMPILER=clang-23",
+    "-DCMAKE_CXX_COMPILER=clang++-23"
+  ],
+  "expected_failure_line": 120,
+  "static_registration": "    if (ENABLE_STATIC_JSC)\n        list(APPEND TestJavaScriptCore_SOURCES Tests/JavaScriptCore/AsyncStackTrace.cpp)\n    endif ()\n\n",
+  "production": {
+    "path": "Source/JavaScriptCore/interpreter/Interpreter.cpp",
+    "before": {
+      "sha256": "5b6c4114ee3b39fff20ea15e544858788612e947681071946001e600ab30acd5",
+      "blob": "294d69065ceea6f7cb04c26812e380ffc76dfb27"
+    },
+    "after": {
+      "sha256": "8a31a54e6bf6d543d002a6c6688381783f502f559343125481b2568a10b4c55b",
+      "blob": "b71ffd70b8420c2593bc0c1f8ff63892327cbd29"
+    }
+  },
+  "stress_fixture": {
+    "path": "JSTests/stress/error-stack-async-relative-resume-target.js",
+    "sha256": "014ebbeecbd94287c126a356c18ded2a44b667c338a452927d78b3e658dd9235",
+    "blob": "18f52dd37073b9fd9facd9ab86145126efb35120"
+  }
+}

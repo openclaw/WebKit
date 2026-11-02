@@ -13,6 +13,7 @@
 #include "AOTCompileOptionWords.h"
 #include "AOTIRParser.h"
 #include "AOTLoadedProgramTestSupport.h"
+#include "AOTModuleHost.h"
 #include "AOTModules.h"
 #include "AOTObjectModel.h"
 #include "AOTProgramFile.h"
@@ -27,6 +28,8 @@
 #include "AOTVector.h"
 #include "JSArrayBuffer.h"
 #include "JSCInlines.h"
+#include "ObjectConstructor.h"
+#include "Strong.h"
 #include <array>
 #include <bit>
 #include <initializer_list>
@@ -46,9 +49,10 @@ variable g0 name="a" module=m1 declared={type=anything} initialization=Undefined
 variable g1 name="a" module=m2 declared={type=anything} initialization=Undefined
 variable g2 name="chosen" module=m0 declared={type=anything} initialization=Undefined
 module m0 path="/main.js" displayPath="main.js" body=f0 requests=[{target=m1 completes=true}, {target=m2 completes=true}, {target=m1 phase=Defer}]
-module m1 path="/first.js" displayPath="first.js" body=f1 exports=[{name="a" variable=g0}]
+module m1 path="/first.js" displayPath="first.js" requireResult=Namespace body=f1 exports=[{name="a" variable=g0}, {name="default" variable=g0}]
 module m2 path="/second.js" displayPath="second.js" body=f2 exports=[{name="a" variable=g1}]
 entry module=m0
+entry module=m1
 function f0 name="main" kind=Module results=[{type=anything}] {
     v0 = Builtin builtin=GlobalThis
     v1 = PropGet v0 key="registry" [isFreeName]
@@ -133,6 +137,39 @@ function f1 name="literals" results=[{type=anything}] {
     PropSet v0, v1 key="next"
     PropSet v1, v2 key="next"
     Return v0
+}
+)IR"_s;
+
+static constexpr ASCIILiteral programWithCapturedExports = R"IR(layout L0 name="Exports" fields=[{key="a" declared={type=anything} flags=[IsRequired]}]
+variable g0 name="exports" module=m1 declared={type=anything} initialization=Undefined
+module m0 path="/main.js" displayPath="main.js" body=f0 requests=[{target=m2 completes=true}]
+module m1 path="/value.cjs" displayPath="value.cjs" kind=CommonJs exportRule=CommonJs requireResult=ModuleExports body=f1 exportsVariable=g0
+module m2 path="#2" displayPath="value.cjs" exportRule=CommonJs requireResult=Namespace body=f2 requests=[{target=m1 kind=Require completes=true}] syntheticExports=[{name="a" isReplaceable=true}, {name="default"}]
+entry module=m0
+function f0 name="main" kind=Module results=[{type=anything}] {
+    v0 = Builtin builtin=GlobalThis
+    v1 = ModuleNamespace module=m2
+    PropSet v0, v1 key="capturedNamespace"
+    v3 = PropGet v0 key="registry" [isFreeName]
+    v4 = NewClosure function=f3
+    PropSet v3, v4 key="readCaptured"
+    v6 = Call v4, -, v1 [isNeverInlined]
+    Return
+}
+function f1 name="value" module=m1 kind=CommonJsModule flags=[IsSloppy] results=[{type=anything}] {
+    v0 = Integer integer=1
+    v1 = NewObject -, v0 layout=L0 fields=[0]
+    v2 = FinishObject v1
+    PutModuleVariable v2 variable=g0
+    Return
+}
+function f2 name="face" module=m1 kind=Module results=[{type=anything}] {
+    EvaluateModule module=m1 referrer=m2 [isBare]
+    Return
+}
+function f3 name="readCaptured" parameters=[{type=anything}] results=[{type=anything}] {
+    v1 = PropGet v0 key="a"
+    Return v1
 }
 )IR"_s;
 
@@ -228,6 +265,82 @@ static void testModuleOfNamespaceObjects(LoadedProgram& program)
     AOT_TEST_CHECK(operationAOTIsNamespaceOfModule(first, firstModule.index()) && !operationAOTIsNamespaceOfModule(first, secondModule.index()));
     AOT_TEST_CHECK(!operationAOTIsNamespaceOfModule(deferredFirst, firstModule.index()));
     AOT_TEST_CHECK(!operationAOTIsNamespaceOfModule(evaluate(program, "({ a: 1 })"_s).asCell(), firstModule.index()));
+}
+
+static void testRequireNamespaceDoesNotMutateImports(LoadedProgram& program)
+{
+    using ModulePhase = AbstractModuleRecord::ModulePhase;
+    VM& vm = program.vm();
+    Modules& modules = modulesOf(program.instance());
+    Strong<JSObject> imported(vm, modules.moduleNamespace(firstModule, ModulePhase::Evaluation));
+    AOT_TEST_CHECK(imported);
+    JSValue answer = modules.require(firstModule);
+    AOT_TEST_CHECK(answer && answer.isObject());
+    Strong<JSObject> required(vm, asObject(answer));
+    AOT_TEST_CHECK(required.get() != imported.get());
+    AOT_TEST_CHECK(modules.require(firstModule) == JSValue(required.get()));
+    AOT_TEST_CHECK(requireModule(program.realm(), firstModule) == JSValue(required.get()));
+    AOT_TEST_CHECK(moduleNamespaceForRequire(program.realm(), imported.get()) == required.get());
+    AOT_TEST_CHECK(moduleNamespaceForRequire(program.realm(), required.get()) == required.get());
+
+    JSGlobalObject* plain = program.realms().plain();
+    plain->putDirect(vm, Identifier::fromString(vm, "importedNamespace"_s), imported.get());
+    plain->putDirect(vm, Identifier::fromString(vm, "requiredNamespace"_s), required.get());
+    AOT_TEST_CHECK(program.realms().evaluate(plain, R"js(
+        const imported = globalThis.importedNamespace;
+        const required = globalThis.requiredNamespace;
+        function check(condition, message) { if (!condition) throw new Error(message); }
+        check(Object.getPrototypeOf(imported) === null && Object.getPrototypeOf(required) === null, "namespace prototypes");
+        check(!Object.isExtensible(imported) && !Object.isExtensible(required), "namespace extensibility");
+        check(!("__esModule" in imported) && !Object.hasOwn(imported, "__esModule"), "import marker isolation");
+        const descriptor = Object.getOwnPropertyDescriptor(required, "__esModule");
+        check(required.__esModule === true && descriptor.value === true && descriptor.writable && descriptor.enumerable && !descriptor.configurable, "require marker descriptor");
+        check(JSON.stringify(Object.keys(imported)) === '["a","default"]', "import own keys");
+        check(JSON.stringify(Object.keys(required)) === '["__esModule","a","default"]', "require own keys");
+        check(imported.a === "export of first" && imported.default === imported.a && required.a === imported.a && required.default === imported.default, "shared exports");
+        check(!Reflect.set(imported, "__esModule", true) && !Reflect.set(required, "__esModule", false), "marker writes");
+        check(!Reflect.deleteProperty(required, "__esModule"), "marker deletion");
+        check(Reflect.defineProperty(required, "__esModule", { value: true }) && !Reflect.defineProperty(required, "__esModule", { value: false }), "marker definition");
+        true;
+    )js"_s) == jsBoolean(true));
+    vm.heap.collectNow(Sync, CollectionScope::Full);
+    AOT_TEST_CHECK(modules.require(firstModule) == JSValue(required.get()));
+    AOT_TEST_CHECK(imported->get(program.realm(), vm.propertyNames->__esModule).isUndefined());
+    AOT_TEST_CHECK(required->get(program.realm(), vm.propertyNames->__esModule) == jsBoolean(true));
+}
+
+static void testRequireFacadeInvalidatesCapturedExports(LoadedProgram& program)
+{
+    using ModulePhase = AbstractModuleRecord::ModulePhase;
+    constexpr ModuleID face(2u);
+    VM& vm = program.vm();
+    Modules& modules = modulesOf(program.instance());
+    Strong<JSObject> registry(vm, constructEmptyObject(program.realm()));
+    program.realm()->putDirect(vm, Identifier::fromString(vm, "registry"_s), registry.get());
+    evaluateModuleSynchronously(program.realm(), ModuleID(0u));
+    Strong<JSObject> imported(vm, modules.moduleNamespace(face, ModulePhase::Evaluation));
+    AOT_TEST_CHECK(imported);
+    JSGlobalObject* plain = program.realms().plain();
+    Identifier readerName = Identifier::fromString(vm, "readCaptured"_s);
+    JSValue reader = registry->getDirect(vm, readerName);
+    AOT_TEST_CHECK(reader && reader.isObject());
+    plain->putDirect(vm, readerName, reader);
+    plain->putDirect(vm, Identifier::fromString(vm, "importedNamespace"_s), imported.get());
+    AOT_TEST_CHECK(evaluate(program, R"js(
+        for (let index = 0; index < 64; ++index) {
+            if (readCaptured(importedNamespace) !== 1)
+                throw new Error("initial captured export");
+        }
+        true;
+    )js"_s) == jsBoolean(true));
+    JSValue answer = modules.require(face);
+    AOT_TEST_CHECK(answer && answer.isObject());
+    Strong<JSObject> required(vm, asObject(answer));
+    plain->putDirect(vm, Identifier::fromString(vm, "requiredNamespace"_s), required.get());
+    Identifier key = Identifier::fromString(vm, "a"_s);
+    AOT_TEST_CHECK(modules.tryReplaceCapturedExport(face, key.impl(), jsNumber(2)));
+    AOT_TEST_CHECK(evaluate(program, "readCaptured(requiredNamespace)"_s) == jsNumber(2));
+    AOT_TEST_CHECK(evaluate(program, "readCaptured(importedNamespace)"_s) == jsNumber(2));
 }
 
 // The collector reads the stack for what looks like a reference, so the tests below keep the cells they ask about in another form and off the stack.
@@ -453,7 +566,9 @@ static std::unique_ptr<CompileOutput> compileOnThisThread(std::initializer_list<
     if (output->image.isEmpty())
         Typed::printDiagnostics(output->diagnostics, WTF::dataFile());
     AOT_TEST_CHECK(!output->image.isEmpty());
-    AOT_TEST_CHECK(output->entryModuleIDs.size() == 1);
+    AOT_TEST_CHECK(output->entryModuleIDs.size() == 2);
+    AOT_TEST_CHECK(output->entryModuleIDs[0] == 1u);
+    AOT_TEST_CHECK(output->entryModuleIDs[1] == 2u);
     return output;
 }
 
@@ -507,6 +622,8 @@ std::span<const NativeTest> sharingModeAndNamespaceTests()
     static constexpr NativeTest tests[] = {
         { "sharing-mode-and-namespace/sharing-mode-of-values"_s, withProgram<testSharingModeOfValues> },
         { "sharing-mode-and-namespace/module-of-namespace-objects"_s, withProgram<testModuleOfNamespaceObjects> },
+        { "sharing-mode-and-namespace/require-namespace-does-not-mutate-imports"_s, withProgram<testRequireNamespaceDoesNotMutateImports> },
+        { "sharing-mode-and-namespace/require-facade-invalidates-captured-exports"_s, runNativeTestWithLoadedProgram<sharingModeAndNamespaceTests, programWithCapturedExports, testRequireFacadeInvalidatesCapturedExports> },
         { "sharing-mode-and-namespace/namespace-objects-made-between-collections-last"_s, withProgram<testNamespaceObjectsMadeBetweenCollectionsLast> },
         { "sharing-mode-and-namespace/literals-made-between-collections-last"_s, runNativeTestWithLoadedProgram<sharingModeAndNamespaceTests, programWithLiterals, testLiteralsMadeBetweenCollectionsLast> },
         { "sharing-mode-and-namespace/addition-that-waits-for-its-first-structure"_s, withProgram<testAdditionThatWaitsForItsFirstStructure> },

@@ -1,4 +1,3 @@
-import copy
 import hashlib
 import json
 import tarfile
@@ -246,18 +245,14 @@ class PreflightAdmission(unittest.TestCase):
         aot = [label + '-aot' for label in legacy] + ['bun-webkit-linux-amd64-debug-asan-aot']
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / 'output'
-            for branch in ('claude/sync-webkit-upstream-20261014', 'claude/hosted-linux-consumer-20261031'):
-                with self.subTest(branch=branch):
-                    output.unlink(missing_ok=True)
-                    env = {'GITHUB_REF': 'refs/heads/' + branch,
-                        'INPUT_PUBLISH': 'false', 'INPUT_SHA': 'a' * 40,
-                        'GITHUB_SHA': 'a' * 40, 'ENGINE_SHA': 'a' * 40,
-                        'GITHUB_OUTPUT': str(output), 'PATH': os.environ['PATH']}
-                    with patch.dict(os.environ, env, clear=True), patch.object(
-                        artifacts, 'source', return_value={'source': 'a' * 40}):
-                        artifacts.preflight()
-                    selected = [row['lane'] for row in json.loads(output.read_text().removeprefix('matrix='))['include']]
-                    self.assertEqual(selected, legacy + aot)
+            env = {'GITHUB_REF': 'refs/heads/claude/sync-webkit-upstream-20261014',
+                'INPUT_PUBLISH': 'false', 'INPUT_SHA': 'a' * 40,
+                'GITHUB_SHA': 'a' * 40, 'GITHUB_OUTPUT': str(output)}
+            with patch.dict(os.environ, env), patch.object(
+                artifacts, 'source', return_value={'source': 'a' * 40}):
+                artifacts.preflight()
+            selected = [row['lane'] for row in json.loads(output.read_text().removeprefix('matrix='))['include']]
+        self.assertEqual(selected, legacy + aot)
         definitions = {lane['label']: lane for lane in artifacts.lane_definitions()}
         source_producers = [label for label in selected if len(artifacts.archive_names(definitions[label])) == 2]
         self.assertEqual(source_producers, ['bun-webkit-linux-amd64-lto-aot'])
@@ -294,81 +289,6 @@ class PreflightAdmission(unittest.TestCase):
                                 artifacts.preflight()
                             lanes.assert_not_called()
                             self.assertFalse(output.exists())
-
-
-    def test_consumer_carrier_requires_exact_engine_and_frozen_matrix(self):
-        engine = '42e4245f4180941634b482a7e8ef7fca47467de5'
-        original = {
-            'baseline': {'commit': 'b' * 40},
-            'candidate': {'commit': 'c' * 40, 'tree': 'd' * 40, 'manifest_blob': 'e' * 40},
-            'lanes': [{'label': 'legacy-' + str(index), 'consumer': 'fixture'} for index in range(10)],
-        }
-        expected = copy.deepcopy(original)
-        expected['candidate'] = {
-            'commit': 'd9be087429c21e563bb5ac29f8a11805e64b56a3',
-            'tree': '980068aa5aa9f51f40fc4125114a68fccd9bc9dc',
-            'manifest_blob': 'e9544c96d5cd9a5e5f6b0245ed5c8dd78fb1a218'}
-        cases = [
-            ('false', engine, None, None),
-            ('true', engine, None, 'permitted owned branch'),
-            (None, engine, None, 'permitted owned branch'),
-            ('false', 'e' * 40, None, 'engine source mismatch'),
-            ('false', engine, 'baseline', 'matrix/configuration drift'),
-            ('false', engine, 'lanes', 'matrix/configuration drift'),
-            ('false', engine, 'lanes-added', 'matrix/configuration drift'),
-            ('false', engine, 'candidate', 'matrix/configuration drift'),
-        ]
-        with tempfile.TemporaryDirectory() as temporary:
-            for publish, source, drift, error in cases:
-                with self.subTest(publish=publish, engine=source, drift=drift):
-                    output = Path(temporary) / 'output'
-                    output.unlink(missing_ok=True)
-                    config = copy.deepcopy(expected)
-                    if drift == 'baseline':
-                        config['baseline']['commit'] = 'f' * 40
-                    elif drift == 'lanes':
-                        config['lanes'][0]['consumer'] = 'changed consumer'
-                    elif drift == 'lanes-added':
-                        config['lanes'].append({'label': 'aot-fixture', 'consumer': 'fixture'})
-                    elif drift == 'candidate':
-                        config['candidate']['commit'] = 'f' * 40
-                    env = {'GITHUB_REF': 'refs/heads/claude/hosted-linux-consumer-20261031',
-                        'INPUT_SHA': 'a' * 40, 'GITHUB_SHA': 'a' * 40,
-                        'ENGINE_SHA': source, 'GITHUB_OUTPUT': str(output)}
-                    if publish is not None:
-                        env['INPUT_PUBLISH'] = publish
-                    with patch.dict(os.environ, env, clear=True), patch.object(
-                        artifacts, 'source', return_value={'source': 'a' * 40}), patch.object(
-                        artifacts, 'CONFIG', config), patch.object(
-                        artifacts, 'capture', return_value=json.dumps(original)), patch.object(
-                        artifacts, 'run') as ancestry, patch.object(
-                        artifacts, 'lane_definitions', return_value=config['lanes']) as lanes:
-                        if error:
-                            with self.assertRaisesRegex(ValueError, error):
-                                artifacts.preflight()
-                            lanes.assert_not_called()
-                            self.assertFalse(output.exists())
-                        else:
-                            artifacts.preflight()
-                            matrix = json.loads(output.read_text().split('=', 1)[1])
-                            self.assertEqual(matrix['include'], [{'lane': lane['label']} for lane in config['lanes']])
-                            ancestry.assert_called_once_with('git', '-C', str(artifacts.ROOT),
-                                'merge-base', '--is-ancestor', engine, 'a' * 40)
-
-    def test_consumer_carrier_rejects_unrelated_history_before_lane_admission(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / 'output'
-            env = {'GITHUB_REF': 'refs/heads/claude/hosted-linux-consumer-20261031',
-                'INPUT_SHA': 'a' * 40, 'GITHUB_SHA': 'a' * 40, 'INPUT_PUBLISH': 'false',
-                'ENGINE_SHA': '42e4245f4180941634b482a7e8ef7fca47467de5', 'GITHUB_OUTPUT': str(output)}
-            with patch.dict(os.environ, env, clear=True), patch.object(
-                artifacts, 'source', return_value={'source': 'a' * 40}), patch.object(
-                artifacts, 'run', side_effect=subprocess.CalledProcessError(1, ['git'])), patch.object(
-                artifacts, 'lane_definitions') as lanes:
-                with self.assertRaises(subprocess.CalledProcessError):
-                    artifacts.preflight()
-                lanes.assert_not_called()
-                self.assertFalse(output.exists())
 
 
 if __name__ == '__main__':

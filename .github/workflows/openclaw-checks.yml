@@ -239,3 +239,15 @@ jobs:
           node-version: '26.3.0'
       - name: Build the macOS fork artifact on Linux without publishing
         run: python3 .github/openclaw/artifacts.py build --lane bun-webkit-macos-arm64 --output "$RUNNER_TEMP/macos-fork-artifact"
+      - name: Build the current Bun macOS AOT engine without publishing
+        env:
+          BUILDX_METADATA_PROVENANCE: max
+        run: python3 .github/openclaw/artifacts.py build --lane bun-webkit-macos-arm64-aot --output "$RUNNER_TEMP/macos-aot-artifact"
+      - name: Retain the exact macOS AOT engine and provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: bun-webkit-macos-arm64-aot
+          path: ${{ runner.temp }}/macos-aot-artifact
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7

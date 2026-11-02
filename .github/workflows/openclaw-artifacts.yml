@@ -12,9 +12,6 @@ on:
         default: false
 permissions:
   contents: read
-  actions: read
-env:
-  ENGINE_SHA: ${{ inputs.sha }}
 concurrency:
   group: openclaw-artifacts-${{ inputs.sha }}
   cancel-in-progress: false
@@ -25,8 +22,7 @@ jobs:
       (github.ref == 'refs/heads/openclaw/main' ||
        github.ref == 'refs/heads/openclaw/batch-1' ||
        github.ref == 'refs/heads/openclaw/release-5718a6ec' ||
-       ((github.ref == 'refs/heads/claude/sync-webkit-upstream-20261014' ||
-         github.ref == 'refs/heads/claude/hosted-linux-consumer-20261031') &&
+       (github.ref == 'refs/heads/claude/sync-webkit-upstream-20261014' &&
         inputs.publish == false))
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 10
@@ -75,7 +71,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ env.ENGINE_SHA }}
           fetch-depth: 0
           persist-credentials: false
           sparse-checkout-cone-mode: false
@@ -109,7 +104,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ env.ENGINE_SHA }}
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: |
@@ -240,11 +234,12 @@ jobs:
       - name: Read the frozen Bun candidate
         id: consumer
         run: python3 -c 'import json,os; p=json.load(open(".github/openclaw/variants.json"))["candidate"]; print("commit="+p["commit"],file=open(os.environ["GITHUB_OUTPUT"],"a"))'
-      - name: Admit the exact Bun source snapshot for native qualification
-        run: |
-          mkdir -p consumer
-          python3 .github/openclaw/qualification/acquire-bun-snapshot.py consumer/bun > consumer/candidate-source.json
-          test "$(git -C consumer/bun rev-parse HEAD)" = "${{ steps.consumer.outputs.commit }}"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: openclaw/bun
+          ref: ${{ steps.consumer.outputs.commit }}
+          path: consumer/bun
+          persist-credentials: false
       - uses: ./consumer/bun/.github/actions/setup-bun
         with:
           bun-version: "1.4.4"
@@ -317,7 +312,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ env.ENGINE_SHA }}
           persist-credentials: false
           sparse-checkout: |
             .github
@@ -328,7 +322,7 @@ jobs:
           path: ${{ runner.temp }}/windows-artifact
       - name: Qualify native ARM64 engine
         shell: pwsh
-        run: ./.github/openclaw/qualify-windows-arm64.ps1 -ArtifactDirectory "$env:RUNNER_TEMP/windows-artifact" -OutputDirectory "$env:RUNNER_TEMP/windows-proof" -Source $env:ENGINE_SHA
+        run: ./.github/openclaw/qualify-windows-arm64.ps1 -ArtifactDirectory "$env:RUNNER_TEMP/windows-artifact" -OutputDirectory "$env:RUNNER_TEMP/windows-proof" -Source $env:GITHUB_SHA
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
@@ -345,7 +339,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ env.ENGINE_SHA }}
           persist-credentials: false
           sparse-checkout: |
             .github
@@ -357,8 +350,8 @@ jobs:
           path: ${{ runner.temp }}/inputs
       - name: Assemble complete release and verify checksums
         run: |
-          python3 .github/openclaw/release.py assemble --source "$ENGINE_SHA" --inputs "$RUNNER_TEMP/inputs" --directory "$RUNNER_TEMP/release"
-          python3 .github/openclaw/release.py verify --source "$ENGINE_SHA" --directory "$RUNNER_TEMP/release"
+          python3 .github/openclaw/release.py assemble --source "$GITHUB_SHA" --inputs "$RUNNER_TEMP/inputs" --directory "$RUNNER_TEMP/release"
+          python3 .github/openclaw/release.py verify --source "$GITHUB_SHA" --directory "$RUNNER_TEMP/release"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: release

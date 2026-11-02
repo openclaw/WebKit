@@ -191,6 +191,8 @@ worker inspection and external-buffer cases alongside the fork selection.
 
 ## Unreleased
 
+- Keep AOT import namespaces separate from cached require facades, preserving marker reflection, shared export reads, module identity and GC ownership across the upstream sync.
+
 - Reject incomplete native JUnit file suites in both frozen reporting adapters by checking descendant testcase counts, file ownership and failure counts before accepting test evidence.
 
 - Qualify the upstream sync against frozen Bun `7b573c05d0c52dffc67d4d25daf108bed5930cf2`, whose Latin1 bridge matches the current engine API. Keep the historical baseline unchanged, require cache format 45 and the eleven current WebKit upgrade regressions, and forward-port strict test reporting without changing compiled sources. The candidate build uses its native logger without an adapter; source and build-tool receipts remain mandatory.
