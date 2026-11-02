@@ -13,13 +13,13 @@ TEMP = Path(os.environ['RUNNER_TEMP'])
 WORKSPACE = Path(os.environ['GITHUB_WORKSPACE'])
 ROOT = TEMP / 'downstream'
 PROOF = TEMP / 'downstream-proof'
-SOURCE = '9f5edfb699e35691497b06572a321b20994ca4e5'
+SOURCE = '4430cc2e4caa5720c2f78963be3566c87b958084'
 BUN = 'd9be087429c21e563bb5ac29f8a11805e64b56a3'
 OPENCLAW = '2952110b2a14efac009e1cc5fb758cd8ed15d193'
 BIRDCLAW = '59c9ee27f39238654efc93ff7862b27ad474c044'
-REPLAY = 41324678688
-CARRIER = '9f03dbd21a64683d1b32e50ace51270248bf92a5'
-EXECUTABLE = '2ec7cfd15b846d11d1f45e311fbc10fd7b447f6fcfb579485525ee1233e95513'
+REPLAY = 41367738580
+CARRIER = 'b1b043eab568e09d22aed763db4ccdbfabdda209'
+EXECUTABLE = 'ef8548baaa826be1342d2aa38229aac852806161a6c13885426333c7fa241b34'
 
 
 def sha(path):
@@ -46,15 +46,15 @@ def admit():
     spec = importlib.util.spec_from_file_location('retained', helper)
     retained = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(retained)
-    run, jobs = retained.run_identity(REPLAY, CARRIER, 'openclaw-current-linux-consumer.yml')
-    assert run['conclusion'] == 'success' and jobs['current-consumer']['conclusion'] == 'success'
+    run, jobs = retained.run_identity(REPLAY, CARRIER, 'openclaw-current-matrix-consumer.yml')
+    assert run['conclusion'] == 'success' and jobs['matrix-consumer']['conclusion'] == 'success'
     records = {}
     for label, row in {
-        'current-linux-consumer-proof': (13090894299, 407316, 'sha256:63c674db96939947df3671c2187c39db96bd2f6a43340f10f7edf413fa09148d'),
-        'current-linux-bun-executables': (13090653410, 183705425, 'sha256:7b4599e44b1a68ace49cffa533209acb6a255542bb59dc6aa8ff250b15f5099e'),
+        'current-matrix-linux-consumer-proof': (13108580959, 433200, 'sha256:ffcb6eaadd13a54cbe62746ec66eb34d8a8f06762dda747c23abdf5bde8e0ac6'),
+        'current-matrix-linux-bun-executables': (13108206293, 183705425, 'sha256:c6e4cdc207253ce43247de6492d0bcec9246b5fb76ae27fdc469b1b8423f1e15'),
     }.items():
         records[label] = retained.download(ROOT, label, row, REPLAY, CARRIER)
-    evidence = ROOT / 'current-linux-consumer-proof'
+    evidence = ROOT / 'current-matrix-linux-consumer-proof'
     identity = read(evidence / 'candidate-identity.json')
     assert identity['candidate']['commit'] == BUN and identity['engine']['source'] == SOURCE
     assert identity['runtime'] == {'bun_revision': BUN, 'webkit': SOURCE, 'platform': 'linux', 'architecture': 'x64'}
@@ -63,7 +63,7 @@ def admit():
     build = read(evidence / 'candidate-build-tools.json')
     assert sha(evidence / 'candidate-build-tools.json') == identity['build_tools']['sha256']
     assert build['compiled_inputs_sha256'] == '33c6f0b30bf33c45b2aab86ca7bf9692cbb30e2114d2e70e255e9ac43e52f614'
-    binary = ROOT / 'current-linux-bun-executables' / identity['executable']['path']
+    binary = ROOT / 'current-matrix-linux-bun-executables' / identity['executable']['path']
     assert binary.stat().st_size == identity['executable']['size'] == 105658384
     assert sha(binary) == identity['executable']['sha256'] == EXECUTABLE
     binary.chmod(0o755)
