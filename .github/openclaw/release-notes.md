@@ -1,3 +1,5 @@
+AOT valueflow preserves arbitrary module answers when the program registers customization hooks, including calls through aliases. Bun must declare the registration builtin and retain its host loader calls; consumers need a joint rebuild with the matching engine headers and libraries.
+
 Native Darwin ARM64 qualification builds the frozen Bun candidate against the same-run macOS AOT archive, completes the reviewed 52-file selection, and runs all four AOT platform cases before assembly. Linux historical comparison and native Windows ARM64 engine gates remain required.
 
 The AOT builtin-table collector now recognizes native data properties declared with `CustomValue`. Getter and setter symbols remain available to code generation; Bun's `process.ppid` and `process.title` keep their existing data descriptors. Unknown table attributes still fail validation.
