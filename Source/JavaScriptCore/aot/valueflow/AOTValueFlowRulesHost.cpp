@@ -1261,10 +1261,12 @@ static void handOverLoadersOn(ValueFlowRuleContext& context, ValueFlowObjectID h
 bool askLoaderFunctionsOfProgram(ValueFlowRuleContext& context, ModuleID asking, RequestAtRunTime request)
 {
     const BuiltinTable& builtins = context.program().builtins();
-    bool asksProgram = context.anyMember(context.valueOf(context.nodes().ofHost(ValueFlowHostNode::RunBuiltins)), [&](ValueFlowObjectID object) {
+    bool asksHooks = context.anyMember(context.valueOf(context.nodes().ofHost(ValueFlowHostNode::RunBuiltins)), [&](ValueFlowObjectID object) {
         BuiltinID builtin = context.universe().builtinOf(object);
         return builtin && builtins.has(BuiltinMark::RegistersModuleHooks, builtins.canonicalID(builtin));
     });
+    // Module hooks receive URLs and a context, not the CommonJS parent object.
+    bool asksProgram = false;
     for (const BuiltinMarkedEntry& resolver : builtins.marked(BuiltinMark::IsResolverThatLoaderCalls)) {
         if (!isSeenToStoreLoaderFunction(context, resolver.builtin))
             continue;
@@ -1278,7 +1280,7 @@ bool askLoaderFunctionsOfProgram(ValueFlowRuleContext& context, ModuleID asking,
             asksProgram |= isSeenToStoreLoaderFunction(context, require.builtin);
     }
     if (!asksProgram || !asking)
-        return asksProgram;
+        return asksProgram || asksHooks;
     exposeModuleObjectOf(context, asking);
     if (ValueFlowObjectID moduleObject = moduleObjectOfEvaluatedModule(context, asking))
         handOverLoadersOn(context, moduleObject);
