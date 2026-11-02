@@ -232,6 +232,10 @@ void* LocalAllocator::allocateSlowCaseWithoutSampling(JSC::Heap& heap, size_t ce
 
     AllocatingScope helpingHeap(heap);
 
+#if USE(BUN_JSC_ADDITIONS)
+    if (MarkedBlockCage::isRequired() && m_directory->m_subspace->alignedMemoryAllocator() == heap.structureAllocator.get())
+        heap.cage().willAllocateStructureInSlowPath();
+#endif
     heap.collectIfNecessaryOrDefer(deferralContext);
     restoreAllocationSampleLimit();
     

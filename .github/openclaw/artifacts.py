@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 
-BASE = 'e66916298091dd12469076fd854e135b03fb16ff'
+BASE = '4d45755fed4aeef19e95beb90d3d0c884a2812bd'
 HISTORY_FLOOR = '5718a6ec579b98362ea7276a426deedcc6281ef5'
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = json.loads((ROOT / '.github/openclaw/variants.json').read_text())
@@ -77,6 +77,13 @@ def write_build_defines(artifact, lane, sha):
 def lane_definitions():
     return json.loads(capture('node', '.github/scripts/lanes.mjs', '--json'))
 
+def archive_names(lane):
+    label = lane['label']
+    sources = 'bun-webkit-aot-sources' if label == 'bun-webkit-linux-amd64-lto-aot' else ''
+    if lane.get('sources', '') != sources:
+        raise ValueError('invalid AOT source producer metadata')
+    return [label + '.tar.gz'] + ([sources + '.tar.gz'] if sources else [])
+
 def preflight():
     source_record = source()
     sha = source_record['source']
@@ -102,6 +109,7 @@ def build(label, destination):
     if label not in [l['label'] for l in CONFIG['lanes']]:
         raise ValueError('lane is outside the approved consumer matrix')
     lane = next(l for l in lane_definitions() if l['label'] == label)
+    names = archive_names(lane)
     destination = destination.resolve()
     destination.mkdir(parents=True, exist_ok=False)
     artifact = destination / 'bun-webkit'
@@ -127,23 +135,33 @@ def build(label, destination):
     for path in (artifact/'lib').glob('*.so*'):
         if path.is_file() or path.is_symlink():
             path.unlink()
-    archive = destination/(label+'.tar.gz')
-    run('tar', '-czf', str(archive), '-C', str(destination), 'bun-webkit')
+    for name in names:
+        archive = destination / name
+        members = ['bun-webkit'] if name == label + '.tar.gz' else [
+            '--exclude=bun-webkit/Source/JavaScriptCore/aot/tests',
+            'bun-webkit/Source/JavaScriptCore/aot',
+        ]
+        run('tar', '-czf', str(archive), '-C', str(destination), *members)
+    files = {name: {'sha256': digest(destination / name), 'size': (destination / name).stat().st_size}
+        for name in names}
     paths = capture('git', 'ls-files', '--', *RECIPE).splitlines()
     manifest = {'schema_version':1,**source_record,'lane':lane,
         'recipe_sha256':{p:digest(ROOT/p) for p in paths},'toolchain_image_id':image['Id'],
         'commands':{'base':base_command,'artifact':build_command},
         'tool_versions':tool_versions,'docker_version':capture('docker','version'),'buildx_version':capture('docker','buildx','version'),
         'workflow_run':os.environ.get('GITHUB_RUN_ID'),'run_attempt':os.environ.get('GITHUB_RUN_ATTEMPT'),
-        'elapsed_seconds':time.time()-started,'files':{archive.name:{'sha256':digest(archive),'size':archive.stat().st_size}},
+        'elapsed_seconds':time.time()-started,'files':files,
         'provenance_files':{p.name:digest(p) for p in provenance.iterdir() if p.is_file()}}
     write(destination/(label+'.manifest.json'), manifest)
-    (destination/'SHA256SUMS').write_text(digest(archive)+'  '+archive.name+'\n')
-    if label == 'bun-webkit-linux-amd64':
-        run(str(artifact/'bin/jsc'), '-e', 'print("OpenClaw WebKit ready")')
+    (destination/'SHA256SUMS').write_text(''.join(files[name]['sha256']+'  '+name+'\n' for name in names))
+    if label in ('bun-webkit-linux-amd64', 'bun-webkit-linux-amd64-aot', 'bun-webkit-linux-amd64-debug-asan-aot'):
+        # Release the shell VM before LeakSanitizer checks process teardown.
+        run(str(artifact/'bin/jsc'), '--destroy-vm', '-e', 'print("OpenClaw WebKit ready")')
         run(str(artifact/'bin/testFFI'))
-        run(str(artifact/'bin/testMimallocExit'))
-        run(str(artifact/'bin/testMimallocExitInFlight'))
+        # ASan uses the system allocator; only the release lanes build these probes.
+        if label in ('bun-webkit-linux-amd64', 'bun-webkit-linux-amd64-aot'):
+            run(str(artifact/'bin/testMimallocExit'))
+            run(str(artifact/'bin/testMimallocExitInFlight'))
         run(str(artifact/'bin/testVMEntryRecord'))
         run(str(artifact/'bin/testVMEntryScope'))
         run(str(artifact / 'bin/testForeignStackSuspension'))

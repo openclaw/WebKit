@@ -12,12 +12,17 @@ import subprocess
 INPUTS = Path(__file__).resolve().parent
 CONFIG = json.loads((INPUTS.parent / 'variants.json').read_text())
 ADAPTERS = json.loads((INPUTS / 'harness-adapters.json').read_text())
-LANE = 'bun-webkit-linux-amd64'
+LANE = 'bun-webkit-linux-amd64-aot'
+DARWIN_LANE = 'bun-webkit-macos-arm64-aot'
+TARGETS = {LANE: ('linux', 'x64'), DARWIN_LANE: ('darwin', 'arm64')}
 MANIFEST = 'scripts/build/deps/webkit-artifacts.json'
 EXECUTABLE = 'bun/build/qualify-candidate/bun'
 BASELINE_EXECUTABLE = 'bun-baseline/build/qualify-baseline/bun'
 FIXTURE = 'bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts'
 FIXTURE_SHA256 = '2e925768c7625e093a3608cb0d47c33e1b2d591d16b485b2d7d30228e528b860'
+AOT_TEST = 'bun/test/aot/every-platform.test.ts'
+AOT_TEST_SHA256 = 'c82727a5ee0fe4091f9eb8337c9b917d76c2fac6ce2c8cf7f4e65a1cbd975269'
+AOT_LOG = 'sync/aot-every-platform.log'
 BUILD_ENV = ('BUN_WEBKIT_ARTIFACT_MANIFEST', 'BUN_BUILD_PREFETCH_DIR', 'BUN_BUILD_CACHE_DIR')
 
 
@@ -41,14 +46,15 @@ def git(repo, *args):
     return subprocess.check_output(['git', '-C', str(repo), *args])
 
 
-def engine_input(archive, lane_manifest, source):
+def engine_input(archive, lane_manifest, source, lane=LANE):
+    require(lane in TARGETS, 'unsupported native consumer lane')
     require(re.fullmatch('[0-9a-f]{40}', source) is not None)
     manifest = json.loads(lane_manifest.read_text())
-    require(manifest['source'] == source and manifest['lane']['label'] == LANE)
+    require(manifest['source'] == source and manifest['lane']['label'] == lane)
     record = file_record(archive.parent, archive.name)
-    require(record['path'] == LANE + '.tar.gz')
+    require(record['path'] == lane + '.tar.gz')
     require(manifest['files'][archive.name] == {'size': record['size'], 'sha256': record['sha256']})
-    return {'source': source, 'lane': LANE, 'archive': record, 'lane_manifest_sha256': sha(lane_manifest)}
+    return {'source': source, 'lane': lane, 'archive': record, 'lane_manifest_sha256': sha(lane_manifest)}
 
 
 def overlay_manifest(engine):
@@ -201,10 +207,11 @@ def validate_build_tools(record, arm, executable):
 
     cwd = Path(record['cwd'])
     require(cwd.is_absolute() and cwd.name == ('bun-baseline' if arm == 'baseline' else 'bun'), 'invalid build cwd')
-    require(isinstance(record['argv'], list) and len(record['argv']) == 7
+    require(isinstance(record['argv'], list) and len(record['argv']) == (7 if arm == 'baseline' else 8)
             and isinstance(record['argv'][0], str) and Path(record['argv'][0]).is_absolute(), 'invalid build argv')
     revision = CONFIG['baseline']['engine'] if arm == 'baseline' else record['engine_source']
-    require(record['argv'][1:] == ['run', 'build:release', '--lto=off', '--webkit-version=' + revision,
+    flags = ['--lto=off'] if arm == 'baseline' else ['--aot=on', '--lto=off']
+    require(record['argv'][1:] == ['run', 'build:release', *flags, '--webkit-version=' + revision,
             '--buildDir=' + str(cwd / 'build' / ('qualify-' + arm)), '--timings'], 'build argv drift')
     validate_file(record['bootstrap'], record['argv'][0])
 
@@ -220,8 +227,9 @@ def validate_build_evidence(identity, arm, proof):
             and tools['engine_source'] == identity['runtime']['webkit'], 'build overlay/engine identity mismatch')
 
 
-def validate_invocation(proof, name):
+def validate_invocation(proof, name, lane=LANE):
     require(name in ('baseline', 'candidate', 'sync'), 'invalid invocation name')
+    require(lane in TARGETS and (lane == LANE or name == 'candidate'), 'invalid native invocation lane')
     arm = 'baseline' if name == 'baseline' else 'candidate'
     path = name + '/invocation.json'
     record = json.loads((proof / path).read_text())
@@ -236,7 +244,7 @@ def validate_invocation(proof, name):
     if arm == 'baseline':
         validate_baseline(consumer)
     else:
-        validate(consumer, consumer['engine']['source'])
+        validate(consumer, consumer['engine']['source'], lane=lane)
     validate_build_evidence(consumer, arm, proof)
     require(record['executable'] == consumer['executable'], 'invocation binary mismatch')
     require(record['selection'] == file_record(proof, name + '/selected.json'), 'invocation selection mismatch')
@@ -288,7 +296,7 @@ def capture(root, engine, inspector_runtime):
               'executable': file_record(root, EXECUTABLE), 'runtime': runtime(root / EXECUTABLE),
               'fixture': file_record(root, FIXTURE), 'baseline': CONFIG['baseline']}
     record['build_tools'] = build_tool_record(root, 'candidate', record)
-    validate(record, engine['source'])
+    validate(record, engine['source'], lane=engine['lane'])
     return record
 
 
@@ -310,14 +318,15 @@ def validate_baseline(record):
             'platform': 'linux', 'architecture': 'x64'}, 'invalid baseline runtime')
 
 
-def validate(record, source, engine=None):
+def validate(record, source, engine=None, lane=LANE):
+    require(lane in TARGETS, 'unsupported native consumer lane')
     pin = CONFIG['candidate']
     require(record['schema_version'] == 1 and record['candidate'] == {
         'repository': CONFIG['bun_repository'], 'commit': pin['commit'], 'tree': pin['tree'], 'index_tree': pin['tree']})
     measured = record['engine']
     require(measured['source'] == source and re.fullmatch('[0-9a-f]{40}', source) is not None
-            and measured['lane'] == LANE and valid_digest(measured['lane_manifest_sha256']))
-    validate_file(measured['archive'], LANE + '.tar.gz')
+            and measured['lane'] == lane and valid_digest(measured['lane_manifest_sha256']))
+    validate_file(measured['archive'], lane + '.tar.gz')
     if engine is not None:
         require(measured == engine, 'candidate archive identity mismatch')
     overlay = record['overlay']
@@ -328,19 +337,36 @@ def validate(record, source, engine=None):
     validate_file(record['build_tools'], 'candidate-build-tools.json')
     validate_file(record['fixture'], FIXTURE)
     require(record['fixture']['sha256'] == FIXTURE_SHA256)
-    require(record['runtime'] == {'bun_revision': pin['commit'], 'webkit': source, 'platform': 'linux', 'architecture': 'x64'})
+    platform, architecture = TARGETS[lane]
+    require(record['runtime'] == {'bun_revision': pin['commit'], 'webkit': source, 'platform': platform, 'architecture': architecture})
     require(record['baseline'] == CONFIG['baseline'])
     return record
 
 
-def validate_evidence(record, source, engine, binaries, proof):
-    validate(record, source, engine)
+def validate_evidence(record, source, engine, binaries, proof, lane=LANE):
+    validate(record, source, engine, lane=lane)
     validate_build_evidence(record, 'candidate', proof)
     require(file_record(binaries, EXECUTABLE) == record['executable'], 'candidate executable identity mismatch')
     require(file_record(binaries, FIXTURE) == record['fixture'], 'candidate fixture identity mismatch')
     require(sha(proof / 'candidate-manifest.patch') == record['overlay']['patch_sha256'], 'candidate overlay patch mismatch')
     manifest = proof / 'candidate-input/artifacts.json'
     require(sha(manifest) == record['overlay']['sha256'] and json.loads(manifest.read_text()) == overlay_manifest(engine), 'candidate overlay bytes mismatch')
+
+
+def aot_evidence(proof, binaries, consumer, lane=LANE):
+    # The same frozen test compiles and executes images with the measured candidate.
+    validate(consumer, consumer['engine']['source'], lane=lane)
+    require(file_record(binaries, EXECUTABLE) == consumer['executable'], 'AOT candidate executable mismatch')
+    test = file_record(binaries, AOT_TEST)
+    require(test['sha256'] == AOT_TEST_SHA256, 'AOT test source drift')
+    text = (proof / AOT_LOG).read_text()
+    text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
+    require(re.findall(r'(?m)^\s*(\d+) pass\s*$', text) == ['4']
+            and re.findall(r'(?m)^\s*(\d+) fail\s*$', text) == ['0']
+            and not re.search(r'\b[1-9]\d* (?:skip|todo)\b', text), 'AOT every-platform tests incomplete')
+    return {'candidate_identity_sha256': sha(proof / 'candidate-identity.json'),
+            'executable': consumer['executable'], 'test': test, 'log': file_record(proof, AOT_LOG),
+            'passed': 4, 'failed': 0, 'skipped': 0, 'todo': 0}
 
 
 def validate_baseline_evidence(record, binaries, proof):
@@ -352,7 +378,7 @@ def validate_baseline_evidence(record, binaries, proof):
 
 def verify(root, engine, receipt, inspector_runtime):
     record = json.loads(receipt.read_text())
-    validate(record, engine['source'], engine)
+    validate(record, engine['source'], engine, lane=engine['lane'])
     require(record == capture(root, engine, inspector_runtime), 'candidate identity changed after build')
     return record
 
@@ -367,10 +393,13 @@ def main():
     parser.add_argument('command', choices=['baseline-inputs', 'check-baseline', 'baseline', 'check-candidate', 'create', 'verify'])
     parser.add_argument('--root', type=Path)
     parser.add_argument('--source')
+    parser.add_argument('--lane', choices=TARGETS, default=LANE)
     parser.add_argument('--artifacts', type=Path)
     parser.add_argument('--receipt', type=Path)
     parser.add_argument('--inspector-runtime', type=Path)
     args = parser.parse_args()
+    require(args.lane == LANE or args.command not in ('baseline-inputs', 'check-baseline', 'baseline'),
+            'historical baseline is Linux only')
     if args.command == 'baseline-inputs':
         baseline_inputs()
     elif args.command == 'check-baseline':
@@ -378,7 +407,7 @@ def main():
     elif args.command == 'baseline':
         write_once(args.root / 'baseline-identity.json', capture_baseline(args.root, args.inspector_runtime))
     else:
-        engine = engine_input(args.artifacts / (LANE + '.tar.gz'), args.artifacts / (LANE + '.manifest.json'), args.source)
+        engine = engine_input(args.artifacts / (args.lane + '.tar.gz'), args.artifacts / (args.lane + '.manifest.json'), args.source, args.lane)
         if args.command == 'check-candidate':
             source_identity(args.root / 'bun', engine, args.inspector_runtime)
         elif args.command == 'create':
