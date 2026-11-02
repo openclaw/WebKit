@@ -1,108 +1,121 @@
-name: OpenClaw retained Linux consumer diagnostic
-
+name: OpenClaw retained C6 AOT compiler probe
 on:
-  pull_request:
-    paths:
-      - .github/workflows/openclaw-retained-linux-diagnostic.yml
   workflow_dispatch:
-
 permissions:
   contents: read
-
+  actions: read
 concurrency:
-  group: openclaw-retained-linux-diagnostic-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
-
+  group: openclaw-retained-c6-aot-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  tls-session-baseline:
+  probe:
+    if: github.repository == 'openclaw/WebKit' && github.ref == 'refs/heads/claude/bun-c6-aot-compiler-probe-20261102'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          repository: openclaw/bun
-          ref: 191755ec115ece3dd642eba3cb0143cecb5e5d7a
+          path: controls
           persist-credentials: false
-      - name: Download the exact shipped baseline
-        env:
-          GH_TOKEN: ${{ github.token }}
+          sparse-checkout: .github/openclaw
+      - name: Admit the exact signed C6 test sources
         shell: bash
         run: |
           set -euo pipefail
-          mkdir diagnostics
-          gh api repos/openclaw/bun/releases/assets/679971474 -H 'Accept: application/octet-stream' > diagnostics/manifest.json
-          gh api repos/openclaw/bun/releases/assets/679971203 -H 'Accept: application/octet-stream' > baseline.zip
-      - name: Verify shipping identity and replay the unchanged TLS context file
+          mkdir proof
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          python3 controls/.github/openclaw/qualification/acquire-bun-snapshot.py source > proof/source-acquisition.json
+      - name: Admit the retained C6 Release executable
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, importlib.util, json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'], 'c6-native')
+          root.mkdir()
+          helper = Path('controls/.github/openclaw/qualification/assemble-retained-matrix.py')
+          spec = importlib.util.spec_from_file_location('retained', helper)
+          retained = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(retained)
+          run, jobs = retained.run_identity(41384479096, 'f06cd7f2122094d4eb3367cfe5a844966d65284f', 'openclaw-current-linux-consumer.yml')
+          assert run['status'] == 'completed' and run['conclusion'] == 'failure'
+          records = {}
+          for label, row in {
+              'current-sync-linux-proof': (13115376384, 124375, 'sha256:7d243a55458d5ce512d96c33229f3d830af9efaba09d2a2500e3256b9cca4938'),
+              'current-sync-linux-executables': (13114988254, 215611081, 'sha256:0c5f477ee1f16f33b179ae0f3cd6eb688fa9d926a50bbd830b0c97c076b99e71'),
+          }.items():
+              records[label] = retained.download(root, label, row, 41384479096, 'f06cd7f2122094d4eb3367cfe5a844966d65284f')
+          identity = json.loads((root / 'current-sync-linux-proof/candidate-identity.json').read_text())
+          assert identity['candidate']['commit'] == 'c6a7bf9d8dc4d44db9f826e47a5ae7645ea6e8c9'
+          assert identity['engine']['source'] == '1281a1be4796f541bcaf0ef751941c41dfbf7817'
+          assert identity['executable'] == {'path': 'bun/build/qualify-candidate/bun', 'size': 137411224, 'sha256': '5c41a6e8aa08786e0e6e341c87049497e783a8970a174b6fbc3c62d03d124e2b'}
+          binary = root / 'current-sync-linux-executables' / identity['executable']['path']
+          assert binary.stat().st_size == identity['executable']['size']
+          with binary.open('rb') as stream:
+              assert hashlib.file_digest(stream, 'sha256').hexdigest() == identity['executable']['sha256']
+          binary.chmod(0o755)
+          Path('proof/admission.json').write_text(json.dumps({'identity': identity, 'artifacts': records, 'diagnostic_only': True}, indent=2) + '\n')
+          with Path(os.environ['GITHUB_ENV']).open('a') as stream:
+              stream.write('PROBE_BINARY=' + str(binary.resolve()) + '\n')
+          PY
+      - name: Execute the current minimal AOT JSON case without installing packages
         shell: bash
         run: |
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
           python3 - <<'PY'
-          import hashlib, json, os, stat, subprocess, sys, zipfile
-          from pathlib import Path, PurePosixPath
-          from xml.etree import ElementTree
-
-          def sha(path):
-              with path.open('rb') as stream:
-                  return hashlib.file_digest(stream, 'sha256').hexdigest()
-
-          commit = '191755ec115ece3dd642eba3cb0143cecb5e5d7a'
-          webkit = 'b82bc917e99110b61c3a21202d6def7457aa194c'
-          assert subprocess.check_output(['git', 'rev-parse', 'HEAD', 'HEAD^{tree}'], text=True).splitlines() == [commit, '656ed5260b61d9063f546f837238661a19514c1f']
-          assert not subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'], text=True)
-          report = Path('diagnostics').resolve()
-          manifest = report / 'manifest.json'
-          assert sha(manifest) == '8c3a9d87f37832fa07173635af52d53b813e29470afa4afdb49a83033fed039e'
-          data = json.loads(manifest.read_text())
-          assert data['bun']['commit'] == commit and data['webkit']['version'] == webkit
-          assets = [a for a in data['assets'] if a['target'] == 'linux-x64']
-          assert len(assets) == 1
-          asset = assets[0]
-          archive = Path('baseline.zip')
-          assert archive.stat().st_size == asset['size'] == 51053995
-          assert sha(archive) == asset['sha256'] == 'a59df8273c232782c16a6c0e680511becd9a49ba08fa6a1adc7baea1a632de0b'
-          executable = asset['executable']['path']
-          with zipfile.ZipFile(archive) as bundle:
-              entries = bundle.infolist()
-              path = PurePosixPath(executable)
-              assert not path.is_absolute() and '..' not in path.parts and '\\' not in executable
-              directory = str(path.parent) + '/'
-              assert len(entries) == 2 and {e.filename for e in entries} == {directory, executable}
-              folder = bundle.getinfo(directory)
-              assert folder.is_dir() and folder.file_size == 0 and stat.S_IFMT(folder.external_attr >> 16) in (0, stat.S_IFDIR)
-              entry = bundle.getinfo(executable)
-              assert stat.S_IFMT(entry.external_attr >> 16) in (0, stat.S_IFREG)
-              assert entry.file_size == asset['executable']['size'] < 256 * 1024**2
-              bundle.extract(entry, 'baseline')
-          exe = (Path('baseline') / executable).resolve()
-          assert sha(exe) == asset['executable']['sha256']
-          exe.chmod(0o700)
-          facts = json.loads(subprocess.check_output([str(exe), '-e', 'console.log(JSON.stringify({commit:Bun.revision,webkit:process.versions.webkit,platform:process.platform,arch:process.arch}))'], text=True, timeout=30))
-          assert facts == {'commit': commit, 'webkit': webkit, 'platform': 'linux', 'arch': 'x64'}
-          fixture = Path('test/js/node/tls/node-tls-context.test.ts')
-          digest = sha(fixture)
-          assert digest == '0f6ba03e222d53279f9fa553cc3390bdd9707fc7ab382294f18d292ec8ad0bb3'
-          env = dict(os.environ, CI='1', BUN_RUNTIME_TRANSPILER_CACHE_PATH='0')
-          with (report / 'stdout.log').open('xb') as stdout, (report / 'stderr.log').open('xb') as stderr:
-              result = subprocess.run([str(exe), 'test', '--expose-internals', str(fixture), '--reporter=junit', '--reporter-outfile=' + str(report / 'result.xml')],
-                  env=env, stdout=stdout, stderr=stderr, timeout=120)
-          tree = ElementTree.parse(report / 'result.xml')
-          cases = list(tree.iter('testcase'))
-          failures = [{'name': c.get('name'), 'classname': c.get('classname')} for c in cases if c.find('failure') is not None or c.find('error') is not None]
-          outcome = {'qualification': False, 'identity': facts, 'executable_sha256': sha(exe), 'fixture_sha256': digest,
-                     'exitCode': result.returncode, 'cases': len(cases), 'skipped': sum(c.find('skipped') is not None for c in cases), 'failures': failures}
-          (report / 'outcome.json').write_text(json.dumps(outcome, indent=2) + '\n')
-          print(json.dumps(outcome), flush=True)
-          assert len(cases) == 83 and outcome['skipped'] == 0, 'baseline file did not execute completely'
-          assert result.returncode in (0, 1) and bool(failures) == (result.returncode == 1)
-          assert sha(fixture) == digest and sha(exe) == asset['executable']['sha256']
-          sys.exit(result.returncode)
+          import hashlib, json, os, subprocess, xml.etree.ElementTree as ET
+          from pathlib import Path
+          source, proof = Path('source').resolve(), Path('proof').resolve()
+          binary = Path(os.environ['PROBE_BINARY'])
+          fixture = source / 'test/aot/run-aot.test.ts'
+          assert hashlib.sha256(fixture.read_bytes()).hexdigest() == 'f80978e02e9f28b660211c01752fe156c03ddc5b161bbe7c77b292a6e66b0556'
+          assert subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip() == 'c6a7bf9d8dc4d44db9f826e47a5ae7645ea6e8c9'
+          runtime = json.loads(subprocess.check_output([str(binary), '--no-env-file', '-e', 'console.log(JSON.stringify({bun_revision:Bun.revision,webkit:process.versions.webkit,platform:process.platform,architecture:process.arch}))'], text=True))
+          assert runtime == {'bun_revision':'c6a7bf9d8dc4d44db9f826e47a5ae7645ea6e8c9','webkit':'1281a1be4796f541bcaf0ef751941c41dfbf7817','platform':'linux','architecture':'x64'}
+          title = 'a module that the constant parts of a dynamic path match is compiled'
+          argv = [str(binary), '--no-env-file', 'test', './test/aot/run-aot.test.ts', '-t', title, '--reporter=junit', '--reporter-outfile=' + str(proof / 'json.xml')]
+          with (proof / 'json.log').open('wb') as log:
+              result = subprocess.run(argv, cwd=source, stdout=log, stderr=subprocess.STDOUT)
+          row = {'diagnostic_only': True, 'runtime': runtime, 'argv': argv, 'exit_code': result.returncode, 'passed': False}
+          (proof / 'result.json').write_text(json.dumps(row, indent=2) + '\n')
+          if (proof / 'json.xml').is_file():
+              cases = list(ET.parse(proof / 'json.xml').getroot().iter('testcase'))
+              selected = [c for c in cases if title in c.get('name', '')]
+              executed = [c for c in cases if c.find('skipped') is None]
+              row['testcases'] = len(cases)
+              row['selected'] = [{'name': c.get('name'), 'skipped': c.find('skipped') is not None, 'failed': c.find('failure') is not None or c.find('error') is not None} for c in selected]
+              row['passed'] = result.returncode == 0 and len(selected) == 1 and executed == selected and not row['selected'][0]['failed'] and not row['selected'][0]['skipped']
+              (proof / 'result.json').write_text(json.dumps(row, indent=2) + '\n')
+          if not row['passed']:
+              diagnostic = Path(os.environ['RUNNER_TEMP'], 'c6-json-wire')
+              diagnostic.mkdir()
+              files = {
+                  'main.ts': 'declare const console: { log(...values: unknown[]): void }; declare const process: { argv: string[] };\n          const late = await import("./la" + (process.argv.length > 0 ? "te" : "") + ".ts");\n          try { console.log(late.twice(JSON.parse(\'"4"\'))); } catch (e) { console.log(String(e)); }',
+                  'late.ts': 'export function twice(n: number): number { return n * 2; }',
+                  'tsconfig.json': '{"compilerOptions":{"strict":true,"target":"ESNext","module":"Preserve","moduleResolution":"bundler","allowImportingTsExtensions":true,"noEmit":true}}',
+              }
+              for name, text in files.items():
+                  (diagnostic / name).write_text(text)
+              (proof / 'diagnostic-fixture.json').write_text(json.dumps(files, indent=2) + '\n')
+              argv = [str(binary), '--no-env-file', 'build', '--compile', '--aot', 'main.ts', '--outfile', str(diagnostic / 'main'), '--aot-out=' + str(proof / 'json-smoke.aot'), '--aot-threads=1']
+              with (proof / 'diagnostic-build.log').open('wb') as log:
+                  build = subprocess.run(argv, cwd=diagnostic, stdout=log, stderr=subprocess.STDOUT)
+              row['wire_diagnostic'] = {'argv': argv, 'exit_code': build.returncode, 'scope': 'Explicit build with equivalent constant-path fixture and wire-output flags; body placement differs from original run --debug-aot. Never replaces original test verdict.'}
+              wire = proof / 'json-smoke.aot'
+              if wire.is_file():
+                  assert wire.stat().st_size <= 64 * 1024**2
+                  row['wire_diagnostic']['wire'] = {'bytes': wire.stat().st_size, 'sha256': hashlib.sha256(wire.read_bytes()).hexdigest()}
+              (proof / 'result.json').write_text(json.dumps(row, indent=2) + '\n')
+          assert row['passed'], 'Current C6 AOT JSON case did not pass; inspect retained native diagnostics'
           PY
-      - name: Retain the baseline result and unchanged assertions
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: tls-session-baseline-linux-x64
-          path: diagnostics
+          name: retained-c6-aot-compiler-proof
+          path: proof
           if-no-files-found: error
           retention-days: 7
