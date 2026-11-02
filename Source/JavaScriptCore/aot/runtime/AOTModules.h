@@ -239,6 +239,7 @@ public:
     static JSValue storedValue(JSGlobalObject*, JSObject* table, const Identifier& name);
     // As AbstractModuleRecord::getModuleNamespace(): the caller that creates the object decides whether it is extensible.
     JSObject* moduleNamespace(ModuleID, ModulePhase, bool shouldPreventExtensions = true);
+    JSObject* moduleNamespaceForRequire(ModuleID);
     bool mayExport(ModuleID, UniquedStringImpl* name) const;
     JSObject* importMeta(ModuleID);
     JSCell* builtinCell(BuiltinID, ModuleID);
@@ -680,8 +681,7 @@ private:
     JSValue defaultExportOfMockMarkedAsESModule(ModuleID);
     JSValue loadEvictedFile(ModuleID);
     JSValue readExportForRequire(JSObject* namespaceObject, const Identifier& name);
-    void willRequireESModule(ModuleID);
-    void markNamespaceAsRequired(ModuleID);
+    void noteRequireOfESModule(ModuleID);
 
     JSPromise* importUncompiled(const Identifier& key, ModuleID referrer, RefPtr<ScriptFetchParameters>&&);
     std::optional<ModuleID> findByName(const Identifier& key);
@@ -785,8 +785,7 @@ private:
     void noteRequireOfFile(ModuleID file);
     bool hasReachedLevelOf(FilesBeingRun&, ModuleID file);
     void findDistanceOfFiles(FilesBeingRun&);
-    BitVector m_modulesWithMarkOfRequire;
-    BitVector m_modulesWithExtensibleNamespace;
+    BitVector m_modulesRequiredAsESModule;
     BitVector m_modulesWithEarlierNamespaceInValue;
     BitVector m_modulesEvaluatedUnderAnotherEvaluation;
     Box<MockedModules> m_mocks;

@@ -49,7 +49,12 @@ public:
     unsigned imagePosition() const { return m_imagePosition; }
     bool hasNamespaceLayoutOf(ModuleID module) const { return (m_module == module || m_face == module) && !m_isDeferred; }
     // The object of a file is also what code gets that asks for the namespace object of the file's face, where that face captures nothing.
-    void setFace(ModuleID face) { m_face = face; }
+    void setFace(ModuleID face)
+    {
+        m_face = face;
+        if (ModuleNamespace* required = m_requiredNamespace.get())
+            required->m_face = face;
+    }
     std::optional<unsigned> find(UniquedStringImpl*) const;
     bool hasExport(UniquedStringImpl* name) const { return find(name) || isDynamicExport(name); }
     // Reads every export once, in the order of the keys, as [[OwnPropertyKeys]] and [[Get]] of each key would, without a lookup by name.
@@ -62,8 +67,7 @@ public:
     // Of a module of the library: the export is read now if nobody has read it yet, and stays what it is then. False: the name is no export of such a module.
     bool readDeferredExport(JSGlobalObject*, const Identifier& name);
 
-    bool hasESModuleMarker() const { return m_hasESModuleMarker; }
-    void setESModuleMarker(bool hasMarker) { m_hasESModuleMarker = hasMarker; }
+    ModuleNamespace* createNamespaceForRequire(JSGlobalObject*);
 
     bool hasOwnStructure() const { return m_hasOwnStructure; }
     void ensureOwnStructure(VM&);
@@ -86,10 +90,12 @@ private:
     bool isHiddenExport(unsigned index) const;
     bool isSymbolLikeKey(UniquedStringImpl*) const;
     bool isOrdinaryKey(PropertyName) const;
+    bool isESModuleMarker(PropertyName) const;
     bool isDynamicExport(UniquedStringImpl*) const;
     JSValue readDynamicExport(JSGlobalObject*, PropertyName);
     bool evaluateIfNeeded(JSGlobalObject*);
 
+    WriteBarrier<ModuleNamespace> m_requiredNamespace;
     WriteBarrier<JSCellButterfly> m_dynamicExportNames;
     WriteBarrier<JSObject> m_capturedValues;
     WriteBarrier<JSObject> m_liveSources;
