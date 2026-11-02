@@ -1,146 +1,258 @@
-name: OpenClaw current AOT Bun Debug repair proof
-on:
-  workflow_dispatch:
+---
+name: OpenClaw Darwin filesystem Debug and Rust qualification
+'on':
+  workflow_dispatch: 
 permissions:
   contents: read
 concurrency:
-  group: openclaw-current-bun-aot-debug-${{ github.ref }}
-  cancel-in-progress: true
+  group: openclaw-darwin-fs-debug-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
   linux-x64:
-    if: github.repository == 'openclaw/WebKit' && github.ref == 'refs/heads/claude/bun-c6a7-aot-debug-repairs-20261102'
+    if: github.repository == 'openclaw/WebKit' && github.ref == 'refs/heads/claude/bun-c6-darwin-fs-debug-20261102'
     runs-on: blacksmith-32vcpu-ubuntu-2404
-    timeout-minutes: 240
+    timeout-minutes: 100
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          path: controls
-          ref: 097247bced3ff346a39e6b699ba707ad63a9cd07
-          persist-credentials: false
-          sparse-checkout: .github/openclaw
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: openclaw/bun
-          ref: 7b573c05d0c52dffc67d4d25daf108bed5930cf2
-          path: pipeline
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
-          path: proposal
-          persist-credentials: false
-          sparse-checkout: .github/openclaw/qualification/aot-debug-repair
-      - name: Admit the exact signed C6 Bun snapshot
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p aot-debug-proof
-          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
-          python3 controls/.github/openclaw/qualification/acquire-bun-snapshot.py source > aot-debug-proof/source-acquisition.json
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: 1281a1be4796f541bcaf0ef751941c41dfbf7817
-          path: engine
-          persist-credentials: false
-      - uses: ./pipeline/.github/actions/setup-bun
-        with:
-          bun-version: '1.4.4'
-      - name: Generate the frozen provisioning script
-        id: provision
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p aot-debug-proof
-          bun pipeline/scripts/build/ci-images/spec.ts linux-x64-debian
-          script=$(bun -e '
-            import { readFileSync, writeFileSync } from "node:fs";
-            import { resolve, join } from "node:path";
-            import { provisionScript, sectionsFor } from "./pipeline/scripts/openclaw-release/release.ts";
-            const dir = resolve("pipeline/build/ci-images/linux-x64-debian");
-            const out = join(dir, "openclaw-provision.sh");
-            writeFileSync(out, provisionScript(readFileSync(join(dir, "bootstrap.sh"), "utf8"), sectionsFor([])));
-            console.log(out);
-          ')
-          test -f "$script"
-          script_relative=${script#"$GITHUB_WORKSPACE/"}
-          test "$script_relative" != "$script"
-          echo "script=/work/$script_relative" >> "$GITHUB_OUTPUT"
-      - name: Provision the pinned native x64 toolchain
-        id: container
-        timeout-minutes: 45
-        shell: bash
-        env:
-          SCRIPT: ${{ steps.provision.outputs.script }}
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = x86_64
-          test "$(df --output=avail -B1 "$GITHUB_WORKSPACE" | tail -1)" -ge 68719476736
-          cat /proc/meminfo > aot-debug-proof/runner-memory.log
-          df -B1 "$GITHUB_WORKSPACE" > aot-debug-proof/runner-disk.log
-          container_id=$(docker run --detach --name bun-aot-debug-consumer -e CI=true -v "$GITHUB_WORKSPACE:/work" -w /work \
-            docker.io/library/debian:13@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c sleep infinity)
-          echo "id=$container_id" >> "$GITHUB_OUTPUT"
-          docker exec -e SCRIPT bun-aot-debug-consumer sh -euc 'sh "$SCRIPT" c6a7bf9d8dc4d44db9f826e47a5ae7645ea6e8c9 openclaw-release'
-          docker exec bun-aot-debug-consumer sh -euc 'apt-get update; apt-get install --yes --no-install-recommends python3 ruby bison gawk perl libxml2-dev pkg-config libicu-dev'
-      - name: Prove current repairs and the host namespace cutover through bun bd
-        shell: bash
-        env:
-          QUALIFICATION_CONTROLS: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          docker exec -e QUALIFICATION_CONTROLS bun-aot-debug-consumer bash -e -lc '
-            . /etc/profile.d/bun-ci.sh
-            for repo in /work/source /work/engine /work/pipeline /work/proposal; do git config --global --add safe.directory "$repo"; done
-            unset CI BUILDKITE GITHUB_ACTIONS GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
-            export BUN_WEBKIT_PATH=/work/engine CMAKE_BUILD_PARALLEL_LEVEL=2 CARGO_BUILD_JOBS=2
-            python3 /work/proposal/.github/openclaw/qualification/aot-debug-repair/qualify.py
-          '
-      - name: Retain bounded source and native proof
-        if: always()
-        shell: bash
-        env:
-          CONTAINER_ID: ${{ steps.container.outputs.id }}
-        run: |
-          set -euo pipefail
-          if test -n "$CONTAINER_ID"; then
-            [[ "$CONTAINER_ID" =~ ^[0-9a-f]{64}$ ]]
-            docker stop --time 30 "$CONTAINER_ID" > /dev/null
-            test "$(docker inspect --format '{{.State.Running}}' "$CONTAINER_ID")" = false
-          fi
-          python3 - <<'PY'
-          import hashlib, json, stat, subprocess
-          from pathlib import Path
-          out = Path('aot-debug-proof')
-          out.mkdir(exist_ok=True)
-          controls = Path('controls/.github/openclaw/qualification')
-          files = sorted(out.iterdir()) + sorted(Path('proposal/.github/openclaw/qualification/aot-debug-repair').iterdir())
-          assert 0 < len(files) <= 112 and all(stat.S_ISREG(p.lstat().st_mode) for p in files)
-          assert sum(p.stat().st_size for p in files) <= 128 * 1024**2
-          def sha(path):
-              with path.open('rb') as stream: return hashlib.file_digest(stream, 'sha256').hexdigest()
-          manifest = out / 'archive-manifest.json'
-          manifest.write_text(json.dumps({str(p): {'bytes': p.stat().st_size, 'sha256': sha(p)} for p in files}, indent=2) + '\n')
-          files.append(manifest)
-          archive = Path('bun-aot-debug-proof.tar.gz.partial')
-          subprocess.run(['tar', '-czf', str(archive), '--', *map(str, files)], check=True)
-          assert archive.stat().st_size <= 32 * 1024**2
-          archive.rename('bun-aot-debug-proof.tar.gz')
-          Path('bun-aot-debug-SHA256SUMS').write_text(sha(Path('bun-aot-debug-proof.tar.gz')) + '  bun-aot-debug-proof.tar.gz\n')
-          PY
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
-        with:
-          name: current-bun-aot-debug-proof
-          path: |
-            bun-aot-debug-proof.tar.gz
-            bun-aot-debug-SHA256SUMS
-          if-no-files-found: error
-          retention-days: 7
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
-        with:
-          name: current-bun-aot-debug-executable
-          path: source/build/debug-prepush/bun
-          compression-level: 0
-          if-no-files-found: warn
-          retention-days: 7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        path: controls
+        ref: '097247bced3ff346a39e6b699ba707ad63a9cd07'
+        persist-credentials: false
+        sparse-checkout: ".github/openclaw"
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        repository: openclaw/bun
+        ref: 7b573c05d0c52dffc67d4d25daf108bed5930cf2
+        path: pipeline
+        persist-credentials: false
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: "${{ github.sha }}"
+        path: proposal
+        persist-credentials: false
+        sparse-checkout: ".github/openclaw/qualification/darwin-fs-repair"
+    - name: Admit the exact signed C6 Bun snapshot
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p fs-debug-proof
+        unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+        python3 controls/.github/openclaw/qualification/acquire-bun-snapshot.py source > fs-debug-proof/source-acquisition.json
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: 1281a1be4796f541bcaf0ef751941c41dfbf7817
+        path: engine
+        persist-credentials: false
+    - uses: "./pipeline/.github/actions/setup-bun"
+      with:
+        bun-version: 1.4.4
+    - name: Generate the frozen provisioning script
+      id: provision
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p fs-debug-proof
+        bun pipeline/scripts/build/ci-images/spec.ts linux-x64-debian
+        script=$(bun -e '
+          import { readFileSync, writeFileSync } from "node:fs";
+          import { resolve, join } from "node:path";
+          import { provisionScript, sectionsFor } from "./pipeline/scripts/openclaw-release/release.ts";
+          const dir = resolve("pipeline/build/ci-images/linux-x64-debian");
+          const out = join(dir, "openclaw-provision.sh");
+          writeFileSync(out, provisionScript(readFileSync(join(dir, "bootstrap.sh"), "utf8"), sectionsFor([])));
+          console.log(out);
+        ')
+        test -f "$script"
+        script_relative=${script#"$GITHUB_WORKSPACE/"}
+        test "$script_relative" != "$script"
+        echo "script=/work/$script_relative" >> "$GITHUB_OUTPUT"
+    - name: Provision the pinned native x64 toolchain
+      id: container
+      timeout-minutes: 45
+      shell: bash
+      env:
+        SCRIPT: "${{ steps.provision.outputs.script }}"
+      run: |
+        set -euo pipefail
+        test "$(uname -m)" = x86_64
+        test "$(df --output=avail -B1 "$GITHUB_WORKSPACE" | tail -1)" -ge 68719476736
+        cat /proc/meminfo > fs-debug-proof/runner-memory.log
+        df -B1 "$GITHUB_WORKSPACE" > fs-debug-proof/runner-disk.log
+        container_id=$(docker run --detach --name bun-fs-debug-consumer -e CI=true -v "$GITHUB_WORKSPACE:/work" -w /work \
+          docker.io/library/debian:13@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c sleep infinity)
+        echo "id=$container_id" >> "$GITHUB_OUTPUT"
+        docker exec -e SCRIPT bun-fs-debug-consumer sh -euc 'sh "$SCRIPT" c6a7bf9d8dc4d44db9f826e47a5ae7645ea6e8c9 openclaw-release'
+        docker exec bun-fs-debug-consumer sh -euc 'apt-get update; apt-get install --yes --no-install-recommends python3 ruby bison gawk perl libxml2-dev pkg-config libicu-dev'
+    - name: Check all twelve Rust target configurations
+      shell: bash
+      env:
+        QUALIFICATION_CONTROLS: "${{ github.sha }}"
+      run: |
+        set -euo pipefail
+        docker exec -e QUALIFICATION_CONTROLS bun-fs-debug-consumer bash -e -lc '
+          . /etc/profile.d/bun-ci.sh
+          for repo in /work/source /work/engine /work/pipeline /work/proposal; do git config --global --add safe.directory "$repo"; done
+          unset CI BUILDKITE GITHUB_ACTIONS GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          export BUN_WEBKIT_PATH=/work/engine CMAKE_BUILD_PARALLEL_LEVEL=2 CARGO_BUILD_JOBS=2 PROOF_WORK=/work
+          python3 /work/proposal/.github/openclaw/qualification/darwin-fs-repair/qualify.py rust
+        '
+    - name: Retain bounded source and native proof
+      if: always()
+      shell: bash
+      env:
+        CONTAINER_ID: "${{ steps.container.outputs.id }}"
+      run: |
+        set -euo pipefail
+        if test -n "$CONTAINER_ID"; then
+          [[ "$CONTAINER_ID" =~ ^[0-9a-f]{64}$ ]]
+          docker stop --time 30 "$CONTAINER_ID" > /dev/null
+          test "$(docker inspect --format '{{.State.Running}}' "$CONTAINER_ID")" = false
+        fi
+        python3 - <<'PY'
+        import hashlib, json, stat, subprocess
+        from pathlib import Path
+        out = Path('fs-debug-proof')
+        out.mkdir(exist_ok=True)
+        controls = Path('controls/.github/openclaw/qualification')
+        files = sorted(out.iterdir()) + sorted(Path('proposal/.github/openclaw/qualification/darwin-fs-repair').iterdir())
+        assert 0 < len(files) <= 112 and all(stat.S_ISREG(p.lstat().st_mode) for p in files)
+        assert sum(p.stat().st_size for p in files) <= 128 * 1024**2
+        def sha(path):
+            with path.open('rb') as stream: return hashlib.file_digest(stream, 'sha256').hexdigest()
+        manifest = out / 'archive-manifest.json'
+        manifest.write_text(json.dumps({str(p): {'bytes': p.stat().st_size, 'sha256': sha(p)} for p in files}, indent=2) + '\n')
+        files.append(manifest)
+        archive = Path('bun-fs-debug-proof.tar.gz.partial')
+        subprocess.run(['tar', '-czf', str(archive), '--', *map(str, files)], check=True)
+        assert archive.stat().st_size <= 32 * 1024**2
+        archive.rename('bun-fs-debug-proof.tar.gz')
+        Path('bun-fs-debug-SHA256SUMS').write_text(sha(Path('bun-fs-debug-proof.tar.gz')) + '  bun-fs-debug-proof.tar.gz\n')
+        PY
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      if: always()
+      with:
+        name: current-bun-fs-rust-proof
+        path: |
+          bun-fs-debug-proof.tar.gz
+          bun-fs-debug-SHA256SUMS
+        if-no-files-found: error
+        retention-days: 7
+  darwin-arm64:
+    if: github.repository == 'openclaw/WebKit' && github.ref == 'refs/heads/claude/bun-c6-darwin-fs-debug-20261102'
+    runs-on: macos-15
+    timeout-minutes: 240
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: '1'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        path: controls
+        ref: '097247bced3ff346a39e6b699ba707ad63a9cd07'
+        persist-credentials: false
+        sparse-checkout: ".github/openclaw"
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: "${{ github.sha }}"
+        path: proposal
+        persist-credentials: false
+        sparse-checkout: ".github/openclaw/qualification/darwin-fs-repair"
+    - name: Admit the exact signed C6 Bun snapshot
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p fs-debug-proof
+        unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+        python3 controls/.github/openclaw/qualification/acquire-bun-snapshot.py source > fs-debug-proof/source-acquisition.json
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: 1281a1be4796f541bcaf0ef751941c41dfbf7817
+        persist-credentials: false
+        sparse-checkout: |
+          /*
+          !/LayoutTests/
+          !/JSTests/*
+          !/PerformanceTests/
+          !/Websites/
+          !/ManualTests/
+          !/WebDriverTests/
+        path: engine
+        sparse-checkout-cone-mode: false
+    - uses: "./source/.github/actions/setup-bun"
+      with:
+        bun-version: 1.4.4
+    - name: Read the candidate toolchain pins
+      id: pins
+      working-directory: source
+      run: |
+        # shellcheck disable=SC2016
+        bun -e 'import { pins } from "./scripts/build/ci-images/spec.ts"; console.log(`llvm=${pins.llvm.version.split(".")[0]}\nnode=${pins.nodejs.version}\nrust=${pins.rust.channel}`)' >> "$GITHUB_OUTPUT"
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      with:
+        node-version: "${{ steps.pins.outputs.node }}"
+    - name: Install native build tools
+      timeout-minutes: 15
+      env:
+        LLVM_MAJOR: "${{ steps.pins.outputs.llvm }}"
+        RUST_TOOLCHAIN: "${{ steps.pins.outputs.rust }}"
+      run: |
+        test "$(uname -s)" = Darwin && test "$(uname -m)" = arm64
+        python3 -c 'import hashlib; assert callable(hashlib.file_digest)'
+        brew install cmake ninja nasm ccache go llvm
+        llvm_bin="$(brew --prefix llvm)/bin"
+        "$llvm_bin/clang" --version | grep -F "clang version ${LLVM_MAJOR}."
+        echo "$llvm_bin" >> "$GITHUB_PATH"
+        echo "CC=$llvm_bin/clang" >> "$GITHUB_ENV"
+        echo "CXX=$llvm_bin/clang++" >> "$GITHUB_ENV"
+        rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rust-src
+        echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+    - name: Prove the real Darwin filesystem boundary through bun bd
+      env:
+        QUALIFICATION_CONTROLS: "${{ github.sha }}"
+      run: |
+        set -euo pipefail
+        unset CI BUILDKITE GITHUB_ACTIONS GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+        export PROOF_WORK="$GITHUB_WORKSPACE" BUN_WEBKIT_PATH="$GITHUB_WORKSPACE/engine"
+        export CMAKE_BUILD_PARALLEL_LEVEL=1 CARGO_BUILD_JOBS=1
+        python3 proposal/.github/openclaw/qualification/darwin-fs-repair/qualify.py darwin
+    - name: Retain bounded native filesystem proof
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 - <<'PY'
+        import hashlib, json, stat, subprocess
+        from pathlib import Path
+        out = Path('fs-debug-proof')
+        out.mkdir(exist_ok=True)
+        controls = Path('controls/.github/openclaw/qualification')
+        files = sorted(out.iterdir()) + sorted(Path('proposal/.github/openclaw/qualification/darwin-fs-repair').iterdir())
+        assert 0 < len(files) <= 112 and all(stat.S_ISREG(p.lstat().st_mode) for p in files)
+        assert sum(p.stat().st_size for p in files) <= 128 * 1024**2
+        def sha(path):
+            with path.open('rb') as stream: return hashlib.file_digest(stream, 'sha256').hexdigest()
+        manifest = out / 'archive-manifest.json'
+        manifest.write_text(json.dumps({str(p): {'bytes': p.stat().st_size, 'sha256': sha(p)} for p in files}, indent=2) + '\n')
+        files.append(manifest)
+        archive = Path('bun-fs-debug-proof.tar.gz.partial')
+        subprocess.run(['tar', '-czf', str(archive), '--', *map(str, files)], check=True)
+        assert archive.stat().st_size <= 32 * 1024**2
+        archive.rename('bun-fs-debug-proof.tar.gz')
+        Path('bun-fs-debug-SHA256SUMS').write_text(sha(Path('bun-fs-debug-proof.tar.gz')) + '  bun-fs-debug-proof.tar.gz\n')
+        PY
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      if: always()
+      with:
+        name: current-bun-darwin-fs-debug-proof
+        path: |
+          bun-fs-debug-proof.tar.gz
+          bun-fs-debug-SHA256SUMS
+        if-no-files-found: error
+        retention-days: 7
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      if: always()
+      with:
+        name: current-bun-darwin-fs-debug-executable
+        path: source/build/fs-debug/bun-debug
+        compression-level: 0
+        if-no-files-found: warn
+        retention-days: 7

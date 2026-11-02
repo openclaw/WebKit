@@ -1,0 +1,34 @@
+{
+  "bun": "c6a7bf9d8dc4d44db9f826e47a5ae7645ea6e8c9",
+  "bun_tree": "ef814c1b5ef7731d6373cfacb8c88b0227a670aa",
+  "engine": "1281a1be4796f541bcaf0ef751941c41dfbf7817",
+  "patch_sha256": "3fd313417d9d7c5483dedb7389fffbd46f8f75d22108256e85fb502d3c761c70",
+  "files": {
+    "src/runtime/node/node_fs.rs": {
+      "before": "deeb5167313b012231cdbfd0868c1ab85c3ed420bf44d8ab46d804a8b2f2260c",
+      "after": "11e72f3f6bcda90ce7c58bfd00d0055bfe13661569c203fedacf0015c018fc2a"
+    },
+    "src/sys/lib.rs": {
+      "before": "38db5739b98354ec72340a3eb2acd7cf906f528708157e65e94a9ed405535e7f",
+      "after": "0ba617c40190b945e3ed072f96b2deb191225b45059373ff5e569cfa2403023b"
+    }
+  },
+  "test": {
+    "path": "test/js/node/fs/fs.test.ts",
+    "sha256": "59dca4b4264b85a12366c6c8808e84b6f2d6a3205e77a5f973b27b64f3f2a29a"
+  },
+  "targets": [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-linux-android",
+    "aarch64-linux-android",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-unknown-freebsd",
+    "aarch64-unknown-freebsd"
+  ]
+}
