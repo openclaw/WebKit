@@ -16,7 +16,7 @@ OUT = WORK / "aot-debug-proof"
 SOURCE = WORK / "source"
 ENGINE = WORK / "engine"
 MANIFEST = json.loads((HERE / "source-manifest.json").read_text())
-NAMESPACE = "host require keeps compiled namespace markers and defaults separate from imports"
+NAMESPACE = "host require preserves compiled facades, raw mocks, and forwarded defaults"
 applied = []
 proof = {"passed": False, "scope": "secretless native Linux x64 AOT Debug; no release or shipping pin promotion",
          "bun_base": MANIFEST["bun"], "engine_base": MANIFEST["engine"], "steps": {}}
@@ -55,6 +55,10 @@ def command(name, argv, cwd=SOURCE):
     row = {"argv": argv, "exit_code": result.returncode, "log_bytes": log.stat().st_size,
            "log_sha256": sha(log)}
     proof["steps"][name] = row
+    if name.startswith("namespace-") or name in ("repairs", "vm-pressure", "json-smoke", "mock-sibling"):
+        binary = SOURCE / "build/debug-prepush/bun-debug"
+        if binary.is_file():
+            proof["retained_binary"] = {"bytes": binary.stat().st_size, "sha256": sha(binary)}
     save()
     assert log.stat().st_size <= 64 * 1024**2, "unbounded phase log"
     return result.returncode
@@ -129,28 +133,36 @@ def main():
         overlay("engine-require-facade.patch")
         assert command("install-root", ["bun", "install", "--frozen-lockfile"]) == 0
         assert command("install-tests", ["bun", "install", "--frozen-lockfile"], SOURCE / "test") == 0
-        red = selected("namespace-red", "./test/aot/run-aot.test.ts", NAMESPACE)
-        row = selected_case("namespace-red", NAMESPACE)
-        text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", (OUT / "namespace-red.log").read_text(errors="replace"))
-        assert red == 1 and row["failed"]
-        assert "namespace facade" in text and "expect(host.mocked.__esModule).toBe(true)" in text
-        assert re.search(r"\b1 fail\b", text)
-        assert re.search(r"(?m)^error: expect\(received\)\.toBe\(expected\)\s*$", text)
-        assert re.search(r"Expected: true\s+Received: undefined", text)
-        assert re.search(r"(?m)^\s+at .*[/\\]one\.test\.ts:24:\d+\)?\s*$", text)
+        assert command("rust-format-current", ["rustfmt", "--edition", "2024", "--config", "skip_children=true", "--check", "src/sys/lib.rs"]) == 0
+        assert command("js-format-current", ["bunx", "--no-install", "prettier", "--check", "test/aot/run-aot.test.ts"]) == 0
+        before = selected("namespace-before", "./test/aot/run-aot.test.ts", NAMESPACE)
+        row = selected_case("namespace-before", NAMESPACE)
+        text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", (OUT / "namespace-before.log").read_text(errors="replace"))
         assert not re.search(r"panic|AddressSanitizer:|ASSERTION FAILED|IRTextError|Aborted|Segmentation fault", text, re.I)
-        proof["namespace_red"] = "inner mocked module marker assertion reached; setup/crashes excluded"
-        proof["red_build_inputs"] = build_inputs()
+        if before == 0:
+            assert not row["failed"]
+            proof["namespace_host_needed"] = False
+            proof["namespace_before"] = "already passes with engine repair; do not apply an unneeded Bun adapter"
+        else:
+            assert before == 1 and row["failed"]
+            assert "namespace facade" in text and "expect(forwarded.default).toBe(host.required)" in text
+            assert re.search(r"\b1 fail\b", text)
+            assert re.search(r"(?m)^error: expect\(received\)\.toBe\(expected\)\s*$", text)
+            assert re.search(r"(?m)^\s+at .*[/\\]one\.test\.ts:36:\d+\)?\s*$", text)
+            proof["namespace_host_needed"] = True
+            proof["namespace_before"] = "exact CommonJS-forwarded compiled default identity failure"
+        proof["before_build_inputs"] = build_inputs()
         binary = SOURCE / "build/debug-prepush/bun-debug"
         assert binary.is_file()
-        proof["red_binary"] = {"bytes": binary.stat().st_size, "sha256": sha(binary)}
+        proof["before_binary"] = {"bytes": binary.stat().st_size, "sha256": sha(binary)}
         save()
-        overlay("namespace-host.patch")
-        assert selected("namespace-green", "./test/aot/run-aot.test.ts", NAMESPACE) == 0
-        one_pass("namespace-green", NAMESPACE)
+        if proof["namespace_host_needed"]:
+            overlay("namespace-host.patch")
+            assert selected("namespace-after", "./test/aot/run-aot.test.ts", NAMESPACE) == 0
+            one_pass("namespace-after", NAMESPACE)
         repairs = ["./test/js/bun/plugin/plugins.test.ts", "./test/js/node/fs/fs.test.ts",
                    "./test/js/node/module/node-module-module.test.js"]
-        assert command("repairs", bd + ["test", *repairs, "--reporter=junit",
+        assert command("repairs", bd + ["test", *repairs, "--max-concurrency=1", "--reporter=junit",
                        "--reporter-outfile=" + str(OUT / "repairs.xml")]) == 0
         rows = cases("repairs")
         assert not any(row["failed"] for row in rows)
@@ -177,9 +189,14 @@ def main():
             one_pass(name, title)
         proof["green_build_inputs"] = build_inputs()
         proof["green_binary"] = {"bytes": binary.stat().st_size, "sha256": sha(binary)}
-        for group in MANIFEST["groups"].values():
+        proof["qualified_sources"] = {}
+        for name, group in MANIFEST["groups"].items():
+            expected_side = "after" if name in applied else "before"
+            assert name in applied or name == "namespace-host.patch"
             for path, identity in group["files"].items():
-                assert sha(WORK / group["repo"] / path) == identity["after"], path
+                actual = sha(WORK / group["repo"] / path)
+                assert actual == identity[expected_side], path
+                proof["qualified_sources"][group["repo"] + "/" + path] = actual
         proof["passed"] = True
     finally:
         proof["restored"] = False

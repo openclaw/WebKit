@@ -1,6 +1,8 @@
+diff --git a/src/sys/lib.rs b/src/sys/lib.rs
+index 6525233c55..34aa0e79ca 100644
 --- a/src/sys/lib.rs
 +++ b/src/sys/lib.rs
-@@ -3068,63 +3068,9 @@
+@@ -3068,63 +3068,14 @@ mod posix_impl {
          }
          #[cfg(target_os = "macos")]
          {
@@ -59,15 +61,18 @@
 -                if last_errno() != libc::EINTR {
 -                    break;
 -                }
--            }
--        }
-+            get_full_path(path, buf).map(|resolved| &*resolved)
-+        }
++            match get_full_path(path, buf).map(|resolved| resolved.len()) {
++                Ok(len) => Ok(&buf.0[..len]),
++                // Darwin realpath resolves file/ and file/.., unlike the kernel's full-path lookup.
++                Err(err) if err.get_errno() == E::ENOTDIR => realpath(path, buf),
++                Err(err) => Err(err),
+             }
+         }
 +        #[cfg(not(target_os = "macos"))]
          realpath(path, buf)
      }
  
-@@ -3163,6 +3109,18 @@
+@@ -3163,6 +3114,18 @@ mod posix_impl {
                      .iter()
                      .any(|prefix| out.0[..len].starts_with(prefix)) =>
              {

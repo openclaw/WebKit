@@ -1,6 +1,8 @@
+diff --git a/test/js/node/vm/vm.test.ts b/test/js/node/vm/vm.test.ts
+index fe1fadc4b4..271b83b5b7 100644
 --- a/test/js/node/vm/vm.test.ts
 +++ b/test/js/node/vm/vm.test.ts
-@@ -4440,8 +4440,12 @@
+@@ -4440,8 +4440,12 @@ describe("bounded vm compilation cache", () => {
        const first = compile(); first();
        const second = compile();
        assert.equal(shared(first, second), true);

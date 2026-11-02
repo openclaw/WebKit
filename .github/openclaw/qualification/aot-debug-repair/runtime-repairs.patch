@@ -1,47 +1,50 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 0432b95454..5eb8e0c84e 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -1,6 +1,14 @@
- # OpenClaw Bun fork changelog
+@@ -2,6 +2,14 @@
  
  ## Unreleased
-+
+ 
 +- Resolve macOS paths through the canonical full-path owner while preserving hard-link names and POSIX locks.
 +
-+- Keep host `require()` facades for compiled modules separate from import namespaces, including forwarded CommonJS exports and native-module mocks.
++- Preserve compiled namespace defaults when CommonJS forwards them, while retaining raw native-module mock exports.
 +
 +- Keep bare plugin loading separate from filelike resolver probes so builtin and recursive resolutions retain their guards.
 +
 +- Preserve `lstat` ENOTDIR errors with `throwIfNoEntry: false` while retaining `stat` no-entry behavior.
- 
++
  - Remove obsolete missing-script handling reintroduced by the upstream sync while preserving Node-compatible stdin and REPL dispatch.
  
+ - Keep heap-limit and negative CA flags covered by the exhaustive runtime startup requirement table after the upstream sync.
+diff --git a/src/jsc/ModuleLoader.rs b/src/jsc/ModuleLoader.rs
+index 4e9fe32088..ab2b493160 100644
 --- a/src/jsc/ModuleLoader.rs
 +++ b/src/jsc/ModuleLoader.rs
-@@ -460,7 +460,11 @@
+@@ -460,7 +460,9 @@ pub(crate) fn namespace_and_path(specifier: &[u8]) -> (&[u8], &[u8]) {
  }
  
  pub(crate) fn on_load_namespace_and_path(key: &[u8]) -> Option<(&[u8], &[u8])> {
 -    has_extension_or_namespace(key).then(|| namespace_and_path(key))
 +    (has_extension_or_namespace(key)
-+        || (!bun_paths::is_absolute(key)
-+            && !key.starts_with(b"./")
-+            && !key.starts_with(b"../")))
++        || (!bun_paths::is_absolute(key) && !key.starts_with(b"./") && !key.starts_with(b"../")))
 +    .then(|| namespace_and_path(key))
  }
  
  /// C++ entry point: length of `key`'s `onLoad` namespace (0 for `file`), or -1 if no `onLoad` runs for it.
-@@ -506,6 +510,5 @@
+@@ -506,6 +508,5 @@ pub(crate) fn has_extension_or_namespace(specifier: &[u8]) -> bool {
          }
      }
      !bun_paths::is_absolute(specifier)
 -        && (bun_core::strings::index_of_char_usize(specifier, b':').is_some()
 -            || (!specifier.starts_with(b"./") && !specifier.starts_with(b"../")))
--}
 +        && bun_core::strings::index_of_char_usize(specifier, b':').is_some()
-+}
+ }
+diff --git a/src/jsc/VirtualMachine.rs b/src/jsc/VirtualMachine.rs
+index b1c1e81f57..6700103da1 100644
 --- a/src/jsc/VirtualMachine.rs
 +++ b/src/jsc/VirtualMachine.rs
-@@ -6200,14 +6200,16 @@
+@@ -6200,14 +6200,21 @@ impl VirtualMachine {
                      let is_bare = bun_resolver::is_package_path(&answer_utf8)
                          && ModuleLoader::on_load_namespace_and_path(&answer_utf8)
                              .is_some_and(|(namespace, _)| namespace.is_empty());
@@ -55,7 +58,12 @@
 -                                Some(Err(error)) => return Ok(Some(Err(error))),
 -                            });
 +                            || (probe_filelike
-+                                && match run_on_resolve(global, &answer, source, mode.import_kind())? {
++                                && match run_on_resolve(
++                                    global,
++                                    &answer,
++                                    source,
++                                    mode.import_kind(),
++                                )? {
 +                                    None => false,
 +                                    Some(Ok(_)) => true,
 +                                    Some(Err(error)) => return Ok(Some(Err(error))),
@@ -63,9 +71,11 @@
                      let global_cache = if is_own {
                          bun_resolver::GlobalCache::disable
                      } else {
+diff --git a/src/runtime/node/node_fs.rs b/src/runtime/node/node_fs.rs
+index cc76b0a08f..7889b6b033 100644
 --- a/src/runtime/node/node_fs.rs
 +++ b/src/runtime/node/node_fs.rs
-@@ -479,7 +479,10 @@
+@@ -479,7 +479,10 @@ fn stat_failure(err: sys::Error, path: &[u8], args: &args::Stat) -> Maybe<StatOr
              return Ok(stats);
          }
      }
@@ -77,9 +87,11 @@
          return Ok(StatOrNotFound::NotFound);
      }
      Err(err.with_path(written))
+diff --git a/test/js/bun/plugin/plugins.test.ts b/test/js/bun/plugin/plugins.test.ts
+index 4ad9aee957..ff0a683319 100644
 --- a/test/js/bun/plugin/plugins.test.ts
 +++ b/test/js/bun/plugin/plugins.test.ts
-@@ -2824,7 +2824,7 @@
+@@ -2824,7 +2824,7 @@ describe.concurrent("onResolve is called for a specifier with no extension and n
          expect.stringMatching(/^file:.*\/not-there\.js$/),
          "onResolve /not/there",
          expect.stringMatching(/^file:\/\/\/(\w:\/)?not\/there$/),
@@ -88,7 +100,7 @@
          expect.stringMatching(/^file:\/\/\/(\w:\/)?not\/there\.js$/),
        ],
        stderr: "",
-@@ -3298,20 +3298,20 @@
+@@ -3298,20 +3298,20 @@ describe.concurrent("`contents` from a plugin is loaded like a file with the sam
        "js",
        `export const a = 1; export default { b: 2 };`,
        { a: 1, default: { b: 2 } },
@@ -112,7 +124,7 @@
        "function f",
      ],
      "JSX": [
-@@ -3319,20 +3319,20 @@
+@@ -3319,20 +3319,20 @@ describe.concurrent("`contents` from a plugin is loaded like a file with the sam
        "jsx",
        `/** @jsxRuntime classic */ /** @jsx h */ const h = tag => tag; export default <div />;`,
        { default: "div" },
@@ -136,7 +148,7 @@
        { a: 1 },
      ],
      "TSX": [
-@@ -3340,7 +3340,7 @@
+@@ -3340,7 +3340,7 @@ describe.concurrent("`contents` from a plugin is loaded like a file with the sam
        "tsx",
        `/** @jsxRuntime classic */ /** @jsx h */ const h = (tag: string) => tag; export default <div />;`,
        { default: "div" },
@@ -145,7 +157,7 @@
      ],
      "a JSON object": [
        "json",
-@@ -3384,13 +3384,13 @@
+@@ -3384,13 +3384,13 @@ describe.concurrent("`contents` from a plugin is loaded like a file with the sam
        { a: { b: { "@c": "2", "#text": "t" } }, default: { a: { b: { "@c": "2", "#text": "t" } } } },
        { a: { b: { "@c": "2", "#text": "t" } } },
      ],
@@ -161,7 +173,7 @@
      ],
      "CSS": ["css", "css", `.a { color: red }`, { __esModule: true, default: {} }, {}],
    };
-@@ -3616,7 +3616,10 @@
+@@ -3616,7 +3616,10 @@ describe.concurrent("`contents` from a plugin is loaded like a file with the sam
      `;
      const { stdout, stderr, exitCode } = await run({ "entry.ts": entry }, ["entry.ts"]);
      const namespace = { ...object, default: { ...object, default: 3 } };
@@ -173,7 +185,7 @@
      expect({ loaded: JSON.parse(stdout || "null"), stderr, exitCode }).toEqual({
        loaded: { file: each, ".virtual": each },
        stderr: "",
-@@ -3684,7 +3687,7 @@
+@@ -3684,7 +3687,7 @@ describe.concurrent("`contents` from a plugin is loaded like a file with the sam
            { v: 1 },
            { default: { v: 2 }, v: 2 },
            { v: 3 },
@@ -182,9 +194,11 @@
          ]) + "\n",
        stderr: "",
        exitCode: 0,
+diff --git a/test/js/node/module/node-module-module.test.js b/test/js/node/module/node-module-module.test.js
+index 5bd4e4d589..7cbf275de2 100644
 --- a/test/js/node/module/node-module-module.test.js
 +++ b/test/js/node/module/node-module-module.test.js
-@@ -68,9 +68,8 @@
+@@ -68,9 +68,8 @@ describe.concurrent("registerHooks Node 24 parity", () => {
      // Known divergence: Bun's single import/require registry reuses a completed record.
      // Node runs load again for require() and can return distinct CommonJS-request source ("outer").
      ["record-identity-completed-handoff", '{"values":["one","one"],"loads":1}'],

@@ -1,4 +1,4 @@
-name: OpenClaw current AOT Bun Debug repair proof
+name: OpenClaw current AOT Bun scoped forwarding proof
 on:
   workflow_dispatch:
 permissions:

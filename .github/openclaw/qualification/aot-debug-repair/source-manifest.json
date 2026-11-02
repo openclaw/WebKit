@@ -5,19 +5,19 @@
   "groups": {
     "runtime-repairs.patch": {
       "repo": "source",
-      "sha256": "44aa55159e8a564acbfa8349b8864a9ac513da541e1a5fd8716c76f17f554eec",
+      "sha256": "f51ced2a66f9f554458b2cce598ce2e2d90f147807893761f2f498438aa48690",
       "files": {
         "CHANGELOG.md": {
           "before": "94e32e3d3137165298ffdb6c95b26687596f0e5133d62fa8c26a7e0a9413a2b0",
-          "after": "596b54794aebe27cde25398c43c6ad4be6f33595e901f6a3c931a71eb9bdfc48"
+          "after": "bb8a66fc0e907437cda94633fc9b7577dd4255599435c0f087dc3665fbfbcd9e"
         },
         "src/jsc/ModuleLoader.rs": {
           "before": "fdec413765c3f19e1b2260248c5cdc53f8d406aef302acb8a2a4ca412a404560",
-          "after": "071070975aeb0768cd25f9d6811b25a241543504c235c3be003c947a680f9331"
+          "after": "e22e34ed43338f6c6be7aa92dc4580eb6f6c722fb6fd82b0d52af2a38785c36f"
         },
         "src/jsc/VirtualMachine.rs": {
           "before": "539acca6617c0d2fc023f9bcb9406565f5eed1efb158d38923bce568b14dd9a7",
-          "after": "feea6b75ef6fe75a72413a821ff1dcfc6961bd63addbef3c8d26fd549ed8061b"
+          "after": "fb84f24619ba7345161d95fcb4a89cb6ab8108ce752de86c62922a9bc6335b51"
         },
         "src/runtime/node/node_fs.rs": {
           "before": "deeb5167313b012231cdbfd0868c1ab85c3ed420bf44d8ab46d804a8b2f2260c",
@@ -35,29 +35,21 @@
     },
     "namespace-regression.patch": {
       "repo": "source",
-      "sha256": "a386bb4c357e287dff29cc043913883115498ef6aee47619019d1249ce30efd5",
+      "sha256": "84e1b23b53dd80b5821b9a92109f5bc59624ff85b09921f1c94b5394551f86b4",
       "files": {
         "test/aot/run-aot.test.ts": {
           "before": "f80978e02e9f28b660211c01752fe156c03ddc5b161bbe7c77b292a6e66b0556",
-          "after": "84c969401b9e0ddcc4a99d37096c4466dbfb312f63ca0f7864639f0ce23ca698"
+          "after": "e03b381d73666fd73f1aa0e7f19f78673893ae969f04592778d38c053cd85bb4"
         }
       }
     },
     "namespace-host.patch": {
       "repo": "source",
-      "sha256": "d71a4753064c18a3f68c093460171be91ef6edfb44fabc8d058964bbc5509438",
+      "sha256": "473395fecba8680047bdfbe717f5d79865610b72a6cc48b096e2ec4046cf42dd",
       "files": {
-        "src/jsc/bindings/BunCompiledModules.cpp": {
-          "before": "1cb35fa3ca361ddfab59a40f0f59db5007e81fd414fe232c8efaef63b88e3da0",
-          "after": "659803b8f32721bdb16afb7e83e5e5c614a493c429bbf2f1fd17bcbed61adfe4"
-        },
         "src/jsc/bindings/JSCommonJSModule.cpp": {
           "before": "c983a52a6b3a02cc752313fd7a1b31cb39ae58738ae448a82329a85708978657",
           "after": "832c3352cb2043dea82ff2a0c9f2b9b09ec66047135c64528428edecea267c06"
-        },
-        "src/jsc/bindings/ZigGlobalObject.cpp": {
-          "before": "9a1fc6ba4c5153362483b4fc06c43b0384ab580182724259fec891d22e950dcf",
-          "after": "777dd9afae816ac5aa90f7b960e0ae1e2d4cba64b36542dc8ad4781b6730ca18"
         }
       }
     },
@@ -97,7 +89,7 @@
     },
     "vm-pressure-regression.patch": {
       "repo": "source",
-      "sha256": "fe6d25491844ad2cc6978aff1c3d1d67437c537f7008f41c42285f13941646bc",
+      "sha256": "8d96462665cb76a3717b87a961dda1a5b30648ef807308df6a9c0d697217f4a2",
       "files": {
         "test/js/node/vm/vm.test.ts": {
           "before": "0e653c69ea8a766fd8ee28c1a0e155d2c7011e1741b1231320cb1ce89fa44862",
@@ -107,11 +99,11 @@
     },
     "darwin-path-owner.patch": {
       "repo": "source",
-      "sha256": "5fced0508581700c10d08256be08de2a00a241ab09608026edcd4df01807e023",
+      "sha256": "9ce0bf7edde2268f8718ee701760d48eb7425f3b92ebb6b712106fb1cbd78b08",
       "files": {
         "src/sys/lib.rs": {
           "before": "38db5739b98354ec72340a3eb2acd7cf906f528708157e65e94a9ed405535e7f",
-          "after": "0ba617c40190b945e3ed072f96b2deb191225b45059373ff5e569cfa2403023b"
+          "after": "b8c5bf7ad41ed6deb6f319c9655fb46660d7cfff695191931495b2ea1dd4d6ad"
         }
       }
     }

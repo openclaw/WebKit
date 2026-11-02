@@ -1,10 +1,12 @@
+diff --git a/test/aot/run-aot.test.ts b/test/aot/run-aot.test.ts
+index 97605a046d..0378bd191d 100644
 --- a/test/aot/run-aot.test.ts
 +++ b/test/aot/run-aot.test.ts
-@@ -489,6 +489,59 @@
+@@ -489,6 +489,61 @@ describe("at run time", () => {
  });
  
  describe("bun test", () => {
-+  test("host require keeps compiled namespace markers and defaults separate from imports", async () => {
++  test("host require preserves compiled facades, raw mocks, and forwarded defaults", async () => {
 +    const { stderr, exitCode } = await ranWithBunTypes(
 +      {
 +        "subject.ts": `
@@ -16,7 +18,8 @@
 +          import * as subject from "./subject.ts";
 +          test("namespace facade", async () => {
 +            const first = await import("bun:jsc");
-+            mock.module("bun:jsc", () => ({ ...first, heapSize: () => 73 }));
++            const mockExports = { ...first, heapSize: () => 73 };
++            mock.module("bun:jsc", () => mockExports);
 +            const hostPath = import.meta.dir + "/written-" + process.pid + ".mjs";
 +            await Bun.write(hostPath, 'export const required = require("./subject.ts"); export const again = require("./subject.ts"); export const mocked = require("bun:jsc"); export const mockedAgain = require("bun:jsc");');
 +            const host = await import(hostPath);
@@ -33,9 +36,10 @@
 +            expect(host.required.value).toBe(2);
 +            const current = await import("bun:jsc");
 +            expect(host.mocked).not.toBe(current);
++            expect(host.mocked).toBe(mockExports);
 +            expect(host.mockedAgain).toBe(host.mocked);
-+            expect(host.mocked.__esModule).toBe(true);
-+            expect(Object.hasOwn(host.mocked, "__esModule")).toBe(true);
++            expect(host.mocked.__esModule).toBeUndefined();
++            expect(Object.hasOwn(host.mocked, "__esModule")).toBe(false);
 +            expect(Reflect.get(current, "__esModule")).toBeUndefined();
 +            expect(Object.hasOwn(current, "__esModule")).toBe(false);
 +            expect(host.mocked.default).toBe(Reflect.get(current, "default"));
