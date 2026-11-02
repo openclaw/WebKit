@@ -1,108 +1,71 @@
-name: OpenClaw retained Linux consumer diagnostic
-
-on:
-  pull_request:
-    paths:
-      - .github/workflows/openclaw-retained-linux-diagnostic.yml
+name: OpenClaw retained Debug mock path diagnostic
+'on':
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: openclaw-retained-linux-diagnostic-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
-
+  actions: read
 jobs:
-  tls-session-baseline:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
+  linux-x64:
+    if: github.repository == 'openclaw/WebKit' && github.ref == 'refs/heads/claude/bun-c6a7-aot-debug-repairs-20261102'
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          repository: openclaw/bun
-          ref: 191755ec115ece3dd642eba3cb0143cecb5e5d7a
+          ref: ${{ github.sha }}
+          path: controls
           persist-credentials: false
-      - name: Download the exact shipped baseline
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir diagnostics
-          gh api repos/openclaw/bun/releases/assets/679971474 -H 'Accept: application/octet-stream' > diagnostics/manifest.json
-          gh api repos/openclaw/bun/releases/assets/679971203 -H 'Accept: application/octet-stream' > baseline.zip
-      - name: Verify shipping identity and replay the unchanged TLS context file
-        shell: bash
+          sparse-checkout: .github/openclaw/qualification/current-mock-path-probe.py
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 097247bced3ff346a39e6b699ba707ad63a9cd07
+          path: snapshot-controls
+          persist-credentials: false
+          sparse-checkout: .github/openclaw/qualification
+      - name: Acquire the frozen Bun type declarations and lockfile
         run: |
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          python3 snapshot-controls/.github/openclaw/qualification/acquire-bun-snapshot.py source
+      - name: Admit the retained Debug executable
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
           python3 - <<'PY'
-          import hashlib, json, os, stat, subprocess, sys, zipfile
-          from pathlib import Path, PurePosixPath
-          from xml.etree import ElementTree
-
-          def sha(path):
-              with path.open('rb') as stream:
-                  return hashlib.file_digest(stream, 'sha256').hexdigest()
-
-          commit = '191755ec115ece3dd642eba3cb0143cecb5e5d7a'
-          webkit = 'b82bc917e99110b61c3a21202d6def7457aa194c'
-          assert subprocess.check_output(['git', 'rev-parse', 'HEAD', 'HEAD^{tree}'], text=True).splitlines() == [commit, '656ed5260b61d9063f546f837238661a19514c1f']
-          assert not subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'], text=True)
-          report = Path('diagnostics').resolve()
-          manifest = report / 'manifest.json'
-          assert sha(manifest) == '8c3a9d87f37832fa07173635af52d53b813e29470afa4afdb49a83033fed039e'
-          data = json.loads(manifest.read_text())
-          assert data['bun']['commit'] == commit and data['webkit']['version'] == webkit
-          assets = [a for a in data['assets'] if a['target'] == 'linux-x64']
-          assert len(assets) == 1
-          asset = assets[0]
-          archive = Path('baseline.zip')
-          assert archive.stat().st_size == asset['size'] == 51053995
-          assert sha(archive) == asset['sha256'] == 'a59df8273c232782c16a6c0e680511becd9a49ba08fa6a1adc7baea1a632de0b'
-          executable = asset['executable']['path']
-          with zipfile.ZipFile(archive) as bundle:
-              entries = bundle.infolist()
-              path = PurePosixPath(executable)
-              assert not path.is_absolute() and '..' not in path.parts and '\\' not in executable
-              directory = str(path.parent) + '/'
-              assert len(entries) == 2 and {e.filename for e in entries} == {directory, executable}
-              folder = bundle.getinfo(directory)
-              assert folder.is_dir() and folder.file_size == 0 and stat.S_IFMT(folder.external_attr >> 16) in (0, stat.S_IFDIR)
-              entry = bundle.getinfo(executable)
-              assert stat.S_IFMT(entry.external_attr >> 16) in (0, stat.S_IFREG)
-              assert entry.file_size == asset['executable']['size'] < 256 * 1024**2
-              bundle.extract(entry, 'baseline')
-          exe = (Path('baseline') / executable).resolve()
-          assert sha(exe) == asset['executable']['sha256']
-          exe.chmod(0o700)
-          facts = json.loads(subprocess.check_output([str(exe), '-e', 'console.log(JSON.stringify({commit:Bun.revision,webkit:process.versions.webkit,platform:process.platform,arch:process.arch}))'], text=True, timeout=30))
-          assert facts == {'commit': commit, 'webkit': webkit, 'platform': 'linux', 'arch': 'x64'}
-          fixture = Path('test/js/node/tls/node-tls-context.test.ts')
-          digest = sha(fixture)
-          assert digest == '0f6ba03e222d53279f9fa553cc3390bdd9707fc7ab382294f18d292ec8ad0bb3'
-          env = dict(os.environ, CI='1', BUN_RUNTIME_TRANSPILER_CACHE_PATH='0')
-          with (report / 'stdout.log').open('xb') as stdout, (report / 'stderr.log').open('xb') as stderr:
-              result = subprocess.run([str(exe), 'test', '--expose-internals', str(fixture), '--reporter=junit', '--reporter-outfile=' + str(report / 'result.xml')],
-                  env=env, stdout=stdout, stderr=stderr, timeout=120)
-          tree = ElementTree.parse(report / 'result.xml')
-          cases = list(tree.iter('testcase'))
-          failures = [{'name': c.get('name'), 'classname': c.get('classname')} for c in cases if c.find('failure') is not None or c.find('error') is not None]
-          outcome = {'qualification': False, 'identity': facts, 'executable_sha256': sha(exe), 'fixture_sha256': digest,
-                     'exitCode': result.returncode, 'cases': len(cases), 'skipped': sum(c.find('skipped') is not None for c in cases), 'failures': failures}
-          (report / 'outcome.json').write_text(json.dumps(outcome, indent=2) + '\n')
-          print(json.dumps(outcome), flush=True)
-          assert len(cases) == 83 and outcome['skipped'] == 0, 'baseline file did not execute completely'
-          assert result.returncode in (0, 1) and bool(failures) == (result.returncode == 1)
-          assert sha(fixture) == digest and sha(exe) == asset['executable']['sha256']
-          sys.exit(result.returncode)
+          import hashlib,io,json,os,stat,urllib.request,zipfile
+          from pathlib import Path
+          def get(route):
+              request=urllib.request.Request("https://api.github.com/repos/openclaw/WebKit/"+route,headers={"Authorization":"Bearer "+os.environ["GH_TOKEN"],"Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"})
+              with urllib.request.urlopen(request) as r: return r.read()
+          run=json.loads(get("actions/runs/41396456930"))
+          assert run["head_sha"]=="1047ca3631645484e812e55b6a665413941f9879" and run["conclusion"]=="failure"
+          row=json.loads(get("actions/artifacts/13120786072"))
+          assert not row["expired"] and row["name"]=="current-bun-aot-debug-executable" and row["size_in_bytes"]==1700157004
+          assert row["workflow_run"]["id"]==41396456930
+          raw=get("actions/artifacts/13120786072/zip")
+          assert len(raw)==1700157004 and hashlib.sha256(raw).hexdigest()=="8485099bd006b7dc7111e6cd7536e4e77cee1214512a2b1875478edd59805032"
+          z=zipfile.ZipFile(io.BytesIO(raw)); assert z.testzip() is None
+          assert len(z.infolist())==1
+          item=z.infolist()[0]
+          assert Path(item.filename).name=="bun-debug" and not item.filename.startswith("/") and ".." not in Path(item.filename).parts
+          assert 0<item.file_size<2*1024**3 and not stat.S_ISLNK(item.external_attr>>16)
+          target=Path("retained-bun")
+          with z.open(item) as source,target.open("wb") as sink:
+              while data:=source.read(1024**2): sink.write(data)
+          target.chmod(0o755)
           PY
-      - name: Retain the baseline result and unchanged assertions
+      - name: Probe the actual ordinary and AOT mock boundary
+        run: |
+          set -euo pipefail
+          mkdir -p mock-path-proof
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work \
+            docker.io/library/debian:13@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c \
+            sh -euc 'apt-get update >/dev/null; apt-get install --yes --no-install-recommends python3 git ca-certificates libicu76 libatomic1 >/dev/null; unset CI BUILDKITE GITHUB_ACTIONS GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN; git config --global --add safe.directory /work/source; python3 /work/controls/.github/openclaw/qualification/current-mock-path-probe.py'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: tls-session-baseline-linux-x64
-          path: diagnostics
+          name: retained-debug-mock-path-proof
+          path: mock-path-proof
           if-no-files-found: error
           retention-days: 7
