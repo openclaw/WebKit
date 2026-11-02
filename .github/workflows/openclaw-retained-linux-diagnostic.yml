@@ -1,108 +1,132 @@
-name: OpenClaw retained Linux consumer diagnostic
-
-on:
-  pull_request:
-    paths:
-      - .github/workflows/openclaw-retained-linux-diagnostic.yml
-  workflow_dispatch:
-
+---
+name: OpenClaw current Bun scoped source format qualification
+'on':
+  workflow_dispatch: 
 permissions:
   contents: read
-
 concurrency:
-  group: openclaw-retained-linux-diagnostic-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
-
+  group: openclaw-bun-source-format-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  tls-session-baseline:
+  format:
+    if: github.repository == 'openclaw/WebKit' && github.ref == 'refs/heads/claude/bun-c6-source-format-20261102'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: openclaw/bun
-          ref: 191755ec115ece3dd642eba3cb0143cecb5e5d7a
-          persist-credentials: false
-      - name: Download the exact shipped baseline
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir diagnostics
-          gh api repos/openclaw/bun/releases/assets/679971474 -H 'Accept: application/octet-stream' > diagnostics/manifest.json
-          gh api repos/openclaw/bun/releases/assets/679971203 -H 'Accept: application/octet-stream' > baseline.zip
-      - name: Verify shipping identity and replay the unchanged TLS context file
-        shell: bash
-        run: |
-          set -euo pipefail
-          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
-          python3 - <<'PY'
-          import hashlib, json, os, stat, subprocess, sys, zipfile
-          from pathlib import Path, PurePosixPath
-          from xml.etree import ElementTree
-
-          def sha(path):
-              with path.open('rb') as stream:
-                  return hashlib.file_digest(stream, 'sha256').hexdigest()
-
-          commit = '191755ec115ece3dd642eba3cb0143cecb5e5d7a'
-          webkit = 'b82bc917e99110b61c3a21202d6def7457aa194c'
-          assert subprocess.check_output(['git', 'rev-parse', 'HEAD', 'HEAD^{tree}'], text=True).splitlines() == [commit, '656ed5260b61d9063f546f837238661a19514c1f']
-          assert not subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'], text=True)
-          report = Path('diagnostics').resolve()
-          manifest = report / 'manifest.json'
-          assert sha(manifest) == '8c3a9d87f37832fa07173635af52d53b813e29470afa4afdb49a83033fed039e'
-          data = json.loads(manifest.read_text())
-          assert data['bun']['commit'] == commit and data['webkit']['version'] == webkit
-          assets = [a for a in data['assets'] if a['target'] == 'linux-x64']
-          assert len(assets) == 1
-          asset = assets[0]
-          archive = Path('baseline.zip')
-          assert archive.stat().st_size == asset['size'] == 51053995
-          assert sha(archive) == asset['sha256'] == 'a59df8273c232782c16a6c0e680511becd9a49ba08fa6a1adc7baea1a632de0b'
-          executable = asset['executable']['path']
-          with zipfile.ZipFile(archive) as bundle:
-              entries = bundle.infolist()
-              path = PurePosixPath(executable)
-              assert not path.is_absolute() and '..' not in path.parts and '\\' not in executable
-              directory = str(path.parent) + '/'
-              assert len(entries) == 2 and {e.filename for e in entries} == {directory, executable}
-              folder = bundle.getinfo(directory)
-              assert folder.is_dir() and folder.file_size == 0 and stat.S_IFMT(folder.external_attr >> 16) in (0, stat.S_IFDIR)
-              entry = bundle.getinfo(executable)
-              assert stat.S_IFMT(entry.external_attr >> 16) in (0, stat.S_IFREG)
-              assert entry.file_size == asset['executable']['size'] < 256 * 1024**2
-              bundle.extract(entry, 'baseline')
-          exe = (Path('baseline') / executable).resolve()
-          assert sha(exe) == asset['executable']['sha256']
-          exe.chmod(0o700)
-          facts = json.loads(subprocess.check_output([str(exe), '-e', 'console.log(JSON.stringify({commit:Bun.revision,webkit:process.versions.webkit,platform:process.platform,arch:process.arch}))'], text=True, timeout=30))
-          assert facts == {'commit': commit, 'webkit': webkit, 'platform': 'linux', 'arch': 'x64'}
-          fixture = Path('test/js/node/tls/node-tls-context.test.ts')
-          digest = sha(fixture)
-          assert digest == '0f6ba03e222d53279f9fa553cc3390bdd9707fc7ab382294f18d292ec8ad0bb3'
-          env = dict(os.environ, CI='1', BUN_RUNTIME_TRANSPILER_CACHE_PATH='0')
-          with (report / 'stdout.log').open('xb') as stdout, (report / 'stderr.log').open('xb') as stderr:
-              result = subprocess.run([str(exe), 'test', '--expose-internals', str(fixture), '--reporter=junit', '--reporter-outfile=' + str(report / 'result.xml')],
-                  env=env, stdout=stdout, stderr=stderr, timeout=120)
-          tree = ElementTree.parse(report / 'result.xml')
-          cases = list(tree.iter('testcase'))
-          failures = [{'name': c.get('name'), 'classname': c.get('classname')} for c in cases if c.find('failure') is not None or c.find('error') is not None]
-          outcome = {'qualification': False, 'identity': facts, 'executable_sha256': sha(exe), 'fixture_sha256': digest,
-                     'exitCode': result.returncode, 'cases': len(cases), 'skipped': sum(c.find('skipped') is not None for c in cases), 'failures': failures}
-          (report / 'outcome.json').write_text(json.dumps(outcome, indent=2) + '\n')
-          print(json.dumps(outcome), flush=True)
-          assert len(cases) == 83 and outcome['skipped'] == 0, 'baseline file did not execute completely'
-          assert result.returncode in (0, 1) and bool(failures) == (result.returncode == 1)
-          assert sha(fixture) == digest and sha(exe) == asset['executable']['sha256']
-          sys.exit(result.returncode)
-          PY
-      - name: Retain the baseline result and unchanged assertions
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: tls-session-baseline-linux-x64
-          path: diagnostics
-          if-no-files-found: error
-          retention-days: 7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: 1047ca3631645484e812e55b6a665413941f9879
+        path: controls
+        persist-credentials: false
+        sparse-checkout: ".github/openclaw"
+    - name: Admit the exact C6 signed snapshot
+      run: |
+        set -euo pipefail
+        mkdir -p source-format-proof
+        unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+        python3 controls/.github/openclaw/qualification/acquire-bun-snapshot.py source > source-format-proof/source-acquisition.json
+    - uses: "./source/.github/actions/setup-bun"
+      with:
+        bun-version: 1.4.4
+    - name: Install the source-pinned formatter toolchains
+      env:
+        RUSTUP_TOOLCHAIN: nightly-2026-09-15
+      run: |
+        set -euo pipefail
+        rustup toolchain install nightly-2026-09-15 --profile minimal --component rustfmt
+        echo RUSTUP_TOOLCHAIN=nightly-2026-09-15 >> "$GITHUB_ENV"
+        wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+        echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-23 main" | sudo tee /etc/apt/sources.list.d/llvm.list > /dev/null
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq --no-install-recommends clang-format-23
+    - name: Check only the changed Rust C++ and JavaScript files
+      run: |
+        set -euo pipefail
+        unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+        python3 - <<'PY'
+        import difflib,hashlib,json,pathlib,re,subprocess
+        root=pathlib.Path.cwd();source=root/"source";out=root/"source-format-proof";out.mkdir(exist_ok=True)
+        owner=root/"controls/.github/openclaw/qualification/aot-debug-repair"
+        manifest=json.loads((owner/"source-manifest.json").read_text())
+        state={"passed":False,"source":manifest["bun"],"engine":manifest["engine"],"checks":{}}
+        applied=[]
+        def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+        def git(*args):return subprocess.check_output(["git","-C",str(source),*args],text=True).strip()
+        def save():(out/"proof.json").write_text(json.dumps(state,indent=2)+"\n")
+        def run(name,args):
+         with (out/(name+".log")).open("wb") as f:p=subprocess.run(args,cwd=source,stdout=f,stderr=subprocess.STDOUT)
+         log=out/(name+".log");assert log.stat().st_size<=8*1024**2
+         state["checks"][name]={"argv":args,"exit_code":p.returncode,"log_bytes":log.stat().st_size,"sha256":sha(log)};save()
+         return p.returncode
+        save()
+        assert git("rev-parse","HEAD")==manifest["bun"] and git("rev-parse","HEAD^{tree}")==manifest["bun_tree"] and not git("status","--porcelain")
+        assert subprocess.check_output(["git","-C","controls","rev-parse","HEAD"],text=True).strip()=="1047ca3631645484e812e55b6a665413941f9879"
+        try:
+         for name,row in manifest["groups"].items():
+          if row["repo"]!="source":continue
+          patch=owner/name;assert sha(patch)==row["sha256"]
+          for path,v in row["files"].items():assert sha(source/path)==v["before"]
+          subprocess.run(["git","-C",str(source),"apply","--check",str(patch)],check=True)
+          subprocess.run(["git","-C",str(source),"apply",str(patch)],check=True);applied.append((name,row))
+          for path,v in row["files"].items():assert sha(source/path)==v["after"]
+         files={p:v["after"] for _,row in applied for p,v in row["files"].items()}
+         assert len(files)==12 and set(git("diff","--name-only").splitlines())==set(files)
+         state["source_files"]=files;save()
+         assert run("install-root",["bun","install","--frozen-lockfile"])==0
+         rust=[p for p in files if p.endswith(".rs")]
+         cpp=[p for p in files if p.endswith(".cpp")]
+         js=[p for p in files if p.endswith((".ts",".js"))]
+         assert len(rust)==4 and len(cpp)==3 and len(js)==4
+         assert run("rustfmt-version",["rustfmt","--version"])==0
+         assert run("clang-format-version",["clang-format-23","--version"])==0
+         assert run("prettier-version",["bunx","--no-install","prettier","--version"])==0
+         checks=[("rust-format",["rustfmt","--edition","2024","--config","skip_children=true","--check",*rust],rust),
+                 ("cpp-format",["clang-format-23","--dry-run","--Werror",*cpp],cpp),
+                 ("js-format",["bunx","--no-install","prettier","--check",*js],js)]
+         failed=[]
+         for name,args,paths in checks:
+          if run(name,args)!=0:failed.append((name,paths))
+         proposals=""
+         for kind,paths in failed:
+          for path in paths:
+           p=source/path;before=p.read_bytes()
+           if kind=="rust-format":args=["rustfmt","--edition","2024","--config","skip_children=true",path]
+           elif kind=="cpp-format":args=["clang-format-23","-i",path]
+           else:args=["bunx","--no-install","prettier","--write",path]
+           try:
+            rc=run("proposal-"+path.replace("/","_"),args)
+            after=p.read_bytes()
+            if rc==0:proposals+="".join(difflib.unified_diff(before.decode().splitlines(True),after.decode().splitlines(True),fromfile="a/"+path,tofile="b/"+path))
+           finally:p.write_bytes(before)
+         if proposals:(out/"format-only.patch").write_text(proposals)
+         assert all(sha(source/path)==digest for path,digest in files.items())
+         state["passed"]=not failed
+        finally:
+         state["restored"]=False
+         for name,row in reversed(applied):
+          subprocess.run(["git","-C",str(source),"apply","--reverse","--check",str(owner/name)],check=True)
+          subprocess.run(["git","-C",str(source),"apply","--reverse",str(owner/name)],check=True)
+          for path,v in row["files"].items():assert sha(source/path)==v["before"]
+         assert not git("diff","--name-only") and not git("diff","--cached","--name-only")
+         assert git("rev-parse","HEAD")==manifest["bun"]
+         state["restored"]=True;save()
+        assert state["passed"],"scoped format checks failed; proposed mechanical diff retained"
+        PY
+    - name: Seal bounded format evidence
+      if: always()
+      run: |
+        python3 - <<'PY'
+        import hashlib,json,pathlib,stat
+        out=pathlib.Path("source-format-proof");out.mkdir(exist_ok=True)
+        files=sorted(out.iterdir())
+        assert 0<len(files)<=64 and all(stat.S_ISREG(p.lstat().st_mode) for p in files)
+        assert sum(p.stat().st_size for p in files)<=32*1024**2
+        (out/"archive-manifest.json").write_text(json.dumps({p.name:{"bytes":p.stat().st_size,"sha256":hashlib.sha256(p.read_bytes()).hexdigest()} for p in files},indent=2)+"\n")
+        PY
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      if: always()
+      with:
+        name: current-bun-scoped-format-proof
+        path: source-format-proof/
+        if-no-files-found: error
+        retention-days: 7
