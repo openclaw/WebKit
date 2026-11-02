@@ -1,4 +1,4 @@
-import hashlib,json,os,re,subprocess,time,xml.etree.ElementTree as ET
+import hashlib,json,mmap,os,re,struct,subprocess,time,xml.etree.ElementTree as ET
 from pathlib import Path
 R=Path("/work");S=R/"source";O=R/"debug-replay-proof";O.mkdir(exist_ok=True)
 H=R/"controls/.github/openclaw/qualification/aot-debug-repair";E=R/"retained-bun"
@@ -13,6 +13,62 @@ def run(n,args,cwd=S):
  with (O/(n+".log")).open("wb") as f:r=subprocess.run(args,cwd=cwd,stdout=f,stderr=subprocess.STDOUT,env={**os.environ,"BUN_DEBUG_QUIET_LOGS":"1"})
  f=O/(n+".log");assert f.stat().st_size<64*1024**2
  P["steps"][n]={"argv":args,"exit_code":r.returncode,"seconds":time.monotonic()-start,"bytes":f.stat().st_size,"sha256":sha(f)};save();return r.returncode
+
+def restore_debug_inputs():
+ # Read the documented v2 builtins section; these are this exact binary's JS bytes,
+ # not regenerated sources. Ordinal mapping mirrors internal-module-registry-scanner.ts.
+ with E.open("rb") as f,mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ) as b:
+  assert b[:6]==b"\x7fELF\x02\x01"
+  off=struct.unpack_from("<Q",b,40)[0];size,count,names=struct.unpack_from("<HHH",b,58)
+  assert size==64 and 0<count<65535 and names<count and off+size*count<=len(b)
+  def sh(i):return struct.unpack_from("<IIQQQQIIQQ",b,off+i*size)
+  ns=sh(names);assert ns[4]+ns[5]<=len(b)
+  strings=b[ns[4]:ns[4]+ns[5]];found=[]
+  for i in range(count):
+   row=sh(i);assert row[0]<len(strings)
+   name=strings[row[0]:].split(b"\0",1)[0]
+   if name==b".bun_builtins":
+    assert row[1]==1 and 48<=row[5]<=32*1024**2 and row[4]+row[5]<=len(b)
+    found.append(bytes(b[row[4]:row[4]+row[5]]))
+ assert len(found)==1
+ b=found[0];assert b[:8]==b"BUNBLTNS"
+ version,stamp,count,records,dep_offsets,deps,data_off,data_len,engine,reserved=struct.unpack_from("<10I",b,8)
+ assert version==2 and reserved==0 and engine and records==48 and count<10000
+ assert records+count*24<=len(b) and data_off+data_len<=len(b)
+ assert dep_offsets+(count+1)*2<=len(b)
+ offsets=struct.unpack_from("<"+str(count+1)+"H",b,dep_offsets)
+ assert list(offsets)==sorted(offsets) and deps+offsets[-1]*2<=len(b)
+ assert all(n<count for n in struct.unpack_from("<"+str(offsets[-1])+"H",b,deps))
+ data=b[data_off:data_off+data_len]
+ base=S/"src/js"
+ paths=sorted(p.relative_to(base).as_posix() for name in ("bun","node","thirdparty","internal")
+              for p in (base/name).rglob("*") if p.is_file() and (p.name.endswith(".js") or (p.name.endswith(".ts") and not p.name.endswith(".d.ts"))))
+ paths.append("internal-for-testing.ts");assert len(paths)==count
+ dest=S/"build/debug-prepush/js";assert not dest.exists()
+ hashes={};digest=hashlib.sha256()
+ for i,path in enumerate(paths):
+  values=struct.unpack_from("<6I",b,records+i*24);spans=[]
+  for j in range(0,6,2):
+   start,n=values[j:j+2];assert start+n<len(data) and data[start+n]==0
+   spans.append(data[start:start+n])
+  name,url,source=spans
+  expected_url=("builtin://"+re.sub("[^a-zA-Z0-9]+","/",re.sub(r"\.[mc]?[tj]s$","",path))).encode()
+  stem=re.sub(r"\.[mc]?[tj]s$","",path)
+  prefix,tail=stem.split("/",1) if "/" in stem else ("","")
+  expected_name="bun:internal-for-testing" if path=="internal-for-testing.ts" else (("" if prefix=="thirdparty" else prefix+":")+tail.replace(".","/"))
+  assert name==expected_name.encode() and url==expected_url and source and source.isascii()
+  target=dest/re.sub(r"\.[mc]?[tj]s$",".js",path)
+  assert target.is_relative_to(dest) and ".." not in target.relative_to(dest).parts
+  target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(source)
+  hashes[str(target.relative_to(S))]={"specifier":name.decode(),"sha256":hashlib.sha256(source).hexdigest(),"bytes":len(source)}
+  digest.update(source)
+ assert int.from_bytes(digest.digest()[:4],"big")==stamp
+ P["builtin_inputs"]={"section_sha256":hashlib.sha256(b).hexdigest(),"format":version,"source_stamp":stamp,"engine_stamp":engine,"files":hashes};save()
+ tools=R/"runtime-tools";tools.mkdir();(tools/"bun").symlink_to(E);(tools/"node").symlink_to(R/"node-bootstrap")
+ os.environ["PATH"]=str(tools)+":"+os.environ["PATH"]
+ assert run("node-version",[str(tools/"node"),"--version"])==0
+ assert (O/"node-version.log").read_text().strip()=="v26.12.1"
+
 def main():
  assert all(not os.environ.get(k) for k in ("CI","BUILDKITE","GITHUB_ACTIONS","GH_TOKEN","GITHUB_TOKEN","ACTIONS_RUNTIME_TOKEN","ACTIONS_ID_TOKEN_REQUEST_TOKEN"))
  assert git("rev-parse","HEAD")==M["bun"] and git("rev-parse","HEAD^{tree}")==M["bun_tree"] and not git("status","--porcelain")
@@ -26,7 +82,12 @@ def main():
    subprocess.run(["git","-C",str(S),"apply","--check",str(patch)],check=True);subprocess.run(["git","-C",str(S),"apply",str(patch)],check=True);A.append(n)
    for path,h in g["files"].items():assert sha(S/path)==h["after"],path
   P["source_files"]={path:sha(S/path) for n in A for path in M["groups"][n]["files"]};save()
+  restore_debug_inputs()
   assert run("install-root",[str(E),"install","--frozen-lockfile"])==0
+  runtime=S/"build/debug-prepush/codegen/runtime.out.js";runtime.parent.mkdir(parents=True,exist_ok=True)
+  esbuild=S/"node_modules/@esbuild/linux-x64/bin/esbuild";assert esbuild.is_file()
+  assert run("generate-runtime-helpers",[str(esbuild),str(S/"src/runtime.bun.js"),"--outfile="+str(runtime),'--define:process.env.NODE_ENV="production"',"--target=esnext","--bundle","--format=esm","--platform=node","--minify","--external:/bun:*"])==0
+  P["runtime_helpers"]={"sha256":sha(runtime),"esbuild_sha256":sha(esbuild),"source_files":{p:sha(S/p) for p in ("src/runtime.bun.js","src/runtime.js")}};save()
   assert run("install-tests",[str(E),"install","--frozen-lockfile"],S/"test")==0
   for n,f,title in [
    ("plugin-gc","./test/js/bun/plugin/plugins.test.ts","keeps the object alive across a GC so require"),

@@ -58,13 +58,21 @@ jobs:
               while data:=source.read(1024**2): sink.write(data)
           target.chmod(0o755)
           PY
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.12.1'
+      - name: Retain the matching Node oracle inside the isolated runtime
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v26.12.1
+          cp "$(command -v node)" node-bootstrap
       - name: Replay measured Debug failures and remaining gates
         run: |
           set -euo pipefail
           mkdir -p debug-replay-proof
           docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work \
             docker.io/library/debian:13@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c \
-            sh -euc 'apt-get update >/dev/null; apt-get install --yes --no-install-recommends python3 git ca-certificates libicu76 libatomic1 >/dev/null; unset CI BUILDKITE GITHUB_ACTIONS GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN; git config --global --add safe.directory /work/source; python3 /work/controls/.github/openclaw/qualification/current-debug-replay.py'
+            sh -euc 'apt-get update >/dev/null; apt-get install --yes --no-install-recommends python3 git ca-certificates libicu76 libatomic1 libstdc++6 >/dev/null; unset CI BUILDKITE GITHUB_ACTIONS GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN; git config --global --add safe.directory /work/source; python3 /work/controls/.github/openclaw/qualification/current-debug-replay.py'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
