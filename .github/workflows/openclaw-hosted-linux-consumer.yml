@@ -1,0 +1,112 @@
+name: OpenClaw final paired Darwin consumer
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: openclaw-final-darwin-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  darwin-arm64:
+    if: github.repository == 'openclaw/WebKit' && github.ref == 'refs/heads/claude/final-paired-darwin-hooks-20261102'
+    runs-on: macos-15
+    timeout-minutes: 115
+    defaults:
+      run:
+        working-directory: pipeline
+        shell: bash
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: "1"
+      OPENCLAW_CI_PLATFORM: darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 5e7f7f530fa77e832238fb2f93ac4dc6e48d926b
+          path: pipeline
+          persist-credentials: false
+          sparse-checkout: |
+            .github
+            icu
+            macos-cross
+            Source/JavaScriptCore
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: controls
+          persist-credentials: false
+          sparse-checkout: .github/openclaw/qualification/final-darwin-stage.py
+      - name: Admit the final PR macOS AOT archive and exact producer provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$GITHUB_WORKSPACE/controls/.github/openclaw/qualification/final-darwin-stage.py"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: openclaw/bun
+          ref: 28b6101e24b93b4a222b03fc5a6a83cd4d1c2653
+          path: pipeline/consumer/bun
+          persist-credentials: false
+      - uses: ./pipeline/consumer/bun/.github/actions/setup-bun
+        with:
+          bun-version: "1.4.4"
+      - name: Read the candidate toolchain pins
+        id: pins
+        working-directory: pipeline/consumer/bun
+        run: |
+          bun -e 'import { pins } from "./scripts/build/ci-images/spec.ts"; console.log(`llvm=${pins.llvm.version.split(".")[0]}\nnode=${pins.nodejs.version}\nrust=${pins.rust.channel}`)' >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ steps.pins.outputs.node }}
+      - name: Install native build tools
+        timeout-minutes: 15
+        env:
+          LLVM_MAJOR: ${{ steps.pins.outputs.llvm }}
+          RUST_TOOLCHAIN: ${{ steps.pins.outputs.rust }}
+        run: |
+          test "$(uname -s)" = Darwin && test "$(uname -m)" = arm64
+          python3 -c 'import hashlib; assert callable(hashlib.file_digest)'
+          brew install cmake ninja nasm ccache go llvm
+          llvm_bin="$(brew --prefix llvm)/bin"
+          "$llvm_bin/clang" --version | grep -F "clang version ${LLVM_MAJOR}."
+          echo "$llvm_bin" >> "$GITHUB_PATH"
+          echo "CC=$llvm_bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=$llvm_bin/clang++" >> "$GITHUB_ENV"
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rust-src
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - name: Build and qualify the exact native Darwin candidate
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/darwin-artifact
+          QUALIFICATION_DIR: ${{ github.workspace }}/pipeline/consumer
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          test "$(git rev-parse HEAD)" = 5e7f7f530fa77e832238fb2f93ac4dc6e48d926b
+          test "$(git -C consumer/bun rev-parse HEAD)" = 28b6101e24b93b4a222b03fc5a6a83cd4d1c2653
+          export INSPECTOR_RUNTIME="$(python3 -c 'import pathlib,shutil; print(pathlib.Path(shutil.which("bun")).resolve())')"
+          bash .github/openclaw/qualify-darwin.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: final-darwin-bun-executables
+          path: |
+            ${{ github.workspace }}/pipeline/consumer/bun/build/qualify-candidate/bun
+            ${{ github.workspace }}/pipeline/consumer/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
+            ${{ github.workspace }}/pipeline/consumer/bun/test/aot/every-platform.test.ts
+            ${{ github.workspace }}/pipeline/consumer/*.sha256
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 3
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: final-darwin-qualification
+          path: |
+            ${{ github.workspace }}/pipeline/consumer/*.json
+            ${{ github.workspace }}/pipeline/consumer/*.log
+            ${{ github.workspace }}/pipeline/consumer/*.patch
+            ${{ github.workspace }}/pipeline/consumer/candidate-input/artifacts.json
+            ${{ github.workspace }}/pipeline/consumer/candidate/*.json
+            ${{ github.workspace }}/pipeline/consumer/candidate/*.log
+            ${{ github.workspace }}/pipeline/consumer/sync/*.log
+          if-no-files-found: error
+          retention-days: 7
