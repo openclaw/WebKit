@@ -1,9 +1,11 @@
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
-@@ -1,6 +1,12 @@
+@@ -1,6 +1,14 @@
  # OpenClaw Bun fork changelog
  
  ## Unreleased
++
++- Resolve macOS paths through the canonical full-path owner while preserving hard-link names and POSIX locks.
 +
 +- Keep host `require()` facades for compiled modules separate from import namespaces, including forwarded CommonJS exports and native-module mocks.
 +

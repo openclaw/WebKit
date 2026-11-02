@@ -5,11 +5,11 @@
   "groups": {
     "runtime-repairs.patch": {
       "repo": "source",
-      "sha256": "68c87248dbcf356f81a297085e517263b99194d497f927e1d75d697e6f48dc13",
+      "sha256": "44aa55159e8a564acbfa8349b8864a9ac513da541e1a5fd8716c76f17f554eec",
       "files": {
         "CHANGELOG.md": {
           "before": "94e32e3d3137165298ffdb6c95b26687596f0e5133d62fa8c26a7e0a9413a2b0",
-          "after": "ab7eced88543d0569f1779a507979a6e6fea2039d9237f6dd253dc8727d35eff"
+          "after": "596b54794aebe27cde25398c43c6ad4be6f33595e901f6a3c931a71eb9bdfc48"
         },
         "src/jsc/ModuleLoader.rs": {
           "before": "fdec413765c3f19e1b2260248c5cdc53f8d406aef302acb8a2a4ca412a404560",
@@ -92,6 +92,26 @@
         "Source/JavaScriptCore/aot/runtime/AOTModuleLinking.cpp": {
           "before": "01718c8d8844abffe38b6b0d69afff2946a65f7fb2ba5ba7c23ed9db31b6d5cc",
           "after": "cf74e8b272d4479ebd54abf1258b885bca30bbeb64c5a0a578c68c1180e32574"
+        }
+      }
+    },
+    "vm-pressure-regression.patch": {
+      "repo": "source",
+      "sha256": "fe6d25491844ad2cc6978aff1c3d1d67437c537f7008f41c42285f13941646bc",
+      "files": {
+        "test/js/node/vm/vm.test.ts": {
+          "before": "0e653c69ea8a766fd8ee28c1a0e155d2c7011e1741b1231320cb1ce89fa44862",
+          "after": "1c6f7f9afd4a4919bf41f3a9a82b92509bdf9ac16da82c865de6e8bf65735d7b"
+        }
+      }
+    },
+    "darwin-path-owner.patch": {
+      "repo": "source",
+      "sha256": "5fced0508581700c10d08256be08de2a00a241ab09608026edcd4df01807e023",
+      "files": {
+        "src/sys/lib.rs": {
+          "before": "38db5739b98354ec72340a3eb2acd7cf906f528708157e65e94a9ed405535e7f",
+          "after": "0ba617c40190b945e3ed072f96b2deb191225b45059373ff5e569cfa2403023b"
         }
       }
     }

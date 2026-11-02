@@ -1,0 +1,17 @@
+--- a/test/js/node/vm/vm.test.ts
++++ b/test/js/node/vm/vm.test.ts
+@@ -4440,8 +4440,12 @@
+       const first = compile(); first();
+       const second = compile();
+       assert.equal(shared(first, second), true);
+-      for (let i = 0; i < 80; i++) new Script("(() => " + i + ")", { filename: "churn-" + i + ".js" }).runInThisContext()();
+-      assert.ok(stats().evictions > 0);
++      const beforePressure = stats();
++      assert.equal(beforePressure.entries, 1);
++      // A near-budget entry forces the shared source out regardless of its measured compile cost.
++      new Script("/* " + Buffer.alloc(26 * 1024, "x").toString() + " */ (() => 7)", { filename: "pressure.js" }).runInThisContext()();
++      assert.equal(stats().evictions, beforePressure.evictions + 1);
++      assert.equal(stats().entries, 1);
+       assert.ok(stats().bytes <= stats().limit);
+       Bun.gc(true);
+       assert.equal(first(), 42);

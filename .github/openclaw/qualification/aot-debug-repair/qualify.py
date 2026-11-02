@@ -123,7 +123,9 @@ def main():
                        "--reporter-outfile=" + str(OUT / (name + ".xml"))])
     try:
         overlay("runtime-repairs.patch")
+        overlay("darwin-path-owner.patch")
         overlay("namespace-regression.patch")
+        overlay("vm-pressure-regression.patch")
         overlay("engine-require-facade.patch")
         assert command("install-root", ["bun", "install", "--frozen-lockfile"]) == 0
         assert command("install-tests", ["bun", "install", "--frozen-lockfile"], SOURCE / "test") == 0
@@ -131,14 +133,15 @@ def main():
         row = selected_case("namespace-red", NAMESPACE)
         text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", (OUT / "namespace-red.log").read_text(errors="replace"))
         assert red == 1 and row["failed"]
-        assert "namespace facade" in text and "expect(host.required).not.toBe(subject)" in text
+        assert "namespace facade" in text and "expect(host.mocked.__esModule).toBe(true)" in text
         assert re.search(r"\b1 fail\b", text)
-        assert re.search(r"(?m)^error: expect\(received\)\.not\.toBe\(expected\)\s*$", text)
-        assert re.search(r"(?m)^\s+at .*[/\\]one\.test\.ts:10:\d+\)?\s*$", text)
+        assert re.search(r"(?m)^error: expect\(received\)\.toBe\(expected\)\s*$", text)
+        assert re.search(r"Expected: true\s+Received: undefined", text)
+        assert re.search(r"(?m)^\s+at .*[/\\]one\.test\.ts:24:\d+\)?\s*$", text)
         assert not re.search(r"panic|AddressSanitizer:|ASSERTION FAILED|IRTextError|Aborted|Segmentation fault", text, re.I)
-        proof["namespace_red"] = "inner namespace identity assertion reached; setup/crashes excluded"
+        proof["namespace_red"] = "inner mocked module marker assertion reached; setup/crashes excluded"
         proof["red_build_inputs"] = build_inputs()
-        binary = SOURCE / "build/debug-prepush/bun"
+        binary = SOURCE / "build/debug-prepush/bun-debug"
         assert binary.is_file()
         proof["red_binary"] = {"bytes": binary.stat().st_size, "sha256": sha(binary)}
         save()
@@ -160,6 +163,12 @@ def main():
         for title in required:
             found = [row for row in rows if title in row["name"]]
             assert found and all(not row["skipped"] for row in found), title
+        vm_title = "shared source buffers survive compilation-cache eviction"
+        assert selected("vm-pressure", "./test/js/node/vm/vm.test.ts", vm_title) == 0
+        vm_rows = cases("vm-pressure")
+        vm_active = [row for row in vm_rows if not row["skipped"]]
+        assert len(vm_active) == 2 and all(not row["failed"] and vm_title in row["name"] for row in vm_active)
+        assert any("é" in row["name"] for row in vm_active) and any("λ🚀" in row["name"] for row in vm_active)
         for name, file, title in (
             ("json-smoke", "./test/aot/run-aot.test.ts", "a module that the constant parts of a dynamic path match is compiled"),
             ("mock-sibling", "./test/aot/a-mock-of-a-built-in-module-that-import-alone-reaches-is-what-runs.test.ts",
