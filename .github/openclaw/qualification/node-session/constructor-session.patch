@@ -1,0 +1,62 @@
+diff --git a/lib/internal/tls/wrap.js b/lib/internal/tls/wrap.js
+index 82f343de726023a1ed85c98340235c372b3d1089..d7e2f13ce7e91534f57b9a6c4bd00cde206b6892 100644
+--- a/lib/internal/tls/wrap.js
++++ b/lib/internal/tls/wrap.js
+@@ -625,7 +625,7 @@
+  */
+ 
+ function TLSSocket(socket, opts) {
+-  const tlsOptions = { ...opts };
++  const tlsOptions = { ...opts, socket };
+   validateOpenSSLEngineOptions(tlsOptions);
+   let enableTrace = tlsOptions.enableTrace;
+ 
+@@ -859,7 +859,7 @@
+ 
+ TLSSocket.prototype[kReinitializeHandle] = function reinitializeHandle(handle) {
+   const originalServername = this.ssl ? this._handle.getServername() : null;
+-  const originalSession = this.ssl ? this._handle.getSession() : null;
++  const originalSession = this.ssl ? this.getSession() : null;
+ 
+   this.handle = this._wrapHandle(null, handle, false);
+   this.ssl = this._handle;
+@@ -1006,7 +1006,7 @@
+     ssl.onocspresponse = onocspresponse;
+ 
+     if (options.session)
+-      ssl.setSession(options.session);
++      this.setSession(options.session);
+ 
+     ssl.onnewsession = onnewsessionclient;
+ 
+@@ -1877,8 +1877,6 @@
+     );
+   }
+ 
+-  options.session = getSessionForReuse(options.session, options);
+-
+   const tlssock = new TLSSocket(options.socket, {
+     allowHalfOpen: options.allowHalfOpen,
+     pipe: !!options.path,
+@@ -1886,7 +1884,6 @@
+     isServer: false,
+     requestCert: true,
+     rejectUnauthorized: options.rejectUnauthorized !== false,
+-    session: options.session,
+     ALPNProtocols: options.ALPNProtocols,
+     requestOCSP: options.requestOCSP,
+     enableTrace: options.enableTrace,
+diff --git a/src/crypto/crypto_common.cc b/src/crypto/crypto_common.cc
+index 759353f08f035f3a805f01cecfad3e2aee6d21f7..50dbe4c2ce86f32ef830369e4279b614b6c2d830 100644
+--- a/src/crypto/crypto_common.cc
++++ b/src/crypto/crypto_common.cc
+@@ -293,6 +293,9 @@
+   // contains the `peer_certificate`, but on server it doesn't.
+   X509Pointer cert(is_server ? X509Pointer::PeerFrom(ssl) : X509Pointer());
+   STACK_OF(X509)* ssl_certs = SSL_get_peer_cert_chain(ssl.get());
++  // A resumed client can retain its peer certificate without a peer chain.
++  if (!is_server && (ssl_certs == nullptr || sk_X509_num(ssl_certs) == 0))
++    cert = X509Pointer::PeerFrom(ssl);
+   if (!cert && (ssl_certs == nullptr || sk_X509_num(ssl_certs) == 0))
+     return Undefined(env->isolate());
+ 
