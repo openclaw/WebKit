@@ -5,7 +5,7 @@
   "groups": {
     "runtime-repairs.patch": {
       "repo": "source",
-      "sha256": "6aa3f73b7b1c5e08b88cfead5516a9eb41689d18787ddf64b8fe5da826c275a7",
+      "sha256": "68c87248dbcf356f81a297085e517263b99194d497f927e1d75d697e6f48dc13",
       "files": {
         "CHANGELOG.md": {
           "before": "94e32e3d3137165298ffdb6c95b26687596f0e5133d62fa8c26a7e0a9413a2b0",
@@ -21,7 +21,7 @@
         },
         "src/runtime/node/node_fs.rs": {
           "before": "deeb5167313b012231cdbfd0868c1ab85c3ed420bf44d8ab46d804a8b2f2260c",
-          "after": "093bc50aa1c4dc17ad6fc86a241d86b227520f94a3c4d7e99895e932b9c7ce5b"
+          "after": "11e72f3f6bcda90ce7c58bfd00d0055bfe13661569c203fedacf0015c018fc2a"
         },
         "test/js/bun/plugin/plugins.test.ts": {
           "before": "7fcfc8b8191e21323cd460cec1f1501608efefd318dc56e79741af17f2b67528",
