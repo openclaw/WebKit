@@ -85,7 +85,7 @@ def main():
   restore_debug_inputs()
   assert run("install-root",[str(E),"install","--frozen-lockfile"])==0
   runtime=S/"build/debug-prepush/codegen/runtime.out.js";runtime.parent.mkdir(parents=True,exist_ok=True)
-  esbuild=S/"node_modules/@esbuild/linux-x64/bin/esbuild";assert esbuild.is_file()
+  esbuild=S/"node_modules/.bin/esbuild";assert esbuild.is_file()
   assert run("generate-runtime-helpers",[str(esbuild),str(S/"src/runtime.bun.js"),"--outfile="+str(runtime),'--define:process.env.NODE_ENV="production"',"--target=esnext","--bundle","--format=esm","--platform=node","--minify","--external:/bun:*"])==0
   P["runtime_helpers"]={"sha256":sha(runtime),"esbuild_sha256":sha(esbuild),"source_files":{p:sha(S/p) for p in ("src/runtime.bun.js","src/runtime.js")}};save()
   assert run("install-tests",[str(E),"install","--frozen-lockfile"],S/"test")==0
