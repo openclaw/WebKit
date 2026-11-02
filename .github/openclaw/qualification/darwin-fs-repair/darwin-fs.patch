@@ -15,10 +15,10 @@ index cc76b0a08f..7889b6b033 100644
      }
      Err(err.with_path(written))
 diff --git a/src/sys/lib.rs b/src/sys/lib.rs
-index 6525233c55..34aa0e79ca 100644
+index 6525233c55..7a5ddc2eb1 100644
 --- a/src/sys/lib.rs
 +++ b/src/sys/lib.rs
-@@ -3068,63 +3068,14 @@ mod posix_impl {
+@@ -3068,63 +3068,20 @@ mod posix_impl {
          }
          #[cfg(target_os = "macos")]
          {
@@ -71,16 +71,21 @@ index 6525233c55..34aa0e79ca 100644
 -                        }
 -                        buf.0[..len - 1].copy_from_slice(full_path);
 -                        return Ok(&buf.0[..len - 1]);
--                    }
++            match get_full_path(path, buf).map(|resolved| resolved.len()) {
++                Ok(len) => Ok(&buf.0[..len]),
++                // Darwin realpath resolves file/ and file/.., unlike the kernel's full-path lookup.
++                Err(err) if err.get_errno() == E::ENOTDIR => match realpath(path, buf) {
++                    Err(fallback) if matches!(fallback.get_errno(), E::EMFILE | E::ENFILE) => {
++                        // libc may open a descriptor for getcwd(); retain the kernel's path error.
++                        Err(err)
+                     }
 -                    break;
 -                }
 -                if last_errno() != libc::EINTR {
 -                    break;
 -                }
-+            match get_full_path(path, buf).map(|resolved| resolved.len()) {
-+                Ok(len) => Ok(&buf.0[..len]),
-+                // Darwin realpath resolves file/ and file/.., unlike the kernel's full-path lookup.
-+                Err(err) if err.get_errno() == E::ENOTDIR => realpath(path, buf),
++                    result => result,
++                },
 +                Err(err) => Err(err),
              }
          }
@@ -88,7 +93,7 @@ index 6525233c55..34aa0e79ca 100644
          realpath(path, buf)
      }
  
-@@ -3163,6 +3114,18 @@ mod posix_impl {
+@@ -3163,6 +3120,18 @@ mod posix_impl {
                      .iter()
                      .any(|prefix| out.0[..len].starts_with(prefix)) =>
              {

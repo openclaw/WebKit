@@ -2,7 +2,7 @@
   "bun": "c6a7bf9d8dc4d44db9f826e47a5ae7645ea6e8c9",
   "bun_tree": "ef814c1b5ef7731d6373cfacb8c88b0227a670aa",
   "engine": "1281a1be4796f541bcaf0ef751941c41dfbf7817",
-  "patch_sha256": "24445617e88ab03696aa5cb1a828197b0526e0601d7f438b5223d594472fbe2f",
+  "patch_sha256": "fade864e99353f76e7f260bef9a1231d3baa98a15a8fd617f90bab1d36939e42",
   "files": {
     "src/runtime/node/node_fs.rs": {
       "before": "deeb5167313b012231cdbfd0868c1ab85c3ed420bf44d8ab46d804a8b2f2260c",
@@ -10,7 +10,7 @@
     },
     "src/sys/lib.rs": {
       "before": "38db5739b98354ec72340a3eb2acd7cf906f528708157e65e94a9ed405535e7f",
-      "after": "b8c5bf7ad41ed6deb6f319c9655fb46660d7cfff695191931495b2ea1dd4d6ad"
+      "after": "d54a980311bb798437aba94deaa843cd7e73e88e120c7ec1b3eb15c2c0a2e42a"
     }
   },
   "test": {

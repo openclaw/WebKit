@@ -1,5 +1,5 @@
 ---
-name: OpenClaw Darwin realpath ENOTDIR qualification
+name: OpenClaw Darwin path errors under descriptor exhaustion
 'on':
   workflow_dispatch: 
 permissions:
@@ -123,7 +123,10 @@ jobs:
       if: always()
       with:
         name: current-bun-darwin-fs-debug-executable
-        path: source/build/fs-debug/bun-debug
+        path: |
+          source/build/fs-debug/bun-debug
+          source/build/fs-debug/js
+          source/build/fs-debug/codegen/runtime.out.js
         compression-level: 0
         if-no-files-found: warn
         retention-days: 7
