@@ -1,0 +1,153 @@
+name: OpenClaw current matrix consumer continuation
+
+on:
+  push:
+    branches: [claude/hosted-linux-consumer-20261031]
+    paths:
+      - .github/workflows/openclaw-current-matrix-consumer.yml
+      - .github/openclaw/qualification/resume-consumer.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: openclaw-current-matrix-consumer-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: '1'
+  PUPPETEER_SKIP_DOWNLOAD: '1'
+
+jobs:
+  matrix-consumer:
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 4430cc2e4caa5720c2f78963be3566c87b958084
+          path: pipeline
+          persist-credentials: false
+          sparse-checkout: |
+            .github/openclaw
+            Source/JavaScriptCore
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: carrier
+          persist-credentials: false
+          sparse-checkout: .github/openclaw
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.3.0'
+      - name: Bind the historical Node reference
+        run: |
+          test "$(node --version)" = v26.3.0
+          echo "BASELINE_REFERENCE_NODE=$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '26.12.1'
+      - name: Bind the candidate Node reference and workspace
+        run: |
+          test "$(node --version)" = v26.12.1
+          echo "CANDIDATE_REFERENCE_NODE=$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
+          echo "QUALIFICATION_DIR=$RUNNER_TEMP/qualification" >> "$GITHUB_ENV"
+          echo "ARTIFACT_DIR=$RUNNER_TEMP/retained/bun-webkit-linux-amd64" >> "$GITHUB_ENV"
+          mkdir "$RUNNER_TEMP/qualification" "$RUNNER_TEMP/retained"
+      - name: Install the existing pinned candidate build tools
+        run: |
+          curl -fsSL --retry 5 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake ninja-build nasm ccache golang-go clang-23 lld-23 llvm-23 unzip ruby ruby-highline libjson-pp-perl
+          rustup toolchain install nightly-2026-09-15 --profile minimal --component rust-src
+          echo 'RUSTUP_TOOLCHAIN=nightly-2026-09-15' >> "$GITHUB_ENV"
+          echo '/usr/lib/llvm-23/bin' >> "$GITHUB_PATH"
+          curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o "$RUNNER_TEMP/bootstrap.zip"
+          unzip -q "$RUNNER_TEMP/bootstrap.zip" -d "$RUNNER_TEMP/bootstrap"
+          echo "INSPECTOR_RUNTIME=$RUNNER_TEMP/bootstrap/bun-linux-x64/bun" >> "$GITHUB_ENV"
+      - name: Admit the fixed matrix run and retained build artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 carrier/.github/openclaw/qualification/resume-consumer.py admit-current-matrix "$GITHUB_WORKSPACE/pipeline" "$RUNNER_TEMP/retained"
+      - name: Record the exact reference tools
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          def sha(path):
+              with path.open('rb') as stream:
+                  return hashlib.file_digest(stream, 'sha256').hexdigest()
+          bootstrap = Path(os.environ['INSPECTOR_RUNTIME']).resolve()
+          assert bootstrap.stat().st_size == 79500640 and sha(bootstrap) == 'a83d263767d839e4d2649ca8e35d07159c7afc99afdc96d731ced29e056dda0c'
+          with Path(os.environ['GITHUB_PATH']).open('a') as path:
+              path.write(str(bootstrap.parent) + '\n')
+          references = {}
+          for arm, key, version in [('baseline', 'BASELINE_REFERENCE_NODE', 'v26.3.0'), ('candidate', 'CANDIDATE_REFERENCE_NODE', 'v26.12.1')]:
+              executable = Path(os.environ[key]).resolve(strict=True)
+              actual = subprocess.check_output([str(executable), '--version'], text=True).strip()
+              assert actual == version
+              references[arm] = {'path': str(executable), 'version': actual, 'size': executable.stat().st_size, 'sha256': sha(executable)}
+          references['carrier'] = subprocess.check_output(['git', '-C', 'carrier', 'rev-parse', 'HEAD'], text=True).strip()
+          references['pipeline'] = subprocess.check_output(['git', '-C', 'pipeline', 'rev-parse', 'HEAD'], text=True).strip()
+          Path(os.environ['QUALIFICATION_DIR'], 'reference-tools.json').write_text(json.dumps(references, indent=2) + '\n')
+          PY
+      - name: Run fresh baseline tests and the exact current candidate gates
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          python3 carrier/.github/openclaw/qualification/resume-consumer.py prepare-current-matrix \
+            "$GITHUB_WORKSPACE/pipeline" "$GITHUB_WORKSPACE/carrier" "$RUNNER_TEMP/retained" "$QUALIFICATION_DIR" "$ARTIFACT_DIR" "$INSPECTOR_RUNTIME"
+          export RETAINED_BASELINE_EXECUTABLE="$RUNNER_TEMP/retained/linux-bun-executables/bun-baseline/build/qualify-baseline/bun"
+          cd pipeline
+          bash "$QUALIFICATION_DIR/qualify-current-matrix.sh"
+          export CANDIDATE_BUN="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
+          export CANDIDATE_RECEIPT="$QUALIFICATION_DIR/candidate-identity.json"
+          bash .github/openclaw/qualify-sync-compatibility.sh
+          bash .github/openclaw/qualify-sync.sh
+          cd "$GITHUB_WORKSPACE"
+          python3 carrier/.github/openclaw/qualification/resume-consumer.py seal-current-matrix "$GITHUB_WORKSPACE/pipeline" "$GITHUB_WORKSPACE/carrier" "$QUALIFICATION_DIR" "$ARTIFACT_DIR" "$INSPECTOR_RUNTIME"
+      - name: Retain executables and their matching allocator object
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: current-matrix-linux-bun-executables
+          path: |
+            ${{ runner.temp }}/qualification/bun-baseline/build/qualify-baseline/bun
+            ${{ runner.temp }}/qualification/bun/build/qualify-candidate/bun
+            ${{ runner.temp }}/qualification/bun/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o
+            ${{ runner.temp }}/qualification/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
+            ${{ runner.temp }}/qualification/*.sha256
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: warn
+      - name: Retain current and reused proof with their original identities
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: current-matrix-linux-consumer-proof
+          path: |
+            ${{ runner.temp }}/qualification/*.json
+            ${{ runner.temp }}/qualification/*.log
+            ${{ runner.temp }}/qualification/*.sha256
+            ${{ runner.temp }}/qualification/*.patch
+            ${{ runner.temp }}/qualification/qualify-current-matrix.sh
+            ${{ runner.temp }}/qualification/candidate-input/artifacts.json
+            ${{ runner.temp }}/qualification/baseline/*.json
+            ${{ runner.temp }}/qualification/baseline/*.log
+            ${{ runner.temp }}/qualification/candidate/*.json
+            ${{ runner.temp }}/qualification/candidate/*.log
+            ${{ runner.temp }}/qualification/compatibility/*.log
+            ${{ runner.temp }}/qualification/sync/*.json
+            ${{ runner.temp }}/qualification/sync/*.xml
+            ${{ runner.temp }}/qualification/sync/*.log
+            ${{ runner.temp }}/qualification/sync/runtime-cache/*.json
+            ${{ runner.temp }}/qualification/jsc-*/results
+            ${{ runner.temp }}/qualification/jsc-stack/*.log
+            ${{ runner.temp }}/qualification/jsc-stack/*.json
+          retention-days: 7
+          if-no-files-found: error

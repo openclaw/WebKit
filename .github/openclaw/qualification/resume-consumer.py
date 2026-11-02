@@ -62,6 +62,13 @@ def install_controls(pipeline, carrier, identity):
     return source_manifest
 
 
+def expose_proxy(source):
+    old = b'"$candidate" test test/js/node/vm/vm.test.ts'
+    new = b'"$candidate" test --expose-internals test/js/node/vm/vm.test.ts'
+    assert source.count(old) + source.count(new) == 1
+    return source.replace(old, new)
+
+
 def main():
     args = sys.argv[1:]
     checkpoint = bool(args and args[0] == "--checkpoint")
@@ -148,9 +155,7 @@ def main():
     anchor = b"for arm in baseline candidate; do"
     assert source.count(anchor) == 1
     source = source.replace(anchor, b"for arm in candidate; do")
-    proxy_command = b'"$candidate" test test/js/node/vm/vm.test.ts'
-    assert source.count(proxy_command) == 1
-    source = source.replace(proxy_command, b'"$candidate" test --expose-internals test/js/node/vm/vm.test.ts')
+    source = expose_proxy(source)
     driver = root / "qualify-candidate-fresh.sh"
     driver.write_bytes(source)
     (root / "reuse.json").write_text(json.dumps({
@@ -252,9 +257,7 @@ def replay_matrix(pipeline, carrier, retained, root, artifacts, checkout, inspec
     driver += b'arm=candidate\nrepo="$QUALIFICATION_DIR/bun"\ncandidate="$repo/build/qualify-candidate/bun"\ncd "$repo"\n'
     driver += b'"$bootstrap" install --frozen-lockfile\n(cd test && "$bootstrap" install --frozen-lockfile)\n'
     driver += source[source.index(begin):source.index(end)] + source[source.index(end) + len(b"done\n"):]
-    proxy = b'"$candidate" test test/js/node/vm/vm.test.ts'
-    assert driver.count(proxy) == 1
-    driver = driver.replace(proxy, b'"$candidate" test --expose-internals test/js/node/vm/vm.test.ts')
+    driver = expose_proxy(driver)
     (root / "qualify-retained-matrix.sh").write_bytes(driver)
     manifest = read(inputs / "consumer-repair.json")
     for name, digest in manifest["files"].items():
@@ -298,8 +301,138 @@ def seal_matrix(pipeline, root, artifacts, inspector):
             "gate_sha256": sha(root / "gate.json"), "candidate_identity_sha256": record["candidate_identity_sha256"]}, indent=2) + "\n")
 
 
+
+CURRENT_MATRIX_HEAD = "4430cc2e4caa5720c2f78963be3566c87b958084"
+CURRENT_MATRIX_RUN = 41330085617
+CURRENT_MATRIX_INPUTS = {
+    "qualification": [13100392950, 81556, "sha256:fafbd7145dce9808ae108478cdb94cc5e741e0caeff4c93745f8e88129adb304"],
+    "linux-bun-executables": [13100835127, 76466682, "sha256:ec3df590339bed2aa45fcf0b58ef0f353b23a31864b0440c841876e07cfadaab"],
+    "bun-webkit-linux-amd64": [13093547315, 716162784, "sha256:cf8da5e9e6b7dda9733ef9479e116df621470b3fa02cafd88f1711aa5e4734be"],
+}
+
+
+def current_matrix_policy(pipeline):
+    assert subprocess.check_output(["git", "-C", str(pipeline), "rev-parse", "HEAD"], text=True).strip() == CURRENT_MATRIX_HEAD
+    subprocess.run(["git", "-C", str(pipeline), "diff", "--exit-code", "HEAD"], check=True)
+    inputs = pipeline / ".github/openclaw/qualification"
+    sys.path.insert(0, str(inputs))
+    import consumer_identity as identity
+    return inputs, identity
+
+
+def admit_current_matrix(pipeline, retained):
+    inputs, identity = current_matrix_policy(pipeline)
+    retained.mkdir(exist_ok=True)
+    assert not any(retained.iterdir())
+    helper = inputs / "assemble-retained-matrix.py"
+    assert sha(helper) == "038627ababda81af7e34025b9fc9e54857aa94c3592f090f351fd3970b1a972b"
+    spec = importlib.util.spec_from_file_location("matrix_transport", helper)
+    transport = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(transport)
+    run, jobs = transport.run_identity(CURRENT_MATRIX_RUN, CURRENT_MATRIX_HEAD, "openclaw-artifacts.yml")
+    labels = {row["label"] for row in identity.CONFIG["lanes"]}
+    assert len(labels) == 21 and run["conclusion"] == "failure"
+    required = {"build (" + label + ")" for label in labels} | {"windows-arm64", "preflight"}
+    assert all(jobs[name]["conclusion"] == "success" and jobs[name]["run_attempt"] == 1 for name in required)
+    assert jobs["test"]["conclusion"] == "failure"
+    admitted = {label: transport.download(retained, label, row, CURRENT_MATRIX_RUN, CURRENT_MATRIX_HEAD)
+                for label, row in CURRENT_MATRIX_INPUTS.items()}
+    (retained / "current-matrix-admission.json").write_text(json.dumps({
+        "run": CURRENT_MATRIX_RUN, "head": CURRENT_MATRIX_HEAD,
+        "successful_jobs": {name: jobs[name]["id"] for name in sorted(required)},
+        "artifacts": admitted}, indent=2) + "\n")
+
+
+def prepare_current_matrix(pipeline, carrier, retained, root, artifacts, inspector):
+    inputs, identity = current_matrix_policy(pipeline)
+    assert not (root / "current-matrix-reuse.json").exists() and not (root / "bun-baseline").exists() and not (root / "bun").exists()
+    admission = read(retained / "current-matrix-admission.json")
+    assert admission["run"] == CURRENT_MATRIX_RUN and admission["head"] == CURRENT_MATRIX_HEAD
+    proof, binaries = retained / "qualification", retained / "linux-bun-executables"
+    baseline = read(proof / "baseline-identity.json")
+    identity.validate_baseline_evidence(baseline, binaries, proof)
+    tools = read(proof / "baseline-build-tools.json")
+    assert Path(tools["cwd"]) == root / "bun-baseline"
+    assert inspector == Path(tools["bootstrap"]["path"]) and inspector.stat().st_size == tools["bootstrap"]["size"] and sha(inspector) == tools["bootstrap"]["sha256"]
+    assert not (proof / "baseline/invocation.json").exists() and not (proof / "candidate-identity.json").exists()
+    engine = identity.engine_input(artifacts / (identity.LANE + ".tar.gz"), artifacts / (identity.LANE + ".manifest.json"), CURRENT_MATRIX_HEAD)
+    gate = read(proof / "engine-gate.json")
+    assert gate["passed"] is True and gate["source"] == CURRENT_MATRIX_HEAD
+    assert gate["stress_counts"]["jsc-stress"] == 1901 and gate["stress_counts"]["jsc-modules"] == 1639
+    for name, count in gate["stress_counts"].items():
+        lines = (proof / name / "results").read_text().splitlines()
+        assert len(lines) == count and all(line.endswith(": PASS") for line in lines)
+    reused = {}
+    for path in proof.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(proof)
+        target = root / relative
+        assert not target.exists()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
+        reused[relative.as_posix()] = sha(path)
+    assert len(reused) == 67
+    (root / "engine").mkdir()
+    subprocess.run(["tar", "-xzf", str(artifacts / (identity.LANE + ".tar.gz")), "-C", str(root / "engine")], check=True)
+    source = (pipeline / ".github/openclaw/qualify.sh").read_bytes()
+    source_sha = sha(pipeline / ".github/openclaw/qualify.sh")
+    source = expose_proxy(source)
+    build = b'  python3 "$inputs/harness_adapters.py" build --name "$arm" --root "$QUALIFICATION_DIR" \\\n    --inspector-runtime "$INSPECTOR_RUNTIME" --source "$SOURCE_SHA" --artifacts "$ARTIFACT_DIR"\n'
+    assert source.count(build) == 1
+    source = source.replace(build, b'  if test "$arm" = baseline; then\n    install -D -m700 "${RETAINED_BASELINE_EXECUTABLE:?}" "$repo/build/qualify-baseline/bun"\n  else\n' + build + b'  fi\n')
+    capture = b'    python3 "$inputs/consumer_identity.py" baseline --root "$QUALIFICATION_DIR" --inspector-runtime "$INSPECTOR_RUNTIME"\n'
+    assert source.count(capture) == 1
+    verify = b'''    PYTHONPATH="$inputs" python3 -c 'import json,sys;from pathlib import Path;from consumer_identity import capture_baseline;r=Path(sys.argv[1]);assert capture_baseline(r,Path(sys.argv[2]))==json.loads((r/"baseline-identity.json").read_text())' "$QUALIFICATION_DIR" "$INSPECTOR_RUNTIME"
+'''
+    source = source.replace(capture, verify)
+    driver = root / "qualify-current-matrix.sh"
+    driver.write_bytes(source)
+    shutil.copyfile(retained / "current-matrix-admission.json", root / "current-matrix-admission.json")
+    record = {"run": CURRENT_MATRIX_RUN, "head": CURRENT_MATRIX_HEAD,
+        "reused_files": reused, "admission_sha256": sha(root / "current-matrix-admission.json"),
+        "baseline_build_reused": True, "baseline_tests_reused": False,
+        "candidate_build_reused": False, "candidate_tests_reused": False,
+        "engine_evidence_reused": True, "pipeline_driver_sha256": source_sha,
+        "driver_sha256": sha(driver), "controller_sha256": sha(Path(__file__)),
+        "carrier": subprocess.check_output(["git", "-C", str(carrier), "rev-parse", "HEAD"], text=True).strip(),
+        "reference_tools_sha256": sha(root / "reference-tools.json")}
+    (root / "current-matrix-reuse.json").write_text(json.dumps(record, indent=2) + "\n")
+
+
+def seal_current_matrix(pipeline, carrier, root, artifacts, inspector):
+    inputs, identity = current_matrix_policy(pipeline)
+    record = read(root / "current-matrix-reuse.json")
+    assert record["run"] == CURRENT_MATRIX_RUN and record["head"] == CURRENT_MATRIX_HEAD
+    assert record["controller_sha256"] == sha(Path(__file__))
+    assert record["carrier"] == subprocess.check_output(["git", "-C", str(carrier), "rev-parse", "HEAD"], text=True).strip()
+    assert record["driver_sha256"] == sha(root / "qualify-current-matrix.sh")
+    assert record["pipeline_driver_sha256"] == sha(pipeline / ".github/openclaw/qualify.sh")
+    assert record["admission_sha256"] == sha(root / "current-matrix-admission.json")
+    assert record["reference_tools_sha256"] == sha(root / "reference-tools.json")
+    for name, digest in record["reused_files"].items():
+        assert sha(root / name) == digest, name
+    engine = identity.engine_input(artifacts / (identity.LANE + ".tar.gz"), artifacts / (identity.LANE + ".manifest.json"), CURRENT_MATRIX_HEAD)
+    identity.verify(root, engine, root / "candidate-identity.json", inspector)
+    for arm in ("baseline", "candidate"):
+        identity.validate_invocation(root, arm)
+    assert identity.capture_baseline(root, inspector) == read(root / "baseline-identity.json")
+    gate = read(root / "gate.json")
+    assert gate["passed"] is True and gate["source"] == CURRENT_MATRIX_HEAD
+    assert gate["upstream_sync"] == read(root / "sync-gate.json") and gate["compatibility"] == read(root / "compatibility-gate.json")
+    (root / "current-matrix-complete.json").write_text(json.dumps({"passed": True,
+        "source": CURRENT_MATRIX_HEAD, "reuse_sha256": sha(root / "current-matrix-reuse.json"),
+        "gate_sha256": sha(root / "gate.json"), "candidate_identity_sha256": sha(root / "candidate-identity.json")}, indent=2) + "\n")
+
+
 if __name__ == "__main__":
-    if sys.argv[1] == "replay-matrix":
+    if sys.argv[1] == "admit-current-matrix":
+        admit_current_matrix(*[Path(p).resolve() for p in sys.argv[2:]])
+    elif sys.argv[1] == "prepare-current-matrix":
+        prepare_current_matrix(*[Path(p).resolve() for p in sys.argv[2:]])
+    elif sys.argv[1] == "seal-current-matrix":
+        seal_current_matrix(*[Path(p).resolve() for p in sys.argv[2:]])
+    elif sys.argv[1] == "replay-matrix":
         replay_matrix(*[Path(p).resolve() for p in sys.argv[2:]])
     elif sys.argv[1] == "seal-matrix":
         seal_matrix(*[Path(p).resolve() for p in sys.argv[2:]])
