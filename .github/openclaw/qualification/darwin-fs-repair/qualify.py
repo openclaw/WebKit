@@ -20,6 +20,11 @@ def command(name,args,cwd=SOURCE):
  log=OUT/(name+".log")
  with log.open("wb") as f:r=subprocess.run(args,cwd=cwd,stdout=f,stderr=subprocess.STDOUT)
  proof["steps"][name]={"argv":args,"exit_code":r.returncode,"log_bytes":log.stat().st_size,"log_sha256":sha(log)}
+ if name=="fs-debug":
+  binary=SOURCE/"build/fs-debug/bun-debug"
+  compile_file=SOURCE/"build/fs-debug/compile_commands.json"
+  if binary.is_file():proof["binary"]={"path":"source/build/fs-debug/bun-debug","bytes":binary.stat().st_size,"sha256":sha(binary)}
+  if compile_file.is_file():proof["compile_commands_sha256"]=sha(compile_file)
  save()
  assert log.stat().st_size<=64*1024**2,"phase log exceeded bound"
  assert r.returncode==0,(name,r.returncode)
@@ -69,12 +74,12 @@ def main():
    proof["disk_free_bytes"]=shutil.disk_usage(WORK).free;save()
    assert proof["memory_bytes"]>=6*1024**3 and proof["disk_free_bytes"]>=20*1024**3,"cold native Debug capacity not admitted"
    command("install-tests",["bun","install","--frozen-lockfile"],SOURCE/"test")
-   command("fs-debug",build+["-j1","test","./"+M["test"]["path"],"--reporter=junit","--reporter-outfile="+str(OUT/"fs.xml")])
+   command("fs-debug",build+["-j1","test","./"+M["test"]["path"],"--max-concurrency=1","--reporter=junit","--reporter-outfile="+str(OUT/"fs.xml")])
    xml=OUT/"fs.xml";assert 0<xml.stat().st_size<=8*1024**2
    rows=list(ET.parse(xml).getroot().iter("testcase"));assert rows
    active=[r for r in rows if r.find("skipped") is None]
    assert active and not any(r.find("failure") is not None or r.find("error") is not None for r in rows)
-   needed=["realpath needs no file descriptor","realpath leads from /dev/fd to the open file","realpath resolves what macOS only resolves for open()","realpath preserves a hard-link name when full-path attributes select another link","matches the Node stat and lstat oracle","lstat still throws ENOTDIR"]
+   needed=["realpath reads its path the way Node does","realpath needs no file descriptor","realpath leads from /dev/fd to the open file","realpath resolves what macOS only resolves for open()","realpath preserves a hard-link name when full-path attributes select another link","matches the Node stat and lstat oracle","lstat still throws ENOTDIR"]
    for title in needed:assert any(title in r.get("name","") for r in active),title
    locks=[r.get("name","") for r in active if "preserves process-owned POSIX locks" in r.get("name","")]
    assert len(locks)>=5
