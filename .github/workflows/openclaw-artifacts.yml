@@ -240,12 +240,11 @@ jobs:
       - name: Read the frozen Bun candidate
         id: consumer
         run: python3 -c 'import json,os; p=json.load(open(".github/openclaw/variants.json"))["candidate"]; print("commit="+p["commit"],file=open(os.environ["GITHUB_OUTPUT"],"a"))'
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: openclaw/bun
-          ref: ${{ steps.consumer.outputs.commit }}
-          path: consumer/bun
-          persist-credentials: false
+      - name: Admit the exact Bun source snapshot for native qualification
+        run: |
+          mkdir -p consumer
+          python3 .github/openclaw/qualification/acquire-bun-snapshot.py consumer/bun > consumer/candidate-source.json
+          test "$(git -C consumer/bun rev-parse HEAD)" = "${{ steps.consumer.outputs.commit }}"
       - uses: ./consumer/bun/.github/actions/setup-bun
         with:
           bun-version: "1.4.4"

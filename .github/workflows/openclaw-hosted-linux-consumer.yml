@@ -49,6 +49,7 @@ jobs:
           for suite in test_artifacts.py test_release.py test_consumer_identity.py test_compare_fork_ci.py test_verify_jsc_results.py; do
             python3 ".github/openclaw/$suite" 2>&1 | tee "$RUNNER_TEMP/contracts/${suite%.py}.log"
           done
+          python3 .github/openclaw/qualification/acquire-bun-snapshot.py "$RUNNER_TEMP/bun-source" > "$RUNNER_TEMP/contracts/candidate-source.json"
           python3 - <<'PY'
           import hashlib, json, os, subprocess
           from pathlib import Path

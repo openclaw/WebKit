@@ -18,10 +18,15 @@ for arm in baseline candidate; do
   commit=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]]["commit"])' "$pipeline/.github/openclaw/variants.json" "$arm")
   tree=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))[sys.argv[2]]["tree"])' "$pipeline/.github/openclaw/variants.json" "$arm")
   if test "$arm" = baseline; then repo="$QUALIFICATION_DIR/bun-baseline"; else repo="$QUALIFICATION_DIR/bun"; fi
-  git clone --depth=1 --filter=blob:none --no-checkout https://github.com/openclaw/bun.git "$repo"
-  cd "$repo"
-  git fetch --depth=1 origin "$commit"
-  git checkout --detach "$commit"
+  if test "$arm" = candidate; then
+    python3 "$inputs/acquire-bun-snapshot.py" "$repo" > "$QUALIFICATION_DIR/candidate-source.json"
+    cd "$repo"
+  else
+    git clone --depth=1 --filter=blob:none --no-checkout https://github.com/openclaw/bun.git "$repo"
+    cd "$repo"
+    git fetch --depth=1 origin "$commit"
+    git checkout --detach "$commit"
+  fi
   test "$(git rev-parse HEAD^{tree})" = "$tree"
   git diff --exit-code HEAD
   if test "$arm" = baseline; then
