@@ -8,17 +8,17 @@ import subprocess
 import sys
 import tempfile
 
-COMMIT = "882b3ce222db5f51adde7dce65bf6262aeb7335f"
-TREE = "20d3242be73f09e989b136c4584191fc7a8a7e82"
-PARENT = "723010451479c1464c6d6c5f2a5ebea2eb92fcbd"
+COMMIT = "c6a7bf9d8dc4d44db9f826e47a5ae7645ea6e8c9"
+TREE = "ef814c1b5ef7731d6373cfacb8c88b0227a670aa"
+PARENT = "04e10be52c3632ded738bc7c71e34d74babcd04e"
 REF = "refs/heads/claude/webkit-bun-882-qualification-20261102"
 PREREQUISITES = (
     "dd5eed75f82e5972e3a3928032bbede7eafd2795",
     "7b573c05d0c52dffc67d4d25daf108bed5930cf2",
     "3f3a9ff87cdccf3d32d7ec6b648c664eddaae840",
 )
-DIGEST = "264eafa6ff4b7cc14c817cae42ea79b4b34fbe37c52a03802a6eceab6c00f767"
-SIZE = 303527
+DIGEST = "d6e34e289b33399b0cf1e1cb40a3f3c6ac977685e7730b7b58d5572cef5f7249"
+SIZE = 372405
 
 
 def main():

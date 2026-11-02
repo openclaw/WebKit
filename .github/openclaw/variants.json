@@ -99,8 +99,8 @@
     "manifest_sha256": "df16ba1dcaad70daa014fbc70c7005842fb2bf5099a1df00a83e1075ceef7462"
   },
   "candidate": {
-    "commit": "882b3ce222db5f51adde7dce65bf6262aeb7335f",
-    "tree": "20d3242be73f09e989b136c4584191fc7a8a7e82",
+    "commit": "c6a7bf9d8dc4d44db9f826e47a5ae7645ea6e8c9",
+    "tree": "ef814c1b5ef7731d6373cfacb8c88b0227a670aa",
     "manifest_blob": "e9544c96d5cd9a5e5f6b0245ed5c8dd78fb1a218"
   }
 }
