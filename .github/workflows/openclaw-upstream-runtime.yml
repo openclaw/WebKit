@@ -1,0 +1,170 @@
+name: OpenClaw upstream helper lock proof
+on:
+  pull_request:
+    branches: [claude/sync-webkit-upstream-20261014]
+    paths: [.github/workflows/openclaw-upstream-runtime.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: openclaw-upstream-runtime-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native-helper-lock:
+    if: >-
+      github.repository == 'openclaw/WebKit' &&
+      (github.event.pull_request.head.ref || github.ref_name) == 'claude/upstream-runtime-proof-20261031' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: openclaw/WebKit
+          ref: 48819ee548ab26be5473bd29ad986674895502e7
+          path: upstream
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/LayoutTests/
+            !/JSTests/*
+            !/PerformanceTests/
+            !/Websites/
+            !/ManualTests/
+            !/WebDriverTests/
+            /JSTests/stress/
+            /JSTests/modules/
+            /JSTests/*.yaml
+            /JSTests/BUN-TEST-DIFFERENCES.md
+      - name: Install the existing native ARM64 toolchain
+        run: |
+          test "$(uname -m)" = aarch64
+          curl -fsSL --retry 5 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake ninja-build clang-23 lld-23 libicu-dev ruby ruby-highline libjson-pp-perl
+      - name: Qualify the exact upstream helper-lock fix
+        env:
+          PIPELINE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 - <<'PY_RUNTIME'
+          import hashlib, json, os, signal, subprocess, time
+          from pathlib import Path
+          source = Path('upstream').resolve()
+          build = Path(os.environ['RUNNER_TEMP']) / 'upstream-runtime-build'
+          out = Path(os.environ['RUNNER_TEMP']) / 'upstream-runtime-proof'
+          out.mkdir()
+          helper_head = '48819ee548ab26be5473bd29ad986674895502e7'
+          record = {'pipeline': os.environ['PIPELINE_SHA'], 'candidate': helper_head, 'passed': False, 'steps': {}}
+          deadline = time.monotonic() + 6000
+          def save():
+              (out / 'proof.json').write_text(json.dumps(record, indent=2) + '\n')
+
+          def digest(path):
+              with path.open('rb') as stream:
+                  return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+          def run(name, argv, budget):
+              with (out / (name + '.log')).open('x') as log:
+                  process = subprocess.Popen(argv, cwd=source, stdout=log, stderr=subprocess.STDOUT,
+                                             start_new_session=True)
+                  timed_out = False
+                  try:
+                      process.wait(timeout=min(budget, max(0, deadline - time.monotonic())))
+                  except subprocess.TimeoutExpired:
+                      timed_out = True
+                      raise
+                  finally:
+                      try:
+                          os.killpg(process.pid, signal.SIGKILL)
+                      except ProcessLookupError:
+                          pass
+                      process.wait()
+                      record['steps'][name] = {'argv': argv, 'returncode': process.returncode,
+                                               'timed_out': timed_out}
+                      save()
+              return process.returncode
+
+          def checked(name, argv, budget=120):
+              assert run(name, argv, budget) == 0, name
+
+          def git(*args):
+              return subprocess.check_output(['git', *args], cwd=source, timeout=120).decode().strip()
+
+          def frozen(expected):
+              assert git('rev-parse', 'HEAD') == expected
+              assert not git('status', '--porcelain', '--untracked-files=no'), 'tracked source drift'
+          configure = [
+              '-G', 'Ninja', '-DPORT=JSCOnly', '-DCMAKE_BUILD_TYPE=Release', '-DDEVELOPER_MODE=ON',
+              '-DCMAKE_COMPILE_WARNING_AS_ERROR=OFF', '-DENABLE_STATIC_JSC=ON',
+              '-DUSE_BUN_JSC_ADDITIONS=ON', '-DUSE_BUN_EVENT_LOOP=ON',
+              '-DUSE_MIMALLOC=ON', '-DUSE_EXTERNAL_MIMALLOC=OFF', '-DENABLE_FTL_JIT=ON',
+              '-DENABLE_BUN_SKIP_FAILING_ASSERTIONS=ON', '-DALLOW_LINE_AND_COLUMN_NUMBER_IN_BUILTINS=ON',
+              '-DENABLE_REMOTE_INSPECTOR=ON', '-DCMAKE_C_COMPILER=clang-23', '-DCMAKE_CXX_COMPILER=clang++-23',
+          ]
+          record['configure'] = configure
+          save()
+          frozen(helper_head)
+          assert not build.exists(), 'expected a fresh native build'
+          checked('configure-helper', ['cmake', '-S', str(source), '-B', str(build), *configure], 600)
+          checked('build-helper', ['cmake', '--build', str(build), '--target', 'jsc', '-j4'], 4500)
+          jsc = build / 'bin/jsc'
+          record['helper_jsc_sha256'] = digest(jsc)
+          assert 'ParallelHelperPool.cpp.o' in (out / 'build-helper.log').read_text(), 'helper owner was not compiled'
+          helper_results = Path(os.environ['RUNNER_TEMP']) / 'upstream-helper-gc'
+          checked('helper-gc', ['Tools/Scripts/run-jsc-stress-tests', 'JSTests/stress',
+                  '--jsc', str(jsc), '--quick', '--no-retry', '--child-processes', '1',
+                  '--filter', r'^stress/(basic-eden-gc-test|weakmap-gc)\.js\.(default|no-cjit)$',
+                  '--env-vars', 'JSC_numberOfGCMarkers=4 JSC_useConcurrentGC=true',
+                  '--output-dir', str(helper_results)], 600)
+          expected = {f'stress/{name}.js.{mode}' for name in ('basic-eden-gc-test', 'weakmap-gc')
+                      for mode in ('default', 'no-cjit')}
+          results = (helper_results / 'results').read_text().splitlines()
+          passed = (helper_results / 'passed').read_text().splitlines()
+          assert len(results) == 4 and set(results) == {name + ': PASS' for name in expected}
+          assert len(passed) == 4 and set(passed) == expected
+          for name in ('failed', 'noresult', 'flaky'):
+              path = helper_results / name
+              assert not path.exists() or not path.read_text().strip(), name
+          (out / 'helper-gc-results.log').write_text('\n'.join(results) + '\n')
+          record['helper_gc_cases'] = sorted(expected)
+
+          frozen(helper_head)
+          record.update(passed=True, helper_claim='native build and existing tests; no TSAN or observed-race claim')
+          save()
+          PY_RUNTIME
+      - name: Pack bounded runtime-fix evidence
+        if: always()
+        run: |
+          python3 - <<'PY_PACK'
+          import hashlib, io, json, os, tarfile
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'upstream-runtime-proof'
+          files = sorted(root.iterdir())
+          assert files and len(files) <= 32
+          assert all(path.is_file() and not path.is_symlink() for path in files)
+          assert sum(path.stat().st_size for path in files) <= 128 * 1024**2
+          manifest = {}
+          for path in files:
+              with path.open('rb') as stream:
+                  manifest[path.name] = {'bytes': path.stat().st_size,
+                                         'sha256': hashlib.file_digest(stream, 'sha256').hexdigest()}
+          target = Path(os.environ['RUNNER_TEMP']) / 'upstream-runtime-proof.tar.gz'
+          pending = target.with_suffix('.pending')
+          with tarfile.open(pending, 'w:gz') as archive:
+              for path in files:
+                  archive.add(path, arcname=path.name, recursive=False)
+              content = (json.dumps(manifest, indent=2) + '\n').encode()
+              entry = tarfile.TarInfo('archive-manifest.json'); entry.size = len(content)
+              archive.addfile(entry, io.BytesIO(content))
+          assert pending.stat().st_size <= 16 * 1024**2
+          pending.rename(target)
+          PY_PACK
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: upstream-runtime-fix-proof
+          path: ${{ runner.temp }}/upstream-runtime-proof.tar.gz
+          if-no-files-found: warn
+          retention-days: 7
