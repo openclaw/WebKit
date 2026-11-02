@@ -1,6 +1,9 @@
 name: OpenClaw current retained matrix assembly
 
 on:
+  push:
+    branches: [claude/hosted-linux-consumer-20261031]
+    paths: [.github/workflows/openclaw-current-matrix-assembly.yml]
   workflow_dispatch:
   workflow_call:
 
