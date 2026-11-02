@@ -46,16 +46,16 @@
         "blob": "319330ac912ef2ab7b09c71040a45955d437d21f"
       },
       "after": {
-        "bytes": 29821,
-        "sha256": "a0afb56626a28b0d79fae510195b3a5cd695db55b4868de3bfba86f5bbe8b828",
-        "blob": "370ac48b25cc6eda7ec335e6215fe7def9da27fe"
+        "bytes": 29834,
+        "sha256": "a80671c77183e910f7ddb16672b0ce0a8f445a42326b3a095b4957e92713df8b",
+        "blob": "e667132822d3b657f87f801ec587262cfaa3bcde"
       },
       "control": "AOTSharingModeAndNamespaceTests.cpp",
       "kind": "test",
       "host": {
-        "bytes": 30017,
-        "sha256": "9e86f3d521aeee08b3f160aaf01e371fc8fb5bf9b7b3e8bc5e581e86b8f1f484",
-        "blob": "570541e81ccf75fd82fa083d8da3b55f3ceb310a"
+        "bytes": 30030,
+        "sha256": "4a1f5e56cb6b7360f3ab7ade8c98d65d7d1760caf718b6760011fd29ffd29593",
+        "blob": "65e3b3ee6571582f1dd078f0685fe8ff79da819b"
       }
     },
     "Source/JavaScriptCore/aot/runtime/AOTModuleNamespace.h": {
@@ -244,6 +244,8 @@
         "cross-image ownership"
       ]
     },
-    "limits": "Failed prior job; reuse only admitted baseline build/full-AOT/basic-isolation red. Cache warmup failure is excluded."
+    "limits": "Failed prior job; reuse only admitted baseline build/full-AOT/basic-isolation red. Cache warmup failure is excluded.",
+    "host_role_before": "function f3 name=\"readCaptured\" parameters=",
+    "host_role_after": "function f3 name=\"readCaptured\" role=Library parameters="
   }
 }

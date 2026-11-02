@@ -164,7 +164,7 @@ function f2 name="face" module=m1 kind=Module results=[{type=anything}] {
     EvaluateModule module=m1 referrer=m2 [isBare]
     Return
 }
-function f3 name="readCaptured" parameters=[{type=anything}] results=[{type=anything}] {
+function f3 name="readCaptured" role=Library parameters=[{type=anything}] results=[{type=anything}] {
     v1 = PropGet v0 key="a"
     Return v1
 }

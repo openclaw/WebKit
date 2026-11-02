@@ -156,13 +156,14 @@ for name, row in SPEC['files'].items():
     identity(control, row['after'])
     (SOURCE / name).write_bytes(control.read_bytes())
 state('tests')
-# The only test change is a warmup call in another test's IR. Keep the old
-# baseline tied to its original bytes and line, rather than relabeling it.
+# The probe needs compilation reachability and a host-callable entry. Keep
+# reused baseline evidence tied to its original bytes and assertion line.
 baseline = SPEC['reused_baseline']
 fixture = SOURCE / SPEC['regression']['file']
 current = fixture.read_text()
 assert current.count(baseline['inserted_call']) == 1
-original = current.replace(baseline['inserted_call'], '').encode()
+assert current.count(baseline['host_role_after']) == 1
+original = current.replace(baseline['inserted_call'], '').replace(baseline['host_role_after'], baseline['host_role_before']).encode()
 assert len(original) == baseline['fixture']['bytes']
 assert hashlib.sha256(original).hexdigest() == baseline['fixture']['sha256']
 assert hashlib.sha1(b'blob ' + str(len(original)).encode() + b'\0' + original).hexdigest() == baseline['fixture']['blob']
