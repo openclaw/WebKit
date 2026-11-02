@@ -161,9 +161,11 @@ state('tests')
 baseline = SPEC['reused_baseline']
 fixture = SOURCE / SPEC['regression']['file']
 current = fixture.read_text()
-assert current.count(baseline['inserted_call']) == 1
-assert current.count(baseline['host_role_after']) == 1
-original = current.replace(baseline['inserted_call'], '').replace(baseline['host_role_after'], baseline['host_role_before']).encode()
+original = current
+for edit in baseline['fixture_edits']:
+    assert original.count(edit['current']) == 1
+    original = original.replace(edit['current'], edit['original'], 1)
+original = original.encode()
 assert len(original) == baseline['fixture']['bytes']
 assert hashlib.sha256(original).hexdigest() == baseline['fixture']['sha256']
 assert hashlib.sha1(b'blob ' + str(len(original)).encode() + b'\0' + original).hexdigest() == baseline['fixture']['blob']

@@ -46,16 +46,16 @@
         "blob": "319330ac912ef2ab7b09c71040a45955d437d21f"
       },
       "after": {
-        "bytes": 29834,
-        "sha256": "a80671c77183e910f7ddb16672b0ce0a8f445a42326b3a095b4957e92713df8b",
-        "blob": "e667132822d3b657f87f801ec587262cfaa3bcde"
+        "bytes": 30054,
+        "sha256": "f483b3b52a4851feabd2f89efbf9793e56271edbe1392433051c7332affc89d7",
+        "blob": "7d644a0910158b6e196735dd3ca042381a785b9c"
       },
       "control": "AOTSharingModeAndNamespaceTests.cpp",
       "kind": "test",
       "host": {
-        "bytes": 30030,
-        "sha256": "4a1f5e56cb6b7360f3ab7ade8c98d65d7d1760caf718b6760011fd29ffd29593",
-        "blob": "65e3b3ee6571582f1dd078f0685fe8ff79da819b"
+        "bytes": 30250,
+        "sha256": "abcda5974b6fdb2890157a6354a0a3ee7429ef25b04a311870a7bd78b52b7016",
+        "blob": "78351073f53803e11f566955bb482747634d99bc"
       }
     },
     "Source/JavaScriptCore/aot/runtime/AOTModuleNamespace.h": {
@@ -206,7 +206,7 @@
     "file": "Source/JavaScriptCore/aot/tests/AOTSharingModeAndNamespaceTests.cpp",
     "case": "sharing-mode-and-namespace/require-facade-invalidates-captured-exports",
     "failure_expression": "evaluate(program, \"readCaptured(requiredNamespace)\"_s) == jsNumber(2)",
-    "failure_line": 335,
+    "failure_line": 339,
     "baseline": "pre-repair namespace port; unchanged163 has no separate facade"
   },
   "cache_fix_patch": {
@@ -232,7 +232,6 @@
       "sha256": "b50e9c5dc0706ed5799e55b467a89dc78182b1e77a6d272b5003a73fc0bf1b01",
       "blob": "eac225ac60d69e17dce326eb3fd594d591acd101"
     },
-    "inserted_call": "    v5 = Call v3, -, v1 [isNeverInlined]\n",
     "regression": {
       "file": "Source/JavaScriptCore/aot/tests/AOTSharingModeAndNamespaceTests.cpp",
       "case": "sharing-mode-and-namespace/require-namespace-does-not-mutate-imports",
@@ -245,7 +244,23 @@
       ]
     },
     "limits": "Failed prior job; reuse only admitted baseline build/full-AOT/basic-isolation red. Cache warmup failure is excluded.",
-    "host_role_before": "function f3 name=\"readCaptured\" parameters=",
-    "host_role_after": "function f3 name=\"readCaptured\" role=Library parameters="
+    "fixture_edits": [
+      {
+        "original": "#include \"JSCInlines.h\"\n",
+        "current": "#include \"JSCInlines.h\"\n#include \"ObjectConstructor.h\"\n"
+      },
+      {
+        "original": "    PropSet v0, v1 key=\"capturedNamespace\"\n    v3 = NewClosure function=f3\n    PropSet v0, v3 key=\"readCaptured\"\n",
+        "current": "    PropSet v0, v1 key=\"capturedNamespace\"\n    v2 = PropGet v0 key=\"registry\" [isFreeName]\n    v3 = NewClosure function=f3\n    PropSet v2, v3 key=\"readCaptured\"\n    v5 = Call v3, -, v1 [isNeverInlined]\n"
+      },
+      {
+        "original": "    evaluateModuleSynchronously(program.realm(), ModuleID(0u));\n",
+        "current": "    Strong<JSObject> registry(vm, constructEmptyObject(program.realm()));\n    program.realm()->putDirect(vm, Identifier::fromString(vm, \"registry\"_s), registry.get());\n    evaluateModuleSynchronously(program.realm(), ModuleID(0u));\n"
+      },
+      {
+        "original": "    JSValue reader = program.realm()->get(program.realm(), readerName);\n",
+        "current": "    JSValue reader = registry->getDirect(vm, readerName);\n"
+      }
+    ]
   }
 }

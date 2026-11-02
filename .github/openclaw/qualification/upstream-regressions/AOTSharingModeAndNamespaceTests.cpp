@@ -28,6 +28,7 @@
 #include "AOTVector.h"
 #include "JSArrayBuffer.h"
 #include "JSCInlines.h"
+#include "ObjectConstructor.h"
 #include "Strong.h"
 #include <array>
 #include <bit>
@@ -148,8 +149,9 @@ function f0 name="main" kind=Module results=[{type=anything}] {
     v0 = Builtin builtin=GlobalThis
     v1 = ModuleNamespace module=m2
     PropSet v0, v1 key="capturedNamespace"
+    v2 = PropGet v0 key="registry" [isFreeName]
     v3 = NewClosure function=f3
-    PropSet v0, v3 key="readCaptured"
+    PropSet v2, v3 key="readCaptured"
     v5 = Call v3, -, v1 [isNeverInlined]
     Return
 }
@@ -164,7 +166,7 @@ function f2 name="face" module=m1 kind=Module results=[{type=anything}] {
     EvaluateModule module=m1 referrer=m2 [isBare]
     Return
 }
-function f3 name="readCaptured" role=Library parameters=[{type=anything}] results=[{type=anything}] {
+function f3 name="readCaptured" parameters=[{type=anything}] results=[{type=anything}] {
     v1 = PropGet v0 key="a"
     Return v1
 }
@@ -310,12 +312,14 @@ static void testRequireFacadeInvalidatesCapturedExports(LoadedProgram& program)
     constexpr ModuleID face(2u);
     VM& vm = program.vm();
     Modules& modules = modulesOf(program.instance());
+    Strong<JSObject> registry(vm, constructEmptyObject(program.realm()));
+    program.realm()->putDirect(vm, Identifier::fromString(vm, "registry"_s), registry.get());
     evaluateModuleSynchronously(program.realm(), ModuleID(0u));
     Strong<JSObject> imported(vm, modules.moduleNamespace(face, ModulePhase::Evaluation));
     AOT_TEST_CHECK(imported);
     JSGlobalObject* plain = program.realms().plain();
     Identifier readerName = Identifier::fromString(vm, "readCaptured"_s);
-    JSValue reader = program.realm()->get(program.realm(), readerName);
+    JSValue reader = registry->getDirect(vm, readerName);
     AOT_TEST_CHECK(reader && reader.isObject());
     plain->putDirect(vm, readerName, reader);
     plain->putDirect(vm, Identifier::fromString(vm, "importedNamespace"_s), imported.get());
