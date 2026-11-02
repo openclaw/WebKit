@@ -1,85 +1,24 @@
-name: OpenClaw hosted Linux consumer qualification
-
+name: OpenClaw repaired Bun native Darwin qualification
 on:
   workflow_dispatch:
-    inputs:
-      assemble_retained:
-        description: Assemble the completed fixed-run matrix after Linux replay
-        type: boolean
-        default: false
-      contracts_only:
-        description: Run only packaging and consumer contracts
-        type: boolean
-        default: false
-
 permissions:
   contents: read
   actions: read
-
-concurrency:
-  group: openclaw-hosted-linux-consumer-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
-
 env:
-  SYNC_COMMIT: 42e4245f4180941634b482a7e8ef7fca47467de5
-  CARRIER_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
-
+  ENGINE_SHA: 1281a1be4796f541bcaf0ef751941c41dfbf7817
+concurrency:
+  group: openclaw-c6-darwin-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  contracts:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
+  build:
+    if: github.repository == 'openclaw/WebKit' && github.ref == 'refs/heads/claude/bun-c6a7-darwin-qualification-20261102'
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-          sparse-checkout: |
-            .github
-            icu
-            macos-cross
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: '26.12.1'
-      - name: Check the canonical packaging and consumer contracts
-        shell: bash
-        run: |
-          set -euo pipefail
-          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
-          mkdir "$RUNNER_TEMP/contracts"
-          for suite in test_artifacts.py test_release.py test_consumer_identity.py test_compare_fork_ci.py test_verify_jsc_results.py; do
-            python3 ".github/openclaw/$suite" 2>&1 | tee "$RUNNER_TEMP/contracts/${suite%.py}.log"
-          done
-          python3 .github/openclaw/qualification/acquire-bun-snapshot.py "$RUNNER_TEMP/bun-source" > "$RUNNER_TEMP/contracts/candidate-source.json"
-          python3 - <<'PY'
-          import hashlib, json, os, subprocess
-          from pathlib import Path
-          config = json.loads(Path('.github/openclaw/variants.json').read_text())
-          assert len(config['lanes']) == 21
-          paths = ['artifacts.py', 'test_artifacts.py', 'release.py', 'test_release.py', 'variants.json']
-          controls = {name: hashlib.sha256(Path('.github/openclaw', name).read_bytes()).hexdigest() for name in paths}
-          Path(os.environ['RUNNER_TEMP'], 'contracts', 'gate.json').write_text(json.dumps({
-              'passed': True, 'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
-              'lanes': 21, 'archives': 22, 'controls': controls,
-              'candidate_commit': config['candidate']['commit'],
-          }, indent=2) + '\n')
-          PY
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
-        with:
-          name: integrated-packaging-contracts
-          path: ${{ runner.temp }}/contracts
-          if-no-files-found: warn
-          retention-days: 7
-  linux-native:
-    needs: contracts
-    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.assemble_retained && !inputs.contracts_only }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: 42e4245f4180941634b482a7e8ef7fca47467de5
-          fetch-depth: 1
+          ref: ${{ env.ENGINE_SHA }}
+          fetch-depth: 0
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: |
@@ -90,201 +29,152 @@ jobs:
             !/Websites/
             !/ManualTests/
             !/WebDriverTests/
-            /JSTests/stress/
-            /JSTests/modules/
-            /JSTests/*.yaml
-            /JSTests/BUN-TEST-DIFFERENCES.md
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: 5e586e4ce8bd9f3f3703af98983f7f13fb58c242
-          persist-credentials: false
-          path: carrier
-          fetch-depth: 1
-          sparse-checkout: .github/openclaw
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: openclaw/bun
-          ref: d9be087429c21e563bb5ac29f8a11805e64b56a3
-          fetch-depth: 1
-          persist-credentials: false
-          path: retained-bun-source
-      - name: Prepare the fixed-run continuation workspace
-        shell: bash
-        run: |
-          set -euo pipefail
-          export ARTIFACT_DIR="$RUNNER_TEMP/linux-artifact" QUALIFICATION_DIR="/home/runner/_work/_temp/qualification"
-          echo "ARTIFACT_DIR=$ARTIFACT_DIR" >> "$GITHUB_ENV"
-          echo "QUALIFICATION_DIR=$QUALIFICATION_DIR" >> "$GITHUB_ENV"
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift /opt/microsoft
-          df -h /
-          python3 - <<'PY'
-          import json, os, shutil
-          from pathlib import Path
-          capacity = dict(cpus=os.cpu_count(), disk_free_bytes=shutil.disk_usage('.').free)
-          assert capacity['disk_free_bytes'] >= 40 * 1024**3, 'retained source, executables and engine need 40 GiB free'
-          Path(os.environ['QUALIFICATION_DIR']).mkdir(parents=True)
-          Path(os.environ['QUALIFICATION_DIR'], 'carrier.json').write_text(json.dumps(dict(
-              carrier=os.environ['CARRIER_COMMIT'], sync=os.environ['SYNC_COMMIT'],
-              engine_artifact=13075718771, engine_run=41286392252, engine_attempt=1,
-              capacity=capacity), indent=2) + '\n')
-          PY
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '26.12.1'
-      - name: Verify the frozen candidate Node version
-        run: test "$(node --version)" = v26.12.1
-      - name: Admit the exact retained engine artifact
+      - name: Measure existing runner and Docker capacity
+        run: bash .github/openclaw/preflight.sh
+      - name: Build unchanged upstream lane and record provenance
         env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh api repos/openclaw/WebKit/actions/artifacts/13075718771 > "$RUNNER_TEMP/engine-artifact.json"
-          gh api repos/openclaw/WebKit/actions/artifacts/13075718771/zip > "$RUNNER_TEMP/engine.zip"
-          python3 - <<'PY'
-          import hashlib, json, os, shutil, stat, zipfile
-          from pathlib import Path, PurePosixPath
-          root = Path(os.environ['RUNNER_TEMP'])
-          artifact = json.loads((root / 'engine-artifact.json').read_text())
-          digest = 'e762b6e8022b4d0f454b1ddc8288f0b3b2ad511b159fe2b8cff7fd4a4eb197d4'
-          assert artifact['id'] == 13075718771 and not artifact['expired']
-          assert artifact['name'] == 'bun-webkit-linux-amd64'
-          assert artifact['workflow_run']['id'] == 41286392252
-          assert artifact['workflow_run']['head_sha'] == 'bfea5fad536fe27d6beb39bdf64106536418428f'
-          assert artifact['size_in_bytes'] == (root / 'engine.zip').stat().st_size == 709340274
-          assert artifact['digest'] == 'sha256:' + digest
-          with (root / 'engine.zip').open('rb') as stream:
-              assert hashlib.file_digest(stream, 'sha256').hexdigest() == digest
-          target = Path(os.environ['ARTIFACT_DIR'])
-          target.mkdir()
-          with zipfile.ZipFile(root / 'engine.zip') as archive:
-              entries = archive.infolist()
-              assert 0 < len(entries) <= 32 and sum(e.file_size for e in entries) <= 8 * 1024**3
-              (Path(os.environ['QUALIFICATION_DIR']) / 'engine-zip-entries.json').write_text(json.dumps([
-                  {'path': e.filename, 'bytes': e.file_size, 'mode': e.external_attr >> 16, 'directory': e.is_dir()}
-                  for e in entries
-              ], indent=2) + '\n')
-              seen_paths, seen_files = set(), set()
-              for entry in entries:
-                  name = PurePosixPath(entry.filename)
-                  parts = entry.filename.rstrip('/').split('/')
-                  assert not name.is_absolute() and not any(p in ('', '.', '..') for p in parts)
-                  assert '\\' not in entry.filename and '\x00' not in entry.filename and name not in seen_paths
-                  seen_paths.add(name)
-                  mode = stat.S_IFMT(entry.external_attr >> 16)
-                  if entry.is_dir():
-                      assert mode in (0, stat.S_IFDIR) and entry.file_size == 0
-                      continue
-                  assert mode in (0, stat.S_IFREG) and name.name not in seen_files
-                  seen_files.add(name.name)
-                  with archive.open(entry) as source, (target / name.name).open('xb') as output:
-                      shutil.copyfileobj(source, output)
-          from sys import path
-          path.insert(0, '.github/openclaw/qualification')
-          from consumer_identity import engine_input
-          engine_input(target / 'bun-webkit-linux-amd64.tar.gz', target / 'bun-webkit-linux-amd64.manifest.json', os.environ['SYNC_COMMIT'])
-          shutil.copyfile(root / 'engine-artifact.json', Path(os.environ['QUALIFICATION_DIR']) / 'engine-artifact.json')
-          (root / 'engine.zip').unlink()
-          PY
-      - name: Install the frozen Bun and JSC test tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fsSL --retry 5 https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
-          echo 'deb https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm.list
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cmake ninja-build nasm ccache golang-go clang-23 lld-23 llvm-23 unzip ruby ruby-highline libjson-pp-perl
-          rustup toolchain install nightly-2026-09-15 --profile minimal --component rust-src
-          echo 'RUSTUP_TOOLCHAIN=nightly-2026-09-15' >> "$GITHUB_ENV"
-          echo '/usr/lib/llvm-23/bin' >> "$GITHUB_PATH"
-          curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o "$RUNNER_TEMP/bun.zip"
-          unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bootstrap"
-          echo "$RUNNER_TEMP/bootstrap/bun-linux-x64" >> "$GITHUB_PATH"
-      - name: Download the exact completed build and runtime evidence
-        timeout-minutes: 5
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir "$RUNNER_TEMP/retained"
-          gh api repos/openclaw/WebKit/actions/artifacts/13077667443 > "$RUNNER_TEMP/retained/proof.metadata.json"
-          gh api repos/openclaw/WebKit/actions/artifacts/13077667443/zip > "$RUNNER_TEMP/retained/proof.zip"
-          gh api repos/openclaw/WebKit/actions/artifacts/13077208926 > "$RUNNER_TEMP/retained/binaries.metadata.json"
-          gh api repos/openclaw/WebKit/actions/artifacts/13077208926/zip > "$RUNNER_TEMP/retained/binaries.zip"
-      - name: Install the reviewed continuation and unchanged consumer policy
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 carrier/.github/openclaw/qualification/resume-consumer.py install "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/carrier"
-      - name: Verify contracts with the reviewed adapters
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$SYNC_COMMIT"
-          python3 .github/openclaw/test_artifacts.py
-          python3 .github/openclaw/test_compare_fork_ci.py
-          python3 .github/openclaw/test_release.py
-          python3 .github/openclaw/test_consumer_identity.py
-          python3 .github/openclaw/test_verify_jsc_results.py
-          bash .github/openclaw/preflight.sh
-      - name: Replay the consumer suites against the retained matrix build
-        shell: bash
+          LANE: bun-webkit-macos-arm64-aot
+          BUILDX_METADATA_PROVENANCE: max
+        run: python3 .github/openclaw/artifacts.py build --lane "$LANE" --output "$RUNNER_TEMP/lane"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: bun-webkit-macos-arm64-aot
+          path: ${{ runner.temp }}/lane
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+  darwin-arm64:
+    needs: build
+    runs-on: macos-15
+    timeout-minutes: 115
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: "1"
+      OPENCLAW_CI_PLATFORM: darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 1281a1be4796f541bcaf0ef751941c41dfbf7817
+          persist-credentials: false
+          sparse-checkout: |
+            .github
+            icu
+            macos-cross
+            Source/JavaScriptCore
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: qualification-controls
+          persist-credentials: false
+          sparse-checkout: .github/openclaw
+      - name: Admit the exact current controls over the frozen engine checkout
         run: |
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
-          export INSPECTOR_RUNTIME="$(realpath "$(command -v bun)")"
-          python3 carrier/.github/openclaw/qualification/resume-consumer.py replay-matrix \
-            "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/carrier" "$RUNNER_TEMP/retained" \
-            "$QUALIFICATION_DIR" "$ARTIFACT_DIR" "$GITHUB_WORKSPACE/retained-bun-source" "$INSPECTOR_RUNTIME"
-          export CANDIDATE_BUN="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
-          export CANDIDATE_RECEIPT="$QUALIFICATION_DIR/candidate-identity.json"
-          bash "$QUALIFICATION_DIR/qualify-retained-matrix.sh"
-          bash .github/openclaw/qualify-sync-compatibility.sh
-          bash .github/openclaw/qualify-sync.sh
-          python3 carrier/.github/openclaw/qualification/resume-consumer.py seal-matrix \
-            "$GITHUB_WORKSPACE" "$QUALIFICATION_DIR" "$ARTIFACT_DIR" "$INSPECTOR_RUNTIME"
-      - name: Retain the exact qualified Bun executables
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+          python3 - <<'PY'
+          import hashlib, json, os, stat, subprocess
+          from pathlib import Path
+          root = Path(os.environ['GITHUB_WORKSPACE'])
+          controls = root / 'qualification-controls'
+          def git(repo, *args):
+              return subprocess.check_output(['git', '-C', str(repo), *args], text=True, timeout=120).strip()
+          assert git(root, 'rev-parse', 'HEAD') == '1281a1be4796f541bcaf0ef751941c41dfbf7817'
+          assert git(controls, 'rev-parse', 'HEAD') == os.environ['GITHUB_SHA']
+          names = [name for name in git(controls, 'ls-files', '-z', '--', '.github/openclaw').split('\0') if name]
+          assert 0 < len(names) <= 512 and sum((controls / name).stat().st_size for name in names) < 64 * 1024**2
+          installed = {}
+          for name in names:
+              source, target = controls / name, root / name
+              assert stat.S_ISREG(source.lstat().st_mode)
+              indexed = git(controls, 'ls-files', '-s', '--', name).split()
+              data = source.read_bytes()
+              assert indexed[0] in ('100644', '100755')
+              assert hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest() == indexed[1]
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(data)
+              target.chmod(0o755 if indexed[0] == '100755' else 0o644)
+              installed[name] = hashlib.sha256(data).hexdigest()
+          proof = root / 'consumer'
+          proof.mkdir()
+          (proof / 'continuation-inputs.json').write_text(json.dumps({
+              'engine': '1281a1be4796f541bcaf0ef751941c41dfbf7817', 'controls': os.environ['GITHUB_SHA'],
+              'installed_controls': installed, 'bun_native_qualification': 'pending',
+          }, indent=2) + '\n')
+          PY
+      - name: Read the frozen Bun candidate
+        id: consumer
+        run: python3 -c 'import json,os; p=json.load(open(".github/openclaw/variants.json"))["candidate"]; print("commit="+p["commit"],file=open(os.environ["GITHUB_OUTPUT"],"a"))'
+      - name: Admit the exact Bun source snapshot for native qualification
+        run: |
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          mkdir -p consumer
+          python3 .github/openclaw/qualification/acquire-bun-snapshot.py consumer/bun > consumer/candidate-source.json
+          test "$(git -C consumer/bun rev-parse HEAD)" = "${{ steps.consumer.outputs.commit }}"
+      - uses: ./consumer/bun/.github/actions/setup-bun
         with:
-          name: hosted-linux-bun-executables
+          bun-version: "1.4.4"
+      - name: Read the candidate toolchain pins
+        id: pins
+        working-directory: consumer/bun
+        run: |
+          # shellcheck disable=SC2016
+          bun -e 'import { pins } from "./scripts/build/ci-images/spec.ts"; console.log(`llvm=${pins.llvm.version.split(".")[0]}\nnode=${pins.nodejs.version}\nrust=${pins.rust.channel}`)' >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ steps.pins.outputs.node }}
+      - name: Install native build tools
+        timeout-minutes: 15
+        env:
+          LLVM_MAJOR: ${{ steps.pins.outputs.llvm }}
+          RUST_TOOLCHAIN: ${{ steps.pins.outputs.rust }}
+        run: |
+          test "$(uname -s)" = Darwin && test "$(uname -m)" = arm64
+          python3 -c 'import hashlib; assert callable(hashlib.file_digest)'
+          brew install cmake ninja nasm ccache go llvm
+          llvm_bin="$(brew --prefix llvm)/bin"
+          "$llvm_bin/clang" --version | grep -F "clang version ${LLVM_MAJOR}."
+          echo "$llvm_bin" >> "$GITHUB_PATH"
+          echo "CC=$llvm_bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=$llvm_bin/clang++" >> "$GITHUB_ENV"
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rust-src
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: bun-webkit-macos-arm64-aot
+          path: ${{ runner.temp }}/darwin-artifact
+      - name: Build and qualify the exact native Darwin candidate
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/darwin-artifact
+          QUALIFICATION_DIR: ${{ github.workspace }}/consumer
+        run: |
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          export INSPECTOR_RUNTIME="$(python3 -c 'import pathlib,shutil; print(pathlib.Path(shutil.which("bun")).resolve())')"
+          bash .github/openclaw/qualify-darwin.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: darwin-bun-executables
           path: |
-            /home/runner/_work/_temp/qualification/bun-baseline/build/qualify-baseline/bun
-            /home/runner/_work/_temp/qualification/bun/build/qualify-candidate/bun
-            /home/runner/_work/_temp/qualification/bun/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o
-            /home/runner/_work/_temp/qualification/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
-            /home/runner/_work/_temp/qualification/*.sha256
+            ${{ github.workspace }}/consumer/bun/build/qualify-candidate/bun
+            ${{ github.workspace }}/consumer/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
+            ${{ github.workspace }}/consumer/bun/test/aot/every-platform.test.ts
+            ${{ github.workspace }}/consumer/*.sha256
           compression-level: 0
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 3
-      - name: Retain terminal or partial qualification evidence
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: hosted-linux-native-proof
+          name: darwin-qualification
           path: |
-            /home/runner/_work/_temp/qualification/*.json
-            /home/runner/_work/_temp/qualification/*.log
-            /home/runner/_work/_temp/qualification/*.sha256
-            /home/runner/_work/_temp/qualification/*.patch
-            /home/runner/_work/_temp/qualification/qualify-retained-matrix.sh
-            /home/runner/_work/_temp/qualification/candidate-input/artifacts.json
-            /home/runner/_work/_temp/qualification/baseline/*.json
-            /home/runner/_work/_temp/qualification/baseline/*.log
-            /home/runner/_work/_temp/qualification/candidate/*.json
-            /home/runner/_work/_temp/qualification/candidate/*.log
-            /home/runner/_work/_temp/qualification/previous-candidate/*
-            /home/runner/_work/_temp/qualification/compatibility/*.log
-            /home/runner/_work/_temp/qualification/sync/*.json
-            /home/runner/_work/_temp/qualification/sync/*.xml
-            /home/runner/_work/_temp/qualification/sync/*.log
-            /home/runner/_work/_temp/qualification/jsc-*/results
-            /home/runner/_work/_temp/qualification/jsc-stack/*.log
-            /home/runner/_work/_temp/qualification/jsc-stack/*.json
-            /home/runner/_work/_temp/qualification/sync/runtime-cache/*.json
+            ${{ github.workspace }}/consumer/*.json
+            ${{ github.workspace }}/consumer/*.log
+            ${{ github.workspace }}/consumer/*.patch
+            ${{ github.workspace }}/consumer/candidate-input/artifacts.json
+            ${{ github.workspace }}/consumer/candidate/*.json
+            ${{ github.workspace }}/consumer/candidate/*.log
+            ${{ github.workspace }}/consumer/sync/*.log
           if-no-files-found: error
           retention-days: 7
-  assemble-retained:
-    if: ${{ inputs.assemble_retained && !inputs.contracts_only }}
-    uses: ./.github/workflows/openclaw-retained-matrix.yml
