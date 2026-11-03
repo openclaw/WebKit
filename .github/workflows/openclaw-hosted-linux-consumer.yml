@@ -1,0 +1,108 @@
+name: OpenClaw artifact capacity regression
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: openclaw-artifact-capacity-regression-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  capacity:
+    if: github.repository == 'openclaw/WebKit' && github.ref == 'refs/heads/claude/artifact-capacity-probe-20261103'
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 94019e6ad8f7e786ec293617799b85eb57ca3e40
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /.github/
+            /Source/JavaScriptCore/COPYING.LIB
+            /Source/WTF/wtf/COPYING.LIB
+      - name: Admit the exact failed-assembly producer and capacity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(git rev-parse HEAD)" = 94019e6ad8f7e786ec293617799b85eb57ca3e40
+          df -B1 "$RUNNER_TEMP"
+          python3 - <<'PYCODE'
+          import json, os, pathlib, shutil, urllib.request
+          SOURCE = "94019e6ad8f7e786ec293617799b85eb57ca3e40"
+          RUN = 41565570543
+          ATTEMPT = 1
+          REPO = "openclaw/WebKit"
+          def api(path):
+              request = urllib.request.Request("https://api.github.com/repos/" + REPO + "/" + path,
+                  headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"], "Accept": "application/vnd.github+json"})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+          run = api(f"actions/runs/{RUN}")
+          assert (run["head_sha"], run["head_branch"], run["event"], run["run_attempt"], run["conclusion"]) == (SOURCE, "openclaw/main", "workflow_dispatch", ATTEMPT, "failure")
+          assert run["path"].split("@", 1)[0] == ".github/workflows/openclaw-artifacts.yml"
+          lanes = json.loads(pathlib.Path(".github/openclaw/variants.json").read_text())["lanes"]
+          expected = {"build (" + lane["label"] + ")" for lane in lanes} | {"preflight", "test", "darwin-arm64", "windows-arm64"}
+          jobs = api(f"actions/runs/{RUN}/jobs?filter=latest&per_page=100")["jobs"]
+          assert len(jobs) == 27 and {j["name"] for j in jobs} == expected | {"assemble", "publish"}
+          assert len(expected) == 25
+          assert all(j["status"] == "completed" and j["run_attempt"] == ATTEMPT for j in jobs)
+          assert all(j["conclusion"] == "success" for j in jobs if j["name"] in expected)
+          assemble = next(j for j in jobs if j["name"] == "assemble")
+          assert assemble["id"] == 125783991131 and assemble["conclusion"] == "failure"
+          assert next(j for j in jobs if j["name"] == "publish")["conclusion"] == "skipped"
+          annotations = api(f"check-runs/{assemble['id']}/annotations")
+          assert any("No space left on device" in row["message"] for row in annotations)
+          artifacts = api(f"actions/runs/{RUN}/artifacts?per_page=100")
+          expected_artifacts = {lane["label"] for lane in lanes} | {"qualification", "linux-bun-executables", "darwin-qualification", "darwin-bun-executables", "windows-arm64-qualification"}
+          assert artifacts["total_count"] == 26 and len(artifacts["artifacts"]) == 26
+          assert {a["name"] for a in artifacts["artifacts"]} == expected_artifacts
+          assert all(not a["expired"] for a in artifacts["artifacts"])
+          free = shutil.disk_usage(os.environ["RUNNER_TEMP"]).free
+          assert free >= 40_000_000_000, "capacity probe needs 40 GB free"
+          proof = {"source": SOURCE, "producer_run": RUN, "producer_attempt": ATTEMPT,
+              "successful_prerequisites": len(expected), "artifact_count": 26,
+              "artifact_bytes": sum(a["size_in_bytes"] for a in artifacts["artifacts"]),
+              "free_before_download": free, "publishing": False}
+          pathlib.Path(os.environ["RUNNER_TEMP"], "capacity-proof.json").write_text(json.dumps(proof, indent=2) + "\n")
+          PYCODE
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          github-token: ${{ github.token }}
+          repository: openclaw/WebKit
+          run-id: 41565570543
+          path: ${{ runner.temp }}/inputs
+      - name: Run the unchanged owner assembly and two-copy verification
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          python3 .github/openclaw/release.py assemble --source 94019e6ad8f7e786ec293617799b85eb57ca3e40 --inputs "$RUNNER_TEMP/inputs" --directory "$RUNNER_TEMP/release"
+          python3 .github/openclaw/release.py verify --source 94019e6ad8f7e786ec293617799b85eb57ca3e40 --directory "$RUNNER_TEMP/release"
+          cp -a "$RUNNER_TEMP/release" "$RUNNER_TEMP/readback"
+          python3 .github/openclaw/release.py verify --source 94019e6ad8f7e786ec293617799b85eb57ca3e40 --directory "$RUNNER_TEMP/readback"
+          df -B1 "$RUNNER_TEMP"
+          python3 - <<'PYCODE'
+          import hashlib, json, os, pathlib, shutil
+          root = pathlib.Path(os.environ["RUNNER_TEMP"])
+          proof_path = root / "capacity-proof.json"
+          proof = json.loads(proof_path.read_text())
+          manifest_path = root / "release/manifest.json"
+          manifest = json.loads(manifest_path.read_text())
+          assert manifest["version"] == proof["source"] and len(manifest["artifacts"]) == 22
+          assert len(manifest["lanes"]) == 21 and manifest["qualification"]["passed"] is True
+          sizes = {name: sum(p.stat().st_size for p in (root / name).rglob("*") if p.is_file()) for name in ("inputs", "release", "readback")}
+          assert sizes["release"] == sizes["readback"] and sum(sizes.values()) < proof["free_before_download"]
+          proof.update({"passed": True, "bytes": sizes, "free_after_copies": shutil.disk_usage(root).free,
+              "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(), "archives": 22, "lanes": 21,
+              "owner_assemble_verified": True, "copy_verified": True})
+          proof_path.write_text(json.dumps(proof, indent=2) + "\n")
+          assert proof_path.stat().st_size < 65536
+          print(proof_path.read_text())
+          PYCODE
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: artifact-capacity-proof
+          path: ${{ runner.temp }}/capacity-proof.json
+          if-no-files-found: error
+          retention-days: 7
