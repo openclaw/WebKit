@@ -191,6 +191,8 @@ worker inspection and external-buffer cases alongside the fork selection.
 
 ## Unreleased
 
+- Keep CommonJS parent objects private from registered module hooks during AOT value flow, preserving runtime-transpiler trimming and legacy resolver parent access.
+
 - Keep AOT import namespaces separate from cached require facades, preserving marker reflection, shared export reads, module identity and GC ownership across the upstream sync.
 
 - Reject incomplete native JUnit file suites in both frozen reporting adapters by checking descendant testcase counts, file ownership and failure counts before accepting test evidence.

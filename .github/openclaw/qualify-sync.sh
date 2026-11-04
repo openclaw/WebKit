@@ -68,7 +68,7 @@ python3 "$inputs/compile_cache.py" /tmp "$junit_prefix" "$results/module-junit.x
 "$candidate" test test/aot/every-platform.test.ts > "$results/aot-every-platform.log" 2>&1
 "$candidate" test --expose-internals test/js/node/v8/capture-stack-trace.test.js test/js/node/util/util.test.js test/js/bun/sourcemap > "$results/stack-positions.log" 2>&1
 "$candidate" test test/bundler/bundler_minify.test.ts > "$results/stack-minifier.log" 2>&1
-python3 "$inputs/stack/check-runtime-cache.py" --baseline "$QUALIFICATION_DIR/bun-baseline/build/qualify-baseline/bun" --candidate "$candidate" --fixture "$inputs/stack/observe-regressions.js" --output "$results/runtime-cache" --expected-baseline-version 36 --expected-version 52 > "$results/stack-cache.json"
+python3 "$inputs/stack/check-runtime-cache.py" --baseline "$QUALIFICATION_DIR/bun-baseline/build/qualify-baseline/bun" --candidate "$candidate" --fixture "$inputs/stack/observe-regressions.js" --output "$results/runtime-cache" --expected-baseline-version 36 --expected-version 53 > "$results/stack-cache.json"
 "$candidate" "$inputs/segmenter.js" > "$results/segmenter.log" 2>&1
 "$candidate" test --expose-internals test/js/node/vm/vm.test.ts -t 'a Proxy in the prototype chain' > "$results/proxy.log" 2>&1
 "$candidate" test test/js/node/worker_threads/openclaw-resource-limits.test.ts -t resourceLimits > "$results/resource-limits.log" 2>&1
