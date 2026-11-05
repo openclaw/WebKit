@@ -70,7 +70,9 @@ Condition ShapeTestEmitter::carriesBrandOfClass(CellPointer cell, LayoutID class
         return boolean(false);
     ptrdiff_t offsetOfBrand = static_cast<ptrdiff_t>(*rank) * sizeof(void*);
     Pointer structure = loadStructure(cell);
-    Condition isBranded = equal(Word32(m_out.load8ZeroExt32(structure.value(), m_heaps.Structure_variant)), word32(static_cast<uint32_t>(Structure::StructureVariant::Branded)));
+    Word32 variant(m_out.load8ZeroExt32(structure.value(), m_heaps.Structure_variant));
+    Word32 branded = word32(static_cast<uint32_t>(Structure::StructureVariant::Branded));
+    Condition isBranded = equal(variant, branded);
     return selectByBranch<Condition>(isBranded, [&] {
         Pointer brands = loadImmutablePointer(AOT_INSTANCE_OFFSET(classes.brandsOfInstances));
         LValue brandOfClass = m_out.loadPtr(m_out.address(m_heaps.entire(AbstractHeap::AllocatorState), brands.value(), offsetOfBrand));
@@ -146,7 +148,9 @@ Condition ShapeTestEmitter::hasPrototypeOfItsClass(CellPointer cell, const Type&
 Condition ShapeTestEmitter::hasNoPropertyOfItsOwn(CellPointer cell)
 {
     Pointer structure = loadStructure(cell);
-    return equal(Word32(m_out.load16ZeroExt32(structure.value(), m_heaps.Structure_maxOffset)), word32(static_cast<uint32_t>(Structure::greatestMaxOffsetOutsideRareData + 1)));
+    Word32 maxOffset(m_out.load16ZeroExt32(structure.value(), m_heaps.Structure_maxOffset));
+    Word32 noProperty = word32(static_cast<uint32_t>(Structure::greatestMaxOffsetOutsideRareData + 1));
+    return equal(maxOffset, noProperty);
 }
 
 bool ShapeTestEmitter::hasOnlyCellsCreatedWithoutProperties(const Type& cellsWithBrands) const
@@ -161,8 +165,10 @@ Condition ShapeTestEmitter::hasOnlyClassFieldNames(CellPointer cell)
 {
     Word32 structureID = loadStructureID(cell);
     Pointer known = loadImmutablePointer(AOT_INSTANCE_OFFSET(classes.structureNameCache));
-    Word32 index = bitAnd(shiftRightUnsigned(structureID, static_cast<int32_t>(structureNameCacheShift)), word32(structureNameCacheSize - 1));
-    LValue place = m_out.add(known.value(), m_out.shl(m_out.zeroExtPtr(index.value()), m_out.constIntPtr(2)));
+    Word32 shiftedID = shiftRightUnsigned(structureID, static_cast<int32_t>(structureNameCacheShift));
+    Word32 index = bitAnd(shiftedID, word32(structureNameCacheSize - 1));
+    LValue wideIndex = m_out.zeroExtPtr(index.value());
+    LValue place = m_out.add(known.value(), m_out.shl(wideIndex, m_out.constIntPtr(2)));
     Word32 entry(m_out.load32(m_out.address(m_heaps.entire(AbstractHeap::AllocatorState), place, 0)));
     return either<Condition>(equal(entry, structureID), [&] {
         return boolean(true);

@@ -132,9 +132,14 @@ CellPointer ConstantEmitter::makeClosureOfField(const OperationContext& context,
     };
     auto makeInStub = [&] {
         Word32 closureNumber = word32(made.last().closureNumber);
-        for (size_t index = 0; index + 1 < made.size(); ++index)
-            closureNumber = select(isOf(*made[index].function), word32(made[index].closureNumber), closureNumber);
-        Integer request = bitOr(zeroExtended(closureNumber), integer(static_cast<int64_t>(static_cast<uint64_t>(offsetOfSlot) << 32)));
+        for (size_t index = 0; index + 1 < made.size(); ++index) {
+            Condition matches = isOf(*made[index].function);
+            Word32 candidate = word32(made[index].closureNumber);
+            closureNumber = select(matches, candidate, closureNumber);
+        }
+        Integer number = zeroExtended(closureNumber);
+        Integer offset = integer(static_cast<int64_t>(static_cast<uint64_t>(offsetOfSlot) << 32));
+        Integer request = bitOr(number, offset);
         return CellPointer(callStub(context, AOT::makeClosureOfField(*slimClosureKind, capturesObject), { request.value(), object.value() }, { .isOnRarePath = true, .accessesCollectorState = true }).first);
     };
     if (made.size() == functions.size())

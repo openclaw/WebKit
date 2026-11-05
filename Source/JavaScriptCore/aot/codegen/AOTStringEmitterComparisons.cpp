@@ -85,7 +85,11 @@ Condition StringEmitter::areBoth8Bit(CellPointer a, CellPointer b)
     auto flagsOf = [&](CellPointer string) {
         return Word32(m_out.load32(loadField<Pointer>(string, m_heaps.JSString_value).value(), m_heaps.StringImpl_hashAndFlags));
     };
-    return isNotZero(bitAnd(bitAnd(flagsOf(a), flagsOf(b)), word32(StringImpl::flagIs8Bit())));
+    Word32 flagsOfA = flagsOf(a);
+    Word32 flagsOfB = flagsOf(b);
+    Word32 flags = bitAnd(flagsOfA, flagsOfB);
+    Word32 is8Bit = word32(StringImpl::flagIs8Bit());
+    return isNotZero(bitAnd(flags, is8Bit));
 }
 
 Word32 StringEmitter::order(const OperationContext& context, CellPointer a, CellPointer b)
@@ -177,7 +181,9 @@ StringEmitter::AtomOfName StringEmitter::atomOfName(uint32_t name)
     // The header of the atom is made when the text first becomes an atom. Until then its offset is zero, where no header lies.
     Pointer offsets = loadImmutablePointer(AOT_INSTANCE_OFFSET(image.lazyStringHeaderOffsets));
     Word32 offset(m_out.load32(m_out.address(m_heaps.AOTInstance_fieldsFilledOnce, offsets.value(), static_cast<ptrdiff_t>(name) * sizeof(uint32_t))));
-    return { offsetBy(loadImmutablePointer(AOT_INSTANCE_OFFSET(lazyStrings.headers)), zeroExtended(offset), 0), isNotZero(offset) };
+    Pointer headers = loadImmutablePointer(AOT_INSTANCE_OFFSET(lazyStrings.headers));
+    Integer headerOffset = zeroExtended(offset);
+    return { offsetBy(headers, headerOffset, 0), isNotZero(offset) };
 }
 
 void StringEmitter::branchOnEqualsLiteral(const OperationContext& context, ComparedOperand operand, LValue subject, StringID literal, BranchTargets targets, bool subjectIsFlat, bool everyCellIsString, bool subjectIsComparedAgain)

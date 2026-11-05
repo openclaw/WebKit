@@ -21,6 +21,8 @@ struct CodeLayout;
 struct EntryAlias;
 struct ProgramTables;
 
+bool checkImageFunctionLimit(uint64_t numberOfIDs, BuildContext&);
+
 struct FrameTable {
     Vector<ImageFrame> frames;
     Vector<uint32_t> frameOf;

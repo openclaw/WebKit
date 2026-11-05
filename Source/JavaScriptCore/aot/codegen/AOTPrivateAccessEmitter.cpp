@@ -50,11 +50,15 @@ TypedPointer PrivateAccessEmitter::locationInKnownStructure(const ValueContext& 
     };
     Pointer records = loadField<Pointer>(token, m_heaps.AOTClassToken_knownStructures);
     branchUnless(Condition(m_out.notNull(records.value())), isUnknown);
-    branchUnless(equal(loadStructureID(object), wordOfRecord(records, ClassToken::StructureNumber)), isUnknown);
+    Word32 structureID = loadStructureID(object);
+    Word32 knownStructureID = wordOfRecord(records, ClassToken::StructureNumber);
+    branchUnless(equal(structureID, knownStructureID), isUnknown);
     if (!isEvaluatedOnce(value))
         branchUnless(isZero(wordOfRecord(records, ClassToken::LocationOfBrand)), isUnknown);
     Integer location = signExtended(wordOfRecord(records, ClassToken::LocationOfValue));
-    Integer storage = select(lessThan(location, integer(0)), Integer(loadField<Pointer>(object, m_heaps.JSObject_butterfly).value()), Integer(object.value()));
+    Condition isOutOfLine = lessThan(location, integer(0));
+    Integer butterfly = Integer(loadField<Pointer>(object, m_heaps.JSObject_butterfly).value());
+    Integer storage = select(isOutOfLine, butterfly, Integer(object.value()));
     return TypedPointer(m_heaps.properties.atAnyNumber(), add(storage, location).value());
 }
 

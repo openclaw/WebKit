@@ -99,7 +99,7 @@ export const sourceOf = (file: string, origin: Origin): Source => ({ file, line:
 function objectsLeftOut(declared: readonly SourcedDeclaration[]): Set<string> {
   const roots = leftOutOf(declared).flatMap(leftOut => leftOut.paths);
   const isLeftOut = (path: string): boolean => roots.some(root => path === root || path.startsWith(`${root}.`));
-  return new Set(
+  const objects = new Set(
     declared.flatMap(({ declaration }) =>
       declaration.declares === "Member" && isLeftOut(declaration.path)
         ? declaration.signatures.flatMap(({ implementation }) =>
@@ -108,6 +108,9 @@ function objectsLeftOut(declared: readonly SourcedDeclaration[]): Set<string> {
         : [],
     ),
   );
+  // ShadowRealm has no AOT members, but disabling it still removes its file from JSC's builtin code indices.
+  if (isLeftOut("ShadowRealm")) objects.add("ShadowRealmPrototype");
+  return objects;
 }
 
 export function engineBuiltinSources(javaScriptCore: string, declared: readonly SourcedDeclaration[]): string[] {
@@ -245,8 +248,10 @@ function removeExcludedFunctions(
 ): EngineFunction[] {
   const upstreamKeys = new Set(upstreamFunctions.map(keyOf));
   const excludedKeys = new Set<string>();
+  const omittedObjects = objectsLeftOut(declared);
   for (const { declaration, source } of declared) {
     if (declaration.declares !== "ExcludedFunction" || source.origin !== "Engine") continue;
+    if (omittedObjects.has(declaration.function.file)) continue;
     const key = keyOf(declaration.function);
     if (!upstreamKeys.has(key)) {
       problems.add(source, `${declaration.function.file}.js has no function ${declaration.function.name}`);

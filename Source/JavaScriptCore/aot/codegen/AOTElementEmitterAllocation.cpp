@@ -231,7 +231,9 @@ CellPointer ArrayAllocationEmitter::allocateArrayOfHoles(const OperationContext&
 {
     auto setLength = [&](CellPointer array) {
         CodeGenerator::InitializationScope scope(generator());
-        m_out.store32(low32(length).value(), m_out.loadPtr(array.value(), m_heaps.JSArray_butterfly), m_heaps.Butterfly_publicLength);
+        Word32 publicLength = low32(length);
+        LValue butterfly = m_out.loadPtr(array.value(), m_heaps.JSArray_butterfly);
+        m_out.store32(publicLength.value(), butterfly, m_heaps.Butterfly_publicLength);
         return array;
     };
     // `new Array(3)`: the stub for an empty array with that room knows its size and its allocator.
@@ -638,7 +640,8 @@ CellPointer ArrayAllocationEmitter::newLiteralWithCapacity(const ValueContext& v
     }
 
     if (std::optional<ValueID> append = appendThatFillsLiteral(value.block(), value.id())) {
-        Integer room = select(belowOrEqual(capacity, integer(maxCapacity)), capacity, integer(0));
+        Condition hasRoom = belowOrEqual(capacity, integer(maxCapacity));
+        Integer room = select(hasRoom, capacity, integer(0));
         return CellPointer(callStub(value, newArrayOfElements(kindOf(form)), { in<CellPointer>(m_function.at(*append).sourceOperand()).value(), room.value() }).first);
     }
 

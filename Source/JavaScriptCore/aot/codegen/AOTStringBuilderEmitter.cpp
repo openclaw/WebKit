@@ -477,7 +477,8 @@ Pointer StringBuilderEmitter::writeDigits(Pointer cursor, Word32 value)
     LValue tenthsOfPairs = m_out.lShr(m_out.mul(pairs, constant(103)), 10);
     LValue tens = m_out.bitAnd(tenthsOfPairs, constant(0x000f000f000f000full));
     LValue digits = m_out.add(tens, m_out.shl(m_out.sub(pairs, m_out.mul(tens, constant(10))), 8));
-    LValue leadingZeroBits = m_out.bitAnd(countTrailingZerosOfNonZero(digits), constant(0x38));
+    LValue zeroBits = countTrailingZerosOfNonZero(digits);
+    LValue leadingZeroBits = m_out.bitAnd(zeroBits, constant(0x38));
     LValue textBehindZeros = m_out.add(digits, constant(asciiZeros));
     ValueFromBlock severalDigitsText = m_out.anchor(m_out.lShr(textBehindZeros, m_out.castToInt32(leadingZeroBits)));
     LValue mostDigits = constant(maxInlineDigits);

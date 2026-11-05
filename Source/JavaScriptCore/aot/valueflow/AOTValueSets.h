@@ -323,8 +323,9 @@ public:
     std::array<uint64_t, 4> sampleOfBlocks(ValueSetID) const;
 
     size_t numberOfStoredSets() const { return m_lists.size(); }
-    static constexpr uint32_t indexInTableBySet(ValueSetID set) { return (set.index() >> 2) * 2 + (set.index() & 1); }
-    uint32_t endOfTableBySet() const { return m_lists.endOfNumbers() + 2; }
+    // Adjacent run units need distinct entries; inline singletons stay outside this table.
+    static constexpr uint32_t indexInTableBySet(ValueSetID set) { return set.index(); }
+    uint32_t endOfTableBySet() const { return m_lists.endOfNumbers() * 2; }
     void addBytesTo(ValueFlowBytesByTable&) const;
     void freeOutgrownTables()
     {
@@ -418,12 +419,13 @@ private:
 
     private:
         static constexpr unsigned numberOfShards = 64;
-        static constexpr size_t bytesPerUnit = 16;
+        // Keep the tagged 30-bit run offsets while allowing each pool to hold 64 GiB.
+        static constexpr size_t bytesPerUnit = 64;
         static constexpr uint32_t unitsPerLine = 64 / bytesPerUnit;
-        static constexpr uint32_t unitsOfHeadAndFirstWord = (sizeof(Run) + sizeof(uint64_t)) / bytesPerUnit;
-        static constexpr uint32_t unitsPerSegment = 1u << 19;
+        static constexpr uint32_t unitsOfHeadAndFirstWord = (sizeof(Run) + sizeof(uint64_t) + bytesPerUnit - 1) / bytesPerUnit;
+        static constexpr uint32_t unitsPerSegment = (8u * 1024 * 1024) / bytesPerUnit;
         static constexpr uint32_t numberOfSegments = (1u << 30) / unitsPerSegment;
-        static constexpr uint32_t unitsPerChunk = 4096;
+        static constexpr uint32_t unitsPerChunk = (64u * 1024) / bytesPerUnit;
 
         using Slot = std::atomic<uint64_t>;
 

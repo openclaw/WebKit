@@ -203,8 +203,11 @@ Condition RuntimeValidationEmitter::hasShapeAmong(CellPointer cell, LayoutSetID 
 void RuntimeValidationEmitter::checkIsCompiledObjectOf(CellPointer cell, LayoutSetID layouts)
 {
     std::span<const uint32_t> shapes = m_placement.shapes().memberShapes(layouts);
-    if (!shapes.empty())
-        failUnless(hasShapeAmong(cell, layouts, shapes), ValidationFailureKind::ReceiverShape, cell, generator().operationBeingGenerated());
+    if (!shapes.empty()) {
+        Condition hasShape = hasShapeAmong(cell, layouts, shapes);
+        ValueID operation = generator().operationBeingGenerated();
+        failUnless(hasShape, ValidationFailureKind::ReceiverShape, cell, operation);
+    }
 }
 
 // A guard may rely on a guard: whether the fields are in the order of the layout is asked of an object that an earlier test found to have the layout.
@@ -424,7 +427,9 @@ void RuntimeValidationEmitter::generateValidateSameValue(const ValueContext& val
     // A string converted to LiteralString and back is the cell of the literal, which may not be the cell it started as.
     m_out.appendTo(differ);
     const Type& anything = m_program.at(TypeTable::anything);
-    m_out.branch(equal(conversions.toLiteralString(keptValue, anything), conversions.toLiteralString(replacingValue, anything)).value(), normalEdge(continuation), rareEdge(differAsLiteralStrings));
+    LiteralStringWord keptString = conversions.toLiteralString(keptValue, anything);
+    LiteralStringWord replacingString = conversions.toLiteralString(replacingValue, anything);
+    m_out.branch(equal(keptString, replacingString).value(), normalEdge(continuation), rareEdge(differAsLiteralStrings));
 
     m_out.appendTo(differAsLiteralStrings);
     Condition keptIsNumber = hasType(keptValue, isNumber);
@@ -707,6 +712,7 @@ Condition RuntimeValidationEmitter::isInStack(Pointer pointer)
     patchpoint->resultConstraints = { B3::ValueRep::SomeEarlyRegister };
     patchpoint->numGPScratchRegisters = 1;
     patchpoint->clobber(RegisterSet::macroClobberedGPRs());
+
     emitter<RuntimeCallEmitter>().applyEffects(patchpoint, Effects::none(), ArgumentBufferAccess::None);
     m_heaps.decoratePatchpointRead(&m_heaps.entire(AbstractHeap::RuntimeState), patchpoint);
     patchpoint->setGenerator([](CCallHelpers& jit, const B3::StackmapGenerationParams& params) {

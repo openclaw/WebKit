@@ -715,11 +715,15 @@ void ElementAccessEmitter::generateIsElementInStorage(const ValueContext& value)
         // One arm for all three forms: an element is eight bytes in each, and only the hole marker differs.
         static_assert(Int32Shape + 2 == DoubleShape && DoubleShape + 2 == ContiguousShape && !(IndexingShapeMask & 1));
         Word32 shape = indexingMode(object, IndexingShapeMask);
-        branchUnless(belowOrEqual(sub(shape, word32(Int32Shape)), word32(ContiguousShape - Int32Shape)), targets.notTaken.block());
+        Word32 shapeFromInt32 = sub(shape, word32(Int32Shape));
+        branchUnless(belowOrEqual(shapeFromInt32, word32(ContiguousShape - Int32Shape)), targets.notTaken.block());
         ArrayElements elements = elementsOf(object);
         LengthTest test = testLength(position, elements);
         branchUnless(test.isInside, targets.notTaken.block());
-        Integer hole = select(equal(shape, word32(DoubleShape)), integer(arrayStorageFormOf(ArrayStorage::Double).hole), integer(arrayStorageFormOf(ArrayStorage::Contiguous).hole));
+        Condition isDouble = equal(shape, word32(DoubleShape));
+        Integer doubleHole = integer(arrayStorageFormOf(ArrayStorage::Double).hole);
+        Integer contiguousHole = integer(arrayStorageFormOf(ArrayStorage::Contiguous).hole);
+        Integer hole = select(isDouble, doubleHole, contiguousHole);
         branch(notEqual(Integer(loadBoxedElement(elements, test.indexInside).value()), hole), targets);
     });
 }

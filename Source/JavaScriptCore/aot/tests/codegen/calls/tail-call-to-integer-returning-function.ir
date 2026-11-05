@@ -83,7 +83,8 @@ function f2 name="halfOrWhole" module=m0 position=52 flags=[IsChecked, HasExplic
 # One function returns integers alone, the other a fraction or what the first returns. The call in tail position is no jump: the tail calls of the callee come to an end, so the caller keeps its frame,
 # converts the integer and returns it. Each returns its number in a register of its own kind.
 # CHECK-LABEL: name="whole" role=Source
-# CHECK: Int32 b@[[integer]] = Phi(
+# The number-to-int conversion is a Phi on targets without a direct JavaScript conversion instruction.
+# CHECK: Int32 b@[[integer]] =
 # CHECK-NEXT: Return(b@[[integer]], Terminal)
 # CHECK-LABEL: name="halfOrWhole" role=Source
 # CHECK: Double b@[[half]] = Mul(

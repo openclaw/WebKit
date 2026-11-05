@@ -110,7 +110,8 @@ void MathBuiltinEmitter::extremumOfArray(const InlineCall& call, Extremum kind)
     ArrayElements storage = elements.elementsOf(cellOperand(call.argument(0)));
     Integer length = elements.publicLength(storage);
     // The call refuses a list that does not fit on the stack.
-    branchUnless(below(length, integer(static_cast<int64_t>(build().limit(LimitID::MaxReservedStackArguments)) + 1)), missBlockOf(call));
+    Condition fitsStack = below(length, integer(static_cast<int64_t>(build().limit(LimitID::MaxReservedStackArguments)) + 1));
+    branchUnless(fitsStack, missBlockOf(call));
     finish(call, extremumOfElements(kind, storage.array, storage.butterfly, length, missBlockOf(call)));
 }
 

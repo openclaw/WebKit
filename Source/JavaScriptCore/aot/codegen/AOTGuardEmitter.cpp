@@ -344,7 +344,9 @@ void GuardEmitter::generateIsPrototypeOfClass(const ValueContext& value)
     }
     Pointer prototypes = loadImmutablePointer(AOT_INSTANCE_OFFSET(classes.classPrototypes));
     ptrdiff_t offset = static_cast<ptrdiff_t>(*rank) * sizeof(void*);
-    defineTest(value, Condition(m_out.equal(in<CellPointer>(value->prototypeOperand()).value(), m_out.load64(m_out.address(m_heaps.entire(AbstractHeap::AllocatorState), prototypes.value(), offset)))));
+    CellPointer prototype = in<CellPointer>(value->prototypeOperand());
+    LValue classPrototype = m_out.load64(m_out.address(m_heaps.entire(AbstractHeap::AllocatorState), prototypes.value(), offset));
+    defineTest(value, Condition(m_out.equal(prototype.value(), classPrototype)));
 }
 
 void GuardEmitter::generateIsPristine(const ValueContext& value)
