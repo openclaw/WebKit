@@ -17,6 +17,31 @@ cd "$repo"
 results="$QUALIFICATION_DIR/sync"
 mkdir -p "$results/home" "$results/tmp" "$results/bin"
 chmod 700 "$results/home" "$results/tmp"
+# Test the real Bun host table without changing the frozen consumer's compiled inputs.
+evaluator_fixtures="$results/aot-evaluators"
+mkdir -p "$evaluator_fixtures"
+for fixture in evaluated-text-does-not-call-private-host-evaluators a-private-host-evaluator-that-is-called-still-evaluates-text; do
+  curl -fSL --retry 5 "https://raw.githubusercontent.com/openclaw/bun/02526c26fb9cbf76c9748e9ed3ae67020d99dd77/test/aot/engine-tests/valueflow/modules/$fixture.ir" -o "$evaluator_fixtures/$fixture.ir"
+done
+printf '%s\n' \
+  '063440e834e83e69d1ee7a5fa2107964569546f727bdee55e3ac5a8de6392003  evaluated-text-does-not-call-private-host-evaluators.ir' \
+  'd5586fed571bd4bf796d00b1f53295d0604e7a0bff664a38505b75904a3213f8  a-private-host-evaluator-that-is-called-still-evaluates-text.ir' \
+  | (cd "$evaluator_fixtures" && sha256sum -c -)
+engine_digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["engine"]["archive"]["sha256"])' "$CANDIDATE_RECEIPT")
+engine_aot="$QUALIFICATION_DIR/cache-candidate/webkit-sha256-$engine_digest/Source/JavaScriptCore/aot"
+export TESTAOT="$repo/build/qualify-candidate/testaot" JSC="$repo/build/qualify-candidate/jsc"
+export AOT_SCHEMA="$engine_aot/ir/AOTSchema.def" AOT_BUILTINS_GENERATED="$engine_aot/builtins/generated"
+export AOT_ENGINE_DIRECTORY="$engine_aot" AOT_ENGINE_TESTS="$engine_aot/tests"
+ninja=$("$INSPECTOR_RUNTIME" -e 'import {detectHost} from "./scripts/build/config.ts"; import {ninjaIfPresent} from "./scripts/build/ninja-release.ts"; console.log=console.error; process.stdout.write(ninjaIfPresent({host:detectHost(),cacheDir:process.argv[1]}));' "$QUALIFICATION_DIR/cache-candidate")
+BUN_BUILD_CACHE_DIR="$QUALIFICATION_DIR/cache-candidate" BUN_BUILD_PREFETCH_DIR="$QUALIFICATION_DIR/candidate-input/prefetch" \
+  "$ninja" -C "$repo/build/qualify-candidate" engine-test-programs > "$results/aot-host-tools-build.log" 2>&1
+test -x "$TESTAOT" && test -x "$JSC" && test -s "$AOT_SCHEMA"
+timeout 120 "$TESTAOT" run "$evaluator_fixtures" --show-output > "$results/aot-evaluators.log" 2>&1
+grep -Fx '2 passed, 0 failed, 0 todo' "$results/aot-evaluators.log"
+timeout 300 "$TESTAOT" native --single-process closed-world/evaluation/program-that-evaluates-text-keeps-every-evaluator \
+  > "$results/aot-language-evaluators.log" 2>&1
+grep -Fx 'closed-world/evaluation/program-that-evaluates-text-keeps-every-evaluator' "$results/aot-language-evaluators.log"
+grep -Fx '1 passed, 0 failed, 0 todo' "$results/aot-language-evaluators.log"
 "$candidate" --revision > "$results/revision.log"
 "$candidate" -e 'const server=Bun.serve({port:0,fetch(){return new Response("ready")}});try{if(await(await fetch(server.url)).text()!=="ready")throw Error("startup");console.log("build/startup/http passed")}finally{await server.stop(true)}' > "$results/startup.log" 2>&1
 ln -s "$candidate" "$results/bin/bun"
