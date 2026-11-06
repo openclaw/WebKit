@@ -1,3 +1,5 @@
+AOT value-flow no longer treats every host text evaluator as called merely because a program may run unseen code. Language evaluators and reachable host evaluator calls keep their existing behavior. Qualification covers a real Bun-host negative/positive regression pair and the existing native control for all five language evaluators.
+
 Qualification now pins Bun `ae14f84a8f978f069ce8deadb4c5582b3331f139`, including repaired socket reconnect teardown and aliased/computed customization-hook coverage. Its runtime transpiler-cache gate expects format 53; the historical baseline remains format 36. Frozen harness adapters and the four AOT platform cases remain unchanged; final-source platform qualification is still required.
 
 AOT valueflow preserves arbitrary module answers when the program registers customization hooks, including calls through aliases. Bun must declare the registration builtin and retain its host loader calls; consumers need a joint rebuild with the matching engine headers and libraries.
