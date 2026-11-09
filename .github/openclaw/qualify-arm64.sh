@@ -22,14 +22,21 @@ from pathlib import Path
 build, out = Path(sys.argv[1]).resolve(), Path(sys.argv[2])
 selections = {
     'aot-namespace': [
+        'sharing-mode-and-namespace/sharing-mode-of-values',
+        'sharing-mode-and-namespace/module-of-namespace-objects',
+        'sharing-mode-and-namespace/require-namespace-does-not-mutate-imports',
+        'sharing-mode-and-namespace/require-facade-invalidates-captured-exports',
         'sharing-mode-and-namespace/compiled-tests',
-        'sharing-mode-and-namespace/compiled-tests-under-validation',
     ],
     'aot-modules': ['module-programs/' + name for name in [
         'required-commonjs-modules', 'imported-commonjs-modules',
-        'commonjs-entry-point', 'records-of-require', 'import-meta-kept',
+        'commonjs-entry-point', 'records-of-require', 'parents-by-level',
+        'cache-by-level', 'nothing-to-run', 'import-meta-kept',
         'import-meta-passed-on', 'module-builtins-in-every-position',
         'termination-during-import-handoff',
+        'import-called-during-load', 'texts-in-turns',
+        'texts-in-turns-while-other-jobs-wait', 'throw-through-start-of-module',
+        'start-of-module-that-has-run', 'every-kind-of-step-of-start',
     ]],
 }
 record = {'source': sys.argv[3], 'mode': 'native --single-process', 'binaries': {}, 'cases': {}}
@@ -40,7 +47,7 @@ for name in ('bin/jsc', 'bin/testaot', 'CMakeCache.txt'):
         record['binaries'][name] = hashlib.file_digest(stream, 'sha256').hexdigest()
 deadline = time.monotonic() + 600
 for suite, expected in selections.items():
-    selected = 'sharing-mode-and-namespace/compiled-tests' if suite == 'aot-namespace' else 'module-programs/'
+    selected = 'sharing-mode-and-namespace/' if suite == 'aot-namespace' else 'module-programs/'
     with (out / (suite + '.log')).open('w') as stdout, (out / (suite + '-stderr.log')).open('w') as stderr:
         process = subprocess.Popen([str(build / 'bin/testaot'), 'native', '--single-process', selected],
                                    stdout=stdout, stderr=stderr, start_new_session=True)
@@ -109,6 +116,6 @@ for suite, minimum in [('jsc-stress', 1400), ('jsc-modules', 1600)]:
 assert 'testAdd64RegisterAddress()' in (out / 'testmasm.log').read_text()
 aot = json.loads((out / 'aot-native.json').read_text())
 assert aot['passed'] is True and aot['source'] == sys.argv[2]
-assert [len(aot['cases'][name]) for name in ('aot-namespace', 'aot-modules')] == [2, 8]
+assert [len(aot['cases'][name]) for name in ('aot-namespace', 'aot-modules')] == [5, 17]
 (out / 'arm64-gate.json').write_text(json.dumps({'passed': True, 'source': sys.argv[2], 'machine': platform.machine(), 'system': platform.system(), 'counts': counts, 'api_regressions': len(seen), 'aot_native': aot, 'accounting_modes': 5, 'sampling_modes': 5, 'testmasm': True, 'testffi': True, 'vm_entry_scope': True, 'foreign_stack_suspension': True, 'stack_execution_modes': 7, 'stack_cache': json.loads((out / 'jsc-stack/cache-files.json').read_text())}, indent=2) + '\n')
 PY
