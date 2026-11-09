@@ -26,6 +26,7 @@
 #include "AOTVector.h"
 #include "JSArrayBuffer.h"
 #include "JSCInlines.h"
+#include "ObjectConstructor.h"
 #include <array>
 #include <bit>
 #include <initializer_list>

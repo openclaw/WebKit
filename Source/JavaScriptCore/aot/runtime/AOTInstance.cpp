@@ -281,7 +281,7 @@ static void fillAllocationSpaces(Instance& instance, VM& vm)
     instance.allocation.auxiliarySpace = &vm.auxiliarySpace();
     instance.allocation.cagedAuxiliarySpace = vm.heap.cagedAuxiliarySpace<SubspaceAccess::OnMainThread>();
     instance.allocation.cellSpace = &vm.cellSpace();
-    instance.allocation.primitiveAuxiliarySpace = &vm.primitiveGigacageAuxiliarySpace();
+    instance.allocation.primitiveAuxiliarySpace = &vm.typedArrayAuxiliarySpace();
     instance.allocation.compactTableHeader = cellHeaderFor(vm.aotState().runtimeTable->compactTableStructure());
     instance.allocation.textBufferStructureID = vm.aotState().runtimeTable->textBufferStructure()->id().bits();
 }

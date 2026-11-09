@@ -642,6 +642,8 @@ public:
     void materializeArrayBufferView(size_t bytes) { m_unmaterializedArrayBufferBytes -= bytes; }
     JSArrayBufferView** addressOfUnmaterializedArrayBufferViews() { return &m_unmaterializedArrayBufferViews; }
     size_t* addressOfUnmaterializedArrayBufferBytes() { return &m_unmaterializedArrayBufferBytes; }
+    static constexpr ptrdiff_t offsetOfUnmaterializedArrayBufferViews() { return OBJECT_OFFSETOF(Heap, m_unmaterializedArrayBufferViews); }
+    static constexpr ptrdiff_t offsetOfUnmaterializedArrayBufferBytes() { return OBJECT_OFFSETOF(Heap, m_unmaterializedArrayBufferBytes); }
     void didAllocateArrayBufferMemory(size_t bytes) { m_arrayBufferBytesAllocated += bytes; }
     void reportArrayBufferMemoryAllocated(size_t, const JSCell* = nullptr);
     ArrayBufferMemoryAccount& arrayBufferMemoryAccount() { return m_arrayBufferMemoryAccount.get(); }

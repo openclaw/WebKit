@@ -793,7 +793,7 @@ static void testTypedArraysWithLength()
     constexpr size_t maxBytesFromStub = 256;
     constexpr size_t numberOfSizeSteps = maxBytesFromStub / MarkedSpace::sizeStep + 1;
     constexpr uint8_t untouchedByte = 0xab;
-    static_assert(sizeof(JSArrayBufferView) < sizeof(FakeCell) && !(sizeof(JSArrayBufferView) % sizeof(uint64_t)) && !(JSArrayBufferView::offsetOfMode() % sizeof(uint64_t)));
+    static_assert(sizeof(JSArrayBufferView) < sizeof(FakeCell) && !(sizeof(JSArrayBufferView) % sizeof(uint64_t)) && JSArrayBufferView::offsetOfMode() < sizeof(JSArrayBufferView));
 
     StubRunner runner;
     runner.install(Entry::operationAOTNewTypedArray, recordTypedArrayRequest);
@@ -802,6 +802,15 @@ static void testTypedArraysWithLength()
     FakeAllocator views { sizeof(JSArrayBufferView) };
     runner.instance().allocation.primitiveAuxiliarySpace = space.bytes.data();
     runner.instance().allocation.typedArrayAllocations[type] = { &views, header, elementSize, 0 };
+#if USE(BUN_JSC_ADDITIONS)
+    auto& listHead = *runner.instance().vm->heap.addressOfUnmaterializedArrayBufferViews();
+    auto& payloadBytes = *runner.instance().vm->heap.addressOfUnmaterializedArrayBufferBytes();
+    FakeCell olderView;
+    auto seedAccounting = [&] {
+        listHead = std::bit_cast<JSArrayBufferView*>(olderView.address());
+        payloadBytes = 37;
+    };
+#endif
 
     auto allocatorOfStorage = [&](size_t bytes) -> void*& {
         return space.at<void*>(CompleteSubspace::offsetOfAllocatorForSizeStep() + MarkedSpace::sizeClassToIndex(bytes) * sizeof(void*));
@@ -819,13 +828,21 @@ static void testTypedArraysWithLength()
         storages.makeRoomAt(room.address(), sizeOfStorageCell);
         views.makeRoomAt(view.address(), sizeof(JSArrayBufferView));
         allocatorOfStorage(bytes) = &storages;
+#if USE(BUN_JSC_ADDITIONS)
+        seedAccounting();
+#endif
 
         StubRun run = runner.run(newTypedArray(), { type, std::bit_cast<uint64_t>(static_cast<double>(length)) });
         AOT_TEST_CHECK(!run.calledOperation && run.result == view.address() && !storages.hasRoom() && !views.hasRoom());
         AOT_TEST_CHECK(view.words[0] == header && !wordOf(view, JSObject::butterflyOffset()));
         AOT_TEST_CHECK(wordOf(view, JSArrayBufferView::offsetOfVector()) == room.address());
         AOT_TEST_CHECK(wordOf(view, JSArrayBufferView::offsetOfLength()) == length && !wordOf(view, JSArrayBufferView::offsetOfByteOffset()));
-        AOT_TEST_CHECK(static_cast<uint8_t>(wordOf(view, JSArrayBufferView::offsetOfMode())) == FastTypedArray);
+        AOT_TEST_CHECK(reinterpret_cast<const uint8_t*>(view.words.data())[JSArrayBufferView::offsetOfMode()] == FastTypedArray);
+#if USE(BUN_JSC_ADDITIONS)
+        AOT_TEST_CHECK(std::bit_cast<uintptr_t>(listHead) == view.address());
+        AOT_TEST_CHECK(wordOf(view, JSArrayBufferView::offsetOfModeAndNext()) == (olderView.address() | JSArrayBufferView::fastModeBits()));
+        AOT_TEST_CHECK(payloadBytes == 37 + length * elementSize);
+#endif
         AOT_TEST_CHECK(wordOf(view, sizeof(JSArrayBufferView)) == FakeCell::untouched);
         AOT_TEST_CHECK(std::ranges::all_of(std::span(room.bytes).first(bytes), [](uint8_t byte) { return !byte; }));
         AOT_TEST_CHECK(std::ranges::all_of(std::span(room.bytes).subspan(bytes), [](uint8_t byte) { return byte == untouchedByte; }));
@@ -842,9 +859,15 @@ static void testTypedArraysWithLength()
         return view.isUntouched() && storages.intervalStart() == room.address() && views.intervalStart() == view.address();
     };
     auto isLeftToOperation = [&](uint32_t requestedType, double length) {
+#if USE(BUN_JSC_ADDITIONS)
+        seedAccounting();
+#endif
         FakeCell fromOperation;
         runner.setResultOfRecordedOperation(fromOperation.address());
         StubRun run = runner.run(newTypedArray(), { requestedType, std::bit_cast<uint64_t>(length) });
+#if USE(BUN_JSC_ADDITIONS)
+        AOT_TEST_CHECK(std::bit_cast<uintptr_t>(listHead) == olderView.address() && payloadBytes == 37);
+#endif
         return run.numberOfRecordedCalls == 1 && run.recordedArguments[0] == requestedType && run.recordedArguments[1] == std::bit_cast<uint64_t>(length) && run.result == fromOperation.address() && fromOperation.isUntouched();
     };
     for (size_t bytes = MarkedSpace::sizeStep; bytes <= maxBytesFromStub; bytes += MarkedSpace::sizeStep)

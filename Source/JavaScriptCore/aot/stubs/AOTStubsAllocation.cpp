@@ -25,6 +25,7 @@
 #include "JSObject.h"
 #include "LocalAllocator.h"
 #include "MarkedSpace.h"
+#include "VM.h"
 #include <optional>
 #include <type_traits>
 #include <wtf/MathExtras.h>
@@ -724,7 +725,22 @@ void generateNewTypedArray(StubAssembler& jit)
     jit.storePtr(storage, Address(result, JSArrayBufferView::offsetOfVector()));
     jit.store64(length, Address(result, JSArrayBufferView::offsetOfLength()));
     jit.store64(TrustedImm32(0), Address(result, JSArrayBufferView::offsetOfByteOffset()));
+#if USE(BUN_JSC_ADDITIONS)
+    // Match the DFG/FTL allocation contract: initialize the weak link and credit
+    // the logical payload before a buffer can materialize or GC can visit it.
+    constexpr ptrdiff_t viewsOffset = OBJECT_OFFSETOF(VM, heap) + Heap::offsetOfUnmaterializedArrayBufferViews();
+    constexpr ptrdiff_t bytesOffset = OBJECT_OFFSETOF(VM, heap) + Heap::offsetOfUnmaterializedArrayBufferBytes();
+    jit.loadPtr(Address(instanceGPR, AOT_INSTANCE_OFFSET(vm)), storage);
+    jit.loadPtr(Address(storage, viewsOffset), allocator);
+    jit.or64(TrustedImm64(JSArrayBufferView::fastModeBits()), allocator);
+    jit.store64(allocator, Address(result, JSArrayBufferView::offsetOfModeAndNext()));
+    jit.storePtr(result, Address(storage, viewsOffset));
+    jit.load32(inRecord(OBJECT_OFFSETOF(TypedArrayAllocation, elementSize)), size);
+    jit.mul32(length, size);
+    jit.add64(size, Address(storage, bytesOffset));
+#else
     jit.store8(TrustedImm32(FastTypedArray), Address(result, JSArrayBufferView::offsetOfMode()));
+#endif
     fenceAfterAllocation(jit);
     jit.returnToCaller();
 
