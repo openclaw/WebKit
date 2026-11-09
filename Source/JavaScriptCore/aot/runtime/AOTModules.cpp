@@ -6702,7 +6702,6 @@ ModuleNamespace* ModuleNamespace::create(VM& vm, Structure* structure, ModuleID 
 
 ModuleNamespace* ModuleNamespace::createNamespaceForRequire(JSGlobalObject* globalObject)
 {
-    ImageOfCellScope imageOfCell(globalObject->vm(), this);
     auto scope = DECLARE_THROW_SCOPE(globalObject->vm());
     if (ModuleNamespace* required = m_requiredNamespace.get())
         return required;
