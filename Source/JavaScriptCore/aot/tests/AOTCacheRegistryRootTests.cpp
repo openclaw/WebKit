@@ -114,6 +114,9 @@ public:
     bool isMarked(PreciseAllocation&, HeapCell* cell) const final { return !wasDropped(cell); }
     bool mutatorsAreStopped() const final { return true; }
     void reportExtraMemoryVisited(size_t) final { }
+#if USE(BUN_JSC_ADDITIONS)
+    void reportArrayBufferMemoryVisited(size_t) final { }
+#endif
 #if ENABLE(RESOURCE_USAGE)
     void reportExternalMemoryVisited(size_t) final { }
 #endif
