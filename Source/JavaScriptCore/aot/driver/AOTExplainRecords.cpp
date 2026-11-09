@@ -20,6 +20,7 @@
 #include <tuple>
 #include <utility>
 #include <wtf/BitVector.h>
+#include <wtf/DataLog.h>
 #include <wtf/text/WTFString.h>
 
 namespace JSC { namespace AOT {
@@ -456,6 +457,15 @@ static Wire::AccessRecord makeExplainedAccess(const Typed::Program& program, std
     record.cost = worst.cost;
     for (const PlacedExplainNote& placed : notesOfPlace) {
         const Typed::WalkNote& note = explainedWalkNote(units, placed);
+        const auto& function = program.at(note.writtenIn);
+        if (function.name && String::fromUTF8(program.string(function.name)) == "answer"_s
+            && String::fromUTF8(program.string(program.at(function.module).path)).endsWith("main.ts"_s)) {
+            dataLogLn("AOT HTTP access position=", note.origin.position,
+                " function=", note.writtenIn.index(), " unit=", placed.unit,
+                " role=", Typed::nameOf(units[placed.unit].unit.role),
+                " opcode=", Typed::nameOf(note.opcode),
+                " kind=", static_cast<unsigned>(note.kind), " cost=", static_cast<unsigned>(note.cost));
+        }
         record.cost = std::min(record.cost, note.cost);
         record.loopDepth = std::max<uint32_t>(record.loopDepth, note.loopDepth);
     }

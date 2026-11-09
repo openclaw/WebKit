@@ -6231,6 +6231,12 @@ template<Opcode known> bool Walker::walkThroughChainOf(const BodyValue& walked)
         isBuilt = buildReadWhereSomeReceiversLackField(*this, value);
     if (!isBuilt && m_explainsClosedAccessesTo) [[unlikely]]
         explainClosedAccess(*this, value, *m_explainsClosedAccessesTo);
+    if (!isBuilt) {
+        const auto& function = program().at(currentFunction());
+        if (function.name && String::fromUTF8(program().string(function.name)) == "answer"_s
+            && String::fromUTF8(program().string(program().at(function.module).path)).endsWith("main.ts"_s))
+            explainClosedAccess(*this, value, WTF::dataFile());
+    }
     if (!isBuilt)
         isBuilt = buildOperatorBesideOneNumber(*this, value) || buildAccessByIndexOffExpectedView(*this, value) || buildReadByIndexOffAnyBase(*this, value) || askPlainVectorBehindRow(*this, value);
     if (!isBuilt && callThroughTargetResolvedOnce(*this, value))
