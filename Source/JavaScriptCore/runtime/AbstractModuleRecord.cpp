@@ -29,7 +29,6 @@
 #if ENABLE(AOT)
 #include "AOTAsyncResumption.h"
 #include "AOTModuleRecord.h"
-#include "AOTRuntimeCounters.h"
 #endif
 #include "BuiltinNames.h"
 #include "CodeCache.h"
@@ -122,6 +121,12 @@ void AbstractModuleRecord::visitChildrenImpl(JSCell* cell, Visitor& visitor)
     visitor.append(thisObject->m_asyncParentModules.begin(), thisObject->m_asyncParentModules.end());
     for (const auto& [key, loadedModule] : thisObject->m_loadedModules)
         visitor.append(loadedModule.m_module);
+#if ENABLE(AOT)
+    if (thisObject->vm().hasCompiledCode() && !thisObject->inherits<AOT::ModuleRecord>()) {
+        for (const auto& resolution : thisObject->m_resolutionCache.values())
+            visitor.appendUnbarriered(resolution.moduleRecord);
+    }
+#endif
 }
 
 DEFINE_VISIT_CHILDREN(AbstractModuleRecord);
@@ -707,8 +712,29 @@ auto AbstractModuleRecord::tryGetCachedResolution(UniquedStringImpl* exportName)
 
 void AbstractModuleRecord::cacheResolution(UniquedStringImpl* exportName, const Resolution& resolution)
 {
+#if ENABLE(AOT)
+    if (vm().hasCompiledCode() && !inherits<AOT::ModuleRecord>()) {
+        {
+            Locker locker { cellLock() };
+            m_resolutionCache.add(exportName, resolution);
+        }
+        vm().writeBarrier(this);
+        return;
+    }
+#endif
     m_resolutionCache.add(exportName, resolution);
 }
+
+#if ENABLE(AOT)
+static NEVER_INLINE bool isSettledByMock(VM& vm, bool someRecordHasLiveExports, const AbstractModuleRecord::Resolution& first, const AbstractModuleRecord::Resolution& second)
+{
+    auto isOfMock = [&](const AbstractModuleRecord::Resolution& found) {
+        auto* compiled = dynamicDowncast<AOT::ModuleRecord>(found.moduleRecord);
+        return (compiled && compiled->standsForMock()) || (someRecordHasLiveExports && found.isLiveExport(vm));
+    };
+    return (isOfMock(first) || isOfMock(second)) && !first.isSameBinding(second);
+}
+#endif
 
 auto AbstractModuleRecord::resolveExportImpl(JSGlobalObject* globalObject, const ResolveQuery& root) -> Resolution
 {
@@ -1025,6 +1051,9 @@ auto AbstractModuleRecord::resolveExportImpl(JSGlobalObject* globalObject, const
 
     // Merge the given resolution to the current resolution value of the top frame.
     // If there is ambiguity, return "false". When the "false" is returned, we should make the result "ambiguous".
+#if ENABLE(AOT)
+    bool wasSettledByMock = false;
+#endif
     auto mergeToCurrentTop = [&] (const Resolution& resolution) -> bool {
         if (resolution.type == Resolution::Type::NotFound)
             return true;
@@ -1033,6 +1062,13 @@ auto AbstractModuleRecord::resolveExportImpl(JSGlobalObject* globalObject, const
             currentTop() = resolution;
             return true;
         }
+
+#if ENABLE(AOT)
+        if (vm.hasCompiledCode() && isSettledByMock(vm, someRecordHasLiveExports, currentTop(), resolution)) [[unlikely]] {
+            wasSettledByMock = true;
+            return true;
+        }
+#endif
 
 #if USE(BUN_JSC_ADDITIONS)
         // A live export never makes a name ambiguous. The first `export *` that provides the name wins, as in Vitest.
@@ -1220,6 +1256,12 @@ auto AbstractModuleRecord::resolveExportImpl(JSGlobalObject* globalObject, const
     if (someRecordHasLiveExports && frames[0].type == Resolution::Type::NotFound) [[unlikely]]
         frames[0] = firstLiveRecordViaStarExport;
 #endif
+#if ENABLE(AOT)
+    if (auto* compiled = dynamicDowncast<AOT::ModuleRecord>(root.moduleRecord); compiled && frames[0].type == Resolution::Type::Resolved) {
+        if (compiled->someMockStandsInPlace() || compiled->mayOutlive(frames[0].moduleRecord) || frames[0].moduleRecord->hasLiveExports() || wasSettledByMock)
+            return frames[0];
+    }
+#endif
     //  1. The starting point is always cacheable.
     if (frames[0].type == Resolution::Type::Resolved)
         cacheResolutionForQuery(root, frames[0]);
@@ -1262,9 +1304,11 @@ auto AbstractModuleRecord::resolveExportByName(JSGlobalObject* globalObject, con
 #endif
 
 #if ENABLE(AOT)
-    if (inherits<AOT::ModuleRecord>()) {
-        if (std::optional<Resolution> cachedResolution = tryGetCachedResolution(exportName.impl()))
-            return *cachedResolution;
+    if (auto* compiled = dynamicDowncast<AOT::ModuleRecord>(this)) {
+        if (!compiled->someMockStandsInPlace()) {
+            if (std::optional<Resolution> cachedResolution = tryGetCachedResolution(exportName.impl()))
+                return *cachedResolution;
+        }
         RELEASE_AND_RETURN(scope, resolveExportImpl(globalObject, ResolveQuery(this, exportName.impl())));
     }
 #endif
@@ -1910,7 +1954,6 @@ bool AbstractModuleRecord::importPromiseGatesAsyncDependency(JSPromise* importPr
         case InternalMicrotask::AsyncFunctionResume:
 #if ENABLE(AOT)
         case InternalMicrotask::CompiledAsyncFunctionResume:
-        case InternalMicrotask::CompiledAsyncFunctionResumeAfterTurn:
         case InternalMicrotask::CompiledModuleBodyResume:
 #endif
         case InternalMicrotask::AsyncModuleExecutionResume:
@@ -1979,21 +2022,14 @@ bool AbstractModuleRecord::importPromiseGatesAsyncDependency(JSPromise* importPr
     };
 
     constexpr size_t maxPromises = 4096;
-#if ENABLE(AOT)
-    static_assert(maxPromises == AOT::defaultLimitValue(AOT::LimitID::PromisesWalkedPerImport, AOT::hostArchitecture()));
-#endif
     while (!work.isEmpty() && !found) {
         JSPromise* promise = work.takeLast();
         if (promise->status() != JSPromise::Status::Pending)
             continue;
         if (!seen.add(promise).isNewEntry)
             continue;
-        if (seen.size() > maxPromises) {
-#if ENABLE(AOT)
-            AOT::countLimitHit(importPromise->vm(), AOT::LimitID::PromisesWalkedPerImport);
-#endif
+        if (seen.size() > maxPromises)
             return false;
-        }
         promise->forEachPendingReaction(visitReaction);
     }
     return found;

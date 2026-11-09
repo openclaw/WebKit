@@ -108,17 +108,17 @@ index 401d5e02728b1966552d6a6357076e50f8203ce9..bdc41d6881b43969d053381afed744a1
  }
  
 diff --git a/scripts/openclaw-ci/tests.ts b/scripts/openclaw-ci/tests.ts
-index 4f60e36ddc6d739c3669718a4c9d4d89fca7a5ce..7135c7a27616ad926c0e3f0b9a65d055f62614e5 100644
+index 515a10cdf4e98e8fec07f5ca5a3ece29b2259078..bd869f380dd829470d747d0e782a18ec46ece551 100644
 --- a/scripts/openclaw-ci/tests.ts
 +++ b/scripts/openclaw-ci/tests.ts
 @@ -1,5 +1,5 @@
  import { spawnSync, type SpawnSyncReturns } from "node:child_process";
--import { appendFileSync, existsSync, mkdirSync, readFileSync, statfsSync, writeFileSync } from "node:fs";
-+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statfsSync, writeFileSync } from "node:fs";
+-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statfsSync, writeFileSync } from "node:fs";
++import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statfsSync, writeFileSync } from "node:fs";
  import { homedir } from "node:os";
  import { basename, dirname, resolve } from "node:path";
  
-@@ -278,6 +278,7 @@
+@@ -365,6 +365,7 @@
    const command = process.argv[2];
    const selectionPath = "build/openclaw-ci/selected.json";
    const resultsPath = "build/openclaw-ci/results.json";
@@ -126,7 +126,7 @@ index 4f60e36ddc6d739c3669718a4c9d4d89fca7a5ce..7135c7a27616ad926c0e3f0b9a65d055
    if (command === "select-windows") {
      const selected = selectTests([], git("ls-files", "-z", "test"), false, "windows");
      mkdirSync(dirname(selectionPath), { recursive: true });
-@@ -311,6 +312,20 @@
+@@ -409,6 +410,20 @@
    } else if (command === "test") {
      const selected: string[] = JSON.parse(readFileSync(selectionPath, "utf8"));
      if (!selected.length) throw new Error("Refusing an empty test selection");
@@ -145,9 +145,9 @@ index 4f60e36ddc6d739c3669718a4c9d4d89fca7a5ce..7135c7a27616ad926c0e3f0b9a65d055
 +      junitArgs.push("--junit", "--junit-temp-dir", reporting[1]!);
 +    }
      reportDiskUsage("before");
-     // Fresh processes preserve the original owner's GC sequence and expose late frees.
-     let ownerExitFailed = false;
-@@ -343,6 +358,7 @@
+     const engineIr = selected.filter(isEngineIr);
+     if (engineIr.length) {
+@@ -476,6 +491,7 @@
        console.log(`Owner-exit: ${failures}/50 failed`);
      }
      // CI invokes this script with the built executable; the upstream runner uses it for every test.
@@ -155,15 +155,15 @@ index 4f60e36ddc6d739c3669718a4c9d4d89fca7a5ce..7135c7a27616ad926c0e3f0b9a65d055
      const result = spawnSync(
        "node",
        [
-@@ -353,6 +369,7 @@
+@@ -486,6 +502,7 @@
          "--retries=0",
          "--results-json",
          resultsPath,
 +        ...junitArgs,
-         ...selected.flatMap(test => ["--include", test.replace(/^test\//, "")]),
+         ...selected.filter(test => !isEngineIr(test)).flatMap(test => ["--include", test.replace(/^test\//, "")]),
        ],
        { stdio: "inherit" },
-@@ -385,6 +402,10 @@
+@@ -518,6 +535,10 @@
        if (direct.stderr) process.stderr.write(direct.stderr);
      }
      reportDiskUsage("after");
@@ -175,10 +175,10 @@ index 4f60e36ddc6d739c3669718a4c9d4d89fca7a5ce..7135c7a27616ad926c0e3f0b9a65d055
      if (result.error) throw result.error;
      if (result.status !== 0) process.exit(result.status ?? 1);
 diff --git a/scripts/runner.node.ts b/scripts/runner.node.ts
-index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3c6343dff 100755
+index a7c25245a75a8587b5cdc5296b5ccbb0780804db..0822e904f2e25eaeac516c7cae93be025fba867e 100755
 --- a/scripts/runner.node.ts
 +++ b/scripts/runner.node.ts
-@@ -1174,6 +1174,7 @@
+@@ -1141,6 +1141,7 @@
      concurrent = parallelism > 1,
      maxAttempts = 1 + (parseInt(options.retries) || 0),
      saysDuration = false,
@@ -186,7 +186,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
    ): Promise<TestResult | undefined> => {
      const index = ++i;
  
-@@ -1187,18 +1188,20 @@
+@@ -1154,18 +1155,20 @@
        let grouptitle = `${getAnsi("gray")}[${index}/${total}]${getAnsi("reset")} ${title}`;
        if (attempt > 1) grouptitle += ` ${getAnsi("gray")}[attempt #${attempt}]${getAnsi("reset")}`;
  
@@ -210,7 +210,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
        }
  
        const { ok, stdoutPreview, error } = result;
-@@ -1329,7 +1332,7 @@
+@@ -1296,7 +1299,7 @@
    if (!failedResults.length) {
      await Promise.all(beforeFirstTest);
  
@@ -219,7 +219,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
        await awaitNapiPrebuild(testPath);
        const absoluteTestPath = join(testsPath, testPath);
        const title = relative(cwd, absoluteTestPath).replaceAll(sep, "/");
-@@ -1411,25 +1414,26 @@
+@@ -1378,25 +1381,26 @@
          return runTest(
            title,
            async index => {
@@ -265,7 +265,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
              const mb = 1024 ** 3;
              let stdoutPreview = stdout.slice(0, mb).split("\n").slice(0, 50).join("\n");
              if (crashes) stdoutPreview += crashes;
-@@ -1444,10 +1448,16 @@
+@@ -1411,10 +1415,16 @@
                stdoutPreview: stdoutPreview,
                exitCode,
                signalCode,
@@ -282,7 +282,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
          );
        } else {
          let attempt = 0;
-@@ -1463,6 +1473,7 @@
+@@ -1430,6 +1440,7 @@
            concurrent,
            undefined,
            saysDuration,
@@ -290,7 +290,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
          );
        }
      };
-@@ -1488,17 +1499,20 @@
+@@ -1455,17 +1466,20 @@
        }
        if (isAsan || buildsManyExecutables(bucketFiles[0]!)) env.BUN_FEATURE_FLAG_NO_ORPHANS = "1";
  
@@ -322,7 +322,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
          spawnBun(execPath, {
            args: [
              "test",
-@@ -1528,109 +1542,65 @@
+@@ -1495,109 +1509,65 @@
        );
        if (crashes) process.stderr.write(crashes);
  
@@ -479,7 +479,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
        }
      };
  
-@@ -1724,6 +1694,7 @@
+@@ -1691,6 +1661,7 @@
      );
      const isModified = (t: string) => modifiedTests.has(t.replaceAll("\\", "/"));
      const isBucketCandidate = (t: string) =>
@@ -487,7 +487,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
        parallelism === 1 &&
        isTestStrict(t) &&
        !isNodeTest(t) &&
-@@ -2033,6 +2004,11 @@
+@@ -2000,6 +1971,11 @@
        error: r.error,
        exitCode: r.exitCode,
        signalCode: r.signalCode,
@@ -499,7 +499,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
        duration: r.duration,
        stdoutPreview: r.stdoutPreview?.slice?.(-4000),
      }));
-@@ -2065,12 +2041,17 @@
+@@ -2032,12 +2008,17 @@
    retries?: number;
  }
  
@@ -521,7 +521,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
    timestamp: number;
    duration: number;
    stdout: string;
-@@ -2094,9 +2075,9 @@
+@@ -2061,9 +2042,9 @@
      stderr = process.stderr.write.bind(process.stderr),
      retries = 0,
    }: SpawnOptions = options;
@@ -534,7 +534,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
    let timestamp: number | undefined;
    let timedOut = false;
    let idledOut = false;
-@@ -2354,11 +2335,13 @@
+@@ -2321,11 +2302,13 @@
    if (timedOut && (!error || error === signalCode || /^code \d+$/.test(error)))
      error = idledOut ? "stalled" : "timeout";
    return {
@@ -552,7 +552,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
      stdout: buffer,
      timestamp: timestamp || Date.now(),
      duration: duration || 0,
-@@ -2562,7 +2545,7 @@
+@@ -2529,7 +2512,7 @@
    }
  }
  
@@ -561,7 +561,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
    testPath: string;
    ok: boolean;
    status: string;
-@@ -2572,8 +2555,8 @@
+@@ -2539,8 +2522,8 @@
    stdout: string;
    stdoutPreview: string;
    // For --results-json and the JUnit report.
@@ -572,7 +572,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
    duration?: number;
  }
  
-@@ -2670,19 +2653,22 @@
+@@ -2637,19 +2620,22 @@
      env.BUN_FEATURE_FLAG_NO_ORPHANS = "1";
    }
  
@@ -608,7 +608,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
    let { tests, errors, stdout: stdoutPreview } = parseTestStdout(stdout, testPath);
    if (crashes) stdoutPreview += crashes;
  
-@@ -2705,6 +2691,9 @@
+@@ -2672,6 +2658,9 @@
      stdoutPreview,
      exitCode,
      signalCode,
@@ -618,7 +618,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
      duration,
    };
  }
-@@ -2861,20 +2850,23 @@
+@@ -2828,20 +2817,23 @@
    // image's baked cache when one exists (the `prefetch` tool of
    // scripts/build/ci-images/spec.ts sets BUN_INSTALL_CACHE_DIR machine-wide).
    const cacheDir = process.env.BUN_INSTALL_CACHE_DIR;
@@ -655,7 +655,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
    if (crashes) stdout += crashes;
    const relativePath = relative(cwd, options.cwd);
    const testPath = join(relativePath, "package.json");
-@@ -2895,6 +2887,11 @@
+@@ -2862,6 +2854,11 @@
      ],
      stdout,
      stdoutPreview: stdout,
@@ -667,7 +667,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
      duration,
    };
  }
-@@ -2912,7 +2909,7 @@
+@@ -2879,7 +2876,7 @@
    // Other steps print meanwhile.
    let output = "";
    const print = (chunk: string) => void (output += chunk);
@@ -676,7 +676,7 @@ index fb0a91398954a39ce1af68c14437ed91705ab87c..52ef9c2a03e36f5f5a82bf7d47e3e2f3
    startGroup(title, () => process.stdout.write(output));
    if (!ok) console.warn(`ci-remap server not installed (${title}: ${error}), crash reports will not be remapped`);
    return ok;
-@@ -3838,11 +3835,8 @@
+@@ -3802,11 +3799,8 @@
    if (outcome === "pass") {
      return 0;
    }

@@ -41,10 +41,6 @@
 #include "StructureAlignedMemoryAllocator.h"
 #include "SuperSampler.h"
 
-#if ENABLE(AOT)
-#include "AOTAllocationCounts.h"
-#endif
-
 namespace JSC {
 
 LocalAllocator::LocalAllocator(BlockDirectory* directory)
@@ -110,10 +106,6 @@ void LocalAllocator::stopAllocating(MarkedBlock::Handle::StopAllocatingMode mode
         return;
     }
 
-#if ENABLE(AOT)
-    if (AOT::AllocationCounts::isEnabled()) [[unlikely]]
-        AOT::AllocationCounts::willStopAllocating(m_directory->markedSpace().heap().vm(), *this);
-#endif
     m_currentBlock->stopAllocating(m_freeList, mode);
     m_lastActiveBlock = m_currentBlock;
     m_currentBlock = nullptr;
@@ -202,11 +194,6 @@ void* LocalAllocator::allocateSlowCaseWithoutSampling(JSC::Heap& heap, size_t ce
     heap.didAllocate(m_freeList.originalSize());
 #if USE(BUN_JSC_ADDITIONS)
     heap.didAllocateArrayBufferAuxiliaryMemory(m_directory->subspace(), m_freeList.originalSize());
-#endif
-
-#if ENABLE(AOT)
-    if (AOT::AllocationCounts::isEnabled()) [[unlikely]]
-        AOT::AllocationCounts::willRefill(heap.vm(), *this);
 #endif
 
     didConsumeFreeList();

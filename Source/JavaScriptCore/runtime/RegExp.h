@@ -94,7 +94,6 @@ public:
     static constexpr uint8_t stateWithBytecode() { return ByteCode; }
     static constexpr ptrdiff_t offsetOfRegExpBytecode() { return OBJECT_OFFSETOF(RegExp, m_regExpBytecode); }
 #endif
-    static constexpr ptrdiff_t offsetOfOvector() { return OBJECT_OFFSETOF(RegExp, m_ovector); }
     static constexpr ptrdiff_t offsetOfNumSubpatterns() { return OBJECT_OFFSETOF(RegExp, m_numSubpatterns); }
     static constexpr ptrdiff_t offsetOfAtom() { return OBJECT_OFFSETOF(RegExp, m_atom); }
     static constexpr ptrdiff_t offsetOfRareData() { return OBJECT_OFFSETOF(RegExp, m_rareData); }
@@ -269,11 +268,13 @@ private:
 
     static RegExp* createWithoutCaching(VM&, const String&, OptionSet<Yarr::Flags>);
     void finishCreationFromCache(VM&, unsigned numSubpatterns, String&& atom, Yarr::SpecificPattern);
+    enum class BytecodeIsFor : bool { Interpreter, LongSearch };
 #if ENABLE(AOT)
     void finishCreationFromImage(VM&, const AOT::ImageRegExp&);
     bool takeCodeFromImage(VM&);
     int matchWithImageCode(JSGlobalObject* nullOrGlobalObject, VM&, StringView, unsigned startOffset, int* offsetVector);
     static void countInterpretedMatch(VM&);
+    void countBytecodeCompilation(VM&, BytecodeIsFor) const;
     void crashIfLiteralIsInterpreted() const;
 #endif
 
@@ -288,7 +289,7 @@ private:
         NotCompiled
     };
 
-    void byteCodeCompileIfNecessary(VM*);
+    void byteCodeCompileIfNecessary(VM*, BytecodeIsFor = BytecodeIsFor::Interpreter);
 
     void compile(VM*, Yarr::CharSize, std::optional<StringView> sampleString);
     void compileIfNecessary(VM&, Yarr::CharSize, std::optional<StringView> sampleString);

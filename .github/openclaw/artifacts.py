@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 
-BASE = '4d45755fed4aeef19e95beb90d3d0c884a2812bd'
+BASE = '5a61071f79134bf41844e7ea31a8449147d85dd4'
 HISTORY_FLOOR = '5718a6ec579b98362ea7276a426deedcc6281ef5'
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = json.loads((ROOT / '.github/openclaw/variants.json').read_text())
@@ -91,7 +91,10 @@ def preflight():
         raise ValueError('dispatch must use the same reviewed branch head and full input SHA')
     ref = os.environ['GITHUB_REF']
     qualification_only = (
-        ref == 'refs/heads/claude/sync-webkit-upstream-20261014'
+        ref in (
+            'refs/heads/claude/sync-webkit-upstream-20261014',
+            'refs/heads/claude/sync-webkit-aot-rewrite-20261109',
+        )
         and os.environ.get('INPUT_PUBLISH') == 'false'
     )
     if ref not in ('refs/heads/openclaw/main', 'refs/heads/openclaw/batch-1', 'refs/heads/openclaw/release-5718a6ec') and not qualification_only:

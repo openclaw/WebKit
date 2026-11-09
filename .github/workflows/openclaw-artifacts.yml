@@ -22,7 +22,8 @@ jobs:
       (github.ref == 'refs/heads/openclaw/main' ||
        github.ref == 'refs/heads/openclaw/batch-1' ||
        github.ref == 'refs/heads/openclaw/release-5718a6ec' ||
-       (github.ref == 'refs/heads/claude/sync-webkit-upstream-20261014' &&
+       ((github.ref == 'refs/heads/claude/sync-webkit-upstream-20261014' ||
+         github.ref == 'refs/heads/claude/sync-webkit-aot-rewrite-20261109') &&
         inputs.publish == false))
     runs-on: blacksmith-32vcpu-ubuntu-2404
     timeout-minutes: 10

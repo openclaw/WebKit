@@ -449,7 +449,7 @@ bool ordinarySetSlow(JSGlobalObject* globalObject, JSObject* object, PropertyNam
     auto scope = DECLARE_THROW_SCOPE(vm);
 #if ENABLE(AOT)
     // The receiver is a proxy of the object that hands definitions on to it. Where an element can be set quickly nothing above the object takes the store, so the store ends in the object as it does without the proxy.
-    if (std::optional<uint32_t> index = parseIndex(propertyName); index && !object->structure()->hasImmutableIndexedProperties()) {
+    if (std::optional<uint32_t> index = vm.hasCompiledCode() ? parseIndex(propertyName) : std::nullopt; index && !object->structure()->hasImmutableIndexedProperties()) {
         JSObject* definedOn = AOT::RuntimeHooks::targetThatProxyDefinesOn(vm, receiver);
         RETURN_IF_EXCEPTION(scope, false);
         if (definedOn == object && object->trySetIndexQuickly(vm, *index, value))
@@ -864,7 +864,7 @@ bool JSObject::definePropertyOnReceiver(JSGlobalObject* globalObject, PropertyNa
     if (receiver->type() == GlobalProxyType)
         receiver = uncheckedDowncast<JSGlobalProxy>(receiver)->target();
 #if ENABLE(AOT)
-    if (JSObject* definedOn = AOT::RuntimeHooks::targetThatProxyDefinesOn(vm, receiver); definedOn && definedOn->type() != ProxyObjectType && definedOn->type() != CompiledObjectType)
+    if (JSObject* definedOn = vm.hasCompiledCode() ? AOT::RuntimeHooks::targetThatProxyDefinesOn(vm, receiver) : nullptr; definedOn && definedOn->type() != ProxyObjectType && definedOn->type() != CompiledObjectType)
         receiver = definedOn;
     RETURN_IF_EXCEPTION(scope, false);
 #endif
@@ -2188,6 +2188,10 @@ bool JSObject::setPrototypeWithCycleCheck(VM& vm, JSGlobalObject* globalObject, 
 #endif
         ImmutablePropertyNames* names = this->structure()->listedImmutablePropertyNames();
         String message = names && shouldThrowIfCantSet ? names->setPrototypeErrorMessage() : String();
+#if ENABLE(AOT)
+        if (!names && shouldThrowIfCantSet)
+            message = AOT::RuntimeHooks::lockedObjectErrorMessage(globalObject, this, nullptr, AOT::RejectedWrite::Prototype);
+#endif
         if (!message.isNull())
             return typeError(globalObject, scope, true, message);
         return typeError(globalObject, scope, shouldThrowIfCantSet, "Cannot set prototype of object with immutable properties"_s);
@@ -2360,7 +2364,6 @@ ASCIILiteral JSObject::putDirectToCompiledObject(VM& vm, PropertyName propertyNa
 ASCIILiteral JSObject::putDirectToCompiledClosure(VM& vm, PropertyName propertyName, JSValue value, unsigned attributes, PutPropertySlot& slot)
 {
     slot.disableCaching();
-    AOT::PropertyWalk::willPutDirectOnClosure(vm, this, propertyName.uid());
     ASCIILiteral error = putDirectInternal<PutModeDefineOwnPropertyWithoutClosureHooks>(vm, propertyName, value, attributes, slot);
     if (error.isNull())
         AOT::PropertyWalk::didPutDirectOnClosure(vm, this, propertyName.uid());
@@ -3379,8 +3382,11 @@ void JSObject::reifyAllStaticProperties(JSGlobalObject* globalObject)
                     JSValue standIn = vm.hasCompiledCode() ? AOT::takeStandInForMemberLeftOut(globalObject, key.string()) : JSValue();
                     if (!standIn)
                         return;
+                    // It is laid as a getter: called, it throws the error that names the member. No read finds it as a value.
                     AllowLazyMaterializationOfImmutableProperties allowMaterialization(vm);
-                    putDirect(vm, key, standIn, attributesForStructure(value.attributes()));
+                    unsigned attributesOfGetter = (attributesForStructure(value.attributes()) & ~static_cast<unsigned>(PropertyAttribute::ReadOnly)) | PropertyAttribute::Accessor;
+                    putDirectNonIndexAccessor(vm, key, GetterSetter::create(vm, globalObject, asObject(standIn), nullptr), attributesOfGetter);
+                    continue;
 #else
                     return;
 #endif

@@ -16,7 +16,24 @@ interface AbiFile {
   readonly input: string;
   readonly imports: readonly string[];
   readonly holds: "enums" | "records" | "enums and records";
+  readonly firstEnum?: string;
 }
+
+const compileCallEnums = "compile_call_enums.rs";
+function partOfCompileCallEnums(output: string, firstEnum: string): AbiFile {
+  return { output, input: "schema/compile-call.def", imports: [], holds: "enums", firstEnum };
+}
+const partsOfCompileCallEnums: readonly AbiFile[] = [
+  partOfCompileCallEnums("compile_call_finding_enums.rs", "KnowledgeLevel"),
+  partOfCompileCallEnums("compile_call_decline_enums.rs", "ImageVerdict"),
+  partOfCompileCallEnums("compile_call_option_enums.rs", "CompileAction"),
+  partOfCompileCallEnums("compile_call_image_enums.rs", "AdmittedCode"),
+];
+
+export const modulesOfCompileCallEnums: readonly string[] = [
+  compileCallEnums,
+  ...partsOfCompileCallEnums.map(part => part.output),
+].map(name => name.slice(0, -".rs".length));
 
 const abiFiles: readonly AbiFile[] = [
   {
@@ -25,7 +42,6 @@ const abiFiles: readonly AbiFile[] = [
     imports: ["super::statistics::StatisticId"],
     holds: "enums and records",
   },
-  { output: "passes.rs", input: "schema/passes.def", imports: ["super::statistics::StatisticId"], holds: "enums" },
   { output: "statistics.rs", input: "schema/statistics.def", imports: [], holds: "enums and records" },
   {
     output: "diagnostics.rs",
@@ -33,7 +49,7 @@ const abiFiles: readonly AbiFile[] = [
     imports: ["super::limits::Stage"],
     holds: "enums and records",
   },
-  { output: "compile_call_enums.rs", input: "schema/compile-call.def", imports: [], holds: "enums" },
+  ...partsOfCompileCallEnums,
   {
     output: "compile_call.rs",
     input: "schema/compile-call.def",
@@ -43,7 +59,6 @@ const abiFiles: readonly AbiFile[] = [
       "super::diagnostics::{InternalErrorKind, UserDiagnosticKind}",
       "super::enums::{IllTypedCause, TypeSiteKind}",
       "super::limits::{LimitId, Stage}",
-      "super::passes::PassId",
       "crate::ir::ids::*",
     ],
   },
@@ -54,8 +69,20 @@ interface CheckedWord {
   readonly type: string;
 }
 
-function abiEnumsOf(schema: Schema, input: string): string[] {
-  const own = [...schema.enums, ...schema.flagWords].filter(type => type.isAbi && type.file.path === input);
+function abiEnumsOf(schema: Schema, file: AbiFile): string[] {
+  const declared = [...schema.enums, ...schema.flagWords]
+    .filter(type => type.isAbi && type.file.path === file.input)
+    .sort((left, right) => left.location.line - right.location.line || left.location.column - right.location.column);
+  const startOf = (part: AbiFile) => {
+    const index = declared.findIndex(type => type.name === part.firstEnum);
+    if (index < 0) throw new Error(`${part.input} declares no ${part.firstEnum}, with which ${part.output} begins`);
+    return index;
+  };
+  const parts = abiFiles.filter(other => other.input === file.input && other.firstEnum !== undefined);
+  const starts = parts.map(startOf).sort((left, right) => left - right);
+  if (starts.length > 0 && starts[0] !== 0) throw new Error(`no file holds ${declared[0].name} of ${file.input}`);
+  const start = file.firstEnum === undefined ? 0 : startOf(file);
+  const own = declared.slice(start, starts.find(other => other > start));
   return blocks(...own.map(type => (type.isFlags ? flagWord(type) : enumBlock(schema, type))));
 }
 
@@ -132,7 +159,7 @@ function abiRecord(record: SchemaRecord): string[] {
 function abiRs(schema: Schema, file: AbiFile): string[] {
   const declared = recordsOf(schema).filter(record => record.form === "abi" && record.file.path === file.input);
   const records = file.holds === "enums" ? [] : declared;
-  const enums = file.holds === "records" ? [] : abiEnumsOf(schema, file.input);
+  const enums = file.holds === "records" ? [] : abiEnumsOf(schema, file);
   return [
     rustMarker,
     "",
@@ -143,5 +170,9 @@ function abiRs(schema: Schema, file: AbiFile): string[] {
 }
 
 export function emitRustAbi(context: EmitContext): OutputFile[] {
-  return abiFiles.map(file => ({ name: file.output, lines: abiRs(context.schema, file) }));
+  const whole = partsOfCompileCallEnums.map(part => `pub use super::${part.output.slice(0, -".rs".length)}::*;`);
+  return [
+    { name: compileCallEnums, lines: [rustMarker, "", ...whole] },
+    ...abiFiles.map(file => ({ name: file.output, lines: abiRs(context.schema, file) })),
+  ];
 }
