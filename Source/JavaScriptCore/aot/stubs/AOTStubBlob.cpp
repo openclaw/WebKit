@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <memory>
 #include <utility>
+#include <wtf/DataLog.h>
 #include <wtf/HashSet.h>
 #include <wtf/StdLibExtras.h>
 
@@ -82,6 +83,17 @@ static ReachedStubs findReachedStubs(const StubCatalog& catalog, std::span<const
             if (descriptorOf(body.family()).linkage == StubLinkage::FrontEnd)
                 RELEASE_ASSERT(registersClobberedByOperations().subsumes(catalog.summaryOf(body).clobbered));
             reached.bodies.append(body);
+            dryRun.entriesUsed.forEachSetBit([&](size_t index) {
+                auto entry = static_cast<Entry>(index);
+                auto feature = featureOf(entry);
+                if (feature == RemovableFeature::OperationsOnArgumentsObjects || feature == RemovableFeature::OperationsOnDates
+                    || feature == RemovableFeature::OperationsOnEncodedText || feature == RemovableFeature::OperationsOnPrivateNames
+                    || feature == RemovableFeature::OperationsOnStringBuilders) {
+                    dataLogLn("AOT retention stub=", descriptorOf(body.family()).name,
+                        " bits=", body.bits(), " form=", static_cast<unsigned>(body.form()),
+                        " count=", body.count(), " entry=", nameOf(entry));
+                }
+            });
             used.merge(dryRun.entriesUsed);
             for (auto& reference : dryRun.references)
                 reach(reference.target);

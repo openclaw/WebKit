@@ -21,6 +21,7 @@
 #include "AOTThrowEmitter.h"
 #include "AllowMacroScratchRegisterUsage.h"
 #include "JSCJSValueInlines.h"
+#include <wtf/DataLog.h>
 
 namespace JSC { namespace AOT { namespace Typed {
 
@@ -949,6 +950,19 @@ void StraightEmitter::callOperation(Origin origin, RuntimeOperation operation, s
     AOT::Entry entry = entryOf(operation);
     RELEASE_ASSERT(arguments.size() == signature.parameters.size() && !options.immediate && !options.numberedImmediate);
     OperationCall::FirstArgument first = isLeaf(operation) ? OperationCall::FirstArgument::None : OperationCall::FirstArgument::Instance;
+    auto feature = AOT::featureOf(entry);
+    if (!m_records.totals.entriesUsed.get(static_cast<size_t>(entry)) && (feature == RemovableFeature::OperationsOnArgumentsObjects
+        || feature == RemovableFeature::OperationsOnDates || feature == RemovableFeature::OperationsOnEncodedText
+        || feature == RemovableFeature::OperationsOnPrivateNames || feature == RemovableFeature::OperationsOnStringBuilders)) {
+        const auto& program = this->program();
+        const auto unit = this->unit();
+        const auto& function = program.at(unit.function);
+        dataLogLn("AOT retention f", unit.function.index(), ":", nameOf(unit.role),
+            " path=", String::fromUTF8(program.string(program.at(function.module).path)),
+            " position=", function.position,
+            " name=", function.name ? String::fromUTF8(program.string(function.name)) : String { },
+            " entry=", AOT::nameOf(entry));
+    }
     m_records.totals.entriesUsed.set(static_cast<size_t>(entry));
 
     unsigned firstGPR = first != OperationCall::FirstArgument::None;

@@ -26,6 +26,7 @@
 #include <array>
 #include <bit>
 #include <type_traits>
+#include <wtf/DataLog.h>
 
 namespace JSC { namespace AOT { namespace Typed {
 
@@ -734,6 +735,17 @@ void RuntimeCallEmitter::fillEntryRequest(CallRequestWithOwnOptions& request, AO
     RELEASE_ASSERT(operation);
     RuntimeSignature signature = signatureOf(*operation);
     OperationCall::Returns returns = returnsOf(signature.result);
+    auto feature = AOT::featureOf(entry);
+    if (!m_records.totals.entriesUsed.get(static_cast<size_t>(entry)) && (feature == RemovableFeature::OperationsOnArgumentsObjects
+        || feature == RemovableFeature::OperationsOnDates || feature == RemovableFeature::OperationsOnEncodedText
+        || feature == RemovableFeature::OperationsOnPrivateNames || feature == RemovableFeature::OperationsOnStringBuilders)) {
+        const auto& function = m_program.at(m_unit.function);
+        dataLogLn("AOT retention f", m_unit.function.index(), ":", nameOf(m_unit.role),
+            " path=", String::fromUTF8(m_program.string(m_program.at(function.module).path)),
+            " position=", function.position,
+            " name=", function.name ? String::fromUTF8(m_program.string(function.name)) : String { },
+            " entry=", AOT::nameOf(entry));
+    }
     m_records.totals.entriesUsed.set(static_cast<size_t>(entry));
 
     request.ownOptions = callerOptions;
