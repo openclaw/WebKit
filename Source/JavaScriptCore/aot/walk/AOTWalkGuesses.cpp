@@ -37,6 +37,7 @@
 #include <atomic>
 #include <optional>
 #include <wtf/BitVector.h>
+#include <wtf/DataLog.h>
 #include <wtf/Lock.h>
 #include <wtf/ScopedLambda.h>
 
@@ -4870,6 +4871,13 @@ static uint32_t countOperationsThatLookAtParameters(Walker& walker, std::span<co
 
 Vector<TypeID, 8> typesBehindParameterGuard(Walker& walker, FunctionID id)
 {
+    const Function& diagnosticFunction = walker.program().at(id);
+    bool explainsAnswer = diagnosticFunction.name && String::fromUTF8(walker.program().string(diagnosticFunction.name)) == "answer"_s
+        && String::fromUTF8(walker.program().string(walker.program().at(diagnosticFunction.module).path)).endsWith("main.ts"_s);
+    if (explainsAnswer)
+        WTF::dataLogLn("openclaw parameter-guard f", id.index(), " enter: enabled=", walker.has(Mechanism::ParameterGuards),
+            " body=", walker.plan().conventions().of(id).has(CodeRole::Body), " coroutine=", diagnosticFunction.isCoroutine(),
+            " results=", diagnosticFunction.results.size(), " kind=", static_cast<unsigned>(diagnosticFunction.kind));
     if (!walker.has(Mechanism::ParameterGuards) || !mayHaveParameterGuard(walker, id))
         return { };
     const LinkTables& link = walker.facts().linked();
@@ -4902,6 +4910,9 @@ Vector<TypeID, 8> typesBehindParameterGuard(Walker& walker, FunctionID id)
         tested = typeTestedInPlaceOfWrittenType(walker, id, index, tested);
         if (tested && isNeverType(types.intersectionOf(typesInFrontOfGuard.last(), tested)))
             tested = { };
+        if (explainsAnswer)
+            WTF::dataLogLn("openclaw parameter-guard f", id.index(), " parameter=", index,
+                " arriving=", typesInFrontOfGuard.last().index(), " candidate=", tested ? tested.index() : 0);
         if (!tested)
             continue;
         parameters.append(ParameterOfGuard { index, tested, typesInFrontOfGuard.last(), types.intersectionOf(typesInFrontOfGuard.last(), tested), false, { }, false });
@@ -4909,13 +4920,21 @@ Vector<TypeID, 8> typesBehindParameterGuard(Walker& walker, FunctionID id)
         if (!saysNothingForGuesses(types, whole) && partThatOneTestTellsForGuesses(types, whole) != whole)
             parameters.last().testedWithPrimitives = typeTestedByParameterGuard(walker, whole, typesInFrontOfGuard.last());
     }
+    if (explainsAnswer)
+        WTF::dataLogLn("openclaw parameter-guard f", id.index(), " candidates=", parameters.size(), " values=", walker.currentBodyIndex().numberOfValues());
     if (parameters.isEmpty())
         return { };
     Walker::ChoiceOfCost guardIsDrawn = walker.drawChoice(DrawnFor::ParameterGuard, id.index(), 0);
     if (guardIsDrawn == Walker::ChoiceOfCost::No)
         return { };
-    if (guardIsDrawn == Walker::ChoiceOfCost::AsItPays && static_cast<uint64_t>(countOperationsThatLookAtParameters(walker, parameters.span())) * mostOperationsOfBodyForOneThatLeans < walker.currentBodyIndex().numberOfValues())
-        return { };
+    if (guardIsDrawn == Walker::ChoiceOfCost::AsItPays) {
+        uint32_t numberThatLook = countOperationsThatLookAtParameters(walker, parameters.span());
+        if (explainsAnswer)
+            WTF::dataLogLn("openclaw parameter-guard f", id.index(), " looks=", numberThatLook, " multiplier=", mostOperationsOfBodyForOneThatLeans,
+                " values=", walker.currentBodyIndex().numberOfValues());
+        if (static_cast<uint64_t>(numberThatLook) * mostOperationsOfBodyForOneThatLeans < walker.currentBodyIndex().numberOfValues())
+            return { };
+    }
     Vector<ParameterOfGuard, 8> asOneTestTells = parameters;
     findParametersThatBodyTellsApart(walker, parameters.mutableSpan());
     for (ParameterOfGuard& parameter : parameters)
@@ -4936,6 +4955,9 @@ Vector<TypeID, 8> typesBehindParameterGuard(Walker& walker, FunctionID id)
             parameter.isLeanedOn = false;
         numberThatLean = findParametersThatBodyLeansOn(walker, parameters.mutableSpan(), typesInFrontOfGuard.span());
     }
+    if (explainsAnswer)
+        WTF::dataLogLn("openclaw parameter-guard f", id.index(), " lean=", numberThatLean, " goBack=", someGoBack,
+            " choice=", static_cast<unsigned>(guardIsDrawn), " values=", walker.currentBodyIndex().numberOfValues());
     if (guardIsDrawn == Walker::ChoiceOfCost::AsItPays && static_cast<uint64_t>(numberThatLean) * mostOperationsOfBodyForOneThatLeans < walker.currentBodyIndex().numberOfValues())
         return { };
 
