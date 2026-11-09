@@ -100,6 +100,9 @@ python3 "$inputs/compile_cache.py" /tmp "$junit_prefix" "$results/module-junit.x
 "$candidate" test test/js/bun/jsc/webkit-upgrade-23b0720b40.test.ts > "$results/webkit-upgrade.log" 2>&1
 # Compile and execute images through the current candidate; this is separate from the historical selection.
 "$candidate" test test/aot/every-platform.test.ts > "$results/aot-every-platform.log" 2>&1
+"$candidate" test test/aot/a-commonjs-file-mocked-again-is-seen-by-who-required-it.test.ts \
+  test/aot/the-default-of-a-mocked-built-in-module-is-the-mocks.test.ts test/aot/mock-module-of-compiled-modules.test.ts \
+  --reporter=junit --reporter-outfile="$results/aot-module-mocks.xml" > "$results/aot-module-mocks.log" 2>&1
 "$candidate" test --expose-internals test/js/node/v8/capture-stack-trace.test.js test/js/node/util/util.test.js test/js/bun/sourcemap > "$results/stack-positions.log" 2>&1
 "$candidate" test test/bundler/bundler_minify.test.ts > "$results/stack-minifier.log" 2>&1
 python3 "$inputs/stack/check-runtime-cache.py" --baseline "$QUALIFICATION_DIR/bun-baseline/build/qualify-baseline/bun" --candidate "$candidate" --fixture "$inputs/stack/observe-regressions.js" --output "$results/runtime-cache" --expected-baseline-version 36 --expected-version 53 > "$results/stack-cache.json"
