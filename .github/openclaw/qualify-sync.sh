@@ -20,12 +20,15 @@ chmod 700 "$results/home" "$results/tmp"
 # Test the real Bun host table without changing the frozen consumer's compiled inputs.
 evaluator_fixtures="$results/aot-evaluators"
 mkdir -p "$evaluator_fixtures"
-for fixture in evaluated-text-does-not-call-private-host-evaluators a-private-host-evaluator-that-is-called-still-evaluates-text; do
-  curl -fSL --retry 5 "https://raw.githubusercontent.com/openclaw/bun/02526c26fb9cbf76c9748e9ed3ae67020d99dd77/test/aot/engine-tests/valueflow/modules/$fixture.ir" -o "$evaluator_fixtures/$fixture.ir"
+for fixture in evaluated-text-does-not-call-private-host-evaluators a-private-host-evaluator-that-is-called-still-evaluates-text \
+  module-hooks-do-not-receive-the-commonjs-parent module-hooks-do-not-hide-the-parent-from-a-legacy-resolver; do
+  cp "test/aot/engine-tests/valueflow/modules/$fixture.ir" "$evaluator_fixtures/$fixture.ir"
 done
 printf '%s\n' \
-  '063440e834e83e69d1ee7a5fa2107964569546f727bdee55e3ac5a8de6392003  evaluated-text-does-not-call-private-host-evaluators.ir' \
-  'd5586fed571bd4bf796d00b1f53295d0604e7a0bff664a38505b75904a3213f8  a-private-host-evaluator-that-is-called-still-evaluates-text.ir' \
+  'b8c8b55a9b4ca57cedeb896fca6978ae18c588e273501d5c52ccde1eb83b89de  evaluated-text-does-not-call-private-host-evaluators.ir' \
+  'cdb3298ab581d7de1d0f62442f3ce0f63498cb0fdccc5e85d8e4739fbc60ac80  a-private-host-evaluator-that-is-called-still-evaluates-text.ir' \
+  'a734a98ca3b2d70fac8c05e780a0d2389268a022f7b9bd56053e07bbc8523122  module-hooks-do-not-receive-the-commonjs-parent.ir' \
+  'd2d6f0f4ac27c00bf536994e015b0a156fa449dd783739a9f478e0d28e3b8925  module-hooks-do-not-hide-the-parent-from-a-legacy-resolver.ir' \
   | (cd "$evaluator_fixtures" && sha256sum -c -)
 engine_digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["engine"]["archive"]["sha256"])' "$CANDIDATE_RECEIPT")
 engine_aot="$QUALIFICATION_DIR/cache-candidate/webkit-sha256-$engine_digest/Source/JavaScriptCore/aot"
@@ -37,11 +40,17 @@ BUN_BUILD_CACHE_DIR="$QUALIFICATION_DIR/cache-candidate" BUN_BUILD_PREFETCH_DIR=
   "$ninja" -C "$repo/build/qualify-candidate" engine-test-programs > "$results/aot-host-tools-build.log" 2>&1
 test -x "$TESTAOT" && test -x "$JSC" && test -s "$AOT_SCHEMA"
 timeout 120 "$TESTAOT" run "$evaluator_fixtures" --show-output > "$results/aot-evaluators.log" 2>&1
-grep -Fx '2 passed, 0 failed, 0 todo' "$results/aot-evaluators.log"
+grep -Fx '4 passed, 0 failed, 0 todo' "$results/aot-evaluators.log"
 timeout 300 "$TESTAOT" native --single-process closed-world/evaluation/program-that-evaluates-text-keeps-every-evaluator \
   > "$results/aot-language-evaluators.log" 2>&1
 grep -Fx 'closed-world/evaluation/program-that-evaluates-text-keeps-every-evaluator' "$results/aot-language-evaluators.log"
 grep -Fx '1 passed, 0 failed, 0 todo' "$results/aot-language-evaluators.log"
+for fixture in require-namespace-does-not-mutate-imports require-facade-invalidates-captured-exports; do
+  native="sharing-mode-and-namespace/$fixture"
+  timeout 300 "$TESTAOT" native --single-process "$native" > "$results/aot-$fixture.log" 2>&1
+  grep -Fx "$native" "$results/aot-$fixture.log"
+  grep -Fx '1 passed, 0 failed, 0 todo' "$results/aot-$fixture.log"
+done
 "$candidate" --revision > "$results/revision.log"
 "$candidate" -e 'const server=Bun.serve({port:0,fetch(){return new Response("ready")}});try{if(await(await fetch(server.url)).text()!=="ready")throw Error("startup");console.log("build/startup/http passed")}finally{await server.stop(true)}' > "$results/startup.log" 2>&1
 ln -s "$candidate" "$results/bin/bun"
