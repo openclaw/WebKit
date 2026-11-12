@@ -1,240 +1,67 @@
-name: OpenClaw WebKit artifacts
-on:
-  workflow_dispatch:
-    inputs:
-      sha:
-        description: Full reviewed owned-branch commit to build
-        required: true
-        type: string
-      publish:
-        description: Publish only after every build and qualification gate passes
-        type: boolean
-        default: false
+name: OpenClaw Darwin watcher qualification
+
+on: workflow_dispatch
+
 permissions:
   contents: read
+  actions: read
+
 concurrency:
-  group: openclaw-artifacts-${{ inputs.sha }}
+  group: darwin-watcher-repair-${{ github.ref }}
   cancel-in-progress: false
+
 jobs:
-  preflight:
-    if: >-
-      github.repository == 'openclaw/WebKit' &&
-      (github.ref == 'refs/heads/openclaw/main' ||
-       github.ref == 'refs/heads/openclaw/batch-1' ||
-       github.ref == 'refs/heads/openclaw/release-5718a6ec' ||
-       ((github.ref == 'refs/heads/claude/sync-webkit-upstream-20261014' ||
-         github.ref == 'refs/heads/claude/sync-webkit-aot-rewrite-20261109') &&
-        inputs.publish == false))
-    runs-on: blacksmith-32vcpu-ubuntu-2404
-    timeout-minutes: 10
-    outputs:
-      matrix: ${{ steps.source.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          sparse-checkout-cone-mode: false
-          sparse-checkout: |
-            /*
-            !/LayoutTests/
-            !/JSTests/*
-            !/PerformanceTests/
-            !/Websites/
-            !/ManualTests/
-            !/WebDriverTests/
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: '26.12.1'
-      - name: Test publication integrity gates
-        run: |
-          python3 .github/openclaw/test_artifacts.py
-          python3 .github/openclaw/test_compare_fork_ci.py
-          python3 .github/openclaw/test_release.py
-          python3 .github/openclaw/test_consumer_identity.py
-          python3 .github/openclaw/test_verify_jsc_results.py
-      - name: Measure runner capacity and Docker support
-        run: bash .github/openclaw/preflight.sh
-      - name: Validate reviewed source and exact consumer matrix
-        id: source
-        env:
-          INPUT_SHA: ${{ inputs.sha }}
-          INPUT_PUBLISH: ${{ inputs.publish }}
-        run: python3 .github/openclaw/artifacts.py preflight
-  build:
-    needs: preflight
-    runs-on: blacksmith-32vcpu-ubuntu-2404
-    timeout-minutes: 150
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          sparse-checkout-cone-mode: false
-          sparse-checkout: |
-            /*
-            !/LayoutTests/
-            !/JSTests/*
-            !/PerformanceTests/
-            !/Websites/
-            !/ManualTests/
-            !/WebDriverTests/
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: '26.12.1'
-      - name: Build unchanged upstream lane and record provenance
-        env:
-          LANE: ${{ matrix.lane }}
-          BUILDX_METADATA_PROVENANCE: max
-        run: python3 .github/openclaw/artifacts.py build --lane "$LANE" --output "$RUNNER_TEMP/lane"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: ${{ matrix.lane }}
-          path: ${{ runner.temp }}/lane
-          compression-level: 0
-          if-no-files-found: error
-          retention-days: 7
-  test:
-    needs: build
-    runs-on: blacksmith-32vcpu-ubuntu-2404
-    timeout-minutes: 150
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-          sparse-checkout-cone-mode: false
-          sparse-checkout: |
-            /.github/
-            /Tools/
-            /Source/JavaScriptCore/
-            /JSTests/stress/
-            /JSTests/modules/
-            /JSTests/*.yaml
-            /JSTests/BUN-TEST-DIFFERENCES.md
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: '26.3.0'
-      - name: Bind the historical Node reference
-        run: |
-          test "$(node --version)" = v26.3.0
-          echo "BASELINE_REFERENCE_NODE=$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: '26.12.1'
-      - name: Bind the candidate Node reference
-        run: |
-          test "$(node --version)" = v26.12.1
-          echo "CANDIDATE_REFERENCE_NODE=$(realpath "$(command -v node)")" >> "$GITHUB_ENV"
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: bun-webkit-linux-amd64-aot
-          path: ${{ runner.temp }}/linux-artifact
-      - name: Verify artifact bytes
-        working-directory: ${{ runner.temp }}/linux-artifact
-        run: sha256sum -c SHA256SUMS
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: bun-webkit-linux-amd64
-          path: ${{ runner.temp }}/linux-legacy-artifact
-      - name: Verify legacy engine artifact bytes
-        working-directory: ${{ runner.temp }}/linux-legacy-artifact
-        run: sha256sum -c SHA256SUMS
-      - name: Install pinned Bun build tools
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ninja-build nasm ccache golang-go unzip ruby ruby-highline libjson-pp-perl
-          tools="$RUNNER_TEMP/bun-tools"
-          mkdir -p "$tools/llvm" "$tools/cmake"
-          curl -fSL --retry 5 https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.1/LLVM-23.1.1-Linux-X64.tar.xz -o "$tools/llvm.tar.xz"
-          echo '832aeb58d105de1cabc7b982dd2c65de0610f7377df48ae8fc2dd8e97420a15c  '"$tools/llvm.tar.xz" | sha256sum -c -
-          tar -xJf "$tools/llvm.tar.xz" --strip-components=1 -C "$tools/llvm" LLVM-23.1.1-Linux-X64/bin LLVM-23.1.1-Linux-X64/lib/clang/23
-          curl -fSL --retry 5 https://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu70_70.1-2_amd64.deb -o "$tools/libicu70.deb"
-          echo '58a154f6307289813da2276f900498ef536ae7c0522d2cf31a3c3c5cf62dfd9a  '"$tools/libicu70.deb" | sha256sum -c -
-          sudo dpkg -i "$tools/libicu70.deb"
-          curl -fSL --retry 5 https://github.com/Kitware/CMake/releases/download/v3.30.5/cmake-3.30.5-linux-x86_64.sh -o "$tools/cmake.sh"
-          echo '83de8839f3fb0d9caf982a0435da3fa8c4fbe2c817dfec99def310dc7e6a8404  '"$tools/cmake.sh" | sha256sum -c -
-          sh "$tools/cmake.sh" --skip-license --prefix="$tools/cmake"
-          rustup toolchain install nightly-2026-09-15 --profile minimal --component rust-src
-          echo 'RUSTUP_TOOLCHAIN=nightly-2026-09-15' >> "$GITHUB_ENV"
-          echo "$tools/llvm/bin" >> "$GITHUB_PATH"
-          echo "$tools/cmake/bin" >> "$GITHUB_PATH"
-          curl -fSL --retry 5 https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64.zip -o "$RUNNER_TEMP/bun.zip"
-          echo 'bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c  '"$RUNNER_TEMP/bun.zip" | sha256sum -c -
-          unzip -q "$RUNNER_TEMP/bun.zip" -d "$RUNNER_TEMP/bootstrap"
-          echo "$RUNNER_TEMP/bootstrap/bun-linux-x64" >> "$GITHUB_PATH"
-      - name: Qualify the new engine archive and build the exact candidate
-        env:
-          ARTIFACT_DIR: ${{ runner.temp }}/linux-artifact
-          QUALIFICATION_DIR: ${{ runner.temp }}/qualification
-        run: |
-          set -euo pipefail
-          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN
-          export INSPECTOR_RUNTIME="$(realpath "$(command -v bun)")"
-          test "$(node --version)" = v26.12.1
-          ARTIFACT_DIR="$RUNNER_TEMP/linux-legacy-artifact" bash .github/openclaw/qualify-engine.sh
-          bash .github/openclaw/qualify.sh
-          export CANDIDATE_BUN="$QUALIFICATION_DIR/bun/build/qualify-candidate/bun"
-          export CANDIDATE_RECEIPT="$QUALIFICATION_DIR/candidate-identity.json"
-          bash .github/openclaw/qualify-sync-compatibility.sh
-          bash .github/openclaw/qualify-sync.sh
-      - name: Retain qualified Linux Bun executables
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
-        with:
-          name: linux-bun-executables
-          path: |
-            ${{ runner.temp }}/qualification/bun-baseline/build/qualify-baseline/bun
-            ${{ runner.temp }}/qualification/bun/build/qualify-candidate/bun
-            ${{ runner.temp }}/qualification/bun/build/qualify-candidate/obj/vendor/mimalloc/src/static.c.o
-            ${{ runner.temp }}/qualification/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
-            ${{ runner.temp }}/qualification/bun/test/aot/every-platform.test.ts
-            ${{ runner.temp }}/qualification/*.sha256
-          compression-level: 0
-          if-no-files-found: error
-          retention-days: 3
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
-        with:
-          name: qualification
-          path: |
-            ${{ runner.temp }}/qualification/*.json
-            ${{ runner.temp }}/qualification/*.log
-            ${{ runner.temp }}/qualification/*.sha256
-            ${{ runner.temp }}/qualification/*.patch
-            ${{ runner.temp }}/qualification/candidate-input/artifacts.json
-            ${{ runner.temp }}/qualification/baseline/*.json
-            ${{ runner.temp }}/qualification/baseline/*.log
-            ${{ runner.temp }}/qualification/candidate/*.json
-            ${{ runner.temp }}/qualification/candidate/*.log
-            ${{ runner.temp }}/qualification/compatibility/*.log
-            ${{ runner.temp }}/qualification/sync/*.json
-            ${{ runner.temp }}/qualification/sync/*.xml
-            ${{ runner.temp }}/qualification/sync/*.log
-            ${{ runner.temp }}/qualification/jsc-*/results
-            ${{ runner.temp }}/qualification/jsc-stack/*.log
-            ${{ runner.temp }}/qualification/jsc-stack/*.json
-            ${{ runner.temp }}/qualification/sync/runtime-cache/*.json
-          if-no-files-found: error
-          retention-days: 7
   darwin-arm64:
-    needs: build
     runs-on: macos-15
     timeout-minutes: 115
     env:
       PUPPETEER_SKIP_DOWNLOAD: "1"
       OPENCLAW_CI_PLATFORM: darwin
     steps:
+      - name: Verify the retained engine artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(gh api repos/openclaw/WebKit/actions/artifacts/13932845152 --jq .workflow_run.id)" = 43185117369
+          test "$(gh api repos/openclaw/WebKit/actions/artifacts/13932845152 --jq .workflow_run.head_sha)" = bcb792d40469dbcfbca2f57f637de0ba6f7097ca
+          test "$(gh api repos/openclaw/WebKit/actions/artifacts/13932845152 --jq .digest)" = sha256:d465ab9108ebdac570f13982902f61a576760f35e40ae6def9eda17b9060ffe7
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: bcb792d40469dbcfbca2f57f637de0ba6f7097ca
+          path: engine
           persist-credentials: false
           sparse-checkout: .github
+      - name: Record the diagnostic candidate overlay
+        run: |
+          mkdir -p consumer
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,subprocess
+          root=pathlib.Path("engine")
+          path=root/".github/openclaw/variants.json"
+          config=json.loads(path.read_text())
+          assert config["candidate"]["commit"]=="a03e7c861fc9461f7126b5120e236cacf53566f7"
+          config["candidate"]["commit"]="dd694cf4c8226ffb24821b6184b1c15ac36c76b7"
+          config["candidate"]["tree"]="b60f7b8898514913a8125bef65707996fcd88bff"
+          path.write_text(json.dumps(config,indent=2)+"\n")
+          path=root/".github/openclaw/qualification/harness-adapters.json"
+          adapters=json.loads(path.read_text())
+          assert adapters["arms"]["candidate"]["pin"]=="a03e7c861fc9461f7126b5120e236cacf53566f7"
+          adapters["arms"]["candidate"]["pin"]=config["candidate"]["commit"]
+          path.write_text(json.dumps(adapters,indent=2)+"\n")
+          patch=subprocess.check_output(["git","-C","engine","diff","--binary","HEAD"])
+          pathlib.Path("consumer/controller.patch").write_bytes(patch)
+          receipt={"controllerSource":os.environ["GITHUB_SHA"],
+                   "engineSource":"bcb792d40469dbcfbca2f57f637de0ba6f7097ca",
+                   "candidateSource":config["candidate"]["commit"],"candidateTree":config["candidate"]["tree"],
+                   "artifact":13932845152,"artifactRun":43185117369,
+                   "artifactSHA256":"d465ab9108ebdac570f13982902f61a576760f35e40ae6def9eda17b9060ffe7",
+                   "configurationPatchSHA256":hashlib.sha256(patch).hexdigest(),
+                   "complete":False,"shippingArchiveQualified":False}
+          pathlib.Path("consumer/controller.json").write_text(json.dumps(receipt,indent=2)+"\n")
+          PY
       - name: Read the frozen Bun candidate
         id: consumer
-        run: python3 -c 'import json,os; p=json.load(open(".github/openclaw/variants.json"))["candidate"]; print("commit="+p["commit"],file=open(os.environ["GITHUB_OUTPUT"],"a"))'
+        run: python3 -c 'import json,os; p=json.load(open("engine/.github/openclaw/variants.json"))["candidate"]; print("commit="+p["commit"],file=open(os.environ["GITHUB_OUTPUT"],"a"))'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: openclaw/bun
@@ -271,19 +98,39 @@ jobs:
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: bun-webkit-macos-arm64-aot
+          artifact-ids: 13932845152
+          run-id: 43185117369
+          github-token: ${{ github.token }}
           path: ${{ runner.temp }}/darwin-artifact
       - name: Build and qualify the exact native Darwin candidate
+        working-directory: engine
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/darwin-artifact
           QUALIFICATION_DIR: ${{ github.workspace }}/consumer
         run: |
           export INSPECTOR_RUNTIME="$(python3 -c 'import pathlib,shutil; print(pathlib.Path(shutil.which("bun")).resolve())')"
           bash .github/openclaw/qualify-darwin.sh
+      - name: Verify the diagnostic result identity
+        run: |
+          python3 - <<'PY'
+          import json,pathlib
+          root=pathlib.Path("consumer")
+          receipt=json.loads((root/"controller.json").read_text())
+          identity=json.loads((root/"candidate-identity.json").read_text())
+          gate=json.loads((root/"gate.json").read_text())
+          assert identity["candidate"]["commit"]==receipt["candidateSource"]
+          assert identity["candidate"]["tree"]==receipt["candidateTree"]
+          assert identity["runtime"]["bun_revision"]==receipt["candidateSource"]
+          assert identity["runtime"]["webkit"]==receipt["engineSource"]
+          assert gate["passed"] is True and gate["source"]==receipt["engineSource"]
+          assert gate["selected_files"]==53
+          receipt["complete"]=True
+          (root/"controller.json").write_text(json.dumps(receipt,indent=2)+"\n")
+          PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: darwin-bun-executables
+          name: darwin-repair-bun-executables-${{ github.sha }}-attempt${{ github.run_attempt }}
           path: |
             ${{ github.workspace }}/consumer/bun/build/qualify-candidate/bun
             ${{ github.workspace }}/consumer/bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts
@@ -295,7 +142,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: darwin-qualification
+          name: darwin-repair-${{ github.sha }}-attempt${{ github.run_attempt }}
           path: |
             ${{ github.workspace }}/consumer/*.json
             ${{ github.workspace }}/consumer/*.log
@@ -306,84 +153,3 @@ jobs:
             ${{ github.workspace }}/consumer/sync/*.log
           if-no-files-found: error
           retention-days: 7
-  windows-arm64:
-    needs: build
-    runs-on: windows-11-arm
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-          sparse-checkout: |
-            .github
-            JSTests/stress
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: bun-webkit-windows-arm64
-          path: ${{ runner.temp }}/windows-artifact
-      - name: Qualify native ARM64 engine
-        shell: pwsh
-        run: ./.github/openclaw/qualify-windows-arm64.ps1 -ArtifactDirectory "$env:RUNNER_TEMP/windows-artifact" -OutputDirectory "$env:RUNNER_TEMP/windows-proof" -Source $env:GITHUB_SHA
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
-        with:
-          name: windows-arm64-qualification
-          path: |
-            ${{ runner.temp }}/windows-proof/gate.json
-            ${{ runner.temp }}/windows-proof/accounting-*.log
-          if-no-files-found: error
-          retention-days: 7
-  assemble:
-    needs: [build, test, darwin-arm64, windows-arm64]
-    runs-on: blacksmith-32vcpu-ubuntu-2404
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-          sparse-checkout: |
-            .github
-            Source/JavaScriptCore/COPYING.LIB
-            Source/WTF/wtf/COPYING.LIB
-          sparse-checkout-cone-mode: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          path: ${{ runner.temp }}/inputs
-      - name: Assemble complete release and verify checksums
-        run: |
-          python3 .github/openclaw/release.py assemble --source "$GITHUB_SHA" --inputs "$RUNNER_TEMP/inputs" --directory "$RUNNER_TEMP/release"
-          python3 .github/openclaw/release.py verify --source "$GITHUB_SHA" --directory "$RUNNER_TEMP/release"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: release
-          path: ${{ runner.temp }}/release
-          compression-level: 0
-          if-no-files-found: error
-          retention-days: 7
-  publish:
-    if: inputs.publish == true && (github.ref == 'refs/heads/openclaw/main' || github.ref == 'refs/heads/openclaw/batch-1' || github.ref == 'refs/heads/openclaw/release-5718a6ec')
-    needs: [build, test, darwin-arm64, windows-arm64, assemble]
-    environment: openclaw-artifacts
-    permissions:
-      contents: write
-    runs-on: blacksmith-32vcpu-ubuntu-2404
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-          sparse-checkout: .github
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: release
-          path: ${{ runner.temp }}/release
-      - name: Create immutable release and download every asset for verification
-        env:
-          GH_TOKEN: ${{ github.token }}
-          IMMUTABILITY_RECEIPT: ${{ vars.OPENCLAW_IMMUTABILITY_RECEIPT }}
-        run: python3 .github/openclaw/release.py publish --source "$GITHUB_SHA" --directory "$RUNNER_TEMP/release"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: publication-receipt
-          path: ${{ runner.temp }}/published-release.json
-          if-no-files-found: error
