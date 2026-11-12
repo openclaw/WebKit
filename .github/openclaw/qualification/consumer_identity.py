@@ -21,7 +21,7 @@ BASELINE_EXECUTABLE = 'bun-baseline/build/qualify-baseline/bun'
 FIXTURE = 'bun/test/js/node/worker_threads/openclaw-resource-limits.test.ts'
 FIXTURE_SHA256 = '2e925768c7625e093a3608cb0d47c33e1b2d591d16b485b2d7d30228e528b860'
 AOT_TEST = 'bun/test/aot/every-platform.test.ts'
-AOT_TEST_SHA256 = 'c82727a5ee0fe4091f9eb8337c9b917d76c2fac6ce2c8cf7f4e65a1cbd975269'
+AOT_TEST_SHA256 = '54c4c43fefe69e7b8a4db37566ed2e4bf1ef09a10d9befd836d87e36fa8c4f92'
 AOT_LOG = 'sync/aot-every-platform.log'
 BUILD_ENV = ('BUN_WEBKIT_ARTIFACT_MANIFEST', 'BUN_BUILD_PREFETCH_DIR', 'BUN_BUILD_CACHE_DIR')
 

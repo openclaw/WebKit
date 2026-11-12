@@ -211,7 +211,7 @@ bool StackVisitor::WithCompiledFrames::showNextCompiledFrame()
             return true;
         }
         // A function that is constructed waits for what its last call returns.
-        bool isTailDeleted = frame.isTailDeleted && !(frame.visibility == AOT::TraceVisibility::Visible && !frames.tailCalledOwnBody() && frames.isConstructCall());
+        bool isTailDeleted = frame.isTailDeleted && !(frame.visibility == AOT::TraceVisibility::Visible && frames.isConstructCall());
         if (m_shownFrameFilter.shows(frame.visibility, isTailDeleted)) {
             setCompiledFrame(frame.callFrame, frame.returnAddress);
             return true;
@@ -861,7 +861,7 @@ bool StackVisitor::Frame::isImplementationVisibilityPrivate() const
                 }
 #if ENABLE(AOT)
                 // A native frame under a function object of compiled code only enters that code, whatever form the function object has.
-                if (AOT::CompiledCallee::isCompiledCallee(callee))
+                if (callee->vm().hasCompiledCode() && AOT::CompiledCallee::isCompiledCallee(callee))
                     return ImplementationVisibility::Private;
 #endif
             }

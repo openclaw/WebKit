@@ -1,6 +1,6 @@
 {
   "bun_repository": "openclaw/bun",
-  "base": "4d45755fed4aeef19e95beb90d3d0c884a2812bd",
+  "base": "5a61071f79134bf41844e7ea31a8449147d85dd4",
   "lanes": [
     {
       "label": "bun-webkit-linux-amd64",
@@ -99,8 +99,8 @@
     "manifest_sha256": "df16ba1dcaad70daa014fbc70c7005842fb2bf5099a1df00a83e1075ceef7462"
   },
   "candidate": {
-    "commit": "ae14f84a8f978f069ce8deadb4c5582b3331f139",
-    "tree": "cba729491b3be5b55400754e114ede9149bfc31d",
-    "manifest_blob": "e9544c96d5cd9a5e5f6b0245ed5c8dd78fb1a218"
+    "commit": "a03e7c861fc9461f7126b5120e236cacf53566f7",
+    "tree": "3a89fa4233f797e89f8efe9b43081cd1fad578e1",
+    "manifest_blob": "11f79b10f82dfa6e1aa5b85a9969ed8c8439ca16"
   }
 }

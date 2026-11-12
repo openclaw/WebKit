@@ -51,6 +51,19 @@ for report, (file, expected) in sqlite_cases.items():
     sqlite_count += len(selected_cases)
 assert sqlite_count==6,'SQLite BigInt qualification incomplete'
 counts['sqlite-bigint']=sqlite_count
+mock_files = {
+    'test/aot/a-commonjs-file-mocked-again-is-seen-by-who-required-it.test.ts',
+    'test/aot/the-default-of-a-mocked-built-in-module-is-the-mocks.test.ts',
+    'test/aot/mock-module-of-compiled-modules.test.ts',
+}
+mock_cases = list(ElementTree.parse(out/'aot-module-mocks.xml').iter('testcase'))
+assert mock_cases and all(case.find(tag) is None for case in mock_cases for tag in ('failure','error','skipped')),'AOT module mocks failed or skipped'
+mock_sources = set()
+for case in mock_cases:
+    location = Path(case.attrib['file'])
+    mock_sources.add(str(location.relative_to(root/'bun') if location.is_absolute() else location))
+assert mock_sources==mock_files,'AOT module mock source selection drift'
+counts['aot-module-mocks']=len(mock_cases)
 assert (out/'untrimmed-getters.log').read_text().strip()=='native URL getters passed','native URL getter smoke incomplete'
 for name in ['als-plugin','als-native','als-gc']:
     matrix=json.loads((out/(name+'.json')).read_text())['results']

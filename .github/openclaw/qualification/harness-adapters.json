@@ -51,7 +51,7 @@
       }
     },
     "candidate": {
-      "pin": "ae14f84a8f978f069ce8deadb4c5582b3331f139",
+      "pin": "a03e7c861fc9461f7126b5120e236cacf53566f7",
       "build": {
         "patch": null,
         "sha256": null,
@@ -59,7 +59,7 @@
       },
       "test": {
         "patch": "harness-adapters/current-test.patch",
-        "sha256": "d78f178e1ab99974de7661c8d5b4dcee372c11ac472b8492e24d544edaea9dca",
+        "sha256": "b2909d5022658929a9da477d2db266bdb80b6f416da783bc6ddf625ede07a361",
         "files": {
           "scripts/buildkite.ts": {
             "before": "cf1999381cf38d34b9892118266614ae2b81a28066d47a455aa15794fb2c1c3e",
@@ -69,17 +69,17 @@
             "mode": "100644"
           },
           "scripts/openclaw-ci/tests.ts": {
-            "before": "157dd3092ef8c6188915b071f9f5cbdc696d0de0cc8df71b3880aff738c3479b",
-            "after": "209ba5becfecef66bdf8251f27d5065dafca05c0649a8c973a974ddabd67320d",
-            "base_blob": "4f60e36ddc6d739c3669718a4c9d4d89fca7a5ce",
-            "adapted_blob": "7135c7a27616ad926c0e3f0b9a65d055f62614e5",
+            "before": "86bf345ff306f216722f94da2d5fe88d7256f5c7aace9a30336643c8818d0cef",
+            "after": "d4a1a9c5a9ab869619cb127e9855d4e5a6abde878d22f0125d1b536155969aff",
+            "base_blob": "515a10cdf4e98e8fec07f5ca5a3ece29b2259078",
+            "adapted_blob": "bd869f380dd829470d747d0e782a18ec46ece551",
             "mode": "100644"
           },
           "scripts/runner.node.ts": {
-            "before": "94a4a40981dfe6e1b9310052cfb19b7827259ad83faa65b39ff19cc170b7e41b",
-            "after": "160d99e237942b955885533fc8b4f2797b7c45c93b1833fbbfcf9e074de5dce8",
-            "base_blob": "fb0a91398954a39ce1af68c14437ed91705ab87c",
-            "adapted_blob": "52ef9c2a03e36f5f5a82bf7d47e3e2f3c6343dff",
+            "before": "c9eab00d35b7bbb9c7c69d8ed7441a6bdb91dfdce54ab152c359b933f50ff800",
+            "after": "bc79759e971009a1f9f69d8e707b3492801914c0915d66c3a3d3385c71c58644",
+            "base_blob": "a7c25245a75a8587b5cdc5296b5ccbb0780804db",
+            "adapted_blob": "0822e904f2e25eaeac516c7cae93be025fba867e",
             "mode": "100755"
           }
         }

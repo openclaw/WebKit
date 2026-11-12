@@ -233,6 +233,7 @@ public:
 
     void appendAsyncParentModule(VM&, AbstractModuleRecord*);
     void setTopLevelCapability(VM&, JSPromise*);
+    void clearTopLevelCapability() { m_topLevelCapability.clear(); }
     void setHasTLA(bool);
 
     static size_t estimatedSize(JSCell*, VM&);
@@ -391,6 +392,9 @@ protected:
 #if USE(BUN_JSC_ADDITIONS)
     // Before the record is visible to anyone: adopts the graph and fills requestedModules() from it.
     void initializePrelinked(VM&, Ref<PrelinkedModuleGraph>&&, uint32_t moduleIndex);
+#endif
+#if ENABLE(AOT)
+    void forgetCachedResolutions() { m_resolutionCache.clear(); }
 #endif
 
 private:
