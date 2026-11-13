@@ -86,7 +86,7 @@ concurrent GC. This workflow provides the pre-merge check; it cannot publish.
 For final publication, dispatch the reviewed full SHA with `publish: true`.
 This builds every lane and runs all qualification gates before waiting at the protected
 `openclaw-artifacts` environment. Only the publication job has repository write
-permission. It assembles exactly the ten archives, `manifest.json`,
+permission. It assembles exactly 21 native-lane archives plus one AOT-source archive, `manifest.json`,
 `SHA256SUMS`, `provenance.tar.gz`, and `LICENSE-SOURCES.txt`.
 
 Repository immutable releases must be enabled. Once the publishing dispatch is
