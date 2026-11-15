@@ -6231,11 +6231,21 @@ template<Opcode known> bool Walker::walkThroughChainOf(const BodyValue& walked)
         isBuilt = buildReadWhereSomeReceiversLackField(*this, value);
     if (!isBuilt && m_explainsClosedAccessesTo) [[unlikely]]
         explainClosedAccess(*this, value, *m_explainsClosedAccessesTo);
-    if (!isBuilt && !m_explainsClosedAccessesTo) {
+    if (!m_explainsClosedAccessesTo) {
         const auto& function = program().at(currentFunction());
         if (function.name && String::fromUTF8(program().string(function.name)) == "answer"_s
-            && String::fromUTF8(program().string(program().at(function.module).path)).endsWith("main.ts"_s))
-            explainClosedAccess(*this, value, WTF::dataFile());
+            && String::fromUTF8(program().string(program().at(function.module).path)).endsWith("main.ts"_s)) {
+            if (!isBuilt)
+                explainClosedAccess(*this, value, WTF::dataFile());
+            else if (value.opcode() == Opcode::PropGet) {
+                Reference result = referenceOf(value.id());
+                if (result && result.isValue()) {
+                    Origin origin = originOfOperation();
+                    dataLogLn("openclaw answer-built role=", nameOf(unit().role), " frame=", static_cast<uint32_t>(origin.inlineFrame),
+                        " position=", origin.position, " emitted=", nameOf(code().at(result.id()).opcode));
+                }
+            }
+        }
     }
     if (!isBuilt)
         isBuilt = buildOperatorBesideOneNumber(*this, value) || buildAccessByIndexOffExpectedView(*this, value) || buildReadByIndexOffAnyBase(*this, value) || askPlainVectorBehindRow(*this, value);

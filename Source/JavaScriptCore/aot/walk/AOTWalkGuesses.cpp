@@ -5096,9 +5096,11 @@ static void explainClosedCall(Walker& walker, const BodyValue& operation, PrintS
     ASCIILiteral whereItStands = walker.isInLoop() ? "in a loop"_s : "outside of loops"_s;
     if (walker.unit().role == CodeRole::SlowBody)
         stage = "slow version"_s;
-    else if (!walker.opensGuesses())
+    else if (!walker.opensGuesses()) {
         stage = "closed arm of a guess"_s;
-    else if (isByName) {
+        if (isByName && objectsAreProven)
+            reason = whyAccessByNameHasNoTypedForm(walker, index.value(read), provenObjects);
+    } else if (isByName) {
         Draft asWritten = walker.draftOf(operation);
         nameMethodOfReceiverAsMade(walker, operation, asWritten);
         BodyValue readOfMethod = index.value(read);
@@ -5241,9 +5243,11 @@ void explainClosedAccess(Walker& walker, const BodyValue& operation, PrintStream
     };
     if (walker.unit().role == CodeRole::SlowBody)
         stage = "slow version"_s;
-    else if (!walker.opensGuesses())
+    else if (!walker.opensGuesses()) {
         stage = "closed arm of a guess"_s;
-    else if (provenObjects && !provenType.hasUnboundedUnknown() && provenType.isJavaScriptValue() && provenType.hasObjects() && !provenType.primitives) {
+        if (isByName && provenObjects && !provenType.hasUnboundedUnknown() && provenType.isJavaScriptValue() && provenType.hasObjects() && !provenType.primitives)
+            reason = whyAccessByNameHasNoTypedForm(walker, operation, provenObjects);
+    } else if (provenObjects && !provenType.hasUnboundedUnknown() && provenType.isJavaScriptValue() && provenType.hasObjects() && !provenType.primitives) {
         stage = "PROVEN"_s;
         if (isByName)
             reason = whyAccessByNameHasNoTypedForm(walker, operation, provenObjects);
