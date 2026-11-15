@@ -4586,30 +4586,66 @@ static bool describesBagOfOptionsForGuesses(Walker& walker, TypeID expected)
     return describesBag;
 }
 
-static TypeID typeTestedByParameterGuard(Walker& walker, TypeID expected, TypeID inFrontOfGuard)
+static TypeID typeTestedByParameterGuard(Walker& walker, TypeID expected, TypeID inFrontOfGuard, bool explainsAnswer)
 {
     TypeArena& types = walker.types();
-    if (saysNothingForGuesses(types, expected) || describesBagOfOptionsForGuesses(walker, expected) || !types.at(inFrontOfGuard).isJavaScriptValue())
+    if (explainsAnswer)
+        WTF::dataLogLn("openclaw guard-test expected=", expected.index(), " arriving=", inFrontOfGuard.index());
+    if (saysNothingForGuesses(types, expected) || describesBagOfOptionsForGuesses(walker, expected) || !types.at(inFrontOfGuard).isJavaScriptValue()) {
+        if (explainsAnswer)
+            WTF::dataLogLn("openclaw guard-test rejected: expectation-or-arrival");
         return { };
+    }
     TypeID tested = types.testablePartOf(types.withLiteralStringsWidened(widenedForTestOfGuess(walker, expected)));
     Type type = types.at(tested);
-    if (type.isNever() || !type.isJavaScriptValue() || type.hasUnboundedUnknown() || !changesCodeWhereProven(types, tested))
+    if (type.isNever() || !type.isJavaScriptValue() || type.hasUnboundedUnknown() || !changesCodeWhereProven(types, tested)) {
+        if (explainsAnswer)
+            WTF::dataLogLn("openclaw guard-test rejected: unhelpful-test type=", tested.index());
         return { };
+    }
 
+    auto explainLayouts = [&](LayoutSetID layouts) {
+        if (!explainsAnswer)
+            return;
+        unsigned count = 0;
+        for (LayoutID layout : membersOf(types, layouts)) {
+            if (++count > 16) {
+                WTF::dataLogLn("openclaw guard-test layouts truncated");
+                break;
+            }
+            WTF::dataLogLn("openclaw guard-test layout=", layout.index(), " inUse=", walker.plan().isInUse(layout),
+                " shapes=", walker.plan().shapes().shapesOf(layout).size(), " base=", walker.program().at(layout).base.index());
+            for (LayoutID supertype : walker.program().at(layout).supertypes)
+                WTF::dataLogLn("openclaw guard-test layout=", layout.index(), " supertype=", supertype.index());
+        }
+    };
     if (type.hasObjects() && type.hasOnlyLayouts() && !type.hasOnlyClosures()) {
+        explainLayouts(type.layouts);
         ShapesOfLayoutsForGuesses shapes = shapesOfLayoutsForGuesses(walker, type.layouts);
         if (shapes == ShapesOfLayoutsForGuesses::NoLayoutHasAny) {
             TypeID above = findLayoutsWithObjectsAboveForGuesses(walker, type.layouts);
-            if (!above)
+            if (!above) {
+                if (explainsAnswer)
+                    WTF::dataLogLn("openclaw guard-test rejected: no-layout-with-objects-above");
                 return { };
+            }
+            explainLayouts(types.at(above).layouts);
             shapes = shapesOfLayoutsForGuesses(walker, types.at(above).layouts);
             tested = types.withPrimitives(above, type.primitives);
         }
-        if (shapes != ShapesOfLayoutsForGuesses::Testable)
+        if (shapes != ShapesOfLayoutsForGuesses::Testable) {
+            if (explainsAnswer)
+                WTF::dataLogLn("openclaw guard-test rejected: shapes=", static_cast<unsigned>(shapes));
             return { };
+        }
     }
-    if (types.isSubset(inFrontOfGuard, tested) || !types.overlap(inFrontOfGuard, tested))
+    if (types.isSubset(inFrontOfGuard, tested) || !types.overlap(inFrontOfGuard, tested)) {
+        if (explainsAnswer)
+            WTF::dataLogLn("openclaw guard-test rejected: redundant-or-disjoint type=", tested.index());
         return { };
+    }
+    if (explainsAnswer)
+        WTF::dataLogLn("openclaw guard-test final-subset-gate type=", tested.index());
     return types.isSubset(types.intersectionOf(inFrontOfGuard, tested), tested) ? tested : TypeID();
 }
 
@@ -4906,7 +4942,7 @@ Vector<TypeID, 8> typesBehindParameterGuard(Walker& walker, FunctionID id)
     Vector<ParameterOfGuard, 8> parameters;
     for (uint32_t index = 0; index < numberOfEntryParameters; ++index) {
         typesInFrontOfGuard.append(walker.typeArrivingAtEntryParameter(index));
-        TypeID tested = isTested(index) ? typeTestedByParameterGuard(walker, findExpectationForGuesses(walker, ValueID(index)).type, typesInFrontOfGuard.last()) : TypeID();
+        TypeID tested = isTested(index) ? typeTestedByParameterGuard(walker, findExpectationForGuesses(walker, ValueID(index)).type, typesInFrontOfGuard.last(), explainsAnswer) : TypeID();
         tested = typeTestedInPlaceOfWrittenType(walker, id, index, tested);
         if (tested && isNeverType(types.intersectionOf(typesInFrontOfGuard.last(), tested)))
             tested = { };
@@ -4918,7 +4954,7 @@ Vector<TypeID, 8> typesBehindParameterGuard(Walker& walker, FunctionID id)
         parameters.append(ParameterOfGuard { index, tested, typesInFrontOfGuard.last(), types.intersectionOf(typesInFrontOfGuard.last(), tested), false, { }, false });
         TypeID whole = types.at(tested).hasObjects() ? findWholeExpectationForGuesses(walker, ValueID(index)).type : TypeID();
         if (!saysNothingForGuesses(types, whole) && partThatOneTestTellsForGuesses(types, whole) != whole)
-            parameters.last().testedWithPrimitives = typeTestedByParameterGuard(walker, whole, typesInFrontOfGuard.last());
+            parameters.last().testedWithPrimitives = typeTestedByParameterGuard(walker, whole, typesInFrontOfGuard.last(), explainsAnswer);
     }
     if (explainsAnswer)
         WTF::dataLogLn("openclaw parameter-guard f", id.index(), " candidates=", parameters.size(), " values=", walker.currentBodyIndex().numberOfValues());

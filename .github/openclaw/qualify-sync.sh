@@ -27,8 +27,8 @@ done
 printf '%s\n' \
   'b8c8b55a9b4ca57cedeb896fca6978ae18c588e273501d5c52ccde1eb83b89de  evaluated-text-does-not-call-private-host-evaluators.ir' \
   'cdb3298ab581d7de1d0f62442f3ce0f63498cb0fdccc5e85d8e4739fbc60ac80  a-private-host-evaluator-that-is-called-still-evaluates-text.ir' \
-  'a734a98ca3b2d70fac8c05e780a0d2389268a022f7b9bd56053e07bbc8523122  module-hooks-do-not-receive-the-commonjs-parent.ir' \
-  'd2d6f0f4ac27c00bf536994e015b0a156fa449dd783739a9f478e0d28e3b8925  module-hooks-do-not-hide-the-parent-from-a-legacy-resolver.ir' \
+  '7ecc2f7e5106d714a6bf7a990f6c56288df532207807ee4beb434955089f4c20  module-hooks-do-not-receive-the-commonjs-parent.ir' \
+  '4b7cb345dd68dc361c7c4d5d92705273a0e5b7dd1f261bfcee9d1a772fb84768  module-hooks-do-not-hide-the-parent-from-a-legacy-resolver.ir' \
   | (cd "$evaluator_fixtures" && sha256sum -c -)
 engine_digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["engine"]["archive"]["sha256"])' "$CANDIDATE_RECEIPT")
 engine_aot="$QUALIFICATION_DIR/cache-candidate/webkit-sha256-$engine_digest/Source/JavaScriptCore/aot"
