@@ -4614,7 +4614,7 @@ static TypeID typeTestedByParameterGuard(Walker& walker, TypeID expected, TypeID
                 break;
             }
             WTF::dataLogLn("openclaw guard-test layout=", layout.index(), " inUse=", walker.plan().isInUse(layout),
-                " shapes=", walker.plan().shapes().shapesOf(layout).size(), " base=", walker.program().at(layout).base.index());
+                " shapes=", walker.plan().shapes().shapesOf(layout).count, " base=", walker.program().at(layout).base.index());
             for (LayoutID supertype : walker.program().at(layout).supertypes)
                 WTF::dataLogLn("openclaw guard-test layout=", layout.index(), " supertype=", supertype.index());
         }
