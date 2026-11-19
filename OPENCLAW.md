@@ -141,7 +141,7 @@ and requires both native executables to pass before accepting the artifact.
 
 ## Matched upstream sync (2026-11-19)
 
-- Merge upstream `0befb64c5f30ae5af5137f31c1ebd4f7c3f908d4`, pinned by Bun upstream `ca7729d01a30856c5f613886057a8d45d7c21a74`, preserving both commit histories. Keep the fork's namespace views, async context, callsite positions, worker collection and buffer accounting across the new engine APIs. Native engine and paired Bun qualification are pending; existing published pins stay unchanged.
+- Merge upstream `0befb64c5f30ae5af5137f31c1ebd4f7c3f908d4`, pinned by Bun upstream `ca7729d01a30856c5f613886057a8d45d7c21a74`, preserving both commit histories. Keep the fork's namespace views, async context, callsite positions, worker collection and buffer accounting across the new engine APIs. Qualification compares lane recipes with this exact upstream revision and retains the original history floor. Native engine and paired Bun qualification are pending; existing published pins stay unchanged.
 
 ## Matched upstream sync (2026-11-01)
 
