@@ -77,6 +77,21 @@ constexpr Mechanisms withoutMechanismsMissingDependencies(Mechanisms mechanisms)
     return result == mechanisms ? result : withoutMechanismsMissingDependencies(result);
 }
 
+enum class WalkMode : uint8_t { AsBuilt, NothingCarried, Closed };
+
+constexpr Mechanisms mechanismsOfWay(WalkMode way, Mechanisms ofBuild)
+{
+    switch (way) {
+    case WalkMode::AsBuilt:
+        return ofBuild;
+    case WalkMode::NothingCarried:
+        return withoutMechanismsMissingDependencies(ofBuild - Mechanisms { Mechanism::LoopInvariants, Mechanism::EscapeAnalysis, Mechanism::Inlining, Mechanism::Handlers });
+    case WalkMode::Closed:
+        return ofBuild & Mechanisms { Mechanism::Folding, Mechanism::DirectCalls, Mechanism::Arrivals };
+    }
+    return ofBuild;
+}
+
 } } } // namespace JSC::AOT::Typed
 
 #endif // ENABLE(AOT)

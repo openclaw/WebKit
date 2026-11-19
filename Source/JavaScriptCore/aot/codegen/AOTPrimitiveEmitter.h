@@ -34,6 +34,8 @@ protected:
         , m_notCellMask(generator.pinned().notCellMask)
         , m_cellCageBase(generator.pinned().cellCageBase)
         , m_wordsOfInt32Elements(generator.pinned().wordsOfInt32Elements)
+        , m_narrowWordsOfIntegers(generator.pinned().narrowWordsOfIntegers)
+        , m_owesFenceBehindStores(generator.owesFenceBehindStores())
     {
     }
 
@@ -42,7 +44,7 @@ protected:
     template<typename Usual, typename Rare> void ifElse(Condition, const Usual&, const Rare&);
     template<typename T, typename Usual, typename Rare> T either(Condition, const Usual&, const Rare&);
     template<typename Usual, typename Rare> Operand eitherOperand(Condition, Representation, const Usual&, const Rare&);
-    template<typename T> T selectByBranch(Condition, NOESCAPE const Invocable<T()> auto& whenTrue, NOESCAPE const Invocable<T()> auto& whenFalse);
+    template<typename T> T selectByBranch(Condition, NOESCAPE const Invocable<T()> auto& whenTrue, NOESCAPE const Invocable<T()> auto& whenFalse, Machine::EdgeClass edgeClassWhenTrue = Machine::EdgeClass::Normal);
     Condition asBoolean(NOESCAPE const Invocable<void(BranchTargets)> auto& branch);
     void branchUnless(Condition condition, LBasicBlock rareTarget);
     void branch(Condition condition, BranchTargets targets) { m_out.branch(condition.value(), targets); }
@@ -158,15 +160,31 @@ protected:
     Integer zeroExtended(Word32 value) { return Integer(m_out.zeroExt(value.value(), Machine::Int64)); }
     Integer zeroExtended(Condition value) { return Integer(m_out.zeroExt(value.value(), Machine::Int64)); }
     Word32 low32(Integer value) { return Word32(m_out.castToInt32(value.value())); }
-    Word32 low32(Boxed value) { return Word32(m_out.castToInt32(value.value())); }
     Word32 low32InWords(Integer value) { return Word32(m_out.lowWord(value.value())); }
     Word32 asWord32(Condition value) { return Word32(value.value()); }
     LValue countTrailingZerosOfNonZero(LValue bits);
+    LValue reverseBytes(LValue word);
 
     Condition isInt32(Boxed value) { return Condition(m_out.aboveOrEqual(value.value(), m_numberTag)); }
+    Condition isNotInt32(Boxed value) { return Condition(m_out.below(value.value(), m_numberTag)); }
     Condition isNumber(Boxed value) { return Condition(m_out.testNonZero64(value.value(), m_numberTag)); }
     Condition isCell(Boxed value) { return Condition(m_out.testIsZero64(value.value(), m_notCellMask)); }
     Condition isNotCell(Boxed value) { return Condition(m_out.testNonZero64(value.value(), m_notCellMask)); }
+    Condition isCellAmongNonNumbers(Boxed value)
+    {
+        static_assert(JSValue::ValueEmpty < JSValue::ValueUndefined && JSValue::ValueNull < JSValue::ValueUndefined && JSValue::ValueFalse < JSValue::ValueUndefined && JSValue::ValueTrue < JSValue::ValueUndefined && JSValue::ValueUndefined < sizeof(JSCell) * 2);
+        return Condition(m_out.above(value.value(), m_out.constInt64(JSValue::ValueUndefined)));
+    }
+    static bool areNonNumbers(uint16_t primitives) { return !(primitives & ~(cellPrimitives | Primitive::UndefinedOrNull | Primitive::Boolean | Primitive::Absent)); }
+    Condition isCellAmong(Boxed value, uint16_t primitives) { return areNonNumbers(primitives) ? isCellAmongNonNumbers(value) : isCell(value); }
+    Condition isCellAndNotEmpty(Boxed value)
+    {
+        static_assert(JSValue::ValueUndefined < 16 && JSValue::ValueNull < 16 && JSValue::ValueTrue < 16 && JSValue::ValueFalse < 16 && JSValue::ValueDeleted < 16);
+#if USE(BIGINT32)
+#error "A BigInt32 has no bit from 2^48 up: it would pass for a cell."
+#endif
+        return Condition(m_out.isZero64(m_out.lShr(m_out.sub(value.value(), m_out.constInt64(16)), 48)));
+    }
     Condition isBoolean(Boxed value)
     {
         static_assert(JSValue::ValueTrue == JSValue::ValueFalse + 1);
@@ -178,6 +196,7 @@ protected:
     Condition isCellReference(NarrowReference value) { return Condition(m_out.above(value.value(), undefinedCell32)); }
     Condition isCellReferenceAmongAllWords(NarrowReference value) { return Condition(m_out.aboveOrEqual(value.value(), minCell32)); }
     std::optional<Word32> narrowWordBehind(OptionalInteger);
+    void noteNarrowWord(OptionalInteger widened, Word32 word) { m_narrowWordsOfIntegers.set(widened.value(), word.value()); }
 
     Boxed boxInt32(Word32 value)
     {
@@ -254,6 +273,8 @@ protected:
     LValue& m_notCellMask;
     LValue& m_cellCageBase;
     UncheckedKeyHashMap<LValue, LValue>& m_wordsOfInt32Elements;
+    UncheckedKeyHashMap<LValue, LValue>& m_narrowWordsOfIntegers;
+    bool& m_owesFenceBehindStores;
 
 private:
     Word32 loadCellType(CellPointer cell) { return Word32(m_out.load8ZeroExt32(cell.value(), m_heaps.JSCell_typeInfoType)); }
@@ -283,7 +304,7 @@ Condition PrimitiveEmitter::asBoolean(NOESCAPE const Invocable<void(BranchTarget
 }
 
 template<typename T>
-T PrimitiveEmitter::selectByBranch(Condition condition, NOESCAPE const Invocable<T()> auto& whenTrue, NOESCAPE const Invocable<T()> auto& whenFalse)
+T PrimitiveEmitter::selectByBranch(Condition condition, NOESCAPE const Invocable<T()> auto& whenTrue, NOESCAPE const Invocable<T()> auto& whenFalse, Machine::EdgeClass edgeClassWhenTrue)
 {
     if (condition.value()->hasInt())
         return condition.value()->asInt() ? whenTrue() : whenFalse();
@@ -292,7 +313,7 @@ T PrimitiveEmitter::selectByBranch(Condition condition, NOESCAPE const Invocable
     LBasicBlock isFalse = m_out.newBlock();
     Join<T> join(m_out);
     ScopeFork fork = m_out.forkScope();
-    m_out.branch(condition.value(), normalEdge(isTrue), normalEdge(isFalse));
+    m_out.branch(condition.value(), BlockEdge(isTrue, edgeClassWhenTrue), normalEdge(isFalse));
     m_out.appendToArm(isTrue, fork);
     join.add(whenTrue());
     m_out.appendToArm(isFalse, fork);

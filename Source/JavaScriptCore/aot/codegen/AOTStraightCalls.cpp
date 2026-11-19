@@ -95,10 +95,10 @@ static void generateCallByValue(StraightEmitter& emitter, const BodyValue& value
 static bool walkReplacesCallByValue(StraightEmitter& emitter, const BodyValue& value)
 {
     const BodyIndex& index = emitter.index();
-    BodyValue callee = index.value(index.valueBehindCasts(value.calleeOperand()));
+    BodyValue callee = index.value(index.stripCasts(value.calleeOperand()));
     if (callee.opcode() != Opcode::Builtin)
         return false;
-    if (isCallThatTheWalkMustLower(emitter.program().builtins(), callee.builtin()))
+    if (requiresWalkLowering(emitter.program().builtins(), callee.builtin()))
         return true;
     return value.opcode() == Opcode::Call && (value.isDoneInPlace() || value.callNumber());
 }
@@ -131,7 +131,7 @@ static void generateConstructWithList(StraightEmitter& emitter, const BodyValue&
 {
     ValueID callee = value.calleeOperand();
     ValueID newTarget = value.newTargetOperand();
-    emitter.callOperation(value, RuntimeOperation::ConstructWithArray, { callee, newTarget ? newTarget : callee, value.listOperand() }, { .constructs = true });
+    emitter.callStub(value, constructWithArray(ConstructSyntax::NewExpression), { callee, newTarget ? newTarget : callee, value.listOperand() }, { .constructs = true });
     emitter.define(value);
 }
 
@@ -153,6 +153,7 @@ static bool crossesStraightCall(const ArgumentLocation& location)
     case Representation::JSValue:
     case Representation::Cell:
     case Representation::Int32:
+    case Representation::Int64:
     case Representation::Boolean:
     case Representation::Double:
         return true;
@@ -526,7 +527,7 @@ static void generateStraightResults(StraightEmitter& emitter, const BodyValue& v
 static bool isMadeAsFunctionInStraightForm(StraightEmitter& emitter, ValueID callee)
 {
     const BodyIndex& index = emitter.index();
-    BodyValue made = index.value(index.valueBehindCasts(callee));
+    BodyValue made = index.value(index.stripCasts(callee));
     if (made.opcode() != Opcode::Builtin)
         return made.opcode() == Opcode::NewClosure;
     const BuiltinTable& builtins = emitter.program().builtins();
@@ -536,7 +537,7 @@ static bool isMadeAsFunctionInStraightForm(StraightEmitter& emitter, ValueID cal
 static bool namesBuiltinInStraightForm(StraightEmitter& emitter, ValueID callee)
 {
     const BodyIndex& index = emitter.index();
-    return index.value(index.valueBehindCasts(callee)).opcode() == Opcode::Builtin;
+    return index.value(index.stripCasts(callee)).opcode() == Opcode::Builtin;
 }
 
 static void requireCallableBeforeStraightTailCall(StraightEmitter& emitter, const BodyValue& call)
@@ -606,8 +607,12 @@ static bool tryLeaveByDirectCall(StraightEmitter& emitter, const BodyValue& call
         return true;
     }
     bringArgumentsOfStraightDirectCall(emitter, call, planned->locations, StackWordsOfStraightCall::InScratchArea);
-    emitMoveStackWordsToArgumentListFrame(jit, planned->stackWords, 0);
     stubCalls.moveAddressOfFunction(planned->callee, primaryEntry, valueEntryGPR);
+    if (planned->stackWords <= StubKey::maxCount) {
+        stubCalls.tailCall(jit, AOT::callFromArgumentListFrameWithWords(planned->stackWords, 0));
+        return true;
+    }
+    emitMoveStackWordsToArgumentListFrame(jit, planned->stackWords, 0);
     stubCalls.tailCall(jit, AOT::callFromArgumentListFrame());
     return true;
 }

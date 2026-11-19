@@ -75,7 +75,7 @@ JSC_DECLARE_HOST_FUNCTION(stringProtoFuncSlice);
 JSC_DECLARE_HOST_FUNCTION(stringProtoFuncSubstr);
 JSC_DECLARE_HOST_FUNCTION(stringProtoFuncToLowerCase);
 JSC_DECLARE_HOST_FUNCTION(stringProtoFuncToUpperCase);
-static JSC_DECLARE_HOST_FUNCTION(stringProtoFuncLocaleCompare);
+JSC_DECLARE_HOST_FUNCTION(stringProtoFuncLocaleCompare);
 static JSC_DECLARE_HOST_FUNCTION(stringProtoFuncToLocaleLowerCase);
 static JSC_DECLARE_HOST_FUNCTION(stringProtoFuncToLocaleUpperCase);
 JSC_DECLARE_HOST_FUNCTION(stringProtoFuncTrim);
@@ -1092,7 +1092,8 @@ JSCell* stringSplitFast(JSGlobalObject* globalObject, JSString* thisString, JSSt
 
         unsigned resultSize = result.size();
         if (limit == 0xFFFFFFFFu && !globalObject->isHavingABadTime() && resultSize < MIN_SPARSE_ARRAY_INDEX) [[likely]] {
-            bool makeAtomStringsArray = subjectCanBeKey && input->impl()->isAtom() && resultSize < atomStringsArrayLimit;
+            const bool isWorthCaching = subjectCanBeKey && StringSplitCache::isWorthCaching(*input->impl());
+            bool makeAtomStringsArray = isWorthCaching && (input->impl()->isAtom() || StringSplitCache::canBeKey(separator->impl())) && resultSize < atomStringsArrayLimit;
             Structure* cellButterflyStructure = makeAtomStringsArray ? vm.cellButterflyOnlyAtomStringsStructure.get() : vm.cellButterflyStructure(CopyOnWriteArrayWithContiguous);
 
             auto* newButterfly = JSCellButterfly::tryCreate(vm, cellButterflyStructure, resultSize);
@@ -1130,7 +1131,7 @@ JSCell* stringSplitFast(JSGlobalObject* globalObject, JSString* thisString, JSSt
                 Structure* replacementStructure = vm.cellButterflyStructure(CopyOnWriteArrayWithContiguous);
                 newButterfly->setStructure(vm, replacementStructure);
             }
-            if (subjectCanBeKey && StringSplitCache::isWorthCaching(*input->impl()))
+            if (isWorthCaching)
                 vm.ensureStringSplitCache().setForString(input, separator, newButterfly);
             Structure* arrayStructure = globalObject->originalArrayStructureForIndexingType(CopyOnWriteArrayWithContiguous);
             return JSArray::createWithButterfly(vm, nullptr, arrayStructure, newButterfly->toButterfly());
@@ -1959,7 +1960,7 @@ JSC_DEFINE_HOST_FUNCTION(stringProtoFuncTrimEnd, (JSGlobalObject* globalObject, 
     return JSValue::encode(trimString<TrimKind::TrimEnd>(globalObject, thisValue));
 }
 
-static inline unsigned LEGACY_NODELETE clampAndTruncateToUnsigned(double value, unsigned min, unsigned max)
+NODELETE static inline unsigned clampAndTruncateToUnsigned(double value, unsigned min, unsigned max)
 {
     if (value < min)
         return min;
@@ -2799,7 +2800,7 @@ static JSString* createHTML(JSGlobalObject* globalObject, JSValue thisValue, ASC
         throwOutOfMemoryError(globalObject, scope);
         return nullptr;
     }
-    RELEASE_AND_RETURN(scope, jsString(vm, result.toString()));
+    RELEASE_AND_RETURN(scope, jsString(vm, WTF::move(result).toString()));
 }
 
 JSC_DEFINE_HOST_FUNCTION(stringProtoFuncAnchor, (JSGlobalObject* globalObject, CallFrame* callFrame))

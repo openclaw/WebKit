@@ -14,6 +14,7 @@
 #include "AOTType.h"
 #include "AOTTypeArena.h"
 #include "TypedArrayType.h"
+#include <array>
 #include <optional>
 #include <span>
 #include <wtf/ScopedLambda.h>
@@ -40,7 +41,6 @@ public:
     virtual TypeID readByNameOffObjectsOf(TypeLevel, LayoutID, PropertyKeyID) const { return { }; }
     virtual LayoutID classAbove(LayoutID) const { return { }; }
     virtual TypeID property(TypeLevel, ObjectID, PropertyKeyID) const = 0;
-    virtual TypeID contents(TypeLevel, ObjectID, ContentsSlot) const = 0;
     virtual TypeID result(TypeLevel, FunctionID, uint32_t resultIndex) const = 0;
     virtual TypeID resultOfBodyThatNeverSuspends(TypeLevel, FunctionID) const { return { }; }
     virtual TypeID entryParameter(TypeLevel, FunctionID, uint32_t entryParameterIndex) const = 0;
@@ -50,6 +50,8 @@ public:
     virtual TypeID resultOfCallBeingTyped(TypeLevel, uint32_t resultIndex) const = 0;
     virtual TypeID resultOfReadBeingTyped(TypeLevel) const { return { }; }
     virtual TypeID contentsBeingTyped(TypeLevel) const { return { }; }
+    virtual TypeID scalarOfResult(TypeLevel, FunctionID, uint32_t) const { return { }; }
+    virtual TypeID scalarOfField(TypeLevel, LayoutID, uint32_t, Representation) const { return { }; }
     virtual TypeID resultOfSelector(TypeLevel, uint32_t) const { return { }; }
     virtual TypeID resultOfTableRow(TypeLevel, uint32_t, LayoutID, bool&) const { return { }; }
 
@@ -57,7 +59,7 @@ public:
     virtual TypeID askedOfEachObject(QuestionOfEachObject, TypeLevel, ObjectSetID, uint32_t, NOESCAPE const ScopedLambda<TypeID()>& askEachObject) const { return askEachObject(); }
     enum class QuestionOfEachLayout : uint8_t { ContentsOfSlot, FieldReadByName, FoundAboveObjects, ReadByNameOffObjects, ResultOfTableRow };
     virtual TypeID askedOfEachLayout(QuestionOfEachLayout, TypeLevel, LayoutSetID, PropertyKeyID, NOESCAPE const ScopedLambda<TypeID()>& askEachLayout) const { return askEachLayout(); }
-    virtual bool listLayoutsAskedAbout(PropertyKeyID, LayoutSetID, bool asksWhatIsWrittenAbove, Vector<LayoutID, 16>&) const { return false; }
+    virtual bool collectQueriedLayouts(PropertyKeyID, LayoutSetID, bool includesInheritedWrites, Vector<LayoutID, 16>&) const { return false; }
 
     static const PositionTypes& knowingNothing();
 };
@@ -83,29 +85,39 @@ struct OperandTypes {
     TypeID operator[](uint32_t operandIndex) const { return operandIndex < types.size() ? types[operandIndex] : TypeID(); }
 };
 
-constexpr std::optional<Opcode> genericOperationOf(Opcode access)
-{
-    switch (access) {
-    case Opcode::GetSlot:
-    case Opcode::GetSlotOrUndefined:
-    case Opcode::GetDeferredClosureSlot:
-    case Opcode::GetDeferredClosureSlotOrUndefined:
-        return Opcode::PropGet;
-    case Opcode::PutSlot:
-    case Opcode::PutSlotOrAdd:
-        return Opcode::PropSet;
-    case Opcode::GetArrayElement:
-    case Opcode::GetTypedArrayElement:
-        return Opcode::ElemGet;
-    case Opcode::PutArrayElement:
-    case Opcode::PutTypedArrayElement:
-        return Opcode::ElemSet;
-    case Opcode::HasArrayElement:
-        return Opcode::ElemHas;
-    default:
-        return std::nullopt;
+inline constexpr std::array<std::optional<Opcode>, numberOfEnumerators<Opcode>> genericOperationsOfAccesses = []() consteval {
+    std::array<std::optional<Opcode>, numberOfEnumerators<Opcode>> generic;
+    for (unsigned index = 0; index < generic.size(); ++index) {
+        switch (static_cast<Opcode>(index)) {
+        case Opcode::GetSlot:
+        case Opcode::GetSlotOrUndefined:
+        case Opcode::GetDeferredClosureSlot:
+        case Opcode::GetDeferredClosureSlotOrUndefined:
+            generic[index] = Opcode::PropGet;
+            break;
+        case Opcode::PutSlot:
+        case Opcode::PutSlotOrAdd:
+            generic[index] = Opcode::PropSet;
+            break;
+        case Opcode::GetArrayElement:
+        case Opcode::GetTypedArrayElement:
+            generic[index] = Opcode::ElemGet;
+            break;
+        case Opcode::PutArrayElement:
+        case Opcode::PutTypedArrayElement:
+            generic[index] = Opcode::ElemSet;
+            break;
+        case Opcode::HasArrayElement:
+            generic[index] = Opcode::ElemHas;
+            break;
+        default:
+            break;
+        }
     }
-}
+    return generic;
+}();
+
+ALWAYS_INLINE constexpr std::optional<Opcode> genericOperationOf(Opcode access) { return genericOperationsOfAccesses[static_cast<unsigned>(access)]; }
 
 template<HoldsOpcode Operation>
 bool testsItsOwnGuess(const Operation& operation)
@@ -149,7 +161,7 @@ ALWAYS_INLINE std::optional<uint32_t> numberOfResultsOf(const Program& program, 
 TypeID naturalTypeFrom(TypeArena&, const NaturalType&);
 TypeID widestPrimitiveResultOf(Opcode);
 TypeID widestPrimitiveResultOf(TypeArena&, Opcode producer, uint32_t resultIndex);
-inline constexpr OpcodeSet recordsTypedByWhatIsProvenOfContents { Opcode::ResultAt, Opcode::CallInline, Opcode::CallBuiltin };
+inline constexpr OpcodeSet recordsTypedByWhatIsProvenOfContents { Opcode::ResultAt, Opcode::CallInline, Opcode::CallBuiltin, Opcode::GetValueAtPlaceInMap, Opcode::GetMapValueByTag, Opcode::GetMapValueByStringTag };
 inline constexpr OpcodeSet readsTypedByWhatIsProvenOfInput { Opcode::ElemGet, Opcode::GetArrayElement, Opcode::GetContiguousIndex, Opcode::GetOwnContiguousIndex };
 
 constexpr UnknownSeed seedOfUnknownResultByRowOf(Opcode opcode)
@@ -218,6 +230,7 @@ Range quotientsRoundedEitherWay(Range dividends, Range divisors);
 template<typename Operation> TypeID typeOfConstant(const TypingContext&, const Operation&, ObjectID created = { });
 TypeID typeOfKeyConstant(const TypingContext&, PropertyKeyID);
 TypeID typeOfBuiltinObject(const TypingContext&, BuiltinID);
+BuiltinID findNativeFunction(const BuiltinTable&, BuiltinID binding);
 TypeID typeOfData(const TypingContext&, const DataNode&, ObjectID created = { });
 TypeID typeOfAllocatedLayout(const TypingContext&, LayoutID, ObjectID created = { });
 TypeID typeOfDeclaredLayout(const TypingContext&, LayoutID);

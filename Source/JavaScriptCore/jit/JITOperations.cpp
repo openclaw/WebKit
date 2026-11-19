@@ -3499,17 +3499,8 @@ ALWAYS_INLINE static JSValue getByVal(JSGlobalObject* globalObject, CallFrame* c
         auto propertyName = asString(subscript)->toAtomString(globalObject);
         RETURN_IF_EXCEPTION(scope, JSValue());
 
-        if (baseValue.isCell()) [[likely]] {
-            Structure& structure = *baseValue.asCell()->structure();
-            if (JSCell::canUseFastGetOwnProperty(structure)) {
-                if (JSValue result = baseValue.asCell()->fastGetOwnProperty(vm, structure, propertyName.data)) {
-                    ASSERT(callFrame->bytecodeIndex() != BytecodeIndex(0));
-                    return result;
-                }
-            }
-
-            RELEASE_AND_RETURN(scope, baseValue.get(globalObject, propertyName.data));
-        }
+        if (baseValue.isObject()) [[likely]]
+            RELEASE_AND_RETURN(scope, CommonSlowPaths::getByValObject(globalObject, vm, asObject(baseValue), propertyName.data));
 
         ASSERT(callFrame->bytecodeIndex() != BytecodeIndex(0));
         RELEASE_AND_RETURN(scope, baseValue.get(globalObject, propertyName.data));
@@ -4505,6 +4496,46 @@ JSC_DEFINE_JIT_OPERATION(operationSetupVarargsFrame, CallFrame*, (JSGlobalObject
     auto scope = DECLARE_THROW_SCOPE(vm);
     JSValue arguments = JSValue::decode(encodedArguments);
     setupVarargsFrame(globalObject, callFrame, newCallFrame, arguments, firstVarArgOffset, length);
+    OPERATION_RETURN(scope, newCallFrame);
+}
+
+JSC_DEFINE_JIT_OPERATION(operationSizeFrameForVarargsWithSpread, size_t, (JSGlobalObject* globalObject, int32_t argvOffset, int32_t argc, const BitVector* bitVector, int32_t numUsedStackSlots))
+{
+    VM& vm = globalObject->vm();
+    CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
+    JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    JSValue* values = std::bit_cast<JSValue*>(&callFrame->r(VirtualRegister(argvOffset)));
+    OPERATION_RETURN(scope, sizeFrameForVarargsWithSpread(globalObject, callFrame, vm, values, argc, *bitVector, numUsedStackSlots));
+}
+
+JSC_DEFINE_JIT_OPERATION(operationSetupVarargsFrameWithSpread, CallFrame*, (JSGlobalObject* globalObject, CallFrame* newCallFrame, int32_t argvOffset, int32_t argc, const BitVector* bitVector, int32_t length))
+{
+    VM& vm = globalObject->vm();
+    CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
+    JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    JSValue* values = std::bit_cast<JSValue*>(&callFrame->r(VirtualRegister(argvOffset)));
+    setupVarargsFrameWithSpread(globalObject, callFrame, newCallFrame, values, argc, *bitVector, length);
+    OPERATION_RETURN(scope, newCallFrame);
+}
+
+JSC_DEFINE_JIT_OPERATION(operationSizeFrameForVarargsWithSpreadBuffer, size_t, (JSGlobalObject* globalObject, EncodedJSValue* buffer, int32_t argc, int32_t numUsedStackSlots))
+{
+    VM& vm = globalObject->vm();
+    CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
+    JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    OPERATION_RETURN(scope, sizeFrameForVarargsWithSpreadBuffer(globalObject, callFrame, vm, std::bit_cast<JSValue*>(buffer), argc, numUsedStackSlots));
+}
+
+JSC_DEFINE_JIT_OPERATION(operationSetupVarargsFrameWithSpreadBuffer, CallFrame*, (JSGlobalObject* globalObject, CallFrame* newCallFrame, EncodedJSValue* buffer, int32_t argc, int32_t length))
+{
+    VM& vm = globalObject->vm();
+    CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
+    JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    setupVarargsFrameWithSpreadBuffer(globalObject, callFrame, newCallFrame, std::bit_cast<JSValue*>(buffer), argc, length);
     OPERATION_RETURN(scope, newCallFrame);
 }
 

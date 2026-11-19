@@ -17,6 +17,7 @@
 #include "AOTPhaseTimes.h"
 #include "AOTRuntimeReporter.h"
 #include "AOTRuntimeTable.h"
+#include "AOTSavedFrame.h"
 #include "AOTVector.h"
 #include "AbstractModuleRecord.h"
 #include "ConsoleClient.h"
@@ -26,6 +27,7 @@
 #include "HeapIterationScope.h"
 #include "JSArray.h"
 #include "JSCInlines.h"
+#include "JSCPtrTag.h"
 #include "JSFunction.h"
 #include "JSNativeStdFunction.h"
 #include "JSPromise.h"
@@ -79,7 +81,10 @@ static JSC_DECLARE_HOST_FUNCTION(functionAOTInstructionsOfThread);
 static JSC_DECLARE_HOST_FUNCTION(functionAOTPlaceOfProperty);
 static JSC_DECLARE_HOST_FUNCTION(functionAOTMarksOfObject);
 static JSC_DECLARE_HOST_FUNCTION(functionAOTStoreIntoSlotUntested);
+static JSC_DECLARE_HOST_FUNCTION(functionAOTAddExtraPropertyUnseen);
 static JSC_DECLARE_HOST_FUNCTION(functionAOTFindObjectOfLayout);
+static JSC_DECLARE_HOST_FUNCTION(functionAOTSpoilReturnAddress);
+static JSC_DECLARE_HOST_FUNCTION(functionAOTSpoilResumeAddresses);
 static JSC_DECLARE_HOST_FUNCTION(functionLockCell);
 static JSC_DECLARE_HOST_FUNCTION(functionUnlockCell);
 static JSC_DECLARE_HOST_FUNCTION(functionCallWhileAnotherThreadLocksCell);
@@ -92,7 +97,7 @@ static JSC_DECLARE_CUSTOM_SETTER(setExportsOfModuleObject);
 static JSC_DECLARE_CUSTOM_GETTER(getParentOfModuleObject);
 static JSC_DECLARE_CUSTOM_GETTER(getChildrenOfModuleObject);
 
-static constexpr std::array<ASCIILiteral, 19> functionNames {
+static constexpr std::array<ASCIILiteral, 22> functionNames {
     "runCompiledEntryPoint"_s,
     "setRequireCacheEntry"_s,
     "overrideRequire"_s,
@@ -104,7 +109,10 @@ static constexpr std::array<ASCIILiteral, 19> functionNames {
     "aotPlaceOfProperty"_s,
     "aotMarksOfObject"_s,
     "aotStoreIntoSlotUntested"_s,
+    "aotAddExtraPropertyUnseen"_s,
     "aotFindObjectOfLayout"_s,
+    "aotSpoilReturnAddress"_s,
+    "aotSpoilResumeAddresses"_s,
     "lockCell"_s,
     "unlockCell"_s,
     "callWhileAnotherThreadLocksCell"_s,
@@ -147,11 +155,11 @@ static std::optional<MappedImage> mapFile(const char* path)
 }
 #endif
 
-void enableGlobalsOfBuiltinTable()
+void enableBuiltinTableGlobals()
 {
     if (!Options::aotImagePath())
         return;
-    Options::useSharedArrayBuffer() = true;
+    Options::alwaysUseSharedArrayBuffer() = true;
     Options::useTemporal() = true;
     Options::useExplicitResourceManagement() = true;
 }
@@ -335,6 +343,20 @@ JSC_DEFINE_HOST_FUNCTION(functionAOTStoreIntoSlotUntested, (JSGlobalObject* glob
     return JSValue::encode(jsBoolean(field && object->store(vm, *field, AcceptedValue::provenAtBuildTime(callFrame->argument(2)))));
 }
 
+JSC_DEFINE_HOST_FUNCTION(functionAOTAddExtraPropertyUnseen, (JSGlobalObject* globalObject, CallFrame* callFrame))
+{
+    VM& vm = globalObject->vm();
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    Object* object = compiledObjectOrNull(callFrame->argument(0));
+    JSObject* extraProperties = object ? object->extraProperties() : nullptr;
+    if (!extraProperties)
+        return JSValue::encode(jsBoolean(false));
+    Identifier name = callFrame->argument(1).toPropertyKey(globalObject);
+    RETURN_IF_EXCEPTION(scope, { });
+    extraProperties->putDirect(vm, name, callFrame->argument(2));
+    return JSValue::encode(jsBoolean(true));
+}
+
 // So a test gets hold of an object of which the compiler has proven that nothing but compiled code ever sees it, and does to it what is ruled out: a false proof made on purpose. Null: there is none.
 JSC_DEFINE_HOST_FUNCTION(functionAOTFindObjectOfLayout, (JSGlobalObject* globalObject, CallFrame* callFrame))
 {
@@ -356,10 +378,57 @@ JSC_DEFINE_HOST_FUNCTION(functionAOTFindObjectOfLayout, (JSGlobalObject* globalO
     return JSValue::encode(found ? JSValue(found) : jsNull());
 }
 
+// Leaves the bare address, which only code that authenticates it stops at. False: the word lacks the signature that belongs there, and stays as it is.
+static bool spoilSignature([[maybe_unused]] void*& savedAddress, [[maybe_unused]] const void* modifier)
+{
+#if ENABLE(RETURN_ADDRESS_SIGNING)
+    void* address = removeReturnAddressSignature(savedAddress);
+    if (savedAddress != JSC::signReturnAddress(address, modifier))
+        return false;
+    // All bits of a signature may be zero. This is one of them however many bits of an address the kernel uses.
+    constexpr uintptr_t bitOfSignature = 1ULL << 54;
+    savedAddress = savedAddress != address ? address : std::bit_cast<void*>(std::bit_cast<uintptr_t>(address) ^ bitOfSignature);
+    return true;
+#else
+    return false;
+#endif
+}
+
+// In the frame record so many above the one of the caller. False: there are not so many below the last entry into the VM.
+JSC_DEFINE_HOST_FUNCTION(functionAOTSpoilReturnAddress, (JSGlobalObject* globalObject, CallFrame* callFrame))
+{
+    auto* end = std::bit_cast<CallerFrameAndPC*>(globalObject->vm().topEntryFrame);
+    auto* record = std::bit_cast<CallerFrameAndPC*>(callFrame->callerFrameOrEntryFrame());
+    for (int32_t depth = callFrame->argument(0).asInt32(); depth && record != end; --depth)
+        record = std::bit_cast<CallerFrameAndPC*>(record->callerFrame);
+    if (record == end)
+        return JSValue::encode(jsBoolean(false));
+    return JSValue::encode(spoilSignature(record->returnPC, record + 1) ? jsBoolean(true) : jsUndefined());
+}
+
+// Of every frame that waits to be resumed. The answer says where each one runs.
+JSC_DEFINE_HOST_FUNCTION(functionAOTSpoilResumeAddresses, (JSGlobalObject* globalObject, CallFrame*))
+{
+    VM& vm = globalObject->vm();
+    StringBuilder places;
+    {
+        HeapIterationScope iterationScope(vm.heap);
+        vm.heap.objectSpace().forEachLiveCell(iterationScope, [&](HeapCell* cell, HeapCell::Kind kind) {
+            auto* saved = isJSCellKind(kind) ? dynamicDowncast<SavedFrame>(static_cast<JSCell*>(cell)) : nullptr;
+            if (!saved || (!saved->liesOnHeap() && saved->isOnStack()))
+                return IterationStatus::Continue;
+            if (spoilSignature(*std::bit_cast<void**>(std::bit_cast<uint8_t*>(saved) + SavedFrame::offsetOfResumeAddressForTesting()), saved->modifierOfResumeAddress()))
+                places.append(places.isEmpty() ? ""_s : " "_s, saved->liesOnHeap() ? "heap"_s : "stack"_s);
+            return IterationStatus::Continue;
+        });
+    }
+    return JSValue::encode(jsString(vm, places.toString()));
+}
+
 JSC_DEFINE_HOST_FUNCTION(functionFilesInRequireCache, (JSGlobalObject* globalObject, CallFrame*))
 {
     StringBuilder files;
-    forEachEvaluatedFile(globalObject, [&](const String& path) {
+    forEachRequireCacheKey(globalObject, [&](const String& path) {
         if (findModule(path))
             files.append(files.isEmpty() ? ""_s : ","_s, path);
     });
@@ -541,7 +610,10 @@ void addShellFunctions(VM& vm, JSGlobalObject* globalObject)
         { functionAOTPlaceOfProperty, 2 },
         { functionAOTMarksOfObject, 1 },
         { functionAOTStoreIntoSlotUntested, 3 },
+        { functionAOTAddExtraPropertyUnseen, 3 },
         { functionAOTFindObjectOfLayout, 1 },
+        { functionAOTSpoilReturnAddress, 1 },
+        { functionAOTSpoilResumeAddresses, 0 },
         { functionLockCell, 1 },
         { functionUnlockCell, 1 },
         { functionCallWhileAnotherThreadLocksCell, 2 },
@@ -564,7 +636,7 @@ std::span<const ASCIILiteral> shellFunctionNames()
     return functionNames;
 }
 
-bool isKeyOfCompiledModule(const String& key)
+bool isCompiledModuleKey(const String& key)
 {
     std::optional<ModuleID> module = findModule(key);
     if (module && s_terminateOnResolveModule == module) [[unlikely]] {
@@ -818,7 +890,7 @@ static JSObject* createAsyncModuleRequiredError(JSGlobalObject* globalObject, co
 static std::optional<ModuleID> findModuleWithAttributes(JSGlobalObject* globalObject, const String& path, const ScriptFetchParameters& attributes)
 {
     String pathOfForm = makeString(path, '?', attributes.hostDefinedImportType());
-    for (ModuleID form : formsThatAttributesAskFor(globalObject, path)) {
+    for (ModuleID form : importAttributeVariants(globalObject, path)) {
         if (modulePath(form) == pathOfForm)
             return form;
     }

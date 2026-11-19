@@ -13,6 +13,7 @@
 #include "AOTCellAllocationEmitter.h"
 #include "AOTGuardEmitter.h"
 #include "AOTStubsCoroutines.h"
+#include "AOTSweep.h"
 #include "LinkTimeConstant.h"
 
 namespace JSC { namespace AOT { namespace Typed {
@@ -24,6 +25,25 @@ static_assert(awaitedHasPromiseStructure.test == AwaitConditionTest::EqualsOther
 CellPointer PromiseIntrinsicEmitter::newPromise(const OperationContext& context)
 {
     return CellPointer(callStub(context, AOT::newPromise(), { }).first);
+}
+
+void PromiseIntrinsicEmitter::generateNewPromise(const ValueContext& value)
+{
+    if (value->endsReactionChain() && !isPromiseOfReactionChain(value.valueID())) {
+        fail(value, InternalErrorKind::OpcodeWithoutCode);
+        return;
+    }
+    define(value, newPromise(value));
+}
+
+bool PromiseIntrinsicEmitter::isPromiseOfReactionChain(ValueID promise)
+{
+    for (uint32_t index = promise.index() + 1; index < m_code.numberOfValues(); ++index) {
+        ValueID id(index);
+        if (!m_code.isConstant(id) && m_code.at(id).opcode == Opcode::StartReactionChain && underlyingCellOf(m_code, m_code.at(id).promiseOperand()) == promise)
+            return true;
+    }
+    return false;
 }
 
 void PromiseIntrinsicEmitter::generateCreatePromise(const ValueContext& value)
@@ -50,15 +70,16 @@ Condition PromiseIntrinsicEmitter::hasPromiseStructure(CellPointer cell)
     return equal(structureID, loadImmutable32(offsetOfPromiseHeader));
 }
 
-void PromiseIntrinsicEmitter::fulfillWithoutBarrier(CellPointer promise, Boxed value)
+void PromiseIntrinsicEmitter::fulfillWithoutBarrier(CellPointer promise, Boxed value, bool mayStoreCell)
 {
+    CodeGenerator::InitializationScope scope(generator(), CodeGenerator::FillsCellOfHeap(mayStoreCell));
     storeField(promise, m_heaps.JSPromise_slot, value);
     storeField(promise, m_heaps.JSPromise_packed, integer(static_cast<int64_t>(fulfilledPromiseBits)));
 }
 
 void PromiseIntrinsicEmitter::fulfillAtStore(const ValueContext& store, CellPointer promise, Boxed value, const Type& valueType)
 {
-    fulfillWithoutBarrier(promise, value);
+    fulfillWithoutBarrier(promise, value, valueType.hasCells());
     barrierAfterStore(store, promise, valueType);
 }
 
@@ -66,6 +87,12 @@ void PromiseIntrinsicEmitter::generateResolvePromise(const ValueContext& value)
 {
     CellPointer promise = in<CellPointer>(value->promiseOperand());
     Boxed resolution = in<Boxed>(value->valueOperand());
+    if (value->valueHasFailedTestForNoThen()) {
+        m_out.noteForm(Form::Runtime, StateOfKnowledge::FailsTest);
+        callVoidOperation(value, RuntimeOperation::ResolvePromise, { promise, resolution });
+        return;
+    }
+    m_out.noteForm(Form::Open, StateOfKnowledge::NeedsTest);
     const Type& resolutionType = typeOf(value->valueOperand());
     LBasicBlock otherwise = newBlock();
     LBasicBlock continuation = newBlock();

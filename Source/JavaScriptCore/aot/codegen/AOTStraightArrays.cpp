@@ -28,11 +28,33 @@ static void storeListOfStraightArrays(StraightEmitter& emitter, std::span<const 
         emitter.storeInScratchArea(values[i], static_cast<uint32_t>(i));
 }
 
+static void generateNewArrayWithHoles(StraightEmitter& emitter, const BodyValue& value)
+{
+    if (emitter.index().isUnused(value.id()))
+        return;
+    emitter.callStub(value, arrayLiteral(0), { });
+    emitter.define(value);
+    emitter.slotOf(value.id());
+    std::span<const ValueID> elements = value.elementsOperands();
+    std::span<const uint32_t> holes = value.holes();
+    size_t element = 0;
+    for (uint32_t index = 0; index < elements.size() + holes.size(); ++index) {
+        if (std::ranges::binary_search(holes, index))
+            emitter.callOperation(value, RuntimeOperation::AppendHole, { value.id() });
+        else
+            emitter.callStub(value, arrayPush(), { value.id(), elements[element++] });
+    }
+}
+
 static void generateNewArray(StraightEmitter& emitter, const BodyValue& value)
 {
     std::span<const ValueID> elements = value.elementsOperands();
-    if (!value.holes().empty() || elements.size() > maxValuesInArrayLiteral) {
+    if (elements.size() > maxValuesInArrayLiteral || (!value.holes().empty() && !emitter.resumesGenerator())) {
         emitter.fail(value);
+        return;
+    }
+    if (!value.holes().empty()) {
+        generateNewArrayWithHoles(emitter, value);
         return;
     }
     if (elements.size() <= maxArrayElementsInRegisters) {
@@ -49,18 +71,9 @@ static void generateNewArray(StraightEmitter& emitter, const BodyValue& value)
 
 static void generateAppendSpread(StraightEmitter& emitter, const BodyValue& value)
 {
-    CCallHelpers& jit = emitter.jit();
-    constexpr GPRReg iterable = operationArgumentGPR(2);
     Origin origin = value.origin();
     origin.isTailCall = false;
-
-    emitter.load(value.iterableOperand(), iterable);
-    GPRReg withoutUndefinedTag = emitter.takeResultRegister();
-    jit.and64(CCallHelpers::TrustedImm32(~JSValue::UndefinedTag), iterable, withoutUndefinedTag);
-    CCallHelpers::Jump isNeitherUndefinedNorNull = jit.branch64(CCallHelpers::NotEqual, withoutUndefinedTag, CCallHelpers::TrustedImm32(JSValue::ValueNull));
-    emitter.throwAt(origin, emitter.throwSiteWithName(ThrowKind::NullishSpread, StringID()));
-    isNeitherUndefinedNorNull.link(&jit);
-    emitter.callOperation(value, RuntimeOperation::AppendIterable, { value.arrayOperand(), StraightArgument::inRegister(iterable) }, { .origin = origin });
+    emitter.callOperation(value, RuntimeOperation::AppendIterable, { value.arrayOperand(), value.iterableOperand() }, { .origin = origin });
 }
 
 static void loadCountOfArguments(StraightEmitter& emitter, ValueID count, GPRReg destination)

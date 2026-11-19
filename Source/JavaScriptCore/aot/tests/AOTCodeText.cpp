@@ -7,6 +7,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
 #include "AOTCode.h"
 
 #include "AOTIRPrinter.h"
@@ -14,7 +15,6 @@
 #include "AOTTypeArena.h"
 #include "AOTTypeText.h"
 #include <utility>
-#include <wtf/BitVector.h>
 #include <wtf/CommaPrinter.h>
 #include <wtf/Noncopyable.h>
 
@@ -32,7 +32,7 @@ static constexpr TraitInCodeText traitsInCodeText[] = {
     { "mayCallUnknownCode"_s, &EffectTraits::mayCallUnknownCode },
     { "maySuspend"_s, &EffectTraits::maySuspend },
     { "mayBeTerminated"_s, &EffectTraits::mayBeTerminated },
-    { "mayWriteWhatIsSeen"_s, &EffectTraits::mayWriteWhatIsSeen },
+    { "mayWriteObservableState"_s, &EffectTraits::mayWriteObservableState },
     { "mayTouchMemory"_s, &EffectTraits::mayTouchMemory },
     { "mayWriteOutsideObjects"_s, &EffectTraits::mayWriteOutsideObjects },
 };
@@ -277,21 +277,8 @@ void CodeTextWriter::writeBlock(BlockID id)
     for (ValueID parameter : block.parameters())
         writeFactUsesOf(parameter);
     std::span<const ValueID> operations = m_isSwept ? m_code.valuesOf(id) : m_operations.span();
-    std::span<const ReleaseBehindLastRead> releases;
-    if (m_isSwept)
-        releases = m_code.releasesBehindLastReadsIn(id);
-    auto writeReleasesBehind = [&](ValueID lastRead) {
-        for (; !releases.empty() && releases.front().behind == lastRead; releases = releases.subspan(1)) {
-            m_out.print("    # releases "_s);
-            m_printer.print(releases.front().released);
-            m_printer.endLine();
-        }
-    };
-    writeReleasesBehind(ValueID());
-    for (ValueID operation : operations) {
+    for (ValueID operation : operations)
         writeRecord(operation);
-        writeReleasesBehind(operation);
-    }
     writeTerminator(block.terminator);
 }
 
@@ -317,6 +304,8 @@ void CodeTextWriter::writeBlockHead(BlockID id, const Block& block)
         m_printer.field("isInLoop"_s, true);
     if (block.isLoopHead)
         m_printer.field("isLoopHead"_s, true);
+    if (block.keepsSitesThoughRare)
+        m_printer.field("keepsSitesThoughRare"_s, true);
     for (uint32_t entry = m_firstEntryOfBlock[id.index()]; entry != endOfChain; entry = m_nextEntryOfBlock[entry])
         m_printer.field("entry"_s, entry);
     EdgeID handler = m_code.handlerOf(id);
@@ -474,6 +463,10 @@ void CodeTextWriter::writeFatesOfPolls()
         m_printer.print(listed.poll);
         m_printer.beginField("fate"_s);
         m_out.print(nameInCodeText(listed.fate));
+        if (listed.unlessKept) {
+            m_printer.beginField("unlessKept"_s);
+            m_printer.print(listed.unlessKept);
+        }
         m_printer.endLine();
     }
 }

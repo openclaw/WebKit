@@ -7,6 +7,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
 #include "AOTBuiltinTableRealm.h"
 #include "AOTCodeRole.h"
 #include "AOTID.h"
@@ -26,7 +27,6 @@
 #include <optional>
 #include <span>
 #include <utility>
-#include <wtf/BitVector.h>
 #include <wtf/Noncopyable.h>
 #include <wtf/OptionSet.h>
 #include <wtf/ScopedLambda.h>
@@ -58,7 +58,7 @@ using Typed::PropertyKeyID;
 using Typed::TypeID;
 using Typed::VariableID;
 
-enum class AskerOfClassGuardOfName : uint8_t { Reads, StoresAlone, ReadsBehindLookAtObject };
+enum class AskerOfClassGuardOfName : uint8_t { Reads, StoresAlone, ReadsBehindLookAtObject, AssignedMember };
 constexpr uint32_t sideWordOfClassGuardOfName(ClassSide side, AskerOfClassGuardOfName asker) { return static_cast<uint32_t>(side) + static_cast<uint32_t>(asker) * numberOfEnumerators<ClassSide>; }
 inline ClassSide sideOfClassGuardKey(std::span<const uint32_t> key) { return static_cast<ClassSide>(key[1] % numberOfEnumerators<ClassSide>); }
 inline AskerOfClassGuardOfName askerOfClassGuardKey(std::span<const uint32_t> key) { return static_cast<AskerOfClassGuardOfName>(key[1] / numberOfEnumerators<ClassSide>); }
@@ -86,6 +86,38 @@ bool forEachGuardInClassGuardCountKey(std::span<const uint32_t> key, NOESCAPE co
     return numberOfGuards > 1;
 }
 
+inline constexpr uint32_t firstWordOfRowOfClassGuardCountsKey = UINT32_MAX - 1;
+inline bool isRowOfClassGuardCountsKey(std::span<const uint32_t> key) { return !key.empty() && key[0] == firstWordOfRowOfClassGuardCountsKey; }
+
+template<typename Functor>
+bool forEachSlotInRowOfClassGuardCountsKey(std::span<const uint32_t> key, NOESCAPE const Functor& functor)
+{
+    if (!isRowOfClassGuardCountsKey(key))
+        return false;
+    uint32_t slot = 0;
+    for (std::span<const uint32_t> rest = key.subspan(1); !rest.empty(); ++slot) {
+        size_t numberOfWords = rest[0];
+        if (numberOfWords >= rest.size())
+            return false;
+        functor(slot, rest.subspan(1, numberOfWords));
+        rest = rest.subspan(1 + numberOfWords);
+    }
+    return !!slot;
+}
+
+template<typename Functor>
+bool forEachGuardInSlotOfRowOfClassGuardCounts(std::span<const uint32_t> slot, NOESCAPE const Functor& functor)
+{
+    for (std::span<const uint32_t> rest = slot; !rest.empty();) {
+        size_t numberOfWords = rest[0];
+        if (numberOfWords < 2 || numberOfWords >= rest.size() || rest[1] >= firstWordOfRowOfClassGuardCountsKey)
+            return false;
+        functor(rest.subspan(1, numberOfWords));
+        rest = rest.subspan(1 + numberOfWords);
+    }
+    return true;
+}
+
 enum class NumberSpace : uint8_t {
     Name,
     NameOfText,
@@ -108,22 +140,25 @@ enum class NumberSpace : uint8_t {
     RegExpLiteralCell,
     TemplateObjectCell,
     ArrayProfile,
+    ReadGroupCache,
     EnvironmentHandedBack,
     ClassGuard,
     ClassRank,
+    HeirLookedAt,
     ClosureFunction,
     ClosureCell,
     Allocation,
     Request,
     PropertyRun,
-    AtomOfComparedText,
     ShownString,
     AtomOfString,
+    NameHeader,
+    StringCharacters,
     Type,
     MethodSelector,
     RegExp,
 };
-inline constexpr unsigned numberOfNumberSpaces = 35;
+inline constexpr unsigned numberOfNumberSpaces = 38;
 static_assert(static_cast<unsigned>(NumberSpace::RegExp) + 1 == numberOfNumberSpaces);
 
 enum class GlobalBindingFlags : uint8_t {
@@ -139,6 +174,8 @@ enum class RequestKind : uint32_t {
     Data,
     CollectionData,
     FormatPattern,
+    ImportChecks,
+    Prefetch,
 };
 
 struct Mention {
@@ -180,9 +217,11 @@ public:
     }
     uint32_t classGuard(const ClassGuardKey& key) { return add(NumberSpace::ClassGuard, key.span()); }
     JS_EXPORT_PRIVATE uint32_t classGuardCount(std::span<const ClassGuardKey> guards);
+    JS_EXPORT_PRIVATE uint32_t rowOfClassGuardCounts(std::span<const Vector<ClassGuardKey, 4>> slots);
     uint32_t builtinCell(BuiltinCellKey key) { return add(NumberSpace::BuiltinCell, key.encoded()); }
     uint32_t globalBinding(PropertyKeyID key, OptionSet<GlobalBindingFlags> flags) { return addPair(NumberSpace::GlobalBinding, key.index(), flags.toRaw()); }
     static constexpr uint32_t firstUseOfSiteAnswers = 8;
+    static constexpr uint32_t useOfPresenceTests = 12;
     template<size_t inlineCapacity>
     uint32_t siteCache(Vector<uint32_t, inlineCapacity>&& modulesAndPositions, PropertyKeyID key, uint32_t access)
     {
@@ -191,9 +230,11 @@ public:
         return add(NumberSpace::SiteCache, modulesAndPositions.span());
     }
     uint32_t regExp(StringID pattern, OptionSet<Yarr::Flags> flags) { return addPair(NumberSpace::RegExp, pattern.index(), flags.toRaw()); }
-    uint32_t regExpLiteralCell(Wire::SourceLocation written, StringID pattern, OptionSet<Yarr::Flags> flags)
+    static constexpr OptionSet<Yarr::Flags> flagsOfMatcher { Yarr::Flags::Global, Yarr::Flags::HasIndices };
+    uint32_t regExpMatcher(StringID pattern, OptionSet<Yarr::Flags> flags) { return regExp(pattern, flags | flagsOfMatcher); }
+    uint32_t regExpLiteralCell(Wire::SourceLocation written, StringID pattern, uint32_t flags)
     {
-        uint32_t key[] { written.module, written.position, pattern.index(), flags.toRaw() };
+        uint32_t key[] { written.module, written.position, pattern.index(), flags };
         return add(NumberSpace::RegExpLiteralCell, std::span<const uint32_t>(key));
     }
     uint32_t templateObjectCell(Wire::SourceLocation written) { return addPair(NumberSpace::TemplateObjectCell, written.module, written.position); }
@@ -221,8 +262,10 @@ private:
     Vector<uint32_t, smallestTableSize> m_table;
 };
 
-inline std::span<const uint32_t> keyOf(const Mention& mention, std::span<const uint32_t> mentionWords)
+inline std::span<const uint32_t> keyOf(const Mention& mention LIFETIME_BOUND, std::span<const uint32_t> mentionWords)
 {
+    if (mention.numberOfWords == 1)
+        return { &mention.firstWord, 1 };
     if (mention.numberOfWords != Mention::longKey)
         return mentionWords.subspan(mention.firstWord, mention.numberOfWords);
     return mentionWords.subspan(mention.firstWord + 1, mentionWords[mention.firstWord]);
@@ -270,12 +313,15 @@ constexpr bool mayHaveUnitsBehind(NumberSpace space)
     case NumberSpace::RegExpLiteralCell:
     case NumberSpace::TemplateObjectCell:
     case NumberSpace::ArrayProfile:
+    case NumberSpace::ReadGroupCache:
     case NumberSpace::EnvironmentHandedBack:
     case NumberSpace::ClassGuard:
+    case NumberSpace::HeirLookedAt:
     case NumberSpace::PropertyRun:
-    case NumberSpace::AtomOfComparedText:
     case NumberSpace::ShownString:
     case NumberSpace::AtomOfString:
+    case NumberSpace::NameHeader:
+    case NumberSpace::StringCharacters:
     case NumberSpace::Type:
     case NumberSpace::RegExp:
         return false;
@@ -308,6 +354,16 @@ public:
     FunctionID firstClosureFunction() const { return FunctionID(m_firstDerived); }
     FunctionID endOfClosureFunctions() const { return FunctionID(m_firstDerived + m_numberOfClosureFunctions); }
     uint32_t closureNumberOf(FunctionID closureEntry) const { return closureEntry.index() - m_firstDerived; }
+    bool hasAscendingClosureNumbers() const
+    {
+        for (uint32_t number = 0; number < m_numberOfClosureFunctions; ++number) {
+            if (number && m_unitOfDerived[number - 1] >= m_unitOfDerived[number])
+                return false;
+            if (idOf(m_unitOfDerived[number]).index() != m_firstDerived + number)
+                return false;
+        }
+        return true;
+    }
 
 private:
     friend struct ImageNumbersBuilder;
@@ -377,16 +433,20 @@ struct PlacedStatics {
     Vector<uint32_t> templateObjectCellOffsets;
     Vector<uint32_t> arrayProfileOffsets;
     uint32_t distanceFromArrayProfileToLastArray { 0 };
+    Vector<uint32_t> readGroupCacheOffsets;
     Vector<ModuleBuiltinCell> moduleBuiltinCells;
     Vector<uint32_t> classGuardBits;
     Vector<PlacedClassGuardOfName> classGuardsOfNames;
     Vector<PlacedClassGuardOfName> namesOfClassGuardsOfSeveralNames;
+    Vector<PlacedClassGuardOfName> guardsOfAssignedMembers;
     Vector<uint32_t> bitsOfClassGuards;
     Vector<PlacedClassGuardCount> classGuardCounts;
     Vector<PlacedGuardOfClassGuardCount> guardsOfClassGuardCounts;
     Vector<uint32_t> environmentHandedBackOffsets;
+    Vector<uint32_t> subclassStructuresOffsets;
     Vector<uint32_t> roots;
     Vector<StaticsRange> clearedEachCollection;
+    Vector<StaticsRange> variablesWithViewMirror;
     uint32_t size { 0 };
 };
 
@@ -416,6 +476,34 @@ struct NumberedKeys {
     Vector<uint32_t> hashSlots;
 };
 
+class StringNumbers {
+public:
+    StringNumbers() = default;
+    JS_EXPORT_PRIVATE StringNumbers(const BitVector& named, Vector<StringID>&& sortedCodedStrings, size_t numberOfStrings, const IdentifierNumbering* = nullptr);
+
+    uint32_t numberOfWords() const { return m_numberOfWords; }
+    std::span<const StringID> coded() const { return m_coded.span(); }
+    std::optional<uint32_t> numberOf(StringID id) const
+    {
+        if (id.index() >= m_numbers.size() || m_numbers[id.index()] == noNumber)
+            return std::nullopt;
+        return m_numbers[id.index()];
+    }
+    uint32_t requiredNumberOf(StringID id) const
+    {
+        std::optional<uint32_t> number = numberOf(id);
+        RELEASE_ASSERT(number);
+        return *number;
+    }
+
+private:
+    static constexpr uint32_t noNumber = UINT32_MAX;
+
+    Vector<uint32_t> m_numbers;
+    uint32_t m_numberOfWords { 0 };
+    Vector<StringID> m_coded;
+};
+
 class ImageNumbers {
     WTF_MAKE_NONCOPYABLE(ImageNumbers);
 public:
@@ -433,6 +521,7 @@ public:
     InstanceSizes instanceSizes() const { return m_instanceSizes; }
 
     const BitVector& namedStrings() const { return m_namedStrings; }
+    const StringNumbers& stringNumbers() const { return m_stringNumbers; }
     const BitVector& textsOfNames() const { return m_textsOfNames; }
     const BitVector& otherStringsWithText() const { return m_otherStringsWithText; }
     std::span<const StringID> stringsInOrderOfText() const { return m_stringsInOrderOfText.span(); }
@@ -442,6 +531,7 @@ public:
     std::span<const PropertyKeyID> keyCells() const { return m_keyCells.span(); }
     std::span<const BuiltinCellKey> builtinCells() const { return m_builtinCells.span(); }
     std::span<const uint32_t> eagerBuiltinCells() const { return m_eagerBuiltinCells.span(); }
+    std::span<const BuiltinID> membersAskedByByteAlone() const { return m_membersAskedByByteAlone.span(); }
     std::span<const StringID> bigIntConstants() const { return m_bigIntConstants.span(); }
     std::span<const PlacedGlobalBinding> globalBindings() const { return m_globalBindings.span(); }
     std::span<const RequireEdge> requireEdges() const { return m_requireEdges.span(); }
@@ -458,7 +548,10 @@ public:
     const NumberedKeys& regExpLiteralCells() const { return m_regExpLiteralCells; }
     const NumberedKeys& templateObjectCells() const { return m_templateObjectCells; }
     const NumberedKeys& arrayProfiles() const { return m_arrayProfiles; }
+    const NumberedKeys& readGroupCaches() const { return m_readGroupCaches; }
     const NumberedKeys& siteCaches() const { return m_siteCaches; }
+    std::span<const uint32_t> shapesInStartOrder() const { return m_shapesInStartOrder.span(); }
+    std::span<const uint32_t> classesInStartOrder() const { return m_classesInStartOrder.span(); }
     std::span<const uint32_t> numbersOfSites() const { return m_numbersOfSites.span(); }
     static bool isPlaceWithSiteAnswers(std::span<const uint32_t> keyOfSite) { return keyOfSite.back() >= MentionList::firstUseOfSiteAnswers; }
     static PropertyKeyID nameOfSite(std::span<const uint32_t> keyOfSite) { return PropertyKeyID(keyOfSite[keyOfSite.size() - 2]); }
@@ -501,15 +594,18 @@ private:
     PlacedStatics m_statics;
     InstanceSizes m_instanceSizes { };
     BitVector m_namedStrings;
+    StringNumbers m_stringNumbers;
     BitVector m_textsOfNames;
     BitVector m_otherStringsWithText;
     Vector<StringID> m_stringsInOrderOfText;
     BitVector m_stringsOnlyShown;
     BitVector m_atomsOfStrings;
+    uint32_t m_bytesBetweenNameHeaders { 0 };
     Vector<PropertyKeyID> m_keyCells;
     Vector<uint32_t> m_keyCellNumbersPlusOne;
     Vector<BuiltinCellKey> m_builtinCells;
     Vector<uint32_t> m_eagerBuiltinCells;
+    Vector<BuiltinID> m_membersAskedByByteAlone;
     Vector<StringID> m_bigIntConstants;
     Vector<PlacedGlobalBinding> m_globalBindings;
     Vector<RequireEdge> m_requireEdges;
@@ -524,9 +620,12 @@ private:
     NumberedKeys m_regExpLiteralCells;
     NumberedKeys m_templateObjectCells;
     NumberedKeys m_arrayProfiles;
+    NumberedKeys m_readGroupCaches;
     NumberedKeys m_classGuards;
     NumberedKeys m_siteCaches;
     Vector<uint32_t> m_numbersOfSites { 0 };
+    Vector<uint32_t> m_shapesInStartOrder;
+    Vector<uint32_t> m_classesInStartOrder;
     Vector<uint32_t> m_originsOfMethodSelectors;
     Vector<TypeID> m_typesNeededAtRunTime;
     Vector<PlaceOfType> m_placesOfTypes;
@@ -535,7 +634,7 @@ private:
 };
 
 struct FunctionByModule {
-    static FunctionByModule forFunction(const Typed::Program&, FunctionID);
+    static FunctionByModule forFunction(const Typed::Program&, FunctionID, std::span<const uint32_t> startRanks = { });
     friend auto operator<=>(const FunctionByModule&, const FunctionByModule&) = default;
 
     ModuleID module;
@@ -583,11 +682,13 @@ constexpr bool hasOneIDAsKey(NumberSpace space)
     case NumberSpace::DataElements:
     case NumberSpace::EnvironmentHandedBack:
     case NumberSpace::ClassRank:
+    case NumberSpace::HeirLookedAt:
     case NumberSpace::ClosureFunction:
     case NumberSpace::ClosureCell:
-    case NumberSpace::AtomOfComparedText:
     case NumberSpace::ShownString:
     case NumberSpace::AtomOfString:
+    case NumberSpace::NameHeader:
+    case NumberSpace::StringCharacters:
     case NumberSpace::MethodSelector:
         return true;
     case NumberSpace::CardOfWord:
@@ -600,6 +701,7 @@ constexpr bool hasOneIDAsKey(NumberSpace space)
     case NumberSpace::RegExpLiteralCell:
     case NumberSpace::TemplateObjectCell:
     case NumberSpace::ArrayProfile:
+    case NumberSpace::ReadGroupCache:
     case NumberSpace::Allocation:
     case NumberSpace::Request:
     case NumberSpace::PropertyRun:
@@ -626,6 +728,7 @@ struct NamesOfTables {
     BitVector textsNamedAsKeys;
     BitVector strings;
     BitVector stringsWithOtherUsesThanShowing;
+    BitVector modulePathStrings;
     BitVector stringConstants;
     BitVector bigInts;
     Vector<uint32_t> allocations;
@@ -654,12 +757,14 @@ struct ImageNumbersBuilder {
     ImageNumbers& numbers;
     BuildContext& context;
 
-    void numberFunctions();
+    static void numberFunctions(const NumberingInputs&, ImageNumbers&, BuildContext&);
+    void checkEntriesOfMentionedClosures();
     void numberClosureCellsAndClassRanks();
     void collectNamesAndStringsWithText();
     void numberIdentifiersAndStrings();
     void numberConstants();
     void numberRows();
+    void placeListedRowsFirst(std::span<const uint32_t> startRanks);
     void numberSites();
     void numberTypes();
     void collectRegExpRequests();

@@ -31,14 +31,14 @@ struct ArrayAllocationProfile {
     static constexpr uint32_t countMask = 0xffffu << allocationCountShift;
     static constexpr uint32_t shortestInterval = 64;
     static constexpr uint8_t maxIntervalDoublings = 4;
-    static constexpr uint8_t reviewsInWindow = 10;
+    static constexpr uint8_t reviewsInWindow = 6;
     static constexpr unsigned lengthsKept = 3;
     static constexpr unsigned sizeOfLastArrayWord = 8;
 
     unsigned capacity() const { return word & capacityMask; }
     bool isDueForReview() const { return (word & countMask) == countMask; }
     uint32_t interval() const { return shape() ? shortestInterval << intervalDoublings : 1; }
-    void startInterval() { word = (word & ~countMask) | (interval() - 1) << allocationCountShift; }
+    void startInterval() { word = (word & ~countMask) | (interval() - 1 - (interval() > reviewsInWindow ? reviews : 0)) << allocationCountShift; }
     IndexingType shape() const { return static_cast<IndexingType>((word & shapeMask) >> shapeShift); }
     void set(unsigned capacity, IndexingType shape)
     {
@@ -63,11 +63,14 @@ void reviewArrayAllocationProfile(ArrayAllocationProfile&, JSArray* lastArrayOrN
 inline constexpr unsigned propertyRoomOfArray = 4 * sizeof(uint64_t);
 constexpr size_t sizeOfArrayWithStorage(unsigned capacity, unsigned propertyRoom = 0) { return (3 + capacity) * sizeof(uint64_t) + propertyRoom; }
 
-JSArray* tryCreateArrayWithStorage(VM&, Structure*, unsigned publicLength, unsigned vectorLength, unsigned propertyRoom = 0);
+enum class NewElements : bool { AreHoles, WrittenByCaller };
+JSArray* tryCreateArrayWithStorage(VM&, Structure*, unsigned publicLength, unsigned vectorLength, unsigned propertyRoom = 0, NewElements = NewElements::AreHoles);
 inline constexpr uint32_t maxValuesInArrayLiteral = (1u << 25) - 1;
 
 inline constexpr unsigned holeArrayCapacityShift = 8;
 inline constexpr unsigned maxHoleArrayCapacity = 127;
+inline constexpr unsigned seedShiftBesideLengthAndCapacity = 16;
+static_assert(maxHoleArrayCapacity < 1u << (seedShiftBesideLengthAndCapacity - holeArrayCapacityShift));
 inline constexpr unsigned arrayLiteralWithDoubleIsNumberMaskShift = 8;
 inline constexpr uint32_t valuesAreRawNumbers = 1u << 8;
 

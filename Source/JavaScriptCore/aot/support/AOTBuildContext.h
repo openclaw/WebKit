@@ -9,15 +9,17 @@
 
 #include "AOTCompileOptions.h"
 #include "AOTDiagnostics.h"
-#include "AOTHostFunctionTexts.h"
+#include "AOTHostFunctionSources.h"
 #include "AOTLimits.h"
 #include "AOTStatistics.h"
 #include "AOTThreads.h"
+#include "AOTVector.h"
 #include "AOTWire.h"
 #include "AssemblerPolicy.h"
 #include "CPUFeatureSet.h"
 #include <memory>
 #include <utility>
+#include <wtf/Function.h>
 #include <wtf/Noncopyable.h>
 #include <wtf/Nonmovable.h>
 #include <wtf/StdLibExtras.h>
@@ -29,6 +31,7 @@ class RegExpSummaries;
 
 namespace Typed {
 class FormatPatternPlans;
+class LinkFlow;
 }
 
 class BuildContext {
@@ -60,8 +63,19 @@ public:
     RegExpSummaries& regExpSummaries() { return *m_regExpSummaries; }
     Typed::FormatPatternPlans& formatPatternPlans() { return *m_formatPatternPlans; }
 
-    const HostFunctionTexts& functionTexts() const { return m_functionTexts; }
-    void setFunctionTexts(const HostFunctionTexts& texts) { m_functionTexts = texts; }
+    const HostFunctionSources& functionSources() const { return m_functionSources; }
+    void setFunctionSources(const HostFunctionSources& sources) { m_functionSources = sources; }
+    const HostStringEncoders& stringEncoders() const { return m_stringEncoders; }
+    void setStringEncoders(const HostStringEncoders& encoders) { m_stringEncoders = encoders; }
+
+    std::span<const uint8_t> orderFile() const { return m_orderFile; }
+    void setOrderFile(std::span<const uint8_t> bytes) { m_orderFile = bytes; }
+    std::span<const uint32_t> startRanks() const { return m_startRanks.span(); }
+    void setStartRanks(Vector<uint32_t>&& ranks) { m_startRanks = WTF::move(ranks); }
+    uint32_t numberOfUnitsOfStart() const { return m_numberOfUnitsOfStart; }
+    void setNumberOfUnitsOfStart(uint32_t number) { m_numberOfUnitsOfStart = number; }
+    const Function<void(const Typed::LinkFlow&)>& askedOfFlowAtRest() const { return m_askedOfFlowAtRest; }
+    void askOfFlowAtRest(Function<void(const Typed::LinkFlow&)>&& asked) { m_askedOfFlowAtRest = WTF::move(asked); }
 
     Diagnostics takeDiagnostics() { return WTF::move(m_diagnostics); }
 
@@ -72,7 +86,12 @@ private:
     const AssemblerPolicy m_assemblerPolicy;
     ParallelLoops m_parallelLoops;
     const Ref<BackgroundJobs> m_backgroundJobs { BackgroundJobs::create(m_parallelLoops) };
-    HostFunctionTexts m_functionTexts;
+    HostFunctionSources m_functionSources;
+    HostStringEncoders m_stringEncoders;
+    Vector<uint32_t> m_startRanks;
+    uint32_t m_numberOfUnitsOfStart { 0 };
+    std::span<const uint8_t> m_orderFile;
+    Function<void(const Typed::LinkFlow&)> m_askedOfFlowAtRest;
     std::unique_ptr<RegExpSummaries> m_regExpSummaries;
     std::unique_ptr<Typed::FormatPatternPlans> m_formatPatternPlans;
 };

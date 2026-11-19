@@ -179,6 +179,8 @@ ASCIILiteral MachinePrinter::nameOf(TypeKind kind)
         return "Float"_s;
     case Double:
         return "Double"_s;
+    case Vector128:
+        return "Vector128"_s;
     case Tuple:
         return "Tuple"_s;
     }
@@ -207,18 +209,20 @@ ASCIILiteral MachinePrinter::nameOf(FailureKind kind)
         return "OutOfRegisters"_s;
     case FailureKind::AccessOutsideDeclaredEffects:
         return "AccessOutsideDeclaredEffects"_s;
-    case FailureKind::RegisterLacksItsValue:
-        return "RegisterLacksItsValue"_s;
-    case FailureKind::SpillSlotLacksItsValue:
-        return "SpillSlotLacksItsValue"_s;
+    case FailureKind::WrongValueInRegister:
+        return "WrongValueInRegister"_s;
+    case FailureKind::WrongValueInSpillSlot:
+        return "WrongValueInSpillSlot"_s;
     case FailureKind::FrameAddressAcrossSuspension:
         return "FrameAddressAcrossSuspension"_s;
     case FailureKind::NarrowReferenceWithoutPointer:
         return "NarrowReferenceWithoutPointer"_s;
     case FailureKind::InnerPointerWithoutOwner:
         return "InnerPointerWithoutOwner"_s;
-    case FailureKind::NeedsFrameWhereNoneIsSetUp:
-        return "NeedsFrameWhereNoneIsSetUp"_s;
+    case FailureKind::MissingFrameSetup:
+        return "MissingFrameSetup"_s;
+    case FailureKind::UpperHalfIsNotClear:
+        return "UpperHalfIsNotClear"_s;
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
@@ -238,8 +242,6 @@ ASCIILiteral MachinePrinter::nameOf(StepKind kind)
         return "materialize"_s;
     case StepKind::Swap:
         return "swap"_s;
-    case StepKind::ClearSpill:
-        return "clearSpill"_s;
     case StepKind::KeepPointer:
         return "keepPointer"_s;
     }
@@ -426,10 +428,10 @@ void MachinePrinter::printPatch(PrintStream& out, CommaPrinter& comma, const Pat
         out.print(comma, "NeedsFrameRecord");
     if (patch.isSuspension())
         out.print(comma, "IsSuspension");
-    if (patch.releasesDeadValues())
-        out.print(comma, "ReleasesDeadValues");
     if (patch.sharesLatePath())
         out.print(comma, "SharesLatePath");
+    if (patch.failsWhenPredicateIsZero())
+        out.print(comma, "FailsWhenPredicateIsZero");
 
     if (patch.pureFunction) {
         uint64_t id = patch.pureFunction->id;
@@ -755,7 +757,7 @@ void MachinePrinter::printLiveness(PrintStream& out)
         printFlag(ValueFlag::WorksInMemory, "WorksInMemory"_s);
         printFlag(ValueFlag::AddsToWholeWord, "AddsToWholeWord"_s);
         printFlag(ValueFlag::IsKeptForCollector, "IsKeptForCollector"_s);
-        printFlag(ValueFlag::GoesByOverflow, "GoesByOverflow"_s);
+        printFlag(ValueFlag::UsesOverflowFlag, "UsesOverflowFlag"_s);
         printFlag(ValueFlag::HintIsOfRareRegion, "HintIsOfRareRegion"_s);
         if (operation->type() == Int64 && facts.lastUse != noPosition && !facts.has(ValueFlag::UpperHalfIsRead))
             out.print(", UpperHalfIsNotRead");
@@ -767,7 +769,7 @@ void MachinePrinter::printLiveness(PrintStream& out)
         const LoopFacts& facts = liveness.of(loops[index], order);
         out.print("loop ", index, ": pressure GP = ", facts.pressure[static_cast<unsigned>(Bank::GP)], ", FP = ", facts.pressure[static_cast<unsigned>(Bank::FP)]);
         if (facts.registersTakenByPatches)
-            out.print(", registersTakenByPatches = ", MachineRegisterListDump(facts.registersTakenByPatches));
+            out.print(", registersTakenByPatches = ", MachineRegisterListDump(facts.registersTakenByPatches), ", pressureAcrossPatches GP = ", facts.pressureAcrossPatches[static_cast<unsigned>(Bank::GP)], ", FP = ", facts.pressureAcrossPatches[static_cast<unsigned>(Bank::FP)]);
         if (!facts.valuesReadFromOutside.empty()) {
             out.print(", valuesReadFromOutside =");
             for (const Operation* value : facts.valuesReadFromOutside)
@@ -905,8 +907,8 @@ void MachinePrinter::printExecute(PrintStream& out, const Step& step)
             out.print(update.bound);
         else
             printPlace(out, leaves.take(), update.operand());
-    } else if (m_proc.liveness().goesByOverflow(operation)) {
-        SumTestedByOverflow test = sumTestedByOverflowOf(m_proc.liveness(), operation);
+    } else if (m_proc.liveness().usesOverflowFlag(operation)) {
+        OverflowCheckedSum test = overflowCheckedSumOf(m_proc.liveness(), operation);
         if (operation->opcode() != Branch) {
             out.print(comma);
             printPlace(out, leaves.take(), test.left());
@@ -921,11 +923,11 @@ void MachinePrinter::printExecute(PrintStream& out, const Step& step)
             }
             if (test.leastResult)
                 out.print(comma, "at least ", *test.leastResult);
-            if (test.isWidenedWhereTestFails)
+            if (test.isWidenedOnFailure)
                 out.print(comma, "widens");
             if (step.other)
                 out.print(comma, "takes back ", pointerDump(step.other));
-            if (test.successorThatPasses)
+            if (test.passingSuccessor)
                 out.print(comma, "passes to the second");
         }
     } else if (!operation->isUnconditionalJump())
@@ -938,10 +940,6 @@ void MachinePrinter::printExecute(PrintStream& out, const Step& step)
             out.print(comma, "scratch ", MachineRegisterListDump(scratch));
         if (assignment->usedRegisters)
             out.print(comma, "used ", MachineRegisterListDump(assignment->usedRegisters));
-    }
-    if (patch) {
-        if (RegisterMask released = maskOf(patch->registersToRelease()))
-            out.print(comma, "releases ", MachineRegisterListDump(released));
     }
 
     if (const Block* block = blockEndedBy(operation))
@@ -967,9 +965,6 @@ void MachinePrinter::printTextOfStep(PrintStream& out, const Step& step)
         break;
     case StepKind::Swap:
         out.print(step.kind, " ", step.sources[0], " <-> ", step.destination);
-        break;
-    case StepKind::ClearSpill:
-        out.print(step.kind, " ", step.destination);
         break;
     }
     if (step.width != Width64)
@@ -1065,6 +1060,8 @@ void MachinePrinter::printAllocation(PrintStream& out)
             out.print(", isStoredAtHeadOfFramedPart");
         if (spill.isSharedByPhis)
             out.print(", isSharedByPhis");
+        if (spill.isDeadSlot)
+            out.print(", isDeadSlot");
         out.println();
     }
 
@@ -1128,19 +1125,9 @@ void MachinePrinter::printFrame(PrintStream& out)
                 out.print(comma, word);
         }
         out.print("]");
-        if (unsigned numberOfWords = suspension->numberOfFrameWordsToClearAtFirstSuspension())
-            out.print(", lowest words cleared at first suspension = ", numberOfWords);
-        const BitSpan& wordsClearedInFront = suspension->frameWordsClearedInFrontOfSuspension();
-        CommaPrinter commaOfClearedWords(", "_s, ", words cleared in front = ["_s);
-        for (size_t word = 0; word < wordsClearedInFront.size(); ++word) {
-            if (wordsClearedInFront.get(word))
-                out.print(commaOfClearedWords, word);
-        }
-        if (commaOfClearedWords.didPrint())
-            out.print("]");
         CommaPrinter blankOfSpillsHeld(" "_s, ", holds "_s);
         for (SpillIndex spill = 0; spill < allocation.spills().size(); ++spill) {
-            if (allocation.spillsHeldAt(index).get(spill))
+            if (allocation.liveSpillsAt(index).get(spill))
                 out.print(blankOfSpillsHeld, "s", spill);
         }
         out.println();
@@ -1157,6 +1144,16 @@ void printProcedure(PrintStream& out, const Procedure& procedure)
 void printOperation(PrintStream& out, const Procedure& procedure, const Operation* operation)
 {
     MachinePrinter(procedure).printOperation(out, operation);
+}
+
+void printFailure(PrintStream& out, const Procedure& procedure)
+{
+    const Failure& failure = *procedure.failure();
+    out.print(failure.kind, ", by the check in ", failure.check.function, " at ", failure.check.file, ":", failure.check.line);
+    if (failure.operation < procedure.numberOfOperations()) {
+        out.print(": ");
+        printOperation(out, procedure, procedure.operationAt(failure.operation));
+    }
 }
 
 void printOrder(PrintStream& out, const Procedure& procedure)
@@ -1310,7 +1307,7 @@ void Frame::dump(PrintStream& out) const
     if (m_beginOfWordsClearedAtSetup != m_endOfWordsClearedAtSetup)
         out.println("wordsClearedAtSetup = [", m_beginOfWordsClearedAtSetup, ", ", m_endOfWordsClearedAtSetup, ")");
     for (size_t spill = 0; spill < m_offsetOfSpill.size(); ++spill)
-        out.println("s", spill, " at ", m_offsetOfSpill[spill]);
+        out.println("s", spill, " at ", offsetFromFPOf(static_cast<SpillIndex>(spill)));
 }
 
 } } } // namespace JSC::AOT::Machine

@@ -9,6 +9,7 @@
 #if ENABLE(AOT)
 
 #include "AOTArgumentLocations.h"
+#include "AOTCallEmitter.h"
 #include "AOTClosureWord.h"
 #include "AOTCodeRecords.h"
 #include "AOTConvention.h"
@@ -70,7 +71,7 @@ void countEntryIntoCode(Machine::PatchOperation* count)
 
 void EntryEmitter::generateEntries()
 {
-    generateEntry(0, conventions().locationsOf(m_program, m_unit));
+    generateEntry(0, emitter<CallEmitter>().ownLocations());
 }
 
 void EntryEmitter::generateEntry(uint16_t entry, const ArgumentLocations& locations)
@@ -188,10 +189,14 @@ static uint32_t stackWordsPassedBy(const CodeGenerationInputs& inputs, const Ope
 
 static bool passesStackWordsInTailCall(const CodeGenerationInputs& inputs, const Code& code)
 {
+    if (!code.mayHoldReturnedCalls())
+        return false;
     for (uint32_t index = 0; index < code.numberOfBlocks(); ++index) {
         BlockID block(index);
+        if (!code.isReached(block))
+            continue;
         const Terminator& terminator = code.at(block).terminator;
-        if (terminator.kind == TerminatorKind::ReturnCall && code.isReached(block) && stackWordsPassedBy(inputs, code.at(terminator.callOperand())))
+        if (terminator.kind == TerminatorKind::ReturnCall && stackWordsPassedBy(inputs, code.at(terminator.callOperand())))
             return true;
     }
     return false;
@@ -218,12 +223,18 @@ static bool rowOfTailCallsThroughEntryEnds(const CodeGenerationInputs& inputs, C
     return unit.role == CodeRole::GenericCallEntry && inputs.plan.endsItsTailCalls(unit.function);
 }
 
+static bool returnsCaptureThrough(const CodeGenerationInputs& inputs, CodeUnit unit)
+{
+    return unit.role == CodeRole::GenericCallEntry && inputs.plan.conventions().of(unit.function).returnsCapture && !numberOfRegisterParameters(inputs, unit);
+}
+
 EntryDescription describeEntry(const CodeGenerationInputs& inputs, CodeUnit unit)
 {
     return {
         .numberOfParameters = numberOfRegisterParameters(inputs, unit),
         .borrowedArguments = argumentsBorrowedThrough(inputs, unit),
         .endsItsTailCalls = rowOfTailCallsThroughEntryEnds(inputs, unit),
+        .returnsCapture = returnsCaptureThrough(inputs, unit),
         .isGenericEntrypoint = isGenericEntry(unit.role),
     };
 }
@@ -539,9 +550,17 @@ CCallHelpers::JumpList emitQuestionOfEntryWrittenByHand(CCallHelpers& jit, const
     return ways.misfits;
 }
 
-void emitEntryWrittenByHand(CCallHelpers& jit, const CodeGenerationInputs& inputs, CodeRecords& records, CodeUnit unit, std::span<const QuestionOfEntry> questions, bool frameIsSetUp)
+void emitEntryWrittenByHand(CCallHelpers& jit, const CodeGenerationInputs& inputs, CodeRecords& records, CodeUnit unit, std::span<const QuestionOfEntry> questions, bool frameIsSetUp, bool nobodyEnters)
 {
     AllowMacroScratchRegisterUsage allowScratch(jit);
+    if (nobodyEnters) {
+        uint32_t site = records.sites.addSite({ .origin = Origin { .position = inputs.program.at(unit.function).position, .inlineFrame = 0, .isTailCall = false, .isPartOfConstruction = false } });
+        if (!frameIsSetUp)
+            jit.emitFunctionPrologue();
+        emitStraightThrowSite(jit, records, ThrowSite { .kind = ThrowKind::ErrorWithMessage, .a = ThrowSiteWord::none, .b = std::nullopt, .sourceOfFalseProof = ProofSource::EntryParameter }, std::nullopt, 0, site);
+        jit.breakpoint();
+        return;
+    }
     constexpr GPRReg scratch = scratchOfEntryWrittenByHand;
     Vector<WaysOutOfQuestionOfEntry, 4> ways(questions.size());
     for (size_t index = 0; index < questions.size(); ++index)
@@ -564,7 +583,7 @@ void emitEntryWrittenByHand(CCallHelpers& jit, const CodeGenerationInputs& input
         ways[index].misfits.link(&jit);
         if (!frameIsSetUp)
             jit.emitFunctionPrologue();
-        emitStraightThrowSite(jit, records, ThrowSite { .kind = ThrowKind::ErrorWithMessage, .a = ThrowSiteWord::none, .b = std::nullopt, .sourceOfFalseProof = ProofSource::EntryParameter }, questions[index].value, 0, site);
+        emitStraightThrowSite(jit, records, ThrowSite { .kind = ThrowKind::ErrorWithMessage, .a = ThrowSiteWord::none, .b = std::nullopt, .sourceOfFalseProof = ProofSource::EntryParameter, .expectedProofType = FalseProofWord::summarize(questions[index].passingPrimitives, questions[index].everyObjectPasses || questions[index].shapeWord || !questions[index].cellTypes.isEmpty()) }, questions[index].value, 0, site);
         jit.breakpoint();
     }
 }

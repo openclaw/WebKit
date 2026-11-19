@@ -7,6 +7,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
 #include "AOTBodyIndex.h"
 #include "AOTBuiltinIDTypes.h"
 #include "AOTBuiltinTable.h"
@@ -25,7 +26,6 @@
 #include <optional>
 #include <span>
 #include <utility>
-#include <wtf/BitVector.h>
 #include <wtf/Lock.h>
 #include <wtf/HashSet.h>
 #include <wtf/MallocSpan.h>
@@ -58,14 +58,16 @@ public:
     const BuiltinTable& builtins() const { return m_builtins; }
     void unlockReplaceableBuiltins();
     std::span<const BuiltinID> unlockedBuiltins() const LIFETIME_BOUND { return m_tableOfBuild.unlockedMembers(); }
-    bool isUnlocked(BuiltinID member) const { return std::ranges::binary_search(unlockedBuiltins(), member); }
+    bool isUnlocked(BuiltinID member) const { return m_tableOfBuild.isUnlocked(member); }
     std::span<const BuiltinID> builtinsWhoseLockIsLeftToProgram() const LIFETIME_BOUND { return m_tableOfBuild.membersWhoseLockIsLeftToProgram(); }
-    bool isLockLeftToProgram(BuiltinID member) const { return std::ranges::binary_search(builtinsWhoseLockIsLeftToProgram(), member); }
+    bool isLockLeftToProgram(BuiltinID member) const { return m_tableOfBuild.isLockLeftToProgram(member); }
     void openNameForTestRun(BuiltinID canonicalHolder, StringID name);
     bool isOpened(BuiltinID canonicalHolder, StringID name) const { return m_namesOpened.contains(static_cast<uint64_t>(canonicalHolder.index()) << 32 | name.index()); }
     bool isOpenedSomewhere(StringID name) const { return m_namesOpenedSomewhere.get(name.index()); }
     void noteTakenForAbsent(PropertyKeyID) const;
     Vector<PropertyKeyID> keysTakenForAbsent() const;
+    void noteLockedAbsentName(BuiltinID holder, PropertyKeyID) const;
+    Vector<std::pair<BuiltinID, PropertyKeyID>> lockedAbsentNames() const;
     bool isSomeNameOpenedOn(BuiltinID canonicalHolder) const { return m_holdersOfOpenedNames.get(canonicalHolder.index()); }
     bool testsReplaceBuiltins() const { return m_testsReplaceBuiltins; }
     std::span<const uint8_t> buffer() const { return m_bytes.borrowed; }
@@ -82,12 +84,19 @@ public:
     Vector<TypeSite> typeSites;
     Vector<ExpectedResult> expectedResults;
     Vector<Layout> layouts;
+    bool someClassExtendsMixin { false };
+    bool someClassExtendsArray { false };
+    bool someClassExtendsIterable { false };
+    bool someClassExtendsView { false };
     Vector<TaggedFamily> taggedFamilies;
     Vector<Variable> variables;
     Vector<Module> modules;
+    Vector<ModuleInstance> moduleInstances;
+    Vector<ModuleLink> moduleLinks;
     Vector<ModuleFailure> moduleFailures;
     Vector<AmbiguousExport> ambiguousExports;
     Vector<SourceStamp> sourceStamps;
+    Vector<DeclaredRecord> declaredRecords;
     Vector<EvalScope> evalScopes;
     Vector<Function> functions;
     UnitIDTables unitsOfBodies;
@@ -100,7 +109,12 @@ public:
     Vector<BuiltinUsedAtStart> builtinsUsedAtStart;
     Wire::ExcludedCode excludedCode { };
     bool admitsReplacedBuiltins { false };
-    bool rowsOfNativeCodeWriteNullish { false };
+    bool shouldAssumeNullishHostResults { false };
+    uint16_t builtinInjectedAsMinimumInteger { 0 };
+    uint16_t builtinInjectedAsNull { 0 };
+    uint16_t opcodeInjectedAsOtherKind { 0 };
+    uint16_t builtinInjectedAsHoldingNull { 0 };
+    uint16_t builtinInjectedAsFresh { 0 };
     bool admitsInspector { false };
 
     Function& at(FunctionID id) { return functions[id.index()]; }
@@ -127,7 +141,15 @@ public:
     StringID stringOf(BuiltinName textName) const { return strings.stringOf(textName); }
 
     PropertyKeyID keyOf(BuiltinName name) const { return m_derivedTables.builtinNameKeys[name.index()]; }
-    BuiltinName builtinNameOf(PropertyKeyID) const;
+    PropertyKeyID keyOfWordOnWhatSeesAccesses() const { return m_derivedTables.keyOfWordOnWhatSeesAccesses; }
+    ALWAYS_INLINE BuiltinName builtinNameOf(PropertyKeyID id) const
+    {
+        const PropertyKey& key = at(id);
+        if (key.kind == PropertyKeyKind::Text) [[likely]]
+            return strings.builtinName(key.text);
+        return builtinNameOfKeyThatIsNoText(id, key);
+    }
+    BuiltinName builtinNameOfKeyThatIsNoText(PropertyKeyID, const PropertyKey&) const;
     inline NameClass nameClassOf(PropertyKeyID) const;
     bool isIndexLike(PropertyKeyID key) const { return mayBeElementKey(nameClassOf(key)); }
 
@@ -140,13 +162,33 @@ public:
     std::span<const LayoutID> layoutsExpectedBelow(LayoutID) const LIFETIME_BOUND;
     std::span<const LayoutID> layoutsWithName(PropertyKeyID) const LIFETIME_BOUND;
     std::span<const LayoutID> viewsAbove(LayoutID) const LIFETIME_BOUND;
-    struct FieldWrittenAbove {
-        PropertyKeyID key;
+    struct FieldOfView {
         LayoutID view;
         uint32_t field { 0 };
     };
     static constexpr size_t fewestViewsIndexedByKey = 8;
-    std::span<const FieldWrittenAbove> fieldsWrittenAbove(LayoutID, PropertyKeyID) const LIFETIME_BOUND;
+    std::span<const FieldOfView> fieldsOfViews(PropertyKeyID) const LIFETIME_BOUND;
+    template<typename Functor>
+    bool visitInheritedFields(LayoutID id, PropertyKeyID key, const Functor& functor) const
+    {
+        std::span<const FieldOfView> fields = fieldsOfViews(key);
+        std::span<const LayoutID> views = viewsAbove(id);
+        auto nextField = fields.begin();
+        auto nextView = views.begin();
+        while (nextField != fields.end() && nextView != views.end()) {
+            if (nextField->view < *nextView)
+                nextField = std::ranges::lower_bound(nextField, fields.end(), *nextView, { }, &FieldOfView::view);
+            else if (*nextView < nextField->view)
+                nextView = std::ranges::lower_bound(nextView, views.end(), nextField->view);
+            else {
+                if (!functor(*nextField))
+                    return false;
+                ++nextField;
+                ++nextView;
+            }
+        }
+        return true;
+    }
     bool prototypeMaySelectOtherClass(LayoutID) const;
     void indexClasses();
     void indexNames();
@@ -156,7 +198,25 @@ public:
     void appendBuiltinLayouts();
     void appendNamespaceLayouts(const ParallelLoops&);
     LayoutID layoutOfWholeNamespace(ModuleID) const;
+    LayoutID layoutOfNamespaceThatListsNoName(ModuleID) const;
     VariableID variableBehindExport(ModuleID, uint32_t index) const;
+    VariableID findCompiledExport(ModuleID, uint32_t index) const;
+    std::span<const FieldReference> exportedFields() const LIFETIME_BOUND { return m_derivedTables.exportedFields.span(); }
+    struct InstanceField {
+        FieldReference field;
+        ModuleID linkTarget;
+    };
+    std::span<const InstanceField> instanceFields() const LIFETIME_BOUND { return m_derivedTables.instanceFields.span(); }
+    const ModuleInstance* findModuleInstance(ModuleID) const;
+    VariableID instanceVariable(ModuleID id) const { return id.index() < m_derivedTables.instanceVariables.size() ? m_derivedTables.instanceVariables[id.index()].first : VariableID(); }
+    VariableID severalInstancesVariable(ModuleID id) const { return id.index() < m_derivedTables.instanceVariables.size() ? m_derivedTables.instanceVariables[id.index()].second : VariableID(); }
+    bool isModuleInstance(LayoutID id) const { return moduleScopeKind(id) == ModuleScopeKind::IsInstance; }
+    bool isInstanceVariable(FieldReference) const;
+    bool isInstanceLink(FieldReference) const;
+    bool isInstanceConstant(FieldReference) const;
+    std::span<const ModuleLink> linksOfModule(ModuleID) const LIFETIME_BOUND;
+    void indexInstanceFields();
+    void indexModuleScopes();
     void internBuiltinNameKeys();
     uint32_t numberInTextOf(LayoutID) const;
     LayoutID layoutNumberedInText(uint32_t) const;
@@ -170,9 +230,13 @@ public:
     ModuleID compiledModuleOfNamespaceObject(BuiltinID canonical) const;
     bool isEntry(FunctionID) const;
     LineColumn lineColumnFor(ModuleID, uint32_t position) const;
+    static LineColumn lineColumnAfter(const SourcePositions&, size_t numberOfLines, size_t numberOfAdjustments, uint32_t position);
     const ConstructionStart* findConstructionReportedAt(ModuleID, uint32_t position) const;
 
 private:
+    enum class ModuleScopeKind : uint8_t { IsNone, IsInstance, IsOtherEnvironment };
+    ModuleScopeKind moduleScopeKind(LayoutID id) const { return id.index() < m_derivedTables.moduleScopeKinds.size() ? m_derivedTables.moduleScopeKinds[id.index()] : ModuleScopeKind::IsNone; }
+
     struct Bytes {
         std::span<const uint8_t> borrowed;
         OwnedBytes owned;
@@ -190,13 +254,18 @@ private:
         Vector<LayoutID> layoutsWithName;
         Vector<uint32_t> firstViewAbove;
         Vector<LayoutID> viewsAbove;
-        Vector<uint32_t> firstFieldWrittenAbove;
-        Vector<FieldWrittenAbove> fieldsWrittenAbove;
+        Vector<uint32_t> firstFieldsByKey;
+        Vector<FieldOfView> fieldsOfViewsByKey;
         Vector<PropertyKeyID> builtinNameKeys;
+        PropertyKeyID keyOfWordOnWhatSeesAccesses;
         Vector<BuiltinName> registeredSymbolNames;
         Vector<std::pair<BuiltinID, ModuleID>> compiledModulesOfNamespaceObjects;
         Vector<uint8_t> locationBitsOfVariables;
         Vector<uint8_t> locationBitsOfLayouts;
+        Vector<FieldReference> exportedFields;
+        Vector<InstanceField> instanceFields;
+        Vector<ModuleScopeKind> moduleScopeKinds;
+        Vector<std::pair<VariableID, VariableID>> instanceVariables;
     };
 
     static std::optional<uint8_t> locationBitAt(const Vector<uint8_t>& bits, uint32_t index)
@@ -210,6 +279,7 @@ private:
     BitVector m_namesOpenedSomewhere;
     mutable Lock m_keysTakenForAbsentLock;
     mutable BitVector m_keysTakenForAbsent WTF_GUARDED_BY_LOCK(m_keysTakenForAbsentLock);
+    mutable Vector<std::pair<BuiltinID, PropertyKeyID>> m_lockedAbsentNames WTF_GUARDED_BY_LOCK(m_keysTakenForAbsentLock);
     BitVector m_holdersOfOpenedNames;
     HashSet<uint64_t, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> m_namesOpened;
     bool m_testsReplaceBuiltins { false };
@@ -283,6 +353,11 @@ inline void forEachOfSeveralParents(const Program& program, LayoutID id, NOESCAP
     }
 }
 
+inline bool isConstructorFunctionBelowValue(const Layout& layout)
+{
+    return layout.has(LayoutFlags::IsConstructorFunction) && layout.has(LayoutFlags::HasHeritage);
+}
+
 inline LayoutID declaredLayoutOf(const Program& program, LayoutID id)
 {
     LayoutID current = id;
@@ -295,17 +370,27 @@ BitVector functionsCalledByHost(const Program&);
 BitVector functionsCalledByHost(const Program&, const ParallelLoops&);
 
 const RuntimeFunctionEntry* findRuntimeFunction(const Program&, RuntimeFunctionID);
+FunctionID findNakedConstructorOf(const Program&, BuiltinID);
+FunctionID functionThatSorts(const Program&);
 bool isLibraryCode(const Program&, const Function&);
 bool isBundlerHelperModule(const Program&, const Module&);
-bool isFaceOfCommonJSFile(const Program&, const Module&);
+bool isCommonJSFacade(const Program&, const Module&);
+bool parsersCouldMakeRecordsOf(const Program&, LayoutID);
 bool isBundlerHelperNamedByProgram(const Program&, ModuleID);
 BitVector modulesThatHostAsksFor(const Program&, bool beginsModulesOfData = false);
 bool answersToPath(const Program&, const Module&);
 ModuleID compiledModuleWithObject(const Program&, BuiltinID);
-ModuleID commonJsModuleCapturedBy(const Program&, const Module& face);
+bool objectOfLibraryFileIsResultOfBody(const Program&, ModuleID);
+
+constexpr bool hasNamespaceLayout(ModuleKind kind)
+{
+    return kind == ModuleKind::SourceText || kind == ModuleKind::RuntimeSource;
+}
+ModuleID commonJsModuleCapturedBy(const Program&, const Module& facade);
 Vector<ModuleID, 2> formsInImage(const Program&, ModuleID named);
-bool namesWaysToModuleObjects(const Program&);
-BuiltinID functionOfHostThatRequireCallsFor(const Module&);
+bool reachesModuleObjects(const Program&);
+bool namesModuleObjects(const Program&);
+BuiltinID hostRequireFunctionFor(const Module&);
 bool loaderEntersBodyAtMostOnce(const Module&);
 bool isBodyWrittenInAnotherFile(const Program&, FunctionID);
 bool importMayAnswerWithMock(const Module&);

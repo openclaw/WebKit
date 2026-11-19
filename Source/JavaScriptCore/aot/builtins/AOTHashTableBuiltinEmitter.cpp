@@ -8,6 +8,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTCollectionIntrinsicEmitter.h"
 #include "AOTCompactTable.h"
 #include "AOTConversionEmitter.h"
 #include "AOTRepresentation.h"
@@ -63,7 +64,7 @@ Boxed HashTableBuiltinEmitter::normalizedNumber(Number key)
     LBasicBlock fitsInt32 = newBlock();
     LBasicBlock otherwise = newBlock();
     Join<Boxed> join(m_out);
-    Word32 truncated = low32(conversions.toInteger(key));
+    Word32 truncated = conversions.truncateToWord(key);
     m_out.branch(equal(toNumber(truncated), key).value(), normalEdge(fitsInt32), unlikelyEdge(otherwise));
 
     m_out.appendTo(fitsInt32);
@@ -82,14 +83,20 @@ Boxed HashTableBuiltinEmitter::normalizedKey(const OperationContext& context, Va
     if (calleeNormalizes || !(type.primitives & Primitive::Number))
         return key;
 
+    static constexpr RepresentationSet integers { Representation::Int32, Representation::Int64, Representation::OptionalInt64 };
+    bool numbersFitInt32 = !(type.primitives & Primitive::Double) && type.integers.isSubsetOf(Range::int32());
+    ValueID number = opcodeOf(id) == Opcode::Box ? operationAt(id).operand(0) : id;
+    if (numbersFitInt32 && integers.contains(representationOf(number)))
+        return key;
+
     Condition isBoxedDouble = logicalNot(isInt32(key));
     if (!type.isNumber())
         isBoxedDouble = logicalAnd(isNumber(key), isBoxedDouble);
-    bool numbersFitInt32 = !(type.primitives & Primitive::Double) && type.integers.isSubsetOf(Range::int32());
     LBasicBlock needsNormalization = newBlock();
     LBasicBlock isNormalized = newBlock();
     Join<Boxed> join(m_out);
-    m_out.branch(isBoxedDouble.value(), numbersFitInt32 ? unlikelyEdge(needsNormalization) : normalEdge(needsNormalization), normalEdge(isNormalized));
+    bool isOutOfLine = numbersFitInt32 || (context.block() && generator().paysForCodeInLine(context.block()));
+    m_out.branch(isBoxedDouble.value(), isOutOfLine ? unlikelyEdge(needsNormalization) : normalEdge(needsNormalization), normalEdge(isNormalized));
 
     m_out.appendTo(isNormalized);
     join.add(key);
@@ -103,8 +110,7 @@ Word32 HashTableBuiltinEmitter::hashOfBits(Boxed key)
 {
     LValue a = m_out.bitXor(key.value(), loadImmutable64(AOT_INSTANCE_OFFSET(numbers.hashSecrets)).value());
     LValue b = m_out.bitXor(key.value(), loadImmutable64(AOT_INSTANCE_OFFSET(numbers.hashSecrets) + sizeof(uint64_t)).value());
-    LValue lowerHalf = m_out.mul(a, b);
-    return Word32(m_out.castToInt32(m_out.bitXor(lowerHalf, m_out.uMulHigh(a, b))));
+    return Word32(m_out.foldedProduct(a, b));
 }
 
 Integer HashTableBuiltinEmitter::sizeOf(CellPointer table, HashTableOwner owner)
@@ -129,6 +135,12 @@ Operand HashTableBuiltinEmitter::lookUpByStub(const OperationContext& context, C
     RELEASE_ASSERT_NOT_REACHED();
 }
 
+bool HashTableBuiltinEmitter::isSoughtAtItsPlace(const OperationContext& context, ValueID key)
+{
+    const Type& type = typeOf(key);
+    return type.isInteger() && type.integers.isSubsetOf(Range::int32()) && context.block() && generator().usesLoopForms(context.block()) && emitter<CollectionIntrinsicEmitter>().isCounterOrSmallNumber(key);
+}
+
 Operand HashTableBuiltinEmitter::search(const OperationContext& context, ValueID collection, ValueID keyOfSearch, HashTableOwner owner, LookupAnswer answer)
 {
     RELEASE_ASSERT(owner == HashTableOwner::Map || answer == LookupAnswer::IsPresent);
@@ -136,7 +148,29 @@ Operand HashTableBuiltinEmitter::search(const OperationContext& context, ValueID
     CellPointer table = cellOperand(collection);
     KeyComparison comparison = keyComparisonForType(typeOf(keyOfSearch));
     Boxed key = normalizedKey(context, keyOfSearch);
-    return lookUpByStub(context, table, key, lookupStubFor(owner, answer, comparison), answer);
+    auto lookUpByHash = [&]() -> Operand { return lookUpByStub(context, table, key, lookupStubFor(owner, answer, comparison), answer); };
+    if (!isSoughtAtItsPlace(context, keyOfSearch))
+        return lookUpByHash();
+    using EntryAnswer = CollectionIntrinsicEmitter::EntryAnswer;
+    return emitter<CollectionIntrinsicEmitter>().findNumberAtHomeSlot(table, key, answer == LookupAnswer::Value ? EntryAnswer::Value : EntryAnswer::IsPresent, scopedLambda<Operand()>(lookUpByHash));
+}
+
+Operand HashTableBuiltinEmitter::lookUpNormalizedKey(const OperationContext& context, ValueID collection, ValueID key, Boxed normalizedKey, HashTableOwner owner, LookupAnswer answer)
+{
+    KeyComparison comparison = keyComparisonForType(typeOf(key));
+    RELEASE_ASSERT(comparison != KeyComparison::AnyValue);
+    return lookUpByStub(context, cellOperand(collection), normalizedKey, lookupStubFor(owner, answer, comparison), answer);
+}
+
+Integer HashTableBuiltinEmitter::findPlace(const OperationContext& context, ValueID map, ValueID keyOfSearch)
+{
+    CellPointer table = cellOperand(map);
+    KeyComparison comparison = keyComparisonForType(typeOf(keyOfSearch));
+    Boxed key = normalizedKey(context, keyOfSearch);
+    auto lookUpByHash = [&]() -> Operand { return Integer(callStub(context, findKeyInMap(comparison), { table.value(), key.value() }).first); };
+    if (!isSoughtAtItsPlace(context, keyOfSearch))
+        return lookUpByHash().as<Integer>();
+    return emitter<CollectionIntrinsicEmitter>().findNumberAtHomeSlot(table, key, CollectionIntrinsicEmitter::EntryAnswer::Place, scopedLambda<Operand()>(lookUpByHash)).as<Integer>();
 }
 
 void HashTableBuiltinEmitter::lookUp(const InlineCall& call, HashTableOwner owner, LookupAnswer answer)
@@ -191,6 +225,18 @@ void HashTableBuiltinEmitter::generateNewMap(const InlineCall& call)
 void HashTableBuiltinEmitter::generateNewSet(const InlineCall& call)
 {
     finish(call, CellPointer(callStub(call.context(), newSet(), { }).first));
+}
+
+void HashTableBuiltinEmitter::generateNewWeakMap(const InlineCall& call)
+{
+    build().statistics().count(StatisticID::WeakTablesAllocatedByStub);
+    finish(call, CellPointer(callStub(call.context(), newWeakMap(), { }).first));
+}
+
+void HashTableBuiltinEmitter::generateNewWeakSet(const InlineCall& call)
+{
+    build().statistics().count(StatisticID::WeakTablesAllocatedByStub);
+    finish(call, CellPointer(callStub(call.context(), newWeakSet(), { }).first));
 }
 
 void HashTableBuiltinEmitter::generateMapGet(const InlineCall& call)

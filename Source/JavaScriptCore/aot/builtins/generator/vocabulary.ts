@@ -155,7 +155,7 @@ export const operandRoles = [
 ] as const;
 export type OperandRole = (typeof operandRoles)[number];
 
-export const pristineAspects = ["Storage", "Names", "AsCreated", "Dense", "NamesKeptBelow", "Prototype", "CellAlone"] as const;
+export const pristineAspects = ["Storage", "Names", "AsCreated", "Dense", "InheritedNamesKept", "Prototype", "CellAlone"] as const;
 export type PristineAspect = (typeof pristineAspects)[number];
 
 export const contentsSlots = ["Element", "Key", "Value"] as const;
@@ -175,6 +175,7 @@ export const callbackResultUses = [
   "Stored",
   "Flattened",
   "AskedWhetherIterable",
+  "Converted",
 ] as const;
 export type CallbackResultUse = (typeof callbackResultUses)[number];
 
@@ -188,6 +189,7 @@ export const rangeRules = [
   "AbsoluteValue",
   "IntegerPart",
   "Sign",
+  "CodeUnitOrNaN",
 ] as const;
 export type RangeRule = (typeof rangeRules)[number];
 
@@ -293,7 +295,7 @@ export type PlaceSpec =
   | { place: "OwnValues"; operand: OperandName }
   | { place: "Result" }
   | { place: "ResultSlot"; slot: SlotName }
-  | { place: "ResultField"; field: string | number; holdsOnlyWhatIsStored?: boolean }
+  | { place: "ResultField"; field: string | number; holdsOnlyWhatIsStored?: boolean; isOfElements?: boolean }
   | { place: "NewValue"; value: TypeSpec; holdsWhatIsThrown?: boolean }
   | { place: "NativeMemory" }
   | { place: "Prototype"; operand: OperandName }
@@ -338,7 +340,7 @@ export type UseSpec =
   | ({ use: "CallsKept"; cell: string } & HandlerSpec)
   | { use: "RetainsMember"; path: MemberPath; in: PlaceSpec }
   | { use: "ReturnsKept"; cell: string; holdsOnlyWhatIsStored?: boolean }
-  | { use: "HandsOutKept"; cell: string }
+  | { use: "ExposesKept"; cell: string }
   | { use: "Creates"; value: TypeSpec; in: PlaceSpec }
   | { use: "ReadsByKey"; key: KeySpec; to: PlaceSpec }
   | { use: "StoresByKey"; key: KeySpec; value: PlaceSpec }
@@ -429,7 +431,7 @@ export interface NativeCodeRef {
 
 export type ConditionSpec =
   | { operand: OperandName; isOneOf: readonly string[]; startsWith: readonly string[]; calledOn?: BuiltinPath }
-  | { operand: OperandName; hasProperty: string }
+  | { operand: OperandName; hasProperty: string; startsWith?: readonly string[] }
   | { buildAdmitsRuntimeCode: true }
   | { callRunsOtherCode: true }
   | { objectNobodyKnowsIsWritten: true }
@@ -532,6 +534,9 @@ export const builtinMarks = [
   "InstancesHaveMethodCalledWithStartupLoads",
   "InstancesArePrintedByCodeOfTheirOwn",
   "PrintsWhatHandlersAnswer",
+  "InstancesAreAnswersThatHostTakes",
+  "ResultShowsOperandsToFormatters",
+  "InstancesShowWhatTheirMethodAnswersToFormatters",
   "LoadsCodeWithoutJSAccess",
   "ReadLoadsCodeByName",
   "HoldsPathOfMainModule",
@@ -549,13 +554,18 @@ export const builtinMarks = [
   "IsReplacedByFakeTimers",
   "RunsCodeThatLocksDoNotBind",
   "RunsCodeWithLoader",
-  "HandsOutWhatNativeCodeHolds",
+  "ExposesNativeRoots",
   "RegistersPreparationOfHolders",
   "AnswersWithPathOfModule",
   "IsKeyReadOnlyByRowsThatNameIt",
   "LaysOperandAbovePrototype",
-  "HandsOutNoOtherHostObject",
+  "ExposesOnlyDescribedObjects",
   "IsDeletedWhenModuleOfLibraryLoads",
+  "PassesOverListWhereItTakesRecordOfHandlers",
+  "AsksOptionsForListedNamesAlone",
+  "MayLayListenerForUncaughtExceptions",
+  "IsReportedAsReadOnly",
+  "AppliesMethodDecorators",
 ] as const;
 export type BuiltinMark = (typeof builtinMarks)[number];
 
@@ -569,6 +579,7 @@ export interface EntryColumns {
   constructable?: boolean;
   addedAtFirstRead?: boolean;
   addedAsEnumerable?: boolean;
+  canBeListed?: boolean;
   hasSetter?: boolean;
   length?: number;
   nativeSymbols?: readonly string[];
@@ -598,9 +609,13 @@ export interface SlotSpec {
   contentsSlot: ContentsSlot | null;
   holds?: TypeSpec;
   internalField?: number;
-  holdsWhatStepsHandOut?: boolean;
+  holdsStepValues?: boolean;
   holdsWhatIsThrown?: boolean;
+  wordOfCell?: WordOfCell;
 }
+
+export const wordsOfCells = ["None", "Followed", "Unfollowed", "MarkedWhereFilled"] as const;
+export type WordOfCell = (typeof wordsOfCells)[number];
 
 export interface TypeNameSpec {
   path: readonly string[];
@@ -625,6 +640,7 @@ export interface ClassColumns {
   isNeverPristine?: boolean;
   pristineTest?: PristineTest;
   hasClosureInstances?: boolean;
+  isFollowedBesideUnseenObject?: boolean;
   instancesAreEntries?: boolean;
   keepsStructuresOfClassesBelow?: boolean;
   definesCharactersOnNewInstances?: boolean;

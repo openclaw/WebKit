@@ -8,11 +8,14 @@
 
 #if ENABLE(AOT)
 
+#include "AOTInliningAcrossFiles.h"
 #include "AOTMachineDescription.h"
 #include "AOTMachineEncoderPairsOfLoads.h"
 #include "AOTMachineFrameForms.h"
 #include "AllowMacroScratchRegisterUsage.h"
 #include "DisallowMacroScratchRegisterUsage.h"
+#include <algorithm>
+#include <bit>
 
 namespace JSC { namespace AOT { namespace Machine {
 
@@ -60,8 +63,6 @@ static CodeOfBackEnd codeOfBackEndIn(StepKind kind)
         return CodeOfBackEnd::Materialize;
     case StepKind::Swap:
         return CodeOfBackEnd::Swap;
-    case StepKind::ClearSpill:
-        return CodeOfBackEnd::ClearSpill;
     case StepKind::KeepPointer:
         return CodeOfBackEnd::KeepPointer;
     case StepKind::Execute:
@@ -180,6 +181,50 @@ static bool blockThatJumpsOnlyJumpsOn(const Encoder& encoder, const Block* block
     return true;
 }
 
+static bool isUnlikelyInLayout(const BlockPlace& place) { return place.isRare() || place.layoutPart == LayoutPart::Rare; }
+
+static bool blockOnlyMovesAndJumpsOn(const Encoder& encoder, const Block* block)
+{
+    ASSERT(block->last()->opcode() == Jump);
+
+    const BlockSteps& steps = encoder.stepsOf(block);
+    if (steps.beginOfEdgeMoves == steps.endOfEdgeMoves)
+        return false;
+    const BlockPlace& place = encoder.placeOf(block);
+    if (block->isEntry() || block->isLandingPad() || !block->phis().empty())
+        return false;
+    const Allocation& allocation = encoder.m_allocation;
+    for (uint32_t index = steps.begin; index < steps.end; ++index) {
+        const Step& step = allocation.step(index);
+        if (step.kind != StepKind::Execute)
+            return false;
+        switch (step.operation->opcode()) {
+        case Nop:
+        case Upsilon:
+            break;
+        default:
+            return false;
+        }
+        if (allocation.isSpilled(step.operation))
+            return false;
+    }
+    for (uint32_t index = steps.beginOfEdgeMoves; index < steps.endOfEdgeMoves; ++index) {
+        switch (allocation.step(index).kind) {
+        case StepKind::Move:
+        case StepKind::Reload:
+        case StepKind::Save:
+        case StepKind::Materialize:
+            break;
+        default:
+            return false;
+        }
+    }
+    FrameAtBlock frame = encoder.frameAtBlock(block, place);
+    if (frame.isSetUpAtHead || frame.returnsInPlaceOfJump)
+        return false;
+    return !(encoder.m_hasFramedPart && allocation.isHeadOfFramedPart(block));
+}
+
 void Encoder::findBlocksWithoutCode()
 {
     UncheckedSpan<Block* const> layout = m_order.blocksInLayout();
@@ -188,6 +233,7 @@ void Encoder::findBlocksWithoutCode()
     UncheckedSpan<const Block*> blocksEntered = m_blocksEntered;
     UncheckedSpan<uint32_t> nextLayoutIndexWithCode = m_nextLayoutIndexWithCode;
     ArenaVector<uint32_t> layoutIndexesOfBlocksThatOnlyJumpOn;
+    ArenaVector<uint32_t> layoutIndexesOfMoveBlocks;
     for (uint32_t index = 0; index < numberOfBlocksInLayout; ++index) {
         const Block* block = layout[index];
         const Block* entered = block;
@@ -197,7 +243,8 @@ void Encoder::findBlocksWithoutCode()
             if (blockThatJumpsOnlyJumpsOn(*this, block)) {
                 entered = block->successor(0).block();
                 layoutIndexesOfBlocksThatOnlyJumpOn.append(m_arena, index);
-            }
+            } else if (blockOnlyMovesAndJumpsOn(*this, block))
+                layoutIndexesOfMoveBlocks.append(m_arena, index);
         } else if (opcode == Patch) {
             if (m_hasSpills && block->numSuccessors() && m_allocation.isSpilled(last)) {
                 if (!m_blocksThatStoreResultOfPatchAtHead.size())
@@ -223,9 +270,12 @@ void Encoder::findBlocksWithoutCode()
             entered = m_blocksEntered[entered->index()];
             ++steps;
         }
-        if (steps > layout.size())
-            entered = block;
-        m_blocksEntered[block->index()] = entered;
+        if (steps > layout.size()) {
+            m_blocksEntered[block->index()] = block;
+            continue;
+        }
+        for (const Block* passed = block; passed != entered;)
+            passed = std::exchange(m_blocksEntered[passed->index()], entered);
     }
 
     for (uint32_t place = layoutIndexesOfBlocksThatOnlyJumpOn.size(); place--;) {
@@ -234,6 +284,129 @@ void Encoder::findBlocksWithoutCode()
             continue;
         m_nextLayoutIndexWithCode[index] = m_nextLayoutIndexWithCode[index + 1];
         --m_numberOfBlocksWithCode;
+    }
+    if (layoutIndexesOfMoveBlocks.size() >= 2)
+        removeRepeatedMoveBlocks(layoutIndexesOfMoveBlocks.span(), layoutIndexesOfBlocksThatOnlyJumpOn.span());
+}
+
+void Encoder::removeRepeatedMoveBlocks(std::span<const uint32_t> layoutIndexesOfMoveBlocks, std::span<const uint32_t> layoutIndexesOfBlocksThatOnlyJumpOn)
+{
+    struct Candidate {
+        uint64_t key;
+        uint32_t layoutIndex;
+    };
+    UncheckedSpan<Block* const> layout = m_order.blocksInLayout();
+    ArenaVector<Candidate> candidates;
+    candidates.reserve(m_arena, layoutIndexesOfMoveBlocks.size());
+    auto wordOf = [](const Step& step) {
+        uint64_t word = static_cast<uint64_t>(step.kind) << 56 ^ static_cast<uint64_t>(step.width) << 48 ^ static_cast<uint64_t>(std::bit_cast<uint32_t>(step.destination)) << 20 ^ std::bit_cast<uint32_t>(step.sources[0]);
+        return step.kind == StepKind::Materialize ? word ^ static_cast<uint64_t>(step.operation->index()) * 0xff51afd7ed558ccdull : word;
+    };
+    for (uint32_t index : layoutIndexesOfMoveBlocks) {
+        const Block* block = layout[index];
+        if (m_blocksThatStoreResultOfPatchAtHead.size() && m_blocksThatStoreResultOfPatchAtHead.get(block->index()))
+            continue;
+        uint64_t key = blockEnteredThrough(block->successor(0).block())->index() * 2 + frameAtBlock(block).runsInFrame;
+        const BlockSteps& steps = stepsOf(block);
+        for (uint32_t step = steps.beginOfEdgeMoves; step < steps.endOfEdgeMoves; ++step)
+            key = (key ^ wordOf(m_allocation.step(step))) * 0x9e3779b97f4a7c15ull;
+        candidates.append(m_arena, Candidate { key, index });
+    }
+    if (candidates.size() < 2)
+        return;
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        return a.key != b.key ? a.key < b.key : a.layoutIndex < b.layoutIndex;
+    });
+    auto repeats = [&](const Block* first, const Block* second) {
+        if (blockEnteredThrough(first->successor(0).block()) != blockEnteredThrough(second->successor(0).block()))
+            return false;
+        if (frameAtBlock(first).runsInFrame != frameAtBlock(second).runsInFrame)
+            return false;
+        if (frameAtBlock(first).isTornDownAtEnd != frameAtBlock(second).isTornDownAtEnd)
+            return false;
+        const BlockSteps& stepsOfFirst = stepsOf(first);
+        const BlockSteps& stepsOfSecond = stepsOf(second);
+        const uint32_t numberOfMoves = stepsOfFirst.endOfEdgeMoves - stepsOfFirst.beginOfEdgeMoves;
+        if (numberOfMoves != stepsOfSecond.endOfEdgeMoves - stepsOfSecond.beginOfEdgeMoves)
+            return false;
+        for (uint32_t index = 0; index < numberOfMoves; ++index) {
+            const Step& a = m_allocation.step(stepsOfFirst.beginOfEdgeMoves + index);
+            const Step& b = m_allocation.step(stepsOfSecond.beginOfEdgeMoves + index);
+            if (a.kind != b.kind || a.width != b.width || a.destination != b.destination || a.sources[0] != b.sources[0])
+                return false;
+            if (a.kind == StepKind::Materialize && a.operation != b.operation)
+                return false;
+        }
+        return true;
+    };
+    UncheckedSpan<const Block*> blocksInFront;
+    auto findPrecedingBlocks = [&] {
+        blocksInFront = m_arena.createSpan<const Block*>(layout.size());
+        const Block* inFront = nullptr;
+        for (uint32_t index = 0; index < layout.size(); ++index) {
+            blocksInFront[index] = inFront;
+            if (hasCode(layout[index]))
+                inFront = layout[index];
+        }
+    };
+    auto isFallenInto = [&](uint32_t index) {
+        constexpr size_t successorsOfBranch = 2;
+        const Block* inFront = blocksInFront[index];
+        if (!inFront || !hasCode(inFront) || inFront->numSuccessors() > successorsOfBranch)
+            return true;
+        return std::ranges::any_of(inFront->successors(), [&](const Edge& edge) {
+            return blockEnteredThrough(edge.block()) == layout[index];
+        });
+    };
+    static constexpr unsigned rankOfBlockThatFallsIntoTarget = 3;
+    auto rankAsKept = [&](uint32_t index) -> unsigned {
+        const Block* block = layout[index];
+        if (isUnlikelyInLayout(placeOf(block)))
+            return 0;
+        uint32_t next = m_nextLayoutIndexWithCode[index + 1];
+        if (next < layout.size() && blockEnteredThrough(block->successor(0).block()) == layout[next])
+            return rankOfBlockThatFallsIntoTarget;
+        return isFallenInto(index) ? 2 : 1;
+    };
+    ArenaVector<uint32_t> layoutIndexesOfCopies;
+    for (uint32_t first = 0; first < candidates.size();) {
+        uint32_t end = first + 1;
+        while (end < candidates.size() && candidates[end].key == candidates[first].key)
+            ++end;
+        if (end - first > 1) {
+            if (blocksInFront.empty())
+                findPrecedingBlocks();
+            uint32_t kept = first;
+            unsigned rankOfKept = rankAsKept(candidates[first].layoutIndex);
+            for (uint32_t other = first + 1; other < end; ++other) {
+                if (unsigned rank = rankAsKept(candidates[other].layoutIndex); rank > rankOfKept) {
+                    kept = other;
+                    rankOfKept = rank;
+                }
+            }
+            const Block* blockKept = layout[candidates[kept].layoutIndex];
+            for (uint32_t other = first; other < end; ++other) {
+                const Block* block = layout[candidates[other].layoutIndex];
+                if (other == kept || !repeats(blockKept, block) || (rankOfKept != rankOfBlockThatFallsIntoTarget && !isUnlikelyInLayout(placeOf(block)) && isFallenInto(candidates[other].layoutIndex)))
+                    continue;
+                m_blocksEntered[block->index()] = blockKept;
+                --m_numberOfBlocksWithCode;
+                layoutIndexesOfCopies.append(m_arena, candidates[other].layoutIndex);
+            }
+        }
+        first = end;
+    }
+    if (layoutIndexesOfCopies.isEmpty())
+        return;
+    for (uint32_t index : layoutIndexesOfBlocksThatOnlyJumpOn) {
+        const Block* entered = m_blocksEntered[layout[index]->index()];
+        m_blocksEntered[layout[index]->index()] = m_blocksEntered[entered->index()];
+    }
+    std::sort(layoutIndexesOfCopies.begin(), layoutIndexesOfCopies.end(), std::greater<uint32_t>());
+    for (uint32_t copy : layoutIndexesOfCopies) {
+        const uint32_t next = m_nextLayoutIndexWithCode[copy + 1];
+        for (uint32_t index = copy + 1; index-- && m_nextLayoutIndexWithCode[index] == copy;)
+            m_nextLayoutIndexWithCode[index] = next;
     }
 }
 
@@ -249,6 +422,7 @@ public:
         , m_order(encoder.m_order)
         , m_places(encoder.m_places)
         , m_stepsOfBlocks(encoder.m_stepsOfBlocks)
+        , m_mayJumpOverUnlikelySides(encoder.m_proc.traits().mayJumpOverUnlikelySides)
         , m_layout(encoder.m_order.blocksInLayout())
         , m_blocksEntered(encoder.m_blocksEntered)
         , m_next(encoder.m_nextLayoutIndexWithCode)
@@ -263,6 +437,7 @@ private:
     static constexpr uint32_t bytesGuessedForStep = 4;
     static constexpr uint32_t reach = 120;
     static constexpr uint32_t mostBytesOfPiece = 64;
+    static constexpr uint32_t maxBytesAfterBranch = 32;
     static constexpr uint32_t noPiece = UINT32_MAX;
 
     struct Piece {
@@ -308,6 +483,7 @@ private:
         return piece;
     }
 
+    bool leadsBackAfterBranch(const Piece&, uint32_t next) const;
     void findPieces();
     uint32_t writeRun(uint32_t index, uint32_t limit, bool nothingFallsIn);
     void writePiece(Piece&);
@@ -317,6 +493,7 @@ private:
     const Order& m_order;
     const BlockPlace* const m_places;
     const BlockSteps* const m_stepsOfBlocks;
+    const bool m_mayJumpOverUnlikelySides;
     UncheckedSpan<Block* const> m_layout;
     UncheckedSpan<const Block* const> m_blocksEntered;
     UncheckedSpan<const uint32_t> m_next;
@@ -378,7 +555,18 @@ void OrderOfWriting::findPieces()
     }
 }
 
-void OrderOfWriting::writePiece(Piece& piece)
+bool OrderOfWriting::leadsBackAfterBranch(const Piece& piece, uint32_t next) const
+{
+    uint32_t first = m_next[piece.begin];
+    if (first >= piece.end || placeOf(m_layout[first]).predecessors.size() != 1 || m_encoder.frameAtBlock(m_layout[first]).isSetUpAtHead)
+        return false;
+    uint32_t last = first;
+    for (uint32_t index = m_next[first + 1]; index < piece.end; index = m_next[index + 1])
+        last = index;
+    return fallsIntoNext(m_layout[last], next);
+}
+
+ALWAYS_INLINE_INTO_OTHER_FILES void OrderOfWriting::writePiece(Piece& piece)
 {
     piece.isPlaced = true;
     m_somethingIsPlaced = true;
@@ -412,6 +600,8 @@ uint32_t OrderOfWriting::writeRun(uint32_t index, uint32_t limit, bool nothingFa
         bytesOfRun += bytesGuessedFor(stepsOfBlocks[block->index()]);
         index = next[index + 1];
         somethingFallsOut = false;
+        uint32_t pieceBehindBranch = noPiece;
+        const bool takesPieceAfterBranch = m_mayJumpOverUnlikelySides && places[block->index()].loop == noLoop && index < limit && fallsIntoNext(block, index);
         for (const Edge& edge : block->successors()) {
             const BlockPlace& place = places[blocksEntered[edge.block()->index()]->index()];
             somethingFallsOut |= place.layoutIndex == index;
@@ -425,8 +615,21 @@ uint32_t OrderOfWriting::writeRun(uint32_t index, uint32_t limit, bool nothingFa
             uint32_t bytesOfPiece = 0;
             for (uint32_t inPiece = next[piece.begin]; inPiece < piece.end && bytesOfPiece <= mostBytesOfPiece; inPiece = next[inPiece + 1])
                 bytesOfPiece += bytesGuessedFor(stepsOfBlocks[layout[inPiece]->index()]);
-            if (bytesOfPiece <= mostBytesOfPiece)
-                m_entrances.append(m_arena, Entrance { number, bytesOfPiece, bytesOfRun });
+            if (bytesOfPiece > mostBytesOfPiece)
+                continue;
+            if (takesPieceAfterBranch && pieceBehindBranch == noPiece && bytesOfPiece <= maxBytesAfterBranch && leadsBackAfterBranch(piece, index)) {
+                pieceBehindBranch = number;
+                bytesOfRun += bytesOfPiece;
+                continue;
+            }
+            m_entrances.append(m_arena, Entrance { number, bytesOfPiece, bytesOfRun });
+        }
+        if (pieceBehindBranch != noPiece) {
+            Piece& piece = m_pieces[pieceBehindBranch];
+            piece.isPlaced = true;
+            m_somethingIsPlaced = true;
+            for (uint32_t inPiece = next[piece.begin]; inPiece < piece.end; inPiece = next[inPiece + 1])
+                written.append(m_arena, layout[inPiece]);
         }
     }
     const size_t endOfEntrances = m_entrances.size();
@@ -562,19 +765,26 @@ void Encoder::run()
 
     linkPendingJumps();
     runLatePaths();
-    if (!m_proc.m_rangesOfOrigins.isEmpty())
-        m_proc.m_rangesOfOrigins.last().end = m_jit.labelIgnoringWatchpoints();
+    MacroAssembler::Label endOfRange = m_jit.labelIgnoringWatchpoints();
+    for (uint32_t index = m_beginsOfRangesOfOrigins.size(); index--;) {
+        m_proc.m_rangesOfOrigins[index].end = endOfRange;
+        endOfRange = m_proc.m_rangesOfOrigins[index].begin = m_jit.labelAt(m_beginsOfRangesOfOrigins[index]);
+    }
     ASSERT(m_pendingJumps.isEmpty());
 
     for (const JumpTableRecord& table : m_proc.m_jumpTables) {
         for (const MacroAssembler::Label& target : table.targets)
             RELEASE_ASSERT(target.isSet());
     }
+
+    if (m_readSlotTags & Frame::deadSlotTag) [[unlikely]]
+        reportDeadSlotRead();
 }
 
 bool Encoder::fallsThroughToSlowCase(const Block* from, const Block* target) const
 {
     ASSERT(from != m_block);
+    ASSERT(hasCode(from));
     const BlockPlace& placeAsNamed = m_order.of(target);
     if (!placeAsNamed.isReached())
         return false;
@@ -587,6 +797,35 @@ bool Encoder::fallsThroughToSlowCase(const Block* from, const Block* target) con
     } else if (m_order.of(target).layoutIndex != m_nextLayoutIndexWithCode[m_order.of(from).layoutIndex + 1])
         return false;
     return frameAtBlock(from).isLeftInFrame() == frameAtBlock(target).isEnteredInFrame();
+}
+
+bool Encoder::isCall(const PatchOperation& patch)
+{
+    static constexpr int fewestRegisters = 8;
+    return std::popcount(patch.lateClobberedMask()) >= fewestRegisters;
+}
+
+void Encoder::noteShortLoopsEndingWith(const Block* block)
+{
+    static constexpr ptrdiff_t maxBytes = 128;
+    for (const Edge& edge : block->successors()) {
+        if (placeOf(edge.block()).loop != placeOf(block).loop)
+            continue;
+        const MacroAssembler::Label& begin = m_labels[blockEnteredThrough(edge.block())->index()];
+        if (!begin.isSet())
+            continue;
+        MacroAssembler::Label end = m_jit.labelIgnoringWatchpoints();
+        ptrdiff_t length = MacroAssembler::differenceBetween(begin, end);
+        if (length <= 0 || length > maxBytes || (m_lastCall.isSet() && MacroAssembler::differenceBetween(begin, m_lastCall) >= 0))
+            continue;
+        ptrdiff_t lastBegin = m_proc.m_shortLoops.isEmpty() ? -1 : MacroAssembler::differenceBetween(begin, m_proc.m_shortLoops.last().begin);
+        if (lastBegin > 0)
+            continue;
+        if (!lastBegin)
+            m_proc.m_shortLoops.last().end = end;
+        else
+            m_proc.m_shortLoops.append(m_arena, ShortLoop { begin, end });
+    }
 }
 
 template<FrameCoverage coverage>
@@ -605,6 +844,8 @@ ALWAYS_INLINE void Encoder::encodeBlockUnder(Block* block)
         noteStartOfRareCode(m_jit);
     }
 
+    if (isARM64() && m_allocation.baseOfFarWords()) [[unlikely]]
+        settleBaseOfFarWordsAtHead(block, place);
     const FrameAtBlock frame = frameAtBlockUnder<coverage>(block, place);
     m_blockIsLeftInFrame = frame.isLeftInFrame();
     noteOrigin(Origin());
@@ -626,10 +867,35 @@ ALWAYS_INLINE void Encoder::encodeBlockUnder(Block* block)
         storeSpilledValuesDefinedAtHead(block, place);
 
     const BlockSteps& steps = stepsOf(block);
-    if (steps.begin < steps.end)
-        encodeSteps(steps.begin, steps.end);
-    if (steps.beginOfEdgeMoves < steps.endOfEdgeMoves)
-        encodeSteps(steps.beginOfEdgeMoves, steps.endOfEdgeMoves);
+    uint32_t beginOfSteps = steps.begin;
+    if (frame.isSetUpAtHead && setupPushesSavesOfRareRegion(block)) {
+        for (; beginOfSteps < steps.end; ++beginOfSteps) {
+            const Step& step = m_allocation.step(beginOfSteps);
+            if (step.kind != StepKind::Save || !step.destination.isSpill())
+                break;
+            uint32_t pushed = 0;
+            while (pushed < m_spillsPushedAtSetup.size() && m_spillsPushedAtSetup[pushed] != step.destination.spillIndex())
+                ++pushed;
+            if (pushed < m_spillsPushedAtSetup.size())
+                m_spillsPushedAtSetup[pushed] = noSpill;
+            else
+                encodeSteps(beginOfSteps, beginOfSteps + 1);
+        }
+        m_spillsPushedAtSetup.clear();
+    }
+    uint32_t endOfSteps = steps.end;
+    uint32_t endOfEdgeMoves = steps.endOfEdgeMoves;
+    std::span<const GPRReg> registersPoppedAtTeardown;
+    if (frame.isTornDownAtEnd) {
+        if (steps.beginOfEdgeMoves < steps.endOfEdgeMoves)
+            registersPoppedAtTeardown = findRegistersThatTeardownPops(steps.beginOfEdgeMoves, steps.endOfEdgeMoves, endOfEdgeMoves);
+        else
+            registersPoppedAtTeardown = findRegistersThatTeardownPops(beginOfSteps, steps.end, endOfSteps);
+    }
+    if (beginOfSteps < endOfSteps)
+        encodeSteps(beginOfSteps, endOfSteps);
+    if (steps.beginOfEdgeMoves < endOfEdgeMoves)
+        encodeSteps(steps.beginOfEdgeMoves, endOfEdgeMoves);
 
     RELEASE_ASSERT(steps.terminator != UINT32_MAX);
     WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
@@ -647,7 +913,7 @@ ALWAYS_INLINE void Encoder::encodeBlockUnder(Block* block)
     if (frame.isTornDownAtEnd) {
         RELEASE_ASSERT(terminator.operation->isUnconditionalJump());
         ASSERT(m_frameIsSetUp);
-        leaveFrameIfSetUp();
+        leaveFrameIfSetUp(registersPoppedAtTeardown);
     }
 
     noteOrigin(terminator.operation->origin(), terminator.operation->index());
@@ -657,11 +923,15 @@ ALWAYS_INLINE void Encoder::encodeBlockUnder(Block* block)
         m_jit.ret();
         return;
     }
-    if (isTerminal(terminator.operation->opcode())) [[likely]] {
+    if (isTerminal(terminator.operation->opcode())) [[likely]]
         encodeTerminatorInline(block, terminator);
-        return;
+    else
+        encodeExecute(terminator);
+    if (isX86_64() && m_mayEndLoop) [[unlikely]] {
+        m_mayEndLoop = false;
+        if (place.loop != noLoop && place.layoutPart == LayoutPart::Likely)
+            noteShortLoopsEndingWith(block);
     }
-    encodeExecute(terminator);
 }
 
 template<FrameCoverage coverage>
@@ -701,39 +971,71 @@ void Encoder::encodeBlocksUnder()
     m_isAmongOtherCode = false;
 }
 
-static NEVER_INLINE PatchOperation* findCalleeThatDoesMoveOutOfResultItself(const Step* move, const Step* end)
+static NEVER_INLINE PatchOperation* findCalleeThatDoesMoveOutOfResultItself(const Step* move, const Step* end, const Step* steps, const BlockSteps& stepsOfBlock, const Step*& moveIntoResult)
 {
+    const Step* const endOfRangeOfMove = end;
+    const Step* intoResult = nullptr;
     const Reg result = Reg(GPRInfo::returnValueGPR);
     if (move->width != Width64 || !move->destination.isRegister())
         return nullptr;
     const Reg filled = move->destination.reg();
+    RELEASE_ASSERT(stepsOfBlock.terminator != UINT32_MAX);
     WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
-    for (const Step* next = move + 1; next < end; ++next) {
+    const Step* const endOfBlock = steps + stepsOfBlock.end;
+    const Step* const endOfEdgeMoves = steps + stepsOfBlock.endOfEdgeMoves;
+    const Step* const terminator = steps + stepsOfBlock.terminator;
+    for (const Step* next = move + 1;; ++next) {
+        if (next == end) {
+            if (end == endOfBlock && stepsOfBlock.beginOfEdgeMoves < stepsOfBlock.endOfEdgeMoves) {
+                next = steps + stepsOfBlock.beginOfEdgeMoves;
+                end = endOfEdgeMoves;
+            } else if (end == endOfBlock || end == endOfEdgeMoves) {
+                next = terminator;
+                end = terminator + 1;
+            } else
+                return nullptr;
+        }
         switch (next->kind) {
         case StepKind::Move:
             if (!next->sources[0].isRegister() || next->sources[0].reg() == filled)
                 return nullptr;
+            if (intoResult && next->sources[0].reg() == result)
+                return nullptr;
+            if (!intoResult && end == endOfRangeOfMove && next->width == Width64 && next->destination == Location::reg(result) && next->sources[0].reg() != result) {
+                intoResult = next;
+                continue;
+            }
             [[fallthrough]];
         case StepKind::Reload:
         case StepKind::Materialize:
             if (!next->destination.isRegister() || next->destination.reg() == filled || next->destination.reg() == result)
+                return nullptr;
+            if (intoResult && next->destination.reg() == intoResult->sources[0].reg())
                 return nullptr;
             continue;
         case StepKind::Execute: {
             if (next->operation->opcode() != Patch)
                 return nullptr;
             auto* patch = static_cast<PatchOperation*>(next->operation);
-            return patch->registerThatCalleeFillsOutOfResult() == filled ? patch : nullptr;
+            if (patch->registerThatCalleeFillsOutOfResult() != filled)
+                return nullptr;
+            if (patch->registerThatCalleeMovesIntoResult() != (intoResult ? intoResult->sources[0].reg() : Reg()))
+                return nullptr;
+            moveIntoResult = intoResult;
+            return patch;
         }
         case StepKind::Save:
+            if (!next->sources[0].isRegister() || next->sources[0].reg() == filled)
+                return nullptr;
+            if (intoResult && next->sources[0].reg() == result)
+                return nullptr;
+            continue;
         case StepKind::Swap:
-        case StepKind::ClearSpill:
         case StepKind::KeepPointer:
             return nullptr;
         }
     }
     WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
-    return nullptr;
 }
 
 void Encoder::encodeSteps(uint32_t begin, uint32_t end)
@@ -744,6 +1046,7 @@ void Encoder::encodeSteps(uint32_t begin, uint32_t end)
 
     WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
     const Step* const endOfSteps = m_steps + end;
+    const Step* moveIntoResultLeftToCallee = nullptr;
     for (const Step* current = m_steps + begin; current < endOfSteps; ++current) {
         const Step& step = *current;
         if (m_notesRangesOfOrigins) [[unlikely]] {
@@ -781,8 +1084,10 @@ void Encoder::encodeSteps(uint32_t begin, uint32_t end)
             continue;
         }
         case StepKind::Move:
+            if (current == moveIntoResultLeftToCallee)
+                continue;
             if (step.sources[0] == Location::reg(Reg(GPRInfo::returnValueGPR))) {
-                if (PatchOperation* callee = findCalleeThatDoesMoveOutOfResultItself(current, endOfSteps)) {
+                if (PatchOperation* callee = findCalleeThatDoesMoveOutOfResultItself(current, endOfSteps, m_steps, stepsOf(m_block), moveIntoResultLeftToCallee)) {
                     callee->setLeavesMoveOutOfResultToCallee(true);
                     continue;
                 }
@@ -809,9 +1114,6 @@ void Encoder::encodeSteps(uint32_t begin, uint32_t end)
         case StepKind::Swap:
             encodeSwap(step);
             continue;
-        case StepKind::ClearSpill:
-            encodeClearSpill(step);
-            continue;
         case StepKind::KeepPointer:
             encodeKeepPointer(step);
             continue;
@@ -826,7 +1128,7 @@ void Encoder::encodeExecute(const Step& step)
     encodeExecuteInline(step);
 }
 
-ALWAYS_INLINE void Encoder::encodeExecuteInline(const Step& step)
+ALWAYS_INLINE_INTO_OTHER_FILES void Encoder::encodeExecuteInline(const Step& step)
 {
     ASSERT(step.kind == StepKind::Execute);
     Operation* operation = step.operation;
@@ -869,6 +1171,7 @@ ALWAYS_INLINE void Encoder::encodeExecuteInline(const Step& step)
     case Shl:
     case SShr:
     case ZShr:
+    case RotR:
     case Clz:
     case PopCount:
     case SExt8:
@@ -964,19 +1267,154 @@ ALWAYS_INLINE void Encoder::encodeExecuteInline(const Step& step)
     RELEASE_ASSERT_NOT_REACHED();
 }
 
+void Encoder::reportDeadSlotRead() const
+{
+    std::span<const SpillFacts> spills = m_allocation.spills();
+    const Operation* valueOfSlot = nullptr;
+    auto look = [&](Location location) {
+        if (!valueOfSlot && location.isSpill() && spills[location.spillIndex()].isDeadSlot)
+            valueOfSlot = spills[location.spillIndex()].value;
+    };
+    for (const Step& step : m_allocation.steps()) {
+        for (Location source : step.sources)
+            look(source);
+        if (step.patchAssignment == UINT32_MAX)
+            continue;
+        std::span<const Location> locations = m_allocation.patchAssignment(step.patchAssignment).locations;
+        for (Location operand : locations.subspan(std::min<size_t>(m_proc.resultCount(step.operation->type()), locations.size())))
+            look(operand);
+    }
+    for (const SpillFacts& spill : spills) {
+        if (!valueOfSlot && spill.isDeadSlot)
+            valueOfSlot = spill.value;
+    }
+    m_proc.fail(FailureKind::WrongValueInSpillSlot, valueOfSlot);
+}
+
+MacroAssembler::Address Encoder::addressOffBaseOfFarWords(MacroAssembler::Address address, Width width)
+{
+    static constexpr int32_t endOfBases = 1 << 24;
+    static constexpr int32_t endOfReach = 1 << 12;
+    const int32_t bytes = static_cast<int32_t>(bytesForWidth(width));
+    auto isWithinReach = [&](int32_t offset) {
+        return offset >= 0 && offset / bytes < endOfReach;
+    };
+    if (m_coverage != FrameCoverage::WholeFunction || !m_frameIsSetUp || address.base != MacroAssembler::stackPointerRegister || address.offset < 0 || address.offset >= endOfBases || address.offset % bytes || isWithinReach(address.offset))
+        return address;
+    GPRReg base = m_allocation.baseOfFarWords().gpr();
+    if (m_offsetOfBaseOfFarWords == noBaseOfFarWords || !isWithinReach(address.offset - m_offsetOfBaseOfFarWords)) {
+        if (!m_blockMovesBaseOfFarWords)
+            return address;
+        const int32_t bytesBetweenBases = std::min(bytes, static_cast<int32_t>(sizeof(CPURegister))) * endOfReach;
+        m_offsetOfBaseOfFarWords = address.offset & ~(bytesBetweenBases - 1);
+        m_jit.add64(CCallHelpers::TrustedImm32(m_offsetOfBaseOfFarWords), MacroAssembler::stackPointerRegister, base);
+    }
+    return MacroAssembler::Address(base, address.offset - m_offsetOfBaseOfFarWords);
+}
+
+bool Encoder::liesOutOfReach(SpillIndex spill) const
+{
+    static constexpr int32_t endOfReach = 1 << 12;
+    MacroAssembler::Address address = m_frame.addressInFrame(m_frame.taggedOffsetOf(spill) & ~Frame::deadSlotTag);
+    return address.offset / static_cast<int32_t>(bytesForWidth(m_allocation.spills()[spill].width)) >= endOfReach;
+}
+
+bool Encoder::accessesWordsOutOfReach(uint32_t beginOfSteps, uint32_t endOfSteps) const
+{
+    for (uint32_t index = beginOfSteps; index < endOfSteps; ++index) {
+        const Step& step = m_allocation.step(index);
+        SpillIndex spill = noSpill;
+        if (step.kind == StepKind::Save && step.destination.isSpill())
+            spill = step.destination.spillIndex();
+        else if (step.kind == StepKind::Reload && step.sources[0].isSpill())
+            spill = step.sources[0].spillIndex();
+        else if (step.kind == StepKind::Execute)
+            spill = m_allocation.spillOf(step.operation);
+        if (spill != noSpill && liesOutOfReach(spill))
+            return true;
+    }
+    return false;
+}
+
+void Encoder::findRareRegionsThatKeepBaseOfFarWords()
+{
+    m_basesOfFarWordsAtEnds.fill(m_arena, m_proc.numberOfBlocks(), noBaseOfFarWords);
+    m_rareRegionKeepsBaseOfFarWords.fill(m_arena, m_order.rareRegions().size(), true);
+    for (const Block* block : m_order.blocksInOrder()) {
+        const BlockPlace& place = placeOf(block);
+        if (!place.isRare())
+            continue;
+        const BlockSteps& steps = stepsOf(block);
+        bool& keeps = m_rareRegionKeepsBaseOfFarWords[place.rareRegion];
+        keeps = keeps && m_order.rareRegions()[place.rareRegion].onlyEntry && !block->isLandingPad() && std::ranges::none_of(block->operations(), [&](const Operation* operation) {
+            const PatchOperation* patch = operation->as<PatchOperation>();
+            return patch && writesBaseOfFarWords(patch);
+        }) && !accessesWordsOutOfReach(steps.begin, steps.end) && !accessesWordsOutOfReach(steps.beginOfEdgeMoves, steps.endOfEdgeMoves);
+    }
+}
+
+int32_t Encoder::baseOfFarWordsThatEnters(const BlockPlace& place, uint32_t rareRegion) const
+{
+    std::optional<int32_t> entering;
+    for (const Block* predecessor : place.predecessors) {
+        const BlockPlace& from = placeOf(predecessor);
+        if (rareRegion != noRareRegion && from.rareRegion == rareRegion)
+            continue;
+        int32_t base = m_basesOfFarWordsAtEnds[predecessor->index()];
+        if (from.isRare() && m_rareRegionKeepsBaseOfFarWords[from.rareRegion])
+            base = rareRegion == noRareRegion ? baseOfFarWordsThatEnters(placeOf(m_order.rareRegions()[from.rareRegion].onlyEntry), from.rareRegion) : noBaseOfFarWords;
+        if (base == noBaseOfFarWords || (entering && *entering != base))
+            return noBaseOfFarWords;
+        entering = base;
+    }
+    return entering.value_or(noBaseOfFarWords);
+}
+
+void Encoder::settleBaseOfFarWordsAtHead(const Block* block, const BlockPlace& place)
+{
+    if (m_basesOfFarWordsAtEnds.isEmpty())
+        findRareRegionsThatKeepBaseOfFarWords();
+    if (const Block* encodedLast = std::exchange(m_blockEncodedLast, block))
+        m_basesOfFarWordsAtEnds[encodedLast->index()] = m_offsetOfBaseOfFarWords;
+    auto leavesBaseAsIs = [&](const BlockPlace& placeOfBlock) {
+        return placeOfBlock.isRare() && m_rareRegionKeepsBaseOfFarWords[placeOfBlock.rareRegion];
+    };
+    std::span<Block* const> layout = m_order.blocksInLayout();
+    for (; m_numberOfBlocksPassedByBaseOfFarWords < place.layoutIndex; ++m_numberOfBlocksPassedByBaseOfFarWords) {
+        const Block* passed = layout[m_numberOfBlocksPassedByBaseOfFarWords];
+        const BlockPlace& placeOfPassed = placeOf(passed);
+        if (!hasCode(passed) && !passed->isLandingPad() && !leavesBaseAsIs(placeOfPassed))
+            m_basesOfFarWordsAtEnds[passed->index()] = baseOfFarWordsThatEnters(placeOfPassed, noRareRegion);
+    }
+    m_blockMovesBaseOfFarWords = !leavesBaseAsIs(place);
+    if (block->isLandingPad())
+        m_offsetOfBaseOfFarWords = noBaseOfFarWords;
+    else if (m_blockMovesBaseOfFarWords)
+        m_offsetOfBaseOfFarWords = baseOfFarWordsThatEnters(place, noRareRegion);
+    else
+        m_offsetOfBaseOfFarWords = baseOfFarWordsThatEnters(placeOf(m_order.rareRegions()[place.rareRegion].onlyEntry), place.rareRegion);
+}
+
+bool Encoder::writesBaseOfFarWords(const PatchOperation* patch) const
+{
+    return (patch->earlyClobberedMask() | patch->lateClobberedMask()) & maskOf(m_allocation.baseOfFarWords());
+}
+
 void Encoder::storeToSpill(const Operation* value)
 {
     SpillIndex spill = m_allocation.spillOf(value);
     ASSERT(spill != noSpill);
     Reg source = m_allocation.registerAtDefinitionOf(value);
-    if (!source || m_allocation.spills()[spill].isStoredAtHeadOfFramedPart || m_allocation.isWrittenByEdges(value) || setupHasPushed(spill))
+    if (!source || m_allocation.spills()[spill].isStoredAtHeadOfFramedPart || m_allocation.spills()[spill].isDeadSlot || m_allocation.isWrittenByEdges(value))
+        return;
+    if (setupHasPushed(spill) && m_allocation.spills()[spill].value == value)
         return;
 
     RELEASE_ASSERT(m_frameIsSetUp);
     ASSERT(m_allocation.spills()[spill].width == widthOf(value->type()));
     noteOrigin(originOfFrameOrStore(*this, CodeOfBackEnd::StoreBehindDefinition));
-    MacroAssembler::Address address = addressOf(Location::spill(spill));
     AllowMacroScratchRegisterUsage allowScratch(m_jit);
+    MacroAssembler::Address address = addressWithinReach(addressOf(Location::spill(spill), MemoryOfEncodedMove::IsWritten), widthOf(value->type()));
     switch (value->type().kind()) {
     case Int32:
         m_jit.store32(source.gpr(), address);
@@ -990,6 +1428,9 @@ void Encoder::storeToSpill(const Operation* value)
     case Double:
         m_jit.storeDouble(source.fpr(), address);
         return;
+    case Vector128:
+        m_jit.storeVector(source.fpr(), address);
+        return;
     case Void:
     case Tuple:
         break;
@@ -997,7 +1438,7 @@ void Encoder::storeToSpill(const Operation* value)
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-void Encoder::storeSpilledValuesDefinedAtHead(Block* block, const BlockPlace& place)
+ALWAYS_INLINE_INTO_OTHER_FILES void Encoder::storeSpilledValuesDefinedAtHead(Block* block, const BlockPlace& place)
 {
     for (Operation* phi : block->phis()) {
         if (m_allocation.isSpilled(phi) && !m_liveness.isDropped(phi))
@@ -1014,7 +1455,7 @@ void Encoder::storeSpilledValuesDefinedAtHead(Block* block, const BlockPlace& pl
     storeToSpill(last);
 }
 
-void Encoder::setUpFrame(const Block* block)
+ALWAYS_INLINE_INTO_OTHER_FILES void Encoder::setUpFrame(const Block* block)
 {
     AllowMacroScratchRegisterUsage allowScratch(m_jit);
     noteOrigin(originOfFrameOrStore(*this, CodeOfBackEnd::FrameSetup));
@@ -1023,7 +1464,7 @@ void Encoder::setUpFrame(const Block* block)
     noteFrameState(true);
 }
 
-void Encoder::leaveFrameIfSetUp()
+void Encoder::leaveFrameIfSetUp(std::span<const GPRReg> registersPoppedOutOfWords)
 {
     if (!m_frameIsSetUp)
         return;
@@ -1033,11 +1474,14 @@ void Encoder::leaveFrameIfSetUp()
     Origin originOfUser = m_origin;
     uint32_t operationOfUser = m_operationOfOrigin;
     noteOrigin(originOfFrameOrStore(*this, CodeOfBackEnd::FrameTeardown));
-    emitFrameTeardown(m_jit, m_frame);
+    if (registersPoppedOutOfWords.empty())
+        emitFrameTeardown(m_jit, m_frame);
+    else
+        emitTeardownOfFrameThatPopsWords(m_jit, m_frame, registersPoppedOutOfWords);
     noteOrigin(originOfUser, operationOfUser);
 }
 
-void Encoder::startOrEndFrameRange(bool isSetUp)
+ALWAYS_INLINE_INTO_OTHER_FILES void Encoder::startOrEndFrameRange(bool isSetUp)
 {
     ASSERT(m_frameRangeIsOpen != isSetUp);
     m_frameRangeIsOpen = isSetUp;
@@ -1057,10 +1501,8 @@ void Encoder::noteOriginInRanges(Origin origin, uint32_t operation)
     ArenaVector<RangeOfOrigin>& ranges = m_proc.m_rangesOfOrigins;
     if (!ranges.isEmpty() && ranges.last().origin == origin && ranges.last().operation == operation && !isOriginOfBackEnd(origin))
         return;
-    MacroAssembler::Label here = m_jit.labelIgnoringWatchpoints();
-    if (!ranges.isEmpty())
-        ranges.last().end = here;
-    ranges.append(m_arena, RangeOfOrigin { here, MacroAssembler::Label(), origin, operation });
+    ranges.append(m_arena, RangeOfOrigin { MacroAssembler::Label(), MacroAssembler::Label(), origin, operation });
+    m_beginsOfRangesOfOrigins.append(m_arena, m_jit.m_assembler.buffer().placeToDescribe());
 }
 
 bool Encoder::blockRunsInFrame(const Block* block) const

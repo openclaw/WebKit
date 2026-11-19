@@ -12,17 +12,25 @@
 #include "AOTBuiltinTableBindings.h"
 #include "AOTCellFormat.h"
 #include "AOTModuleEmitter.h"
+#include "AOTRelocation.h"
 #include "AOTStubCatalog.h"
 #include "AOTStubsArithmetic.h"
 #include "AOTRepresentationRules.h"
 #include "AOTSlotPlan.h"
 #include "AOTStubsOperations.h"
+#include "AOTGenerator.h"
+#include "AOTSavedFrame.h"
 #include "AOTStubsValues.h"
 #include "AOTThrowEmitter.h"
 #include "AllowMacroScratchRegisterUsage.h"
 #include "JSCJSValueInlines.h"
 
 namespace JSC { namespace AOT { namespace Typed {
+
+static constexpr ptrdiff_t offsetOfGeneratorFrameWord(uint32_t word)
+{
+    return SavedFrame::offsetOfWords() + static_cast<ptrdiff_t>(word * sizeof(EncodedJSValue));
+}
 
 static constexpr TerminatorKindSet terminatorsWithStraightForm { TerminatorKind::Jump, TerminatorKind::Branch, TerminatorKind::Switch, TerminatorKind::Return, TerminatorKind::Throw, TerminatorKind::Rethrow, TerminatorKind::Unreachable };
 
@@ -34,6 +42,7 @@ static bool crossesEntryOfStraightUnit(Representation representation)
     case Representation::JSValue:
     case Representation::Cell:
     case Representation::Int32:
+    case Representation::Int64:
     case Representation::Boolean:
     case Representation::Double:
         return true;
@@ -49,8 +58,14 @@ const OpcodeSet& StraightEmitter::opcodesWithStraightForm()
     return opcodes;
 }
 
+bool StraightEmitter::isResumeBody(const CodeGenerationInputs& inputs, CodeUnit unit)
+{
+    return unit.role == CodeRole::SlowBody && inputs.plan.conventions().isCoroutine(unit.function);
+}
+
 bool StraightEmitter::covers(const CodeGenerationInputs& inputs, CodeUnit unit, const BodyIndex& index)
 {
+    bool isResumeBodyUnit = isResumeBody(inputs, unit);
     std::span<const BlockID> blocksNeverEntered = inputs.facts.summaries().at(unit.function).blocksNeverEntered.span();
     OpcodeSet opcodes = index.opcodes();
     if (!blocksNeverEntered.empty()) {
@@ -63,7 +78,7 @@ bool StraightEmitter::covers(const CodeGenerationInputs& inputs, CodeUnit unit, 
         });
     }
     OpcodeSet covered = opcodes;
-    covered &= opcodesWithStraightForm();
+    covered &= isResumeBodyUnit ? opcodesWithStraightForm() | OpcodeSet { Opcode::InitialYield, Opcode::Yield } : opcodesWithStraightForm();
     if (!(covered == opcodes))
         return false;
     if (opcodes.contains(Opcode::NewClosure) && inputs.facts.linked().capturesWhatItOnlyCalls(unit.function))
@@ -76,7 +91,7 @@ bool StraightEmitter::covers(const CodeGenerationInputs& inputs, CodeUnit unit, 
     const CallingConventions& conventions = inputs.plan.conventions();
     if (conventions.entryConventionOf(unit) != EntryConvention::Direct || conventions.numberOfResults(unit) != 1 || conventions.savesRegistersOfCallers(unit))
         return false;
-    if (conventions.isCoroutine(unit.function))
+    if (conventions.isCoroutine(unit.function) && !isResumeBodyUnit)
         return false;
     if (inputs.plan.moduleEvaluation().moduleThatBeginsIn(unit.function))
         return false;
@@ -84,7 +99,7 @@ bool StraightEmitter::covers(const CodeGenerationInputs& inputs, CodeUnit unit, 
         return false;
 
     BodyBlock entry = index.block(entryBlock);
-    for (uint32_t parameter = 0; parameter < entry.numberOfParameters(); ++parameter) {
+    for (uint32_t parameter = 0; parameter < entry.numberOfParameters() && !isResumeBodyUnit; ++parameter) {
         Representation representation = conventions.parameterRepresentation(inputs.program, unit, parameter);
         if (!crossesEntryOfStraightUnit(representation) && !index.isUnused(entry.parameter(parameter)))
             return false;
@@ -101,7 +116,7 @@ bool StraightEmitter::covers(const CodeGenerationInputs& inputs, CodeUnit unit, 
                 isCovered = false;
         }
         TerminatorKind kind = block.terminator().kind();
-        if (kind == TerminatorKind::ReturnCall && unit.role == CodeRole::Body && conventions.resultRepresentation(unit) != Representation::JSValue)
+        if (kind == TerminatorKind::ReturnCall && (isResumeBodyUnit || (unit.role == CodeRole::Body && conventions.resultRepresentation(unit) != Representation::JSValue)))
             isCovered = false;
         isCovered = isCovered && (terminatorsWithStraightForm.contains(kind) || (kind == TerminatorKind::ReturnCall && coversReturnCalls()) || (kind == TerminatorKind::SwitchString && coversSwitchesOnStrings()));
     });
@@ -119,7 +134,34 @@ StraightEmitter::StraightEmitter(BuildContext& build, TypeArena& types, const Co
     , m_blocksNeverEntered(inputs.facts.summaries().at(unit.function).blocksNeverEntered.span())
 {
     findValuesNobodyReads();
+    if (isResumeBody(inputs, unit)) {
+        m_generatorFrame.emplace(index);
+        findResumableBlocks();
+    }
     measureFrame();
+}
+
+void StraightEmitter::findResumableBlocks()
+{
+    Vector<BlockID, 16> worklist;
+    auto visit = [&](BlockID block) {
+        if (!m_blocksAfterYields.quickSet(block.index()))
+            worklist.append(block);
+    };
+    auto visitTargetsOf = [&](BodyBlock block) {
+        for (BodyTarget target : block.terminator().targets())
+            visit(target.block());
+        if (block.hasHandler())
+            visit(block.handler().block());
+    };
+    m_blocksAfterYields.ensureSize(m_index.numberOfBlocks());
+    m_yieldBlocks.ensureSize(m_index.numberOfBlocks());
+    for (const GeneratorFrameLayout::Suspension& suspension : m_generatorFrame->suspensions) {
+        m_yieldBlocks.quickSet(suspension.block.index());
+        visitTargetsOf(m_index.block(suspension.block));
+    }
+    while (!worklist.isEmpty())
+        visitTargetsOf(m_index.block(worklist.takeLast()));
 }
 
 const CallingConventions& StraightEmitter::conventions() const
@@ -129,7 +171,7 @@ const CallingConventions& StraightEmitter::conventions() const
 
 void StraightEmitter::findValuesNobodyReads()
 {
-    static constexpr OpcodeSet operationsThatOnlyMakeValues = inputOperationsThatOnlyHandOn | opcodesWithoutCodeOfTheirOwn
+    static constexpr OpcodeSet operationsThatOnlyMakeValues = inputIdentityOpcodes | opcodesWithoutCodeOfTheirOwn
         | OpcodeSet { Opcode::String, Opcode::BigInt, Opcode::Data, Opcode::NewClosure, Opcode::GetModuleVariable, Opcode::TypeTest };
     uint32_t numberOfValues = m_index.numberOfValues();
     Vector<uint32_t, 128> readsLeft;
@@ -157,6 +199,13 @@ void StraightEmitter::findValuesNobodyReads()
             uint32_t callee = m_index.value(id).calleeOperand().index();
             if (readsLeft[callee] && readsLeft[callee] < BodyIndex::maxCountedUses)
                 --readsLeft[callee];
+            continue;
+        }
+        if (!m_index.isParameter(id) && m_index.opcodeOf(id) == Opcode::DefineMethod && classRecordCreatesMemberDefinedBy(m_index.value(id))) {
+            countReads();
+            uint32_t function = m_index.value(id).as<Opcode::DefineMethod>().functionOperand().index();
+            if (readsLeft[function] && readsLeft[function] < BodyIndex::maxCountedUses)
+                --readsLeft[function];
             continue;
         }
         if (m_index.isParameter(id) || !(operationsThatOnlyMakeValues.contains(m_index.opcodeOf(id)) || (place < checksThatPass.size() && checksThatPass.quickGet(place))))
@@ -187,22 +236,36 @@ void StraightEmitter::measureFrame()
         for (uint32_t index = 0; index < block.numberOfParameters(); ++index)
             lasting += !m_index.isUnused(block.parameter(index));
         uint32_t passing = 0;
+        BodyTerminator terminator = block.terminator();
+        ValueID returnedCall = terminator.kind() == TerminatorKind::ReturnCall ? terminator.callOperand() : ValueID();
+        auto takesWord = [&](ValueID id) {
+            return !m_index.isUnused(id) && !isReadByNobody(id) && !opcodesWithoutCodeOfTheirOwn.contains(m_index.opcodeOf(id));
+        };
         for (BodyValue value : block.values()) {
             Opcode opcode = value.opcode();
-            longestList = std::max(longestList, value.variadicOperands().size());
+            if (opcode != Opcode::NewObject)
+                longestList = std::max(longestList, value.variadicOperands().size());
             m_entersUnits = m_entersUnits || opcodesThatEnterUnits.contains(opcode);
-            if (m_index.isUnused(value.id()) || isReadByNobody(value.id()) || opcodesWithoutCodeOfTheirOwn.contains(opcode))
+            if (takesWord(value.id())) {
+                std::optional<BodyUser> user = m_index.onlyUser(value.id());
+                bool isReadOnceInBlock = user && (user->kind == BodyUseKind::Operand ? block.holds(user->value) : user->kind == BodyUseKind::TerminatorOperand && user->block == block.id());
+                if (!isReadOnceInBlock)
+                    ++lasting;
+                else
+                    mostPassing = std::max(mostPassing, ++passing);
+            }
+            if (value.id() == returnedCall)
                 continue;
-            std::optional<BodyUser> user = m_index.onlyUser(value.id());
-            bool isReadOnceInBlock = user && (user->kind == BodyUseKind::Operand ? block.holds(user->value) : user->kind == BodyUseKind::TerminatorOperand && user->block == block.id());
-            if (!isReadOnceInBlock)
-                ++lasting;
-            else if (!inputOperationsThatHandOn.contains(opcode))
-                ++passing;
+            bool keepsWordOfWhatItHandsOn = inputPassThroughOpcodes.contains(opcode) && !takesWord(value.id());
+            value.forEachOperand([&](ValueID operand, uint32_t) {
+                if (!operand || m_index.isParameter(operand) || !block.holds(operand) || !m_index.hasOneUse(operand) || !takesWord(operand))
+                    return;
+                --passing;
+                lasting += keepsWordOfWhatItHandsOn;
+            });
         }
-        mostPassing = std::max(mostPassing, passing);
     });
-    m_numberOfSlots = lasting + mostPassing;
+    m_numberOfSlots = lasting + mostPassing + (m_generatorFrame ? numberOfGeneratorSlots + static_cast<uint32_t>(m_generatorFrame->values.size()) : 0);
     m_wordsOfScratchArea = static_cast<uint32_t>((longestList + 5) & ~static_cast<size_t>(1));
     if (m_numberOfSlots + m_wordsOfScratchArea > mostWordsOfFrame) {
         fail(Opcode::Undefined);
@@ -355,12 +418,12 @@ bool StraightEmitter::isReadByNextCodeAlone(const BodyValue& value) const
             return false;
         for (uint32_t between = value.id().index() + 1; between < reader; ++between) {
             Opcode opcode = m_index.opcodeOf(ValueID(between));
-            if (!inputOperationsThatOnlyHandOn.contains(opcode) && !opcodesWithoutCodeOfTheirOwn.contains(opcode))
+            if (!inputIdentityOpcodes.contains(opcode) && !opcodesWithoutCodeOfTheirOwn.contains(opcode))
                 return false;
         }
         if (reader == end)
             return true;
-        if (!inputOperationsThatOnlyHandOn.contains(m_index.opcodeOf(user->value)))
+        if (!inputIdentityOpcodes.contains(m_index.opcodeOf(user->value)))
             return true;
         id = user->value;
     }
@@ -433,6 +496,15 @@ bool StraightEmitter::leavesArgumentsToThunk(StubKey key, const StraightCallOpti
     return !(options.numberedImmediate && descriptorOf(key.family()).binding == ImmediateBinding::InThunk);
 }
 
+NEVER_INLINE void StraightEmitter::storeValueReadBySeveralArguments(std::span<const StraightArgument> arguments)
+{
+    auto waits = [&](const StraightArgument& argument) {
+        return argument.kind == StraightArgument::Kind::Value && waitsInRegister(argument.value);
+    };
+    if (std::ranges::count_if(arguments, waits) > 1)
+        storeWhatWaitsInRegister();
+}
+
 void StraightEmitter::bringAll(std::span<const StraightArgument> arguments, NOESCAPE const Invocable<GPRReg(size_t)> auto& registerOf, ArgumentMoves* leftToThunk)
 {
     auto goesIntoThunk = [&](const StraightArgument& argument) {
@@ -452,6 +524,9 @@ void StraightEmitter::bringAll(std::span<const StraightArgument> arguments, NOES
         }
         RELEASE_ASSERT_NOT_REACHED();
     };
+
+    if (m_generatorFrame && m_valueInRegister)
+        storeValueReadBySeveralArguments(arguments);
 
     size_t broughtFirst = arguments.size();
     for (size_t i = 0; i < arguments.size() && m_valueInRegister; ++i) {
@@ -559,6 +634,8 @@ void StraightEmitter::define(const BodyValue& value, GPRReg boxed)
         return;
     }
     storeWhatWaitsInRegister();
+    if (m_generatorFrame && m_valueTakenOutOfRegister == value.id())
+        m_valueTakenOutOfRegister = { };
     if (m_index.isUnused(value.id()))
         return;
     if (isResultRegister(boxed) && isReadByNextCodeAlone(value)) {
@@ -698,6 +775,10 @@ void StraightEmitter::boxInForm(Representation representation, GPRReg word)
             m_jit->or64(tag, word);
         });
         return;
+    case Representation::Int64:
+        m_jit->convertInt64ToDouble(word, conversionFPR);
+        boxDouble(conversionFPR, word);
+        return;
     case Representation::Boolean:
         m_jit->or32(CCallHelpers::TrustedImm32(JSValue::ValueFalse), word);
         return;
@@ -719,6 +800,16 @@ void StraightEmitter::unboxIntoForm(Representation representation, GPRReg word)
         m_jit->truncateDoubleToInt32(conversionFPR, word);
         isInt32.link(m_jit);
         m_jit->zeroExtend32ToWord(word, word);
+        return;
+    }
+    case Representation::Int64: {
+        CCallHelpers::Jump isInt32 = m_jit->branchIfInt32(word);
+        m_jit->unboxDoubleWithoutAssertions(word, word, conversionFPR);
+        m_jit->truncateDoubleToInt64(conversionFPR, word);
+        CCallHelpers::Jump done = m_jit->jump();
+        isInt32.link(m_jit);
+        m_jit->signExtend32ToPtr(word, word);
+        done.link(m_jit);
         return;
     }
     case Representation::Boolean:
@@ -881,7 +972,7 @@ void StraightEmitter::emitCallInstruction(StubKey key, const StubSignature& sign
         m_records.traps.callThrowSites.append(CallThrowSite { returnSite, WTF::move(words), wordsThatAreMentions });
     }
     if (options.neverReturns)
-        m_jit->breakpoint();
+        emitUnreachable(*m_jit);
 }
 
 void StraightEmitter::callStub(const BodyValue& value, StubKey key, std::initializer_list<StraightArgument> arguments, const StraightCallOptions& options)
@@ -1024,7 +1115,8 @@ void StraightEmitter::takeParameters(const ArgumentLocations& locations)
             case ArgumentLocation::Kind::None:
                 break;
             case ArgumentLocation::Kind::GPR:
-                boxInForm(location.representation, location.reg.gpr());
+                if (location.representation != Representation::Int64)
+                    boxInForm(location.representation, location.reg.gpr());
                 m_jit->store64(location.reg.gpr(), addressOfSlot(parameter));
                 break;
             case ArgumentLocation::Kind::FPR:
@@ -1056,7 +1148,7 @@ void StraightEmitter::takeParameters(const ArgumentLocations& locations)
         if (!declared.environment)
             continue;
         const PlannedLayout& planned = m_inputs.plan.layout(declared.environment);
-        if (!planned.cellsAreHandedBack || planned.liesOnlyInFrames)
+        if (!planned.cellsAreHandedBack)
             continue;
         GPRReg environment = takeResultRegister();
         m_jit->load64(addressOfSlot(parameter), environment);
@@ -1069,14 +1161,218 @@ void StraightEmitter::takeParameters(const ArgumentLocations& locations)
             isNoCell.link(m_jit);
     }
     for (uint32_t index = 0; index < entry.numberOfParameters(); ++index) {
+        const ArgumentLocation& location = locations.parameters[index];
         ValueID parameter = entry.parameter(index);
-        if (locations.parameters[index].kind != ArgumentLocation::Kind::FPR || m_index.isUnused(parameter))
+        bool isInt64 = location.kind == ArgumentLocation::Kind::GPR && location.representation == Representation::Int64;
+        if ((location.kind != ArgumentLocation::Kind::FPR && !isInt64) || m_index.isUnused(parameter))
             continue;
         GPRReg result = takeResultRegister();
+        if (isInt64) {
+            m_jit->load64(addressOfSlot(parameter), result);
+            boxInForm(Representation::Int64, result);
+            m_jit->store64(result, addressOfSlot(parameter));
+            continue;
+        }
         FPRReg number = takeResultFPR();
         m_jit->loadDouble(addressOfSlot(parameter), number);
         boxDouble(number, result);
         m_jit->store64(result, addressOfSlot(parameter));
+    }
+}
+
+void StraightEmitter::emitResumeDispatch(const ArgumentLocations& locations)
+{
+    static_assert(SavedFrame::generatorWord == GeneratorFrameLayout::generatorWord);
+    RELEASE_ASSERT(locations.parameters.size() == 3);
+    m_numberOfSlotsTaken = numberOfGeneratorSlots;
+    for (ValueID value : m_generatorFrame->values)
+        addressOfSlot(value);
+    GPRReg frame = locations.parameters[0].reg.gpr();
+    GPRReg mode = locations.parameters[1].reg.gpr();
+    GPRReg sent = locations.parameters[2].reg.gpr();
+    boxInForm(Representation::Int32, mode);
+    m_jit->store64(frame, addressOfGeneratorSlot(generatorFrameSlot));
+    m_jit->store64(sent, addressOfGeneratorSlot(sentValueSlot));
+    m_jit->store64(mode, addressOfGeneratorSlot(resumeModeSlot));
+    m_jit->load32(CCallHelpers::Address(frame, offsetOfGeneratorFrameWord(GeneratorFrameLayout::yieldWord)), frame);
+    uint32_t numberOfYields = static_cast<uint32_t>(m_generatorFrame->suspensions.size());
+    for (uint32_t number = 0; number < numberOfYields; ++number)
+        m_resumeJumps.append(m_jit->branch32(CCallHelpers::Equal, frame, CCallHelpers::TrustedImm32(static_cast<int32_t>(number))));
+    m_jit->breakpoint();
+}
+
+TypeID StraightEmitter::testableTypeOfCell(const LinkedCell& cell)
+{
+    if (!cell.everyWriterIsKnown || !cell.proven || !m_types.at(cell.proven).isJavaScriptValue() || m_types.at(cell.proven).isAnything())
+        return { };
+    TypeID tested = m_types.testablePartOf(cell.proven);
+    bool mentionsWhatIsOutOfReach = facts().testMentionsWhatIsOutOfReach(m_types, tested, scopedLambda<bool(FunctionID)>([&](FunctionID function) {
+        return facts().linked().mayBeMentionedBy(m_unit, function);
+    }));
+    if (mentionsWhatIsOutOfReach)
+        tested = m_types.unionOf(m_types.withoutObjects(tested), m_types.at(tested).hasOnlyClosures() ? TypeTable::function : TypeTable::object);
+    return tested;
+}
+
+void StraightEmitter::checkStoredValueProofs(const BodyValue& value)
+{
+    const LinkTables& linked = facts().linked();
+    auto hold = [&](ValueID stored, const LinkedCell& cell, ProofSource source) {
+        TypeID tested = stored && !m_hasFailed ? testableTypeOfCell(cell) : TypeID();
+        if (tested)
+            trapUnlessOfType(stored, m_types.withPrimitives(tested, Primitive::Absent), source, value.origin());
+    };
+    auto holdToField = [&](ValueID stored, LayoutID layout, uint32_t field) {
+        if (const LinkedCell* cell = linked.findCellOfField({ layout, field }))
+            hold(stored, *cell, ProofSource::SlotOfScope);
+    };
+    switch (value.opcode()) {
+    case Opcode::PutModuleVariable:
+        if (value.variable().index() < linked.variables.size() && !plan().runTimeMayFill(value.variable()))
+            hold(value.valueOperand(), linked.variable(value.variable()), ProofSource::Variable);
+        return;
+    case Opcode::PutEnvironmentField:
+        holdToField(value.valueOperand(), value.layout(), value.field());
+        return;
+    case Opcode::NewObject: {
+        auto allocation = value.as<Opcode::NewObject>();
+        if (!allocation.layout() || program().at(allocation.layout()).kind != LayoutKind::Environment)
+            return;
+        std::span<const ValueID> values = value.variadicOperands();
+        size_t place = 0;
+        for (uint32_t field : allocation.fields()) {
+            if (place < values.size())
+                holdToField(values[place], allocation.layout(), field);
+            ++place;
+        }
+        return;
+    }
+    case Opcode::NewClosure: {
+        FunctionID function = value.as<Opcode::NewClosure>().function();
+        uint32_t numberTyped = function.index() + 1 < linked.firstCaptureOfFunction.size() ? linked.firstCaptureOfFunction[function.index() + 1] - linked.firstCaptureOfFunction[function.index()] : 0;
+        uint32_t place = 0;
+        for (ValueID captured : value.as<Opcode::NewClosure>().capturesOperands()) {
+            if (place < numberTyped)
+                hold(captured, linked.capture(function, place), ProofSource::Capture);
+            ++place;
+        }
+        return;
+    }
+    case Opcode::TryReExportFields:
+        fail(value);
+        return;
+    default:
+        return;
+    }
+}
+
+void StraightEmitter::checkScopeReadProof(const BodyValue& read)
+{
+    std::span<const SummaryScopeStoredFirst> scopes = facts().summaries().at(function()).scopesStoredFirst.span();
+    if (scopes.empty() || m_index.isUnused(read.id()) || m_hasFailed)
+        return;
+    ValueID allocation = m_index.stripCasts(read.environmentOperand());
+    auto scope = std::ranges::lower_bound(scopes, allocation, { }, &SummaryScopeStoredFirst::allocation);
+    if (scope == scopes.end() || scope->allocation != allocation || !std::ranges::binary_search(scope->fields, read.field()))
+        return;
+    const LinkedCell* cell = facts().linked().findCellOfField({ read.layout(), read.field() });
+    if (TypeID tested = cell ? testableTypeOfCell(*cell) : TypeID())
+        trapUnlessOfType(read.id(), tested, ProofSource::SlotOfScope, read.origin());
+}
+
+void StraightEmitter::checkEscapingScopeSlots(uint32_t position, bool isAtTerminator)
+{
+    std::span<const SummaryScopeStoredFirst> scopes = facts().summaries().at(function()).scopesStoredFirst.span();
+    uint32_t block = m_block.id().index();
+    auto place = std::ranges::lower_bound(scopes, std::pair { block, position }, { }, [&](const SummaryScopeStoredFirst& atPlace) {
+        const SummaryScopeStoredFirst& scope = scopes[atPlace.scopeAtThisPlaceInOrderOfLeaving];
+        return std::pair { scope.blockOfLeaving, scope.positionOfLeaving };
+    });
+    for (; place != scopes.end() && !m_hasFailed; ++place) {
+        const SummaryScopeStoredFirst& scope = scopes[place->scopeAtThisPlaceInOrderOfLeaving];
+        if (scope.blockOfLeaving != block || (!isAtTerminator && scope.positionOfLeaving != position))
+            return;
+        uint32_t scopeSlot = isReadByNobody(scope.allocation) || isConstant(scope.allocation) ? 0 : m_slots[rootOf(scope.allocation).index()];
+        if (!scopeSlot || scopeSlot == slotWasGivenBack)
+            continue;
+        LayoutID layout = m_index.value(scope.allocation).as<Opcode::NewObject>().layout();
+        for (uint32_t field : scope.fields) {
+            const LinkedCell* cell = facts().linked().findCellOfField({ layout, field });
+            TypeID tested = cell ? testableTypeOfCell(*cell) : TypeID();
+            if (!tested || m_types.isSubset(TypeTable::anything, tested) || m_hasFailed)
+                continue;
+            storeWhatWaitsInRegister();
+            const GPRReg found = temporary(1);
+            m_jit->load64(addressOfSlot(scope.allocation), found);
+            loadSlot(found, plan().slot(layout, field), found);
+            m_jit->store64(found, addressOfGeneratorSlot(foundValueSlot));
+            GPRReg passes = takeResultRegister();
+            testType(found, tested, passes);
+            if (m_hasFailed)
+                return;
+            CCallHelpers::Jump isOfType = m_jit->branchTest32(CCallHelpers::NonZero, passes);
+            m_jit->load64(addressOfGeneratorSlot(foundValueSlot), found);
+            trapOnFalseProof(found, tested, ProofSource::SlotOfScope, m_index.value(scope.allocation).origin());
+            isOfType.link(m_jit);
+            m_valueCopiedInRegister = { };
+        }
+    }
+}
+
+void StraightEmitter::generateYield(const BodyValue& yield)
+{
+    const GeneratorFrameLayout::Suspension* suspension = m_generatorFrame ? m_generatorFrame->find(yield.id()) : nullptr;
+    if (!suspension) {
+        fail(yield);
+        return;
+    }
+    uint32_t number = static_cast<uint32_t>(suspension - m_generatorFrame->suspensions.begin());
+    const GPRReg frame = temporary(0);
+    const GPRReg word = temporary(1);
+    auto wordOfFrame = [&](uint32_t place) {
+        return CCallHelpers::Address(frame, offsetOfGeneratorFrameWord(place));
+    };
+    auto hasSlot = [&](ValueID value) {
+        if (isReadByNobody(value) || isConstant(value))
+            return false;
+        uint32_t slot = m_slots[rootOf(value).index()];
+        return slot && slot != slotWasGivenBack;
+    };
+
+    storeWhatWaitsInRegister();
+    m_valueCopiedInRegister = { };
+    if (m_blocksAfterYields.quickGet(m_block.id().index())) {
+        m_jit->load64(addressOfGeneratorSlot(generatorFrameSlot), frame);
+        for (ValueID value : suspension->values) {
+            if (!hasSlot(value))
+                continue;
+            m_jit->load64(addressOfSlot(value), word);
+            m_jit->store64(word, wordOfFrame(m_generatorFrame->wordOf(value)));
+        }
+        m_jit->move(CCallHelpers::TrustedImm64(JSValue::encode(jsNumber(number))), word);
+        m_jit->store64(word, wordOfFrame(GeneratorFrameLayout::yieldWord));
+        m_jit->load64(wordOfFrame(GeneratorFrameLayout::generatorWord), word);
+        m_jit->store32(CCallHelpers::TrustedImm32(static_cast<int32_t>(Generator::State::SuspendedAtYield)), CCallHelpers::Address(word, Generator::offsetOfState()));
+        barrierAfterStore(frame);
+        loadIntoResultRegister(yield.valueOperand());
+        tearDownFrame();
+        m_jit->ret();
+    }
+    m_valueCopiedInRegister = { };
+
+    m_resumeJumps.jumps()[number].link(m_jit);
+    m_jit->load64(addressOfGeneratorSlot(generatorFrameSlot), frame);
+    for (ValueID value : suspension->values) {
+        if (isReadByNobody(value) || isConstant(value) || m_slots[rootOf(value).index()] == slotWasGivenBack)
+            continue;
+        m_jit->load64(wordOfFrame(m_generatorFrame->wordOf(value)), word);
+        m_jit->store64(word, addressOfSlot(value));
+    }
+    for (auto [result, slot] : { std::pair { YieldResult::Sent, sentValueSlot }, std::pair { YieldResult::Mode, resumeModeSlot } }) {
+        if (!resultIsRead(yield, static_cast<uint32_t>(result)))
+            continue;
+        m_jit->load64(addressOfGeneratorSlot(slot), word);
+        defineResult(yield, static_cast<uint32_t>(result), word);
     }
 }
 
@@ -1100,18 +1396,25 @@ void StraightEmitter::generate(CCallHelpers& jit, const ArgumentLocations& locat
         m_hasHandlers = m_hasHandlers || block.hasHandler();
     });
 
-    takeParameters(locations);
+    if (m_generatorFrame) {
+        for (uint32_t value = 0; value < numberOfValues; ++value) {
+            if (!m_index.isParameter(ValueID(value)) && GeneratorFrameLayout::isRematerialized(m_index.opcodeOf(ValueID(value))))
+                defineConstant(m_index.value(ValueID(value)));
+        }
+        emitResumeDispatch(locations);
+    } else
+        takeParameters(locations);
     if (facts().isTakenToRunOnce(m_unit.function)) {
         StraightArgument function = StraightArgument::word(m_unit.function.index());
         callOperation(Origin { }, RuntimeOperation::EnterBodyThatRunsOnce, singleElementSpan(function), { });
     }
     uint32_t endOfImportChecks = 0;
     m_index.body().forEachBlock([&](BodyBlock block) {
-        if (m_hasFailed || isNeverEntered(block.id()) || block.id().index() < endOfImportChecks)
+        if (m_hasFailed || isNeverEntered(block.id()) || block.id().index() < endOfImportChecks || isNeverResumed(block.id()))
             return;
         if (Vector<ImportCheck, 8> checks = importChecksFrom(block); checks.size() >= fewestImportChecksInList) {
             endOfImportChecks = block.id().index() + 2 * static_cast<uint32_t>(checks.size());
-            generateImportChecks(block, WTF::move(checks));
+            generateImportChecks(block, checks.span());
             return;
         }
         generateBlock(block);
@@ -1122,7 +1425,6 @@ void StraightEmitter::generate(CCallHelpers& jit, const ArgumentLocations& locat
         return;
     for (JumpToBlock& jump : m_jumps)
         jump.jump.linkTo(m_labels[jump.block.index()], &jit);
-    writeListsOfImportChecks();
 }
 
 std::optional<StraightEmitter::ImportCheck> StraightEmitter::importCheckIn(BodyBlock block) const
@@ -1175,16 +1477,18 @@ Vector<StraightEmitter::ImportCheck, 8> StraightEmitter::importChecksFrom(BodyBl
     return checks;
 }
 
-void StraightEmitter::generateImportChecks(BodyBlock first, Vector<ImportCheck, 8>&& checks)
+void StraightEmitter::generateImportChecks(BodyBlock first, std::span<const ImportCheck> checks)
 {
     uint32_t numberOfChecks = static_cast<uint32_t>(checks.size());
     m_block = first;
     m_landingPadOfBlockPlusOne = 0;
     m_valueCopiedInRegister = { };
     m_labels[first.id().index()] = m_jit->label();
-    ListOfImportChecks list;
-    list.entry = static_cast<uint16_t>(firstEntryOfListOfImportChecks + m_listsOfImportChecks.size());
-    list.checks = WTF::move(checks);
+    Vector<uint32_t, 16> variablesAndFailures;
+    for (const ImportCheck& check : checks) {
+        variablesAndFailures.append(check.variable.index());
+        variablesAndFailures.append(check.failure.index());
+    }
     Origin origin;
     for (uint32_t index = 0; index < numberOfChecks; ++index) {
         BodyBlock block = m_index.block(BlockID(first.id().index() + 2 * index));
@@ -1193,22 +1497,8 @@ void StraightEmitter::generateImportChecks(BodyBlock first, Vector<ImportCheck, 
         if (!index)
             origin = m_index.value(m_index.block(BlockID(block.id().index() + 1)).firstValue()).origin();
     }
-    GPRReg pairs = operationArgumentGPR(1);
-    m_records.stubCalls.moveAddressOfFunction(m_unit, list.entry, pairs);
-    StraightArgument arguments[] { StraightArgument::inRegister(pairs), StraightArgument::word(numberOfChecks) };
+    StraightArgument arguments[] { StraightArgument::number(m_records.mentions.request(RequestKind::ImportChecks, variablesAndFailures)) };
     callOperation(origin, RuntimeOperation::ThrowIfImportIsMissing, arguments, { });
-    m_listsOfImportChecks.append(WTF::move(list));
-}
-
-void StraightEmitter::writeListsOfImportChecks()
-{
-    for (const ListOfImportChecks& list : m_listsOfImportChecks) {
-        m_records.entries.append(RecordedEntry { list.entry, m_jit->label() });
-        for (const ImportCheck& check : list.checks) {
-            m_records.relocations.emitNumber32({ SymbolSpace::Number, m_records.mentions.add(NumberSpace::Variable, check.variable) });
-            m_jit->m_assembler.buffer().putInt(static_cast<int32_t>(check.failure.index()));
-        }
-    }
 }
 
 void StraightEmitter::generateBlock(BodyBlock block)
@@ -1221,17 +1511,21 @@ void StraightEmitter::generateBlock(BodyBlock block)
     m_returnedCall = terminator.kind() == TerminatorKind::ReturnCall ? terminator.callOperand() : ValueID();
     m_valueCopiedInRegister = { };
     findProofsNobodyReads(terminator);
-    for (uint32_t index = 0; index < block.numberOfParameters(); ++index) {
+    bool isEnteredAtYield = m_generatorFrame && !m_blocksAfterYields.quickGet(block.id().index());
+    for (uint32_t index = 0; index < block.numberOfParameters() && !isEnteredAtYield; ++index) {
         if (!m_index.isUnused(block.parameter(index)))
             addressOfSlot(block.parameter(index));
     }
     for (BodyValue value : block.values()) {
-        if (value.id() != m_returnedCall)
+        isEnteredAtYield &= value.opcode() != Opcode::Yield;
+        if (value.id() != m_returnedCall && !isEnteredAtYield)
             generateOperation(value);
         if (m_hasFailed)
             return;
         giveBackSlotsReadLastAt(value.id().index());
     }
+    if (m_generatorFrame)
+        checkEscapingScopeSlots(block.endOfValues().index(), true);
     generateTerminator(block, terminator);
     RELEASE_ASSERT(m_hasFailed || !m_valueInRegister);
     giveBackSlotsReadLastAt(block.endOfValues().index());
@@ -1239,12 +1533,12 @@ void StraightEmitter::generateBlock(BodyBlock block)
 
 bool StraightEmitter::leavesDefinitionToFirstRead(const BodyValue& value)
 {
-    static constexpr OpcodeSet opcodesOfDefinitions = inputOperationsThatHandOn | OpcodeSet { Opcode::NewRegExp, Opcode::Data, Opcode::PutModuleVariable };
+    static constexpr OpcodeSet opcodesOfDefinitions = inputPassThroughOpcodes | OpcodeSet { Opcode::NewRegExp, Opcode::Data, Opcode::PutModuleVariable };
     const DeferredDefinitions& definitions = m_inputs.plan.deferredDefinitions();
     if (!opcodesOfDefinitions.contains(value.opcode()) || !definitions.bodiesThatDefine.get(m_unit.function.index()))
         return false;
     ValueID made = value.opcode() == Opcode::PutModuleVariable ? value.valueOperand() : value.id();
-    while (!m_index.isParameter(made) && inputOperationsThatHandOn.contains(m_index.opcodeOf(made)))
+    while (!m_index.isParameter(made) && inputPassThroughOpcodes.contains(m_index.opcodeOf(made)))
         made = m_index.value(made).operand(0);
     const DeferredVariable* deferred = m_index.isParameter(made) ? nullptr : definitions.findMadeBy(m_unit.function, made);
     if (!deferred)
@@ -1272,8 +1566,12 @@ void StraightEmitter::generateOperation(const BodyValue& value)
 {
     if (isReadByNobody(value.id()) || leavesDefinitionToFirstRead(value))
         return;
-    if (m_valueInRegister && !inputOperationsThatOnlyHandOn.contains(value.opcode()) && !opcodesWithoutCodeOfTheirOwn.contains(value.opcode()) && !readsWhatWaitsInRegister(value))
+    if (m_valueInRegister && !inputIdentityOpcodes.contains(value.opcode()) && !opcodesWithoutCodeOfTheirOwn.contains(value.opcode()) && !readsWhatWaitsInRegister(value))
         storeWhatWaitsInRegister();
+    if (m_generatorFrame) {
+        checkEscapingScopeSlots(value.id().index(), false);
+        checkStoredValueProofs(value);
+    }
     switch (familyOf(value.opcode())) {
     case OperationFamily::Constant:
         generateConstant(value);
@@ -1292,6 +1590,8 @@ void StraightEmitter::generateOperation(const BodyValue& value)
         return;
     case OperationFamily::Binding:
         generateBinding(value);
+        if (m_generatorFrame && value.opcode() == Opcode::GetEnvironmentField)
+            checkScopeReadProof(value);
         return;
     case OperationFamily::Hint:
         generateHint(value);
@@ -1313,6 +1613,12 @@ void StraightEmitter::generateOperation(const BodyValue& value)
         return;
     case OperationFamily::EngineIntrinsic:
         generateEngineIntrinsic(value);
+        return;
+    case OperationFamily::Coroutine:
+        if (value.opcode() == Opcode::Yield)
+            generateYield(value);
+        else
+            fail(value);
         return;
     case OperationFamily::Eval:
         generateEval(value);
@@ -1423,7 +1729,11 @@ void StraightEmitter::jumpTo(CCallHelpers::Jump jump, BlockID to)
 void StraightEmitter::tearDownFrame()
 {
     RELEASE_ASSERT(!m_valueInRegister);
+#if CPU(X86_64)
+    m_jit->m_assembler.leave();
+#else
     m_jit->emitFunctionEpilogue();
+#endif
 }
 
 void StraightEmitter::branchOnCondition(ValueID condition, bool jumpsIfTrue, BlockID target)

@@ -93,6 +93,7 @@ public:
     static constexpr uint8_t stateWithImageCode() { return ImageCode; }
     static constexpr uint8_t stateWithBytecode() { return ByteCode; }
     static constexpr ptrdiff_t offsetOfRegExpBytecode() { return OBJECT_OFFSETOF(RegExp, m_regExpBytecode); }
+    static constexpr ptrdiff_t offsetOfImageRecordNumber() { return OBJECT_OFFSETOF(RegExp, m_imageRecordNumber); }
 #endif
     static constexpr ptrdiff_t offsetOfNumSubpatterns() { return OBJECT_OFFSETOF(RegExp, m_numSubpatterns); }
     static constexpr ptrdiff_t offsetOfAtom() { return OBJECT_OFFSETOF(RegExp, m_atom); }
@@ -193,8 +194,12 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
     bool wasUsedInCurrentFullCollectionCycle(VM&) const;
 
 #if ENABLE(AOT)
-    // A global search of a pattern that is one set or a run of one set, in one pass. False: search match by match.
+    // Runs a global search for a pattern that is one character class, or a repetition of one, in a single pass. Returns false if the caller has to search match by match.
     bool collectMatchesOfOneSetOrRun(VM&, StringView, Vector<unsigned, 128>& matches);
+    bool hasImageCodeFor(bool subjectIs8Bit) const { return m_state == ImageCode && (subjectIs8Bit || m_regExpJITCode->has16BitCode()); }
+    // Returns the start of the match, -1, or Yarr::JSRegExpResult::JITCodeFailure, in which case the caller falls back to match().
+    template<typename CharacterType>
+    int executeImageCode(std::span<const CharacterType> subject, unsigned start, Yarr::MatchingContextHolder& context) { return m_regExpJITCode->execute(subject, start, m_ovector.mutableSpan().data(), &context).start; }
 #endif
 
     bool hasCode()

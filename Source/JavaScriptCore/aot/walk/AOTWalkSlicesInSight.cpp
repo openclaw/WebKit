@@ -34,7 +34,7 @@ Reference buildSliceOfElementsInSight(Walker& walker, const SliceOfElementsInSig
     if (!walker.has(Mechanism::EscapeAnalysis) || !walker.has(Mechanism::Folding) || !asked.sliced || walker.isUnreachable())
         return { };
     std::optional<Vector<Reference, 8>> elements = elementsOfFreshArguments(walker, asked.sliced);
-    if (!elements && asked.isListByItsRow && isFreshListAsMade(walker, asked.sliced))
+    if (!elements && asked.isListByItsRow && isFreshPristineArray(walker, asked.sliced))
         elements = elementsOfFreshList(walker, asked.sliced);
     if (!elements)
         return { };
@@ -44,18 +44,19 @@ Reference buildSliceOfElementsInSight(Walker& walker, const SliceOfElementsInSig
     std::optional<uint32_t> end = boundOfSliceInSight(walker, asked.bounds.size() < 2 ? Reference() : asked.bounds[1], length, length);
     if (!start || !end)
         return { };
+    walker.checkWhatIsInSightOfList(asked.sliced, asked.origin);
 
     Draft literal(Opcode::NewArray, asked.origin);
-    walker.chooseConservativeFields(literal);
     literal.setContents(TypeTable::anything);
     literal.setElementsOperands(*start < *end ? elements->span().subspan(*start, *end - *start) : std::span<const Reference>());
     literal.expected = asked.expected;
     literal.resultIsReturnedAtOnce = asked.resultIsReturnedAtOnce;
     literal.inputValueGiven = asked.call.id();
+    walker.chooseConservativeFields(literal);
     Reference list = walker.build(WTF::move(literal));
     noteFreshList(walker, list);
     if (list)
-        walker.noteSliceMadeOfElementsInSight();
+        walker.recordFoldedSlice();
     return list;
 }
 

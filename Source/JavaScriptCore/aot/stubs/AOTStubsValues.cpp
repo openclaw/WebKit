@@ -9,14 +9,18 @@
 #if ENABLE(AOT)
 
 #include "AOTClosureWord.h"
+#include "AOTDoubleStringCache.h"
+#include "AOTImageText.h"
 #include "AOTSlotRepresentation.h"
 #include "AOTStubAssembler.h"
 #include "AOTStubFrontEnds.h"
 #include "AOTStubHelpers.h"
 #include "AOTStubRegisters.h"
+#include "AOTStubsField.h"
 #include "AOTStubsOperations.h"
 #include "AOTStubsStrings.h"
 #include "AOTVector.h"
+#include "JSBigInt.h"
 #include "JSCJSValueInlines.h"
 #include "JSCell.h"
 #include "JSString.h"
@@ -24,8 +28,10 @@
 #include "JSTypeInfo.h"
 #include "NumericStrings.h"
 #include "StackAlignment.h"
+#include "TypeofType.h"
 #include <bit>
 #include <initializer_list>
+#include <ranges>
 #include <utility>
 #include <wtf/MathExtras.h>
 #include <wtf/text/StringImpl.h>
@@ -42,6 +48,13 @@ StubSignature signatureOfToBoolean(StubKey key)
 StubSignature signatureOfValueIsTruthy(StubKey key)
 {
     return signatureWithFlagsResult({ key.operandRegister().value_or(gprOf(StubRegister::R0)) }, MacroAssembler::NonZero);
+}
+
+StubSignature signatureOfLargeValueIsTruthy(StubKey key) { return signatureOfValueIsTruthy(key); }
+
+StubSignature signatureOfIsCallableCell(StubKey key)
+{
+    return signatureWithFlagsResult({ key.operandRegister().value_or(gprOf(StubRegister::R0)) }, MacroAssembler::Zero);
 }
 
 StubSignature signatureOfEqual(StubKey key)
@@ -74,7 +87,6 @@ static void generateTruthiness(StubAssembler& jit, bool answersInFlags)
     if (isX86_64())
         ownedScratch.emplace(jit);
     const GPRReg scratch = ownedScratch ? ownedScratch->gpr() : jit.allocateScratch(value == gprOf(StubRegister::T9) ? StubRegister::T10 : StubRegister::T9);
-    JumpList slow;
 
     auto returnConstant = [&](bool constant) {
         if (answersInFlags)
@@ -120,8 +132,12 @@ static void generateTruthiness(StubAssembler& jit, bool answersInFlags)
         returnIsNotZero(scratch);
 
         notString.link(&jit);
-        compareTypeOfCellOnFlags(jit, value, SymbolType, scratch);
-        slow.append(jit.branchOnFlags(CCallHelpers::NotEqual));
+        compareTypeOfCellOnFlags(jit, value, HeapBigIntType, scratch);
+        Jump notBigInt = jit.branchOnFlags(CCallHelpers::NotEqual);
+        jit.load32(Address(value, JSBigInt::offsetOfLength()), scratch);
+        returnIsNotZero(scratch);
+
+        notBigInt.link(&jit);
         returnConstant(true);
     };
 
@@ -132,6 +148,7 @@ static void generateTruthiness(StubAssembler& jit, bool answersInFlags)
         jit.returnFlagsTest32(value, TrustedImm32(1));
 
         isCellOrNumber.link(&jit);
+        jit.bindEntry(jit.key().withFamily(StubFamily::LargeValueIsTruthy));
         Jump notCell = jit.branchIfNotCell(value);
         answerForCell();
         notCell.link(&jit);
@@ -146,15 +163,72 @@ static void generateTruthiness(StubAssembler& jit, bool answersInFlags)
         isCell.link(&jit);
         answerForCell();
     }
+}
 
-    slow.link(&jit);
-    OperationCall call { .saves = Saves::CallerSavedRegisters, .checksException = false, .secondArgumentIn = value };
-    if (!answersInFlags)
-        return jit.callOperationAndReturn(Entry::operationAOTToBoolean, call);
+void generateIsCallableCell(StubAssembler& jit)
+{
+    const GPRReg cell = jit.operand(0);
+    const GPRReg scratch = jit.allocateScratch(cell == gprOf(StubRegister::T9) ? StubRegister::T10 : StubRegister::T9);
+
+    Jump isNotFunction = branchIfNotFunctionType(jit, cell, scratch);
+    jit.returnFlagsConstant(true);
+
+    isNotFunction.link(&jit);
+    Jump mayOverrideCallData = jit.branchTest8(CCallHelpers::NonZero, Address(cell, JSCell::typeInfoFlagsOffset()), TrustedImm32(OverridesGetCallData));
+    jit.returnFlagsConstant(false);
+
+    mayOverrideCallData.link(&jit);
+    OperationCall call { .saves = Saves::CallerSavedRegisters, .checksException = false, .secondArgumentIn = cell };
     call.valueDestination = scratch;
-    jit.callOperationAndReturn(Entry::operationAOTToBoolean, call, [&] {
-        jit.compareOnFlags32(scratch, TrustedImm32(0));
+    jit.callOperationAndReturn(Entry::operationAOTIsCallable, call, [&] {
+        jit.compareOnFlags32(scratch, TrustedImm32(1));
     });
+}
+
+StubSignature signatureOfTypeOf(StubKey) { return StubSignature::withGPRResult({ gprOf(StubRegister::R0) }); }
+
+void generateTypeOf(StubAssembler& jit)
+{
+    const GPRReg value = jit.clobberOperand(0);
+    RELEASE_ASSERT(value == jit.result());
+    const GPRReg scratch = jit.allocateScratch(StubRegister::T11);
+    auto returnType = [&](TypeofType type) {
+        jit.loadPtr(Address(instanceGPR, AOT_INSTANCE_OFFSET(typeStrings) + static_cast<ptrdiff_t>(type) * sizeof(JSCell*)), jit.result());
+        jit.returnToCaller();
+    };
+
+    Jump isCell = jit.branchIfCell(value);
+    Jump notNumber = jit.branchTest64(CCallHelpers::Zero, value, numberTag);
+    returnType(TypeofType::Number);
+
+    notNumber.link(&jit);
+    Jump notUndefined = jit.branch64(CCallHelpers::NotEqual, value, TrustedImm32(JSValue::ValueUndefined));
+    returnType(TypeofType::Undefined);
+    notUndefined.link(&jit);
+    Jump isNull = jit.branch64(CCallHelpers::Equal, value, TrustedImm32(JSValue::ValueNull));
+    returnType(TypeofType::Boolean);
+
+    isCell.link(&jit);
+    jit.load8(Address(value, JSCell::typeInfoTypeOffset()), scratch);
+    Jump notString = jit.branch32(CCallHelpers::NotEqual, scratch, TrustedImm32(StringType));
+    returnType(TypeofType::String);
+    notString.link(&jit);
+    Jump isObject = jit.branch32(CCallHelpers::AboveOrEqual, scratch, TrustedImm32(ObjectType));
+    Jump isBigInt = jit.branch32(CCallHelpers::Equal, scratch, TrustedImm32(HeapBigIntType));
+    returnType(TypeofType::Symbol);
+    isBigInt.link(&jit);
+    returnType(TypeofType::BigInt);
+
+    isObject.link(&jit);
+    Jump notFunction = branchIfNotFunctionType(jit, value, scratch);
+    returnType(TypeofType::Function);
+    notFunction.link(&jit);
+    Jump asksItsClass = jit.branchTest8(CCallHelpers::NonZero, Address(value, JSCell::typeInfoFlagsOffset()), TrustedImm32(OverridesGetCallData | MasqueradesAsUndefined));
+    isNull.link(&jit);
+    returnType(TypeofType::Object);
+
+    asksItsClass.link(&jit);
+    jit.callOperationAndReturn(Entry::operationAOTTypeOf, { .saves = Saves::CallerSavedRegisters, .checksException = false, .secondArgumentIn = value });
 }
 
 void generateToBoolean(StubAssembler& jit)
@@ -205,16 +279,14 @@ static void stopAtFalseProofOfKinds(StubAssembler& jit, GPRReg value, GPRReg kin
     word.registerNumber = static_cast<uint32_t>(value);
     word.kind = static_cast<uint32_t>(ThrowKind::ErrorWithMessage);
     word.representation = static_cast<uint32_t>(Typed::Representation::JSValue);
+    word.hasWideA = true;
     word.calleeIsReadFromReceiver = true;
-    ThrowSiteWord wordOfSecondSource = word;
-    wordOfSecondSource.a = 1;
-    jit.urshift32(TrustedImm32(KindsOfProof::shiftOfSource), kindsWithSource);
-    jit.lshift32(TrustedImm32(WTF::ctz(std::bit_cast<uint32_t>(word) ^ std::bit_cast<uint32_t>(wordOfSecondSource))), kindsWithSource);
+    jit.lshift64(TrustedImm32(32), kindsWithSource);
 #if CPU(X86_64)
-    jit.or32(TrustedImm32(static_cast<int32_t>(std::bit_cast<uint32_t>(word))), kindsWithSource);
+    jit.or64(TrustedImm32(static_cast<int32_t>(std::bit_cast<uint32_t>(word))), kindsWithSource);
 #else
     jit.move(TrustedImm32(static_cast<int32_t>(std::bit_cast<uint32_t>(word))), scratch);
-    jit.or32(scratch, kindsWithSource);
+    jit.or64(scratch, kindsWithSource);
 #endif
     jit.jumpToStub(throwAtSite(ThrowSiteSource::WordInRegister, CallerFrame::HasFrame));
 }
@@ -224,15 +296,11 @@ StubSignature signatureOfCheckProofOfKinds(StubKey key)
     return StubSignature::withoutResult({ key.operandRegister().value_or(gprOf(StubRegister::R0)), throwWordGPR });
 }
 
-void generateCheckProofOfKinds(StubAssembler& jit)
+static void returnIfAmongKinds(StubAssembler& jit, GPRReg value, GPRReg words, GPRReg scratch, JumpList& isNotAmongThem)
 {
     namespace Primitive = Typed::Primitive;
-    const GPRReg value = jit.operand(0);
-    OwnedScratchRegister words(jit, jit.operand(1));
-    const GPRReg scratch = isX86_64() ? InvalidGPRReg : scratchImmediateGPR;
-    JumpList proofIsFalse;
     auto returnIfAmongKinds = [&](uint32_t kind) {
-        proofIsFalse.append(jit.branchTest32(CCallHelpers::Zero, words, TrustedImm32(kind)));
+        isNotAmongThem.append(jit.branchTest32(CCallHelpers::Zero, words, TrustedImm32(kind)));
         jit.returnToCaller();
     };
 
@@ -254,7 +322,7 @@ void generateCheckProofOfKinds(StubAssembler& jit)
         returnIfAmongKinds(kind);
         isOfOtherType.link(&jit);
     }
-    proofIsFalse.append(jit.jump());
+    isNotAmongThem.append(jit.jump());
 
     isAbsent.link(&jit);
     returnIfAmongKinds(Primitive::Absent);
@@ -275,9 +343,60 @@ void generateCheckProofOfKinds(StubAssembler& jit)
         returnIfAmongKinds(kind);
         isOtherWord.link(&jit);
     }
+    isNotAmongThem.append(jit.jump());
+}
 
+void generateCheckProofOfKinds(StubAssembler& jit)
+{
+    const GPRReg value = jit.operand(0);
+    OwnedScratchRegister words(jit, jit.operand(1));
+    const GPRReg scratch = isX86_64() ? InvalidGPRReg : scratchImmediateGPR;
+    JumpList proofIsFalse;
+    returnIfAmongKinds(jit, value, words, scratch, proofIsFalse);
     proofIsFalse.link(&jit);
     stopAtFalseProofOfKinds(jit, value, words, scratch);
+}
+
+StubSignature signatureOfCheckProofOfType(StubKey key)
+{
+    GPRReg value = key.operandRegister().value_or(gprOf(StubRegister::R0));
+    return StubSignature::withoutResult({ value, throwWordGPR, gprOf(value == gprOf(StubRegister::T9) ? StubRegister::T10 : StubRegister::T9) });
+}
+
+void generateCheckProofOfType(StubAssembler& jit)
+{
+    const GPRReg value = jit.operand(0);
+    const GPRReg words = jit.operand(1);
+    const GPRReg type = jit.operand(2);
+    JumpList isNotAmongKinds;
+    {
+        OwnedScratchRegister owned(jit, words);
+        returnIfAmongKinds(jit, value, owned, isX86_64() ? InvalidGPRReg : scratchImmediateGPR, isNotAmongKinds);
+    }
+    isNotAmongKinds.link(&jit);
+    Jump isAbsent = jit.branchTest64(CCallHelpers::Zero, value);
+
+    static_assert(areDistinctOnEveryISA(StubRegister::T9, StubRegister::T10, StubRegister::T11, StubRegister::T12, StubRegister::T13));
+    Vector<GPRReg, 4> borrowed { words };
+    for (StubRegister candidate : { StubRegister::T9, StubRegister::T10, StubRegister::T11, StubRegister::T12, StubRegister::T13 }) {
+        if (gprOf(candidate) != value && gprOf(candidate) != type && borrowed.size() < 4)
+            borrowed.append(gprOf(candidate));
+    }
+    auto giveBack = [&] {
+        for (GPRReg reg : borrowed | std::views::reverse)
+            jit.popToRestore(reg);
+    };
+    for (GPRReg reg : borrowed)
+        jit.pushToSave(reg);
+    JumpList isNotAccepted;
+    branchUnlessTypeAccepts(jit, { value, type, borrowed[1], borrowed[2], borrowed[3] }, isNotAccepted, isNotAccepted);
+    giveBack();
+    jit.returnToCaller();
+
+    isNotAccepted.link(&jit);
+    giveBack();
+    isAbsent.link(&jit);
+    jit.callOperationAndReturn(Entry::operationAOTStopUnlessValueHasType, { .returns = OperationCall::Returns::Void, .saves = Saves::CallerSavedRegisters, .checksException = false, .secondArgumentIn = words, .thirdArgumentIn = type, .fourthArgumentIn = value });
 }
 
 StubSignature signatureOfThrowUnlessForwardedCallCanBeMade(StubKey)
@@ -372,6 +491,7 @@ void generateEqual(StubAssembler& jit)
     JumpList isTrue;
     JumpList isFalse;
     JumpList needsContent;
+    JumpList areBigInts;
     JumpList& kindsDiffer = isStrict ? isFalse : needsContent;
 
     auto returnConstant = [&](bool answer) {
@@ -398,18 +518,34 @@ void generateEqual(StubAssembler& jit)
     JumpList flagsSayFalse;
     JumpList& isFalseWhereTestFoundBits = flagsOfLastTestAreAnswer ? flagsSayFalse : isFalse;
 
+    Jump leftIsNoInt32;
+    Jump rightIsNoInt32;
+    if (!isStrict) {
+        leftIsNoInt32 = jit.branch64(CCallHelpers::Below, left, numberTag);
+        rightIsNoInt32 = jit.branch64(CCallHelpers::Below, right, numberTag);
+        jit.compare32(CCallHelpers::Equal, left, right, result);
+        jit.returnToCaller();
+        leftIsNoInt32.link(&jit);
+    }
     Jump haveSameBits = jit.branch64(CCallHelpers::Equal, left, right);
-    jit.or64(left, right, leftValue);
+    if (!isStrict)
+        jit.or64(left, right, leftValue);
+    Jump leftIsNotCell;
     Jump areNotBothCells;
     Jump notStrings;
     if (isStrict) {
         static_assert(StringType + 1 == HeapBigIntType && HeapBigIntType == LastValueCompareCellType);
         static_assert(JSValue::ValueNull & JSValue::OtherTag && JSValue::ValueUndefined & JSValue::OtherTag && JSValue::ValueFalse & JSValue::OtherTag && JSValue::ValueTrue & JSValue::OtherTag);
-        areNotBothCells = jit.branchTest64(CCallHelpers::NonZero, leftValue, numberTag);
-        isFalseWhereTestFoundBits.append(jit.branchTest64(CCallHelpers::NonZero, leftValue, TrustedImm32(JSValue::OtherTag)));
+        leftIsNotCell = jit.branchIfNotCell(left);
         isFalse.append(jit.branchTest64(CCallHelpers::Zero, left));
-        isFalseWhereTestFoundBits.append(jit.branch8(CCallHelpers::Above, Address(left, JSCell::typeInfoTypeOffset()), TrustedImm32(HeapBigIntType)));
+        if (flagsOfLastTestAreAnswer) {
+            Jump isComparedByValue = jit.branch8(CCallHelpers::BelowOrEqual, Address(left, JSCell::typeInfoTypeOffset()), TrustedImm32(HeapBigIntType));
+            jit.returnToCaller();
+            isComparedByValue.link(&jit);
+        } else
+            isFalse.append(jit.branch8(CCallHelpers::Above, Address(left, JSCell::typeInfoTypeOffset()), TrustedImm32(HeapBigIntType)));
         notStrings = jit.branchOnFlags(CCallHelpers::Equal);
+        isFalseWhereTestFoundBits.append(jit.branchIfNotCell(right));
         isFalse.append(jit.branchTest64(CCallHelpers::Zero, right));
         isFalse.append(jit.branch8(CCallHelpers::NotEqual, Address(right, JSCell::typeInfoTypeOffset()), TrustedImm32(StringType)));
     } else {
@@ -418,6 +554,11 @@ void generateEqual(StubAssembler& jit)
         isFalse.append(jit.branchTest64(CCallHelpers::Zero, right));
         jit.load8(Address(left, JSCell::typeInfoTypeOffset()), leftValue);
         jit.load8(Address(right, JSCell::typeInfoTypeOffset()), rightValue);
+        Jump leftIsNoObject = jit.branch32(CCallHelpers::Below, leftValue, TrustedImm32(ObjectType));
+        kindsDiffer.append(jit.branch32(CCallHelpers::Below, rightValue, TrustedImm32(ObjectType)));
+        returnConstant(false);
+
+        leftIsNoObject.link(&jit);
         kindsDiffer.append(jit.branch32(CCallHelpers::NotEqual, leftValue, rightValue));
         notStrings = jit.branch32(CCallHelpers::NotEqual, leftValue, TrustedImm32(StringType));
     }
@@ -428,7 +569,7 @@ void generateEqual(StubAssembler& jit)
     isTrue.append(jit.branchPtr(CCallHelpers::Equal, leftValue, rightValue));
     jit.load32(Address(leftValue, StringImpl::flagsOffset()), flags);
     jit.and32(Address(rightValue, StringImpl::flagsOffset()), flags);
-    Jump areNotBothAtoms = jit.branchTest32(CCallHelpers::Zero, flags, TrustedImm32(StringImpl::flagIsAtom()));
+    Jump mayHaveSameText = jit.branchTest32(CCallHelpers::Zero, flags, TrustedImm32(flagsOfUniqueTexts));
     Label returnsFalse = jit.label();
     returnConstant(false);
 
@@ -442,35 +583,101 @@ void generateEqual(StubAssembler& jit)
 
     notStrings.link(&jit);
     if (isStrict) {
+        isFalse.append(jit.branchIfNotCell(right));
         isFalse.append(jit.branchTest64(CCallHelpers::Zero, right));
-        needsContent.append(jit.branch8(CCallHelpers::Equal, Address(right, JSCell::typeInfoTypeOffset()), TrustedImm32(HeapBigIntType)));
+        areBigInts.append(jit.branch8(CCallHelpers::Equal, Address(right, JSCell::typeInfoTypeOffset()), TrustedImm32(HeapBigIntType)));
     } else
-        needsContent.append(jit.branch32(CCallHelpers::Equal, leftValue, TrustedImm32(HeapBigIntType)));
+        areBigInts.append(jit.branch32(CCallHelpers::Equal, leftValue, TrustedImm32(HeapBigIntType)));
     isFalse.append(jit.jump());
 
-    areNotBothCells.link(&jit);
-    isNumber.link(&jit);
+    areBigInts.link(&jit);
+    jit.load32(Address(left, JSBigInt::offsetOfLength()), leftValue);
+    isFalse.append(jit.branch32(CCallHelpers::NotEqual, leftValue, Address(right, JSBigInt::offsetOfLength())));
+    isTrue.append(jit.branchTest32(CCallHelpers::Zero, leftValue));
+    jit.load64(Address(left, JSBigInt::offsetOfData()), rightValue);
+    isFalse.append(jit.branch64(CCallHelpers::NotEqual, rightValue, Address(right, JSBigInt::offsetOfData())));
+    needsContent.append(jit.branch32(CCallHelpers::NotEqual, leftValue, TrustedImm32(1)));
+    jit.load8(Address(left, JSCell::typeInfoFlagsOffset()), leftValue);
+    jit.load8(Address(right, JSCell::typeInfoFlagsOffset()), rightValue);
+    jit.xor32(rightValue, leftValue);
+    isFalse.append(jit.branchTest32(CCallHelpers::NonZero, leftValue, TrustedImm32(TypeInfoPerCellBit)));
+    isTrue.append(jit.jump());
+
     const FPRReg leftNumber = jit.allocateScratch(FPRInfo::fpRegT0);
     const FPRReg rightNumber = jit.allocateScratch(FPRInfo::fpRegT1);
-    Jump leftNotInt32 = jit.branch64(CCallHelpers::Below, left, numberTag);
-    Jump rightNotInt32 = jit.branch64(CCallHelpers::Below, right, numberTag);
-    if (answersInFlags)
-        jit.returnFlags32(CCallHelpers::Equal, left, right);
-    else {
-        jit.compare32(CCallHelpers::Equal, left, right, result);
-        jit.returnToCaller();
+    JumpList areNumbers;
+    JumpList oneIsNoNumber;
+    if (isStrict) {
+        leftIsNotCell.link(&jit);
+        jit.or64(left, right, leftValue);
+        isFalse.append(jit.branchTest64(CCallHelpers::Zero, leftValue, numberTag));
+        Jump leftIsInt32 = jit.branch64(CCallHelpers::AboveOrEqual, left, numberTag);
+        Jump rightIsInt32 = jit.branch64(CCallHelpers::AboveOrEqual, right, numberTag);
+        isFalse.append(jit.branch64(CCallHelpers::NotEqual, leftValue, TrustedImm64(JSValue::encode(jsDoubleNumber(-0.0)))));
+        areNumbers.append(jit.jump());
+        leftIsInt32.link(&jit);
+        isFalse.append(jit.branch64(CCallHelpers::AboveOrEqual, right, numberTag));
+        isFalse.append(jit.branchTest64(CCallHelpers::Zero, right, numberTag));
+        areNumbers.append(jit.jump());
+        rightIsInt32.link(&jit);
+        isFalse.append(jit.branchTest64(CCallHelpers::Zero, left, numberTag));
+    } else {
+        areNotBothCells.link(&jit);
+        isNumber.link(&jit);
+        rightIsNoInt32.link(&jit);
+        oneIsNoNumber.append(jit.branchTest64(CCallHelpers::Zero, left, numberTag));
+        oneIsNoNumber.append(jit.branchTest64(CCallHelpers::Zero, right, numberTag));
     }
-
-    leftNotInt32.link(&jit);
-    rightNotInt32.link(&jit);
-    kindsDiffer.append(jit.branchTest64(CCallHelpers::Zero, left, numberTag));
-    kindsDiffer.append(jit.branchTest64(CCallHelpers::Zero, right, numberTag));
+    areNumbers.link(&jit);
+    Label comparesNumbers = jit.label();
     toDouble(jit, left, length, leftNumber);
     toDouble(jit, right, length, rightNumber);
+    Label comparesDoubles = jit.label();
     isTrue.append(jit.branchDouble(CCallHelpers::DoubleEqualAndOrdered, leftNumber, rightNumber));
     isFalse.append(jit.jump());
 
-    areNotBothAtoms.link(&jit);
+    if (!isStrict) {
+        oneIsNoNumber.link(&jit);
+        auto branchIfNullish = [&](GPRReg value, GPRReg scratch) {
+            jit.move(value, scratch);
+            jit.and64(TrustedImm32(~JSValue::UndefinedTag), scratch);
+            return jit.branch64(CCallHelpers::Equal, scratch, TrustedImm32(JSValue::ValueNull));
+        };
+        auto convertNumberOrBoolean = [&](GPRReg value, GPRReg scratch, FPRReg number) {
+            Jump isNumber = jit.branchTest64(CCallHelpers::NonZero, value, numberTag);
+            jit.move(value, scratch);
+            jit.and32(TrustedImm32(1), scratch);
+            jit.convertInt32ToDouble(scratch, number);
+            Jump isConverted = jit.jump();
+            isNumber.link(&jit);
+            toDouble(jit, value, length, number);
+            isConverted.link(&jit);
+        };
+        auto branchIfCannotMasquerade = [&](GPRReg cell) {
+            return jit.branch8(CCallHelpers::Below, Address(cell, JSCell::typeInfoTypeOffset()), TrustedImm32(ObjectType));
+        };
+        Jump leftIsCell = jit.branchIfCell(left);
+        Jump leftIsNullish = branchIfNullish(left, leftValue);
+        needsContent.append(jit.branchIfCell(right));
+        isFalse.append(branchIfNullish(right, rightValue));
+        convertNumberOrBoolean(left, leftValue, leftNumber);
+        convertNumberOrBoolean(right, rightValue, rightNumber);
+        jit.jump().linkTo(comparesDoubles, &jit);
+
+        leftIsNullish.link(&jit);
+        isTrue.append(branchIfNullish(right, rightValue));
+        isFalse.append(jit.branchIfNotCell(right));
+        isFalse.append(branchIfCannotMasquerade(right));
+        needsContent.append(jit.jump());
+        leftIsCell.link(&jit);
+        Jump rightIsNullish = branchIfNullish(right, rightValue);
+        needsContent.append(jit.jump());
+        rightIsNullish.link(&jit);
+        isFalse.append(branchIfCannotMasquerade(left));
+        needsContent.append(jit.jump());
+    }
+
+    mayHaveSameText.link(&jit);
     jit.load32(Address(leftValue, StringImpl::lengthMemoryOffset()), length);
     isFalse.append(jit.branch32(CCallHelpers::NotEqual, length, Address(rightValue, StringImpl::lengthMemoryOffset())));
     JumpList needsLeaf;
@@ -491,6 +698,11 @@ void generateEqual(StubAssembler& jit)
     needsOperation.link(&jit);
     callOperationAndReturn(Entry::operationAOTStringsAreEqual, false);
 
+    if (isStrict) {
+        isNumber.link(&jit);
+        isTrue.append(jit.branch64(CCallHelpers::AboveOrEqual, left, numberTag));
+        jit.jump().linkTo(comparesNumbers, &jit);
+    }
     isTrue.link(&jit);
     returnConstant(true);
 
@@ -535,7 +747,110 @@ void generateToNumberAsDouble(StubAssembler& jit)
     jit.returnToCaller();
 
     notBoolean.link(&jit);
+    JumpList isOther;
+    JumpList isNaN;
+    isNaN.append(jit.branch64(CCallHelpers::Equal, value, TrustedImm32(JSValue::ValueUndefined)));
+    Jump isCell = jit.branchIfCell(value);
+    jit.moveZeroToDouble(result);
+    jit.returnToCaller();
+
+    isCell.link(&jit);
+    isOther.append(jit.branchIfNotString(value));
+    jit.loadPtr(Address(value, JSString::offsetOfValue()), scratch);
+    isOther.append(jit.branchIfRopeStringImpl(scratch));
+    isOther.append(jit.branchTest32(CCallHelpers::Zero, Address(scratch, StringImpl::flagsOffset()), TrustedImm32(StringImpl::flagIs8Bit())));
+    isOther.append(jit.branchTest32(CCallHelpers::Zero, Address(scratch, StringImpl::lengthMemoryOffset())));
+    jit.loadPtr(Address(scratch, StringImpl::dataOffset()), scratch);
+    jit.load8(Address(scratch), scratch);
+    jit.or32(TrustedImm32('a' - 'A'), scratch);
+    jit.sub32(TrustedImm32('a'), scratch);
+    Jump isNoLetter = jit.branch32(CCallHelpers::Above, scratch, TrustedImm32('z' - 'a'));
+    isOther.append(jit.branch32(CCallHelpers::Equal, scratch, TrustedImm32('i' - 'a')));
+    isNaN.link(&jit);
+    jit.move(TrustedImm64(std::bit_cast<int64_t>(PNaN)), scratch);
+    jit.move64ToDouble(scratch, result);
+    jit.returnToCaller();
+
+    isNoLetter.link(&jit);
+    constexpr int32_t mostCharacters = 9;
+    static_assert(areDistinctOnEveryISA(StubRegister::T9, StubRegister::T10, StubRegister::T11, StubRegister::T12, StubRegister::T13));
+    const GPRReg remaining = gprOf(StubRegister::T10);
+    const GPRReg digit = gprOf(StubRegister::T9);
+    const GPRReg digits = gprOf(StubRegister::T12);
+    const GPRReg divisor = gprOf(StubRegister::T13);
+    const std::array borrowed { remaining, digit, digits, divisor };
+    auto giveBack = [&] {
+        for (GPRReg reg : borrowed | std::views::reverse)
+            jit.popToRestore(reg);
+    };
+    jit.loadPtr(Address(value, JSString::offsetOfValue()), scratch);
+    isOther.append(jit.branchIfRopeStringImpl(scratch));
+    isOther.append(jit.branch32(CCallHelpers::Above, Address(scratch, StringImpl::lengthMemoryOffset()), TrustedImm32(mostCharacters)));
+    for (GPRReg reg : borrowed)
+        jit.pushToSave(reg);
+    jit.load32(Address(scratch, StringImpl::lengthMemoryOffset()), remaining);
+    jit.loadPtr(Address(scratch, StringImpl::dataOffset()), scratch);
+    jit.move(TrustedImm32(0), digits);
+    jit.move(TrustedImm32(0), divisor);
+    JumpList isNotPlain;
+    Label nextCharacter = jit.label();
+    jit.load8(Address(scratch), digit);
+    jit.sub32(TrustedImm32('0'), digit);
+    Jump isNoDigit = jit.branch32(CCallHelpers::Above, digit, TrustedImm32(9));
+    jit.mul32(TrustedImm32(10), digits, digits);
+    jit.add32(digit, digits);
+    jit.mul32(TrustedImm32(10), divisor, divisor);
+    Label isTaken = jit.label();
+    jit.addPtr(TrustedImm32(1), scratch);
+    jit.branchSub32(CCallHelpers::NonZero, TrustedImm32(1), remaining).linkTo(nextCharacter, &jit);
+    isNotPlain.append(jit.branch32(CCallHelpers::Equal, divisor, TrustedImm32(1)));
+    jit.convertInt32ToDouble(digits, result);
+    Jump isInteger = jit.branchTest32(CCallHelpers::Zero, divisor);
+    const FPRReg divisorFPR = FPRInfo::fpRegT1;
+    jit.saveFPR(divisorFPR, scratch);
+    jit.convertInt32ToDouble(divisor, divisorFPR);
+    jit.divDouble(divisorFPR, result);
+    jit.restoreFPR(divisorFPR, scratch);
+    isInteger.link(&jit);
+    giveBack();
+    jit.returnToCaller();
+
+    isNoDigit.link(&jit);
+    isNotPlain.append(jit.branch32(CCallHelpers::NotEqual, digit, TrustedImm32('.' - '0')));
+    isNotPlain.append(jit.branchTest32(CCallHelpers::NonZero, divisor));
+    jit.move(TrustedImm32(1), divisor);
+    jit.jump().linkTo(isTaken, &jit);
+
+    isNotPlain.link(&jit);
+    giveBack();
+
+    isOther.link(&jit);
     jit.callOperationAndReturn(Entry::operationAOTToNumber, { .returns = OperationCall::Returns::Double, .saves = Saves::CallerSavedRegisters });
+}
+
+StubSignature signatureOfNumberOfAnyValue(StubKey) { return StubSignature::withGPRResult({ gprOf(StubRegister::A1) }); }
+
+void generateNumberOfAnyValue(StubAssembler& jit)
+{
+    const GPRReg value = jit.operand(0);
+    Jump notNumber = jit.branchTest64(CCallHelpers::Zero, value, numberTag);
+    jit.move(value, jit.result());
+    jit.returnToCaller();
+
+    notNumber.link(&jit);
+    Jump isCell = jit.branchIfCell(value);
+    Jump isUndefined = jit.branch64(CCallHelpers::Equal, value, TrustedImm32(JSValue::ValueUndefined));
+    jit.move(value, jit.result());
+    jit.and32(TrustedImm32(1), jit.result());
+    boxInt32(jit, jit.result(), jit.result());
+    jit.returnToCaller();
+
+    isUndefined.link(&jit);
+    jit.move(TrustedImm64(JSValue::encode(jsNaN())), jit.result());
+    jit.returnToCaller();
+
+    isCell.link(&jit);
+    jit.callOperationAndReturn(Entry::operationAOTNumberOfAnyValue, { });
 }
 
 static void returnStringFromFrontEnd(StubAssembler& jit, GPRReg string)
@@ -550,7 +865,7 @@ StubSignature signatureOfToStringFrontEnd(StubKey)
     return operationFrontEndSignature(1);
 }
 
-void generateToStringFrontEnd(StubAssembler& jit)
+static void emitFrontEndThatMakesText(StubAssembler& jit, Entry rawOperation)
 {
     const GPRReg value = jit.operand(0);
     const GPRReg first = jit.allocateScratch(isARM64() ? StubRegister::T11 : StubRegister::R0);
@@ -562,7 +877,7 @@ void generateToStringFrontEnd(StubAssembler& jit)
 #endif
 
     JumpList isNotKnown;
-    isNotKnown.append(jit.branch64(CCallHelpers::Below, value, numberTag));
+    Jump isNoInteger = jit.branch64(CCallHelpers::Below, value, numberTag);
     Jump isSmall = jit.branch32(CCallHelpers::Below, value, TrustedImm32(NumericStrings::cacheSize));
     jit.zeroExtend32ToWord(value, first);
     jit.load64(Address(instanceGPR, AOT_INSTANCE_OFFSET(numbers.hashSecrets) + sizeof(uint64_t)), second);
@@ -593,9 +908,32 @@ void generateToStringFrontEnd(StubAssembler& jit)
     isNotKnown.append(jit.branchTestPtr(CCallHelpers::Zero, second));
     returnStringFromFrontEnd(jit, second);
 
+    isNoInteger.link(&jit);
+    Jump isDouble = jit.branchTest64(CCallHelpers::NonZero, value, numberTag);
+    isNotKnown.append(jit.branch64(CCallHelpers::AboveOrEqual, value, TrustedImm32(RealmWords::numberOfImmediates)));
+    jit.loadPtr(BaseIndex(instanceGPR, value, CCallHelpers::TimesEight, AOT_INSTANCE_OFFSET(realm.stringsOfImmediates)), second);
+    isNotKnown.append(jit.branchTestPtr(CCallHelpers::Zero, second));
+    returnStringFromFrontEnd(jit, second);
+
+    isDouble.link(&jit);
+    jit.loadPtr(Address(instanceGPR, AOT_INSTANCE_OFFSET(realm.doubleStrings)), second);
+    isNotKnown.append(jit.branchTestPtr(CCallHelpers::Zero, second));
+    jit.move(TrustedImm64(static_cast<int64_t>(DoubleStringCache::multiplier)), first);
+    jit.mul64(value, first);
+    jit.urshift64(TrustedImm32(64 - DoubleStringCache::logOfNumberOfEntries), first);
+    jit.lshift64(TrustedImm32(DoubleStringCache::logOfEntrySize), first);
+    jit.addPtr(first, second);
+    isNotKnown.append(jit.branch64(CCallHelpers::NotEqual, Address(second, OBJECT_OFFSETOF(DoubleStringCache::Entry, number)), value));
+    jit.loadPtr(Address(second, OBJECT_OFFSETOF(DoubleStringCache::Entry, string)), second);
+    returnStringFromFrontEnd(jit, second);
+
     isNotKnown.link(&jit);
-    jit.tailCallOperation(Entry::RawToString, OperationCall::FirstArgument::Instance);
+    jit.tailCallOperation(rawOperation, OperationCall::FirstArgument::Instance);
 }
+
+StubSignature signatureOfStringOfAnyValueFrontEnd(StubKey) { return operationFrontEndSignature(1); }
+void generateToStringFrontEnd(StubAssembler& jit) { emitFrontEndThatMakesText(jit, Entry::RawToString); }
+void generateStringOfAnyValueFrontEnd(StubAssembler& jit) { emitFrontEndThatMakesText(jit, Entry::RawStringOfAnyValue); }
 
 } } // namespace JSC::AOT
 

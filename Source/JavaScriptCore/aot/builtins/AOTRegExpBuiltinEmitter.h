@@ -8,6 +8,7 @@
 #if ENABLE(AOT)
 
 #include "AOTBuiltinFamilyEmitter.h"
+#include "AOTResolvedCallEmitter.h"
 
 namespace JSC { namespace AOT { namespace Typed {
 
@@ -24,11 +25,14 @@ public:
     void generateRegExpSource(const InlineCall&);
     void generateStringReplace(const InlineCall&);
     void generateStringReplaceAll(const InlineCall&);
+    bool storesElementIntoResult(const InlineCall&);
     void generateStringSplit(const InlineCall&);
     void generateRegExpFlag(const InlineCall&);
     void generateRegExpGetLastIndex(const InlineCall&);
 
 private:
+    template<typename T> T matchInPlace(const InlineCall&, RegExpMatch, RegExpMatchAnswer, T miss, const ScopedLambda<T()>& matchByCall);
+
     TypedPointer fieldAt(LValue cell, ptrdiff_t offset);
     Pointer regExpOf(CellPointer regExpObject);
     Word32 flagsOf(CellPointer regExpObject);

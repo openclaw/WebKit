@@ -7,6 +7,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
 #include "AOTBodyFactsForTables.h"
 #include "AOTBuildContext.h"
 #include "AOTID.h"
@@ -22,7 +23,6 @@
 #include <optional>
 #include <span>
 #include <type_traits>
-#include <wtf/BitVector.h>
 #include <wtf/Function.h>
 #include <wtf/HashMap.h>
 #include <wtf/MathExtras.h>
@@ -42,7 +42,7 @@ enum class TablePartID : uint8_t {
     FieldTable,
     Statics,
     Functions,
-    FunctionTexts,
+    FunctionSources,
     Modules,
     Requests,
     Constants,
@@ -135,7 +135,7 @@ public:
     template<typename T, size_t inlineCapacity>
     uint32_t setTable(ProgramTableIndex index, const Vector<T, inlineCapacity>& items) { return setTable(index, items.span()); }
     template<typename T>
-    uint32_t setTableWrittenInPlace(ProgramTableIndex index, size_t count, const Invocable<void(std::span<T>)> auto& write)
+    uint32_t setTableInPlace(ProgramTableIndex index, size_t count, const Invocable<void(std::span<T>)> auto& write)
     {
         static_assert(std::has_unique_object_representations_v<T>, "Padding would make the bytes differ from build to build.");
         const size_t alignment = sizeof(T) == 1 ? 8 : alignof(T);
@@ -200,6 +200,10 @@ struct AnswersAboutModules {
 
     Vector<OptionSet<Answer>> ofModules;
     Vector<VariableID> variablesThatHoldMocks;
+    Vector<VariableID> instanceVariables;
+    Vector<VariableID> instanceGuards;
+    Vector<VariableID> instanceAllocators;
+    Vector<VariableID> severalInstancesVariables;
     Vector<Directory> directories;
     Vector<uint32_t> directoryOf;
     Vector<StringID> pathOrNameOf;
@@ -250,7 +254,10 @@ struct FieldsOfLayoutRecord {
 };
 
 struct FirstTableParts {
+    static constexpr uint32_t startOfTypes = roundUpToMultipleOf<8>(sizeof(ProgramTables));
     Vector<uint32_t> typeOffsets;
+    static constexpr uint32_t mostShiftOfTypeNumbers = 16;
+    uint32_t shiftOfTypeNumbers { ProgramTables::shiftOfNearTypeNumbers };
     Vector<uint32_t> dataNodes;
     Vector<uint32_t> tablesInImage;
     Vector<uint64_t> shapeSetWords;
@@ -265,7 +272,9 @@ struct TableEncoder {
     uint32_t stringConstantNumber(StringID) const;
     uint32_t identifierNumber(PropertyKeyID, ASCIILiteral use, RowOwner = { }) const;
     uint32_t identifierNumberOfText(StringID, ASCIILiteral use, RowOwner = { }) const;
+    uint32_t identifierOrStringNumber(StringID) const;
     uint32_t typeOffset(TypeID) const;
+    uint16_t typeNumber(TypeID) const;
     uint32_t dataNodeOf(DataID) const;
     uint32_t entrypointOf(FunctionID, ASCIILiteral use, RowOwner = { }) const;
     std::optional<FunctionID> findEntrypoint(FunctionID) const;
@@ -284,7 +293,8 @@ struct TableEncoder {
     Vector<uint32_t> classesByParent;
     Vector<uint32_t> firstClassBelow;
     BitVector sidesWithClassGuardsHereOrBelow;
-    BitVector classesWithRecordsAllTheWayUp;
+    Typed::BitVector classesWithRecordsAllTheWayUp;
+    Typed::BitVector classesWhoseClassObjectsFindNoHasInstance;
     BitVector classesWhosePrivateNamesTextsKnow;
 };
 
@@ -292,6 +302,8 @@ bool showsVariablesOf(const TableInputs&, ModuleID);
 
 void nameWhatTypeTablesName(const TableInputs&, const GatheredMentions&, NamesOfTables&);
 void encodeTypeTables(TableEncoder&, FirstTableParts&);
+std::optional<uint32_t> findShiftOfTypeNumbers(const TablePart&, std::span<const uint32_t> firstWords);
+uint32_t placeTypeRecord(TablePart&, std::span<const uint8_t> record, size_t unit);
 void nameWhatDataTableNames(const TableInputs&, const GatheredMentions&, NamesOfTables&);
 void encodeDataTable(TableEncoder&, FirstTableParts&);
 void nameWhatLayoutTablesName(const TableInputs&, const GatheredMentions&, NamesOfTables&);
@@ -308,7 +320,7 @@ struct MethodTableRow;
 std::array<uint32_t, 4> keyOfClassGuardUnderMethodTableRow(const Typed::MethodFamily&, const Typed::MethodTableRow&);
 void nameWhatFunctionTablesName(const TableInputs&, const GatheredMentions&, NamesOfTables&);
 void encodeFunctionProgramTables(TableEncoder&);
-void encodeFunctionTexts(TableEncoder&);
+void encodeFunctionSources(TableEncoder&);
 void nameWhatModuleTablesName(const TableInputs&, const GatheredMentions&, NamesOfTables&);
 void encodeModuleTables(TableEncoder&);
 void nameWhatRequestTablesName(const TableInputs&, const GatheredMentions&, NamesOfTables&);
@@ -334,6 +346,7 @@ struct ClassRecordParts {
 void askRowsOfClassesForClassRecords(TableEncoder&);
 ClassRecordParts collectClassRecordParts(const TableEncoder&, LayoutID classLayout);
 Vector<ClassBelowWithGuardOfNameData> collectClassesBelowWithGuardsOfNames(const TableEncoder&);
+Vector<AssignedMemberData> collectAssignedMembers(const TableEncoder&);
 void groupClassesByParentInClassRecords(TableEncoder&, std::span<const LayoutID> parentsThatListClasses);
 void appendListsOfClassRecord(TableEncoder&, LayoutID classLayout, const std::array<Vector<uint32_t>, numberOfClassSides>& namedGuards, ClassData&);
 

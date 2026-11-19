@@ -11,6 +11,8 @@
 #include "AOTBody.h"
 #include "AOTBuildContext.h"
 #include "AOTCurrentWork.h"
+#include "AOTFieldGetters.h"
+#include "AOTPlan.h"
 #include "AOTIRProgram.h"
 #include "AOTLinkedFunctions.h"
 #include "AOTThreads.h"
@@ -59,7 +61,7 @@ static bool onlyReturnsForTables(const Typed::Function& function)
     return !returned || (block.holds(returned) && !block.indexOfParameter(returned));
 }
 
-BodyFactsForTables collectBodyFactsForTables(const Typed::Program& program, const Typed::Plan&, const LinkedFunctions& functions, BuildContext& build)
+BodyFactsForTables collectBodyFactsForTables(const Typed::Program& program, const Typed::Plan& plan, const LinkedFunctions& functions, BuildContext& build)
 {
     const ParallelLoops& loops = build.parallelLoops();
     size_t numberOfFunctions = program.functions.size();
@@ -77,6 +79,17 @@ BodyFactsForTables collectBodyFactsForTables(const Typed::Program& program, cons
     facts.functionsThatOnlyReturn = BitVector(numberOfFunctions);
     for (uint32_t function : functionsThatOnlyReturn)
         facts.functionsThatOnlyReturn.quickSet(function);
+    Vector<uint32_t> fieldGetters = findIndicesInParallel(loops, static_cast<unsigned>(numberOfFunctions), [&](unsigned index) {
+        return !!Typed::fieldReturnedByGetter(program, program.functions[index]);
+    });
+    for (uint32_t getter : fieldGetters)
+        facts.fieldsReturnedByGetters.append({ FunctionID(getter), Typed::fieldReturnedByGetter(program, program.functions[getter]) });
+    for (uint32_t index = 0; index < numberOfFunctions; ++index) {
+        if (Typed::ReturnedCapture returned = plan.conventions().of(FunctionID(index)).returnsCapture ? Typed::findReturnedCapture(program, program.functions[index]) : Typed::ReturnedCapture())
+            facts.capturesReturnedByFunctions.append({ FunctionID(index), returned });
+        if (Typed::CapturedVariable object = plan.conventions().of(FunctionID(index)).has(Typed::CodeRole::GenericCallEntry) ? Typed::findKeyedLookup(program.functions[index]) : Typed::CapturedVariable())
+            facts.objectsOfKeyedLookups.append({ FunctionID(index), object });
+    }
     facts.functionsWithFrames = findFunctionsWithFramesForTables(functions, numberOfFunctions, loops);
     return facts;
 }

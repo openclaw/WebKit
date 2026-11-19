@@ -34,14 +34,13 @@ static bool lookupFindsNothingOnObjectsOfForThenables(const Program& program, co
     if (linked.reachesUnseenCode || !linked.listsEveryMemberAbove || possibleChangesForbid(linked.possibleChanges, TypedAccess::FindsNoProperty))
         return false;
 
-    std::span<const PropertyKeyID> appendedKeys = link.appendedKeysOf(id);
-    if (findField(program, id, key) || std::ranges::find(appendedKeys, key) != appendedKeys.end())
+    if (!link.findsNothing(program, id, ClassSide::Prototype, key, Of::ObjectItself))
         return false;
     if (isOnObjectPrototype(program.nameClassOf(key)) || layout.has(LayoutFlags::IsOfCreatedObject))
         return false;
     if (layout.kind == LayoutKind::Record)
         return !layout.constructor && !layout.has(LayoutFlags::IsConstructorFunction);
-    return link.findMember(program, id, ClassSide::Prototype, key).kind == MemberFound::Kind::Nothing;
+    return link.findsNothing(program, id, ClassSide::Prototype, key, Of::HolderAndAbove).has_value();
 }
 
 static bool isProvenToHaveNoThen(const Program& program, const Facts& facts, TypeArena& types, TypeID id)
@@ -98,7 +97,7 @@ static bool nothingEverLiesUnderKeyFromForThenables(const Program& program, Buil
 
 static bool isFreshListWithoutThenForThenables(Walker& walker, Reference value)
 {
-    if (!walker.has(Mechanism::TypedOperations) || !isFreshListAsMade(walker, value))
+    if (!walker.has(Mechanism::TypedOperations) || !isFreshPristineArray(walker, value))
         return false;
     const Program& program = walker.program();
     const BuiltinTable& table = program.builtins();
@@ -106,6 +105,11 @@ static bool isFreshListWithoutThenForThenables(Walker& walker, Reference value)
     return !names.empty() && table.mayHavePristineInstances(BuiltinClasses::Array) && std::ranges::all_of(names, [&](BuiltinName name) {
         return nothingEverLiesUnderKeyFromForThenables(program, table.at(BuiltinClasses::Array).prototype, program.keyOf(name));
     });
+}
+
+bool hasNoThen(const Walker& walker, TypeID type)
+{
+    return isProvenToHaveNoThen(walker.program(), walker.facts(), walker.types(), type);
 }
 
 bool isProvenToHaveNoThen(Walker& walker, Reference value)
@@ -118,6 +122,26 @@ bool isProvenToHaveNoThen(Walker& walker, Reference value)
     return isProvenToHaveNoThen(walker.program(), walker.facts(), walker.types(), type) || isFreshListWithoutThenForThenables(walker, value);
 }
 
+bool leansOnProofOfNoThen(Walker& walker, Reference value, Origin origin)
+{
+    if (!isProvenToHaveNoThen(walker, value))
+        return false;
+    TypeID type = walker.typeOf(value);
+    if (!walker.checksProofsOf(ProofSource::RememberedFact) || !value.isRecord() || !type || !walker.types().at(type).hasObjects() || walker.isUnreachable())
+        return true;
+    origin.isTailCall = false;
+    for (BuiltinName name : walker.program().builtins().keysReadBy(Protocol::Thenable)) {
+        Draft test(Opcode::FindsNoMember, origin);
+        walker.chooseConservativeFields(test);
+        test.setObjectOperand(value);
+        test.setKey(walker.program().keyOf(name));
+        test.setAsksRunTime(true);
+        test.setAsksObjectByInquiry(true);
+        walker.verifyRememberedTest(WTF::move(test));
+    }
+    return true;
+}
+
 Reference buildTestForNoThen(Walker& walker, Reference value, Origin origin)
 {
     auto answer = [&](bool hasNoThen) {
@@ -125,7 +149,7 @@ Reference buildTestForNoThen(Walker& walker, Reference value, Origin origin)
         constant.setBoolean(hasNoThen);
         return walker.constant(WTF::move(constant));
     };
-    if (isProvenToHaveNoThen(walker, value))
+    if (leansOnProofOfNoThen(walker, value, origin))
         return answer(true);
 
     TypeArena& types = walker.types();

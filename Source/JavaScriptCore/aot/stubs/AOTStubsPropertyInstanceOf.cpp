@@ -14,6 +14,7 @@
 #include "AOTStubsConstants.h"
 #include "AOTStubsGlobalBindings.h"
 #include "AOTStubsValues.h"
+#include "JSGlobalProxy.h"
 #include "JSObject.h"
 #include "JSTypeInfo.h"
 #include "Structure.h"
@@ -57,68 +58,74 @@ static void readConstructorOffGlobalNameAndGoOn(StubAssembler& jit, GlobalBindin
     jit.jumpToStub(instanceOf(InstanceOfOperand::Constructor));
 }
 
-static void readPrototypeOutOfCellOfBuiltinAndGoOn(StubAssembler& jit)
-{
-    const GPRReg value = jit.operand(0);
-    const GPRReg prototype = jit.clobberRegister(jit.immediate());
-    const GPRReg number = jit.allocateScratch(StubRegister::T11);
-
-    jit.zeroExtend32ToWord(jit.immediate(), number);
-    jit.loadPtr(Address(instanceGPR, AOT_INSTANCE_PREFIX_OFFSET(builtinCells)), prototype);
-    jit.load64(BaseIndex(prototype, number, CCallHelpers::TimesEight), prototype);
-    Jump isNotMade = jit.branchTest64(CCallHelpers::Zero, prototype);
-    jit.jumpToStub(instanceOf(InstanceOfOperand::Prototype));
-
-    const StubSignature signatureOfMaker = signatureOf(builtinCell());
-    isNotMade.link(&jit);
-    jit.emitFunctionPrologue();
-    jit.preserving({ value }, [&] {
-        jit.move(number, *signatureOfMaker.immediate);
-        jit.callStub(builtinCell());
-        jit.move(signatureOfMaker.firstResult.gpr(), prototype);
-    });
-    jit.emitFunctionEpilogue();
-    jit.jumpToStub(instanceOf(InstanceOfOperand::Prototype));
-}
-
 void generateInstanceOf(StubAssembler& jit)
 {
     const auto operand = static_cast<InstanceOfOperand>(jit.key().form());
-    if (operand == InstanceOfOperand::PrototypeThatIsBuiltin) {
-        readPrototypeOutOfCellOfBuiltinAndGoOn(jit);
-        return;
-    }
     if (operand == InstanceOfOperand::NameSeenByScripts || operand == InstanceOfOperand::NameOfGlobalObject) {
         readConstructorOffGlobalNameAndGoOn(jit, operand == InstanceOfOperand::NameSeenByScripts ? GlobalBindingScope::ScriptsAndGlobalObject : GlobalBindingScope::GlobalObject);
         return;
     }
-    const bool isGivenPrototype = operand == InstanceOfOperand::Prototype;
-    const GPRReg prototype = isGivenPrototype ? jit.operand(1) : jit.clobberOperand(1);
+    const bool readsPrototypeOutOfCell = operand == InstanceOfOperand::PrototypeThatIsBuiltin;
+    const bool givesWayAtTraps = operand == InstanceOfOperand::PrototypeWithoutTraps;
+    const bool isGivenPrototype = operand == InstanceOfOperand::Prototype || givesWayAtTraps;
+    const bool mayAcceptBinaryData = readsPrototypeOutOfCell || operand == InstanceOfOperand::Prototype;
+    const GPRReg prototype = readsPrototypeOutOfCell ? jit.clobberRegister(jit.immediate()) : isGivenPrototype ? jit.operand(1) : jit.clobberOperand(1);
     const GPRReg constructor = prototype;
     const GPRReg current = jit.allocateScratch(StubRegister::T11);
     const GPRReg next = jit.allocateScratch(StubRegister::T12);
     const GPRReg value = jit.operand(0);
     JumpList isInstance;
     JumpList notInstance;
+    JumpList reachesEndOfChain;
     JumpList slowCases;
+    JumpList startsOverWithPrototype;
+    JumpList cellIsNotMade;
 
+    auto readPrototypeOutOfCell = [&] {
+        jit.zeroExtend32ToWord(jit.immediate(), current);
+        jit.loadPtr(Address(instanceGPR, AOT_INSTANCE_PREFIX_OFFSET(builtinCells)), prototype);
+        jit.load64(BaseIndex(prototype, current, CCallHelpers::TimesEight), prototype);
+        cellIsNotMade.append(jit.branchTest64(CCallHelpers::Zero, prototype));
+    };
     auto returnBoolean = [&](bool result) {
         jit.move(TrustedImm32(result), jit.result());
         jit.returnToCaller();
     };
-    auto followPrototypeChainAndReturn = [&] {
+    auto followPrototypeChainAndReturn = [&](const Invocable<void()> auto& beforeThirdLink) {
         struct Link {
             Jump hasPolyProto;
             Label hasPrototype;
             Jump goesOn;
         };
-        auto followLink = [&](GPRReg object) {
+        auto loadStructureOfGlobalObject = [&](GPRReg object) {
+            slowCases.append(jit.branchIfNotType(object, GlobalProxyType));
+            jit.loadPtr(Address(object, JSGlobalProxy::targetOffset()), next);
+            slowCases.append(jit.branchTest8(CCallHelpers::NonZero, Address(next, JSObject::typeInfoFlagsOffset()), TrustedImm32(OverridesGetPrototype)));
+            loadStructure(jit, next, next);
+        };
+        auto followLink = [&](GPRReg object, bool standsAheadOfPrototype) {
             Link link;
-            slowCases.append(jit.branchTest8(CCallHelpers::NonZero, Address(object, JSObject::typeInfoFlagsOffset()), TrustedImm32(OverridesGetPrototype)));
+            Jump overridesGetPrototype = jit.branchTest8(CCallHelpers::NonZero, Address(object, JSObject::typeInfoFlagsOffset()), TrustedImm32(OverridesGetPrototype));
+            if (!givesWayAtTraps)
+                (standsAheadOfPrototype ? startsOverWithPrototype : slowCases).append(overridesGetPrototype);
             loadStructure(jit, object, next);
+            if (givesWayAtTraps) {
+                Jump hasStructure = jit.jump();
+                overridesGetPrototype.link(&jit);
+                loadStructureOfGlobalObject(object);
+                hasStructure.link(&jit);
+            }
             jit.load64(Address(next, Structure::prototypeOffset()), next);
             link.hasPolyProto = jit.branchTest64(CCallHelpers::Zero, next);
             link.hasPrototype = jit.label();
+            if (standsAheadOfPrototype) {
+                Jump liesBelowAnotherObject = jit.branch64(CCallHelpers::NotEqual, next, Address(instanceGPR, AOT_INSTANCE_OFFSET(realm.objectPrototype)));
+                returnBoolean(false);
+                liesBelowAnotherObject.link(&jit);
+                readPrototypeOutOfCell();
+                isInstance.append(jit.branch64(CCallHelpers::Equal, next, prototype));
+                return link;
+            }
             isInstance.append(jit.branch64(CCallHelpers::Equal, next, prototype));
             link.goesOn = jit.branch64(CCallHelpers::NotEqual, next, Address(instanceGPR, AOT_INSTANCE_OFFSET(realm.objectPrototype)));
             returnBoolean(false);
@@ -129,28 +136,63 @@ void generateInstanceOf(StubAssembler& jit)
             jit.load64(Address(object, offsetRelativeToBase(knownPolyProtoOffset)), next);
             jit.jump().linkTo(link.hasPrototype, &jit);
         };
-        Link first = followLink(value);
-        first.goesOn.link(&jit);
+        Link first = followLink(value, readsPrototypeOutOfCell);
+        if (!readsPrototypeOutOfCell)
+            first.goesOn.link(&jit);
+        std::optional<Link> second;
+        if (operand == InstanceOfOperand::Constructor) {
+            reachesEndOfChain.append(jit.branchIfNotCell(next));
+            jit.move(next, current);
+            second = followLink(current, false);
+            second->goesOn.link(&jit);
+            beforeThirdLink();
+        }
         Label nextLink = jit.label();
-        notInstance.append(jit.branchIfNotCell(next));
+        reachesEndOfChain.append(jit.branchIfNotCell(next));
         jit.move(next, current);
-        Link further = followLink(current);
+        Link further = followLink(current, false);
         further.goesOn.linkTo(nextLink, &jit);
         readPolyProto(first, value);
+        if (second)
+            readPolyProto(*second, current);
         readPolyProto(further, current);
 
+        reachesEndOfChain.link(&jit);
+        if (mayAcceptBinaryData)
+            slowCases.append(jit.branchIfType(value, JSTypeRange { ArrayBufferType, static_cast<JSType>(LastTypedArrayTypeExcludingDataView) }));
         notInstance.link(&jit);
         returnBoolean(false);
         isInstance.link(&jit);
         returnBoolean(true);
         slowCases.link(&jit);
-        jit.callOperationAndReturn(Entry::operationAOTDefaultHasInstance, { .secondArgumentIn = value, .thirdArgumentIn = prototype });
+        if (givesWayAtTraps) {
+            jit.move(TrustedImm32(answerOfChainWalkAtTrap), jit.result());
+            jit.returnToCaller();
+        } else
+            jit.callOperationAndReturn(Entry::operationAOTDefaultHasInstance, { .secondArgumentIn = value, .thirdArgumentIn = prototype });
+        if (!readsPrototypeOutOfCell)
+            return;
+
+        startsOverWithPrototype.link(&jit);
+        readPrototypeOutOfCell();
+        jit.jumpToStub(instanceOf(InstanceOfOperand::Prototype));
+
+        const StubSignature signatureOfMaker = signatureOf(builtinCell());
+        cellIsNotMade.link(&jit);
+        jit.emitFunctionPrologue();
+        jit.preserving({ value }, [&] {
+            jit.move(current, *signatureOfMaker.immediate);
+            jit.callStub(builtinCell());
+            jit.move(signatureOfMaker.firstResult.gpr(), prototype);
+        });
+        jit.emitFunctionEpilogue();
+        jit.jumpToStub(instanceOf(InstanceOfOperand::Prototype));
     };
 
-    if (isGivenPrototype) {
+    if (isGivenPrototype || readsPrototypeOutOfCell) {
         notInstance.append(jit.branchIfNotCell(value));
         notInstance.append(jit.branchIfNotObject(value));
-        followPrototypeChainAndReturn();
+        followPrototypeChainAndReturn([] { });
         return;
     }
 
@@ -205,9 +247,88 @@ void generateInstanceOf(StubAssembler& jit)
     Label hasReadPrototype = jit.label();
     slowCases.append(jit.branchIfNotCell(prototype));
     slowCases.append(jit.branchIfNotObject(prototype));
-    followPrototypeChainAndReturn();
+    Label hasCheckedPrototype = jit.label();
+    followPrototypeChainAndReturn([&] {
+        jit.load64(headerAtPlace, method);
+        jit.or64(TrustedImm32(PlaceOfOrdinaryConstructor::asksFilter), method);
+        jit.store64(method, headerAtPlace);
+    });
 
     isNotRemembered.link(&jit);
+    {
+        JumpList notInstance;
+        const GPRReg filterPlace = place;
+        const GPRReg bit = probe.entry;
+        const GPRReg objects = method;
+        const Address filters(instanceGPR, AOT_INSTANCE_OFFSET(propertyCaches.prototypeChainFilters));
+        auto loadPlaceOfFilter = [&] {
+            static_assert(sizeof(PrototypeChainFilter) == 2 * sizeof(uint64_t));
+            jit.load32(Address(value, JSCell::structureIDOffset()), current);
+            jit.mul32(TrustedImm32(static_cast<int32_t>(HashedSlot::structureMultiplier)), current, filterPlace);
+            jit.urshift32(TrustedImm32(32 - PrototypeChainFilter::numberOfFiltersLog2), filterPlace);
+            jit.lshift32(TrustedImm32(1), filterPlace);
+            jit.getEffectiveAddress(BaseIndex(bit, filterPlace, CCallHelpers::TimesEight), filterPlace);
+        };
+        auto loadBitOf = [&](GPRReg object) {
+            jit.mul32(TrustedImm32(static_cast<int32_t>(HashedSlot::structureMultiplier)), object, bit);
+            jit.urshift32(TrustedImm32(32 - PrototypeChainFilter::numberOfBitsLog2), bit);
+        };
+        jit.xor32(TrustedImm32(PlaceOfOrdinaryConstructor::asksFilter), probe.structureID);
+        Jump asksNoFilter = jit.branch32(CCallHelpers::NotEqual, probe.header, probe.structureID);
+        notInstance.append(jit.branchIfNotCell(value));
+        loadOwnValueBySlot(jit, valueSlot, constructor, probe.structureID, probe.header, prototype);
+        Jump prototypeIsNoCell = jit.branchIfNotCell(prototype);
+        Jump prototypeIsNoObject = jit.branchIfNotObject(prototype);
+        jit.loadPtr(filters, bit);
+        Jump hasNoFilters = jit.branchTestPtr(CCallHelpers::Zero, bit);
+        loadPlaceOfFilter();
+        Jump hasNoFilter = jit.branch32(CCallHelpers::NotEqual, current, Address(filterPlace, OBJECT_OFFSETOF(PrototypeChainFilter, structureID)));
+        jit.load64(Address(filterPlace, OBJECT_OFFSETOF(PrototypeChainFilter, objects)), objects);
+        loadBitOf(prototype);
+        jit.urshift64(bit, objects);
+        Jump isOnChainPerhaps = jit.branchTest32(CCallHelpers::NonZero, objects, TrustedImm32(1));
+        returnBoolean(false);
+
+        hasNoFilter.link(&jit);
+        JumpList hasNone;
+        notInstance.append(jit.branchIfNotObject(value));
+        hasNone.append(jit.branchIfType(value, JSTypeRange { ArrayBufferType, static_cast<JSType>(LastTypedArrayTypeExcludingDataView) }));
+        jit.move(value, current);
+        jit.move(TrustedImm32(0), objects);
+        Label nextObject = jit.label();
+        hasNone.append(jit.branchTest8(CCallHelpers::NonZero, Address(current, JSObject::typeInfoFlagsOffset()), TrustedImm32(OverridesGetPrototype)));
+        loadStructure(jit, current, next);
+        jit.load64(Address(next, Structure::prototypeOffset()), current);
+        hasNone.append(jit.branchTest64(CCallHelpers::Zero, current));
+        Jump isEndOfChain = jit.branchIfNotCell(current);
+        loadBitOf(current);
+        jit.move(TrustedImm32(1), filterPlace);
+        jit.lshift64(bit, filterPlace);
+        jit.or64(filterPlace, objects);
+        jit.jump().linkTo(nextObject, &jit);
+        isEndOfChain.link(&jit);
+        jit.loadPtr(filters, bit);
+        loadPlaceOfFilter();
+        jit.store32(current, Address(filterPlace, OBJECT_OFFSETOF(PrototypeChainFilter, structureID)));
+        jit.store64(objects, Address(filterPlace, OBJECT_OFFSETOF(PrototypeChainFilter, objects)));
+        jit.store8(TrustedImm32(1), Address(instanceGPR, AOT_INSTANCE_OFFSET(propertyCaches.prototypeChainFiltersMayBeFilled)));
+
+        hasNoFilters.link(&jit);
+        notInstance.append(jit.branchIfNotObject(value));
+        hasNone.link(&jit);
+        isOnChainPerhaps.link(&jit);
+        jit.move(TrustedImm32(PlaceOfOrdinaryConstructor::placeThatIsNeverRead), place);
+        jit.jump().linkTo(hasCheckedPrototype, &jit);
+
+        prototypeIsNoCell.link(&jit);
+        prototypeIsNoObject.link(&jit);
+        notInstance.append(jit.branchIfNotObject(value));
+        jit.callOperationAndReturn(Entry::operationAOTDefaultHasInstance, { .secondArgumentIn = value, .thirdArgumentIn = prototype });
+        notInstance.link(&jit);
+        returnBoolean(false);
+        asksNoFilter.link(&jit);
+        jit.xor32(TrustedImm32(PlaceOfOrdinaryConstructor::asksFilter), probe.structureID);
+    }
     miss.append(jit.branchIfNotObject(constructor));
     jit.loadPtr(Address(instanceGPR, AOT_INSTANCE_OFFSET(propertyCaches.hasInstanceUID)), probe.uid);
     SlotRead methodRead = readFromConstructor(method, false);
@@ -249,7 +370,7 @@ void generateInstanceOf(StubAssembler& jit)
 
 StubSignature signatureOfInstanceOf(StubKey key)
 {
-    if (static_cast<InstanceOfOperand>(key.form()) <= InstanceOfOperand::Prototype)
+    if (static_cast<InstanceOfOperand>(key.form()) <= InstanceOfOperand::PrototypeWithoutTraps)
         return StubSignature::withGPRResult({ gprOf(StubRegister::R0), gprOf(StubRegister::A1) });
     StubSignature signature = StubSignature::withGPRResult({ gprOf(StubRegister::R0) });
     signature.immediate = gprOf(StubRegister::A1);

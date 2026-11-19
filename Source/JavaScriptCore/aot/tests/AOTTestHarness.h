@@ -50,6 +50,7 @@ inline Wire::CompileOptions makeOptionsOfTestedProgram()
 namespace Typed {
 
 class Code;
+struct CompileInputs;
 class Facts;
 class Plan;
 class TypeArena;
@@ -63,6 +64,7 @@ int runCommandSubcommand(StringView command, std::span<const String> arguments);
 int runPrintSubcommand(std::span<const String> arguments);
 int runCompileSubcommand(std::span<const String> arguments);
 int runFuzzAllocationSubcommand(std::span<const String> arguments);
+int runFuzzExecutionSubcommand(std::span<const String> arguments);
 
 Vector<TypeID> typesNamedBy(const Program&, std::optional<FunctionID> functionOfTypesLine);
 
@@ -82,6 +84,16 @@ enum class MachineState : uint8_t {
     Prepared,
 };
 
+class ScopeOfTestThatRunsAsUsersBuild {
+    WTF_MAKE_NONCOPYABLE(ScopeOfTestThatRunsAsUsersBuild);
+public:
+    explicit ScopeOfTestThatRunsAsUsersBuild(bool);
+    ~ScopeOfTestThatRunsAsUsersBuild();
+
+private:
+    bool m_before;
+};
+
 class StagedBuild {
     WTF_MAKE_NONCOPYABLE(StagedBuild);
 public:
@@ -95,6 +107,7 @@ public:
     const Facts* facts();
     const Plan* plan();
     const PreparedProgram* prepared();
+    std::unique_ptr<CompileInputs> prepareInputsForVerification();
 
     TypeArena& types();
     const Code* code(CodeUnit);

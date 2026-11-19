@@ -25,6 +25,7 @@ struct BuiltinTypeContext {
     TypeArena& types;
     const PositionTypes* positions { nullptr };
     TypeLevel level { TypeLevel::Proven };
+    bool* asksPositions { nullptr };
 };
 
 struct BuiltinOperandTypes {
@@ -68,6 +69,8 @@ TypeID typeExpectedByLibraryFunction(const Program&, TypeArena&, FunctionID, uin
 uint16_t primitivesOfBuiltinType(const BuiltinType&);
 Range integerRangeWrittenBy(const BuiltinType&);
 TypedArrayType typedArrayTypeOf(const BuiltinTypeContext&, TypeID);
+uint32_t kindsOfViewsOfNumbersIn(const Program&, TypeReader, TypeID);
+BuiltinClassID classAboveViewsOfSeveralKinds(const Program&, TypeReader, TypeID);
 
 OperandFit fitOf(const BuiltinTypeContext&, TypeID operandOrNotPassed, BuiltinTypeID tested);
 bool fitsIfPristine(const BuiltinTypeContext&, TypeID operandOrNotPassed, BuiltinTypeID tested);
@@ -88,7 +91,7 @@ Vector<BuiltinOverloadID, 4> overloadsReachedBy(const BuiltinTypeContext&, Built
 bool rowsSpeakOfCallOnReceiver(const BuiltinTypeContext&, BuiltinID, TypeID receiverOrNotPassed);
 bool overloadTakesOperands(const BuiltinTypeContext&, BuiltinOverloadID, BuiltinCallForm, const BuiltinOperandTypes&);
 bool distinguishesOmittedFromUndefined(const BuiltinTable&, const BuiltinParameter&);
-bool isCallThatTheWalkMustLower(const BuiltinTable&, BuiltinID);
+bool requiresWalkLowering(const BuiltinTable&, BuiltinID);
 
 } } } // namespace JSC::AOT::Typed
 

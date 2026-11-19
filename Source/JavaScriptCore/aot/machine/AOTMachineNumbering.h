@@ -43,7 +43,7 @@ public:
     {
         return combine(payload, static_cast<uint64_t>(opcode) | static_cast<uint64_t>(base) << 32);
     }
-    Operation* findWithoutPosition(Opcode opcode, uint64_t payload, uint32_t hash, uint32_t base = UINT32_MAX) const
+    ALWAYS_INLINE Operation* findWithoutPosition(Opcode opcode, uint64_t payload, uint32_t hash, uint32_t base = UINT32_MAX) const
     {
         for (uint32_t link = m_bucketsWithoutPosition[hash & (m_bucketsWithoutPosition.size() - 1)]; link; link = m_withoutPosition[link - 1].previousInBucket) {
             const Entry& entry = m_withoutPosition[link - 1];
@@ -78,7 +78,7 @@ public:
         Operation* operation { nullptr };
         bool isInherited { false };
     };
-    static uint32_t hashOf(const NumberingKey& key)
+    ALWAYS_INLINE static uint32_t hashOf(const NumberingKey& key)
     {
         uint64_t head = static_cast<uint64_t>(key.opcode) | static_cast<uint64_t>(key.type.kind()) << 8 | static_cast<uint64_t>(key.children[0]->index()) << 32;
         uint64_t rest = key.payload;
@@ -119,6 +119,7 @@ public:
     }
     JS_EXPORT_PRIVATE void addPurePatch(const NumberingKeyOfPurePatch&, PatchOperation*);
     JS_EXPORT_PRIVATE void addInPlaceOfPurePatch(const NumberingKeyOfPurePatch&, Operation* phi);
+    JS_EXPORT_PRIVATE void addInPlaceOfReadOfMemory(const NumberingKeyOfPurePatch&, Operation* phi, HeapIndex);
 
     void didWrite(HeapIndex heap)
     {
@@ -189,7 +190,7 @@ public:
         m_endOfInheritedEntries = m_log.size();
     }
 
-    void switchBlocks(Block* from, Block* to)
+    ALWAYS_INLINE void switchBlocks(Block* from, Block* to)
     {
         ASSERT(from != to);
         if (!m_suspendedBlocks.isEmpty() || !from->isTerminated()) {
@@ -239,7 +240,7 @@ private:
     {
         return operation->m_owner && !operation->traps() && !hasTrait(operation->m_opcode, OpcodeTrait::HasEffects | OpcodeTrait::HasNoPosition | OpcodeTrait::IsNeverNumbered);
     }
-    static bool matches(const NumberingKey& key, const Entry& entry)
+    ALWAYS_INLINE static bool matches(const NumberingKey& key, const Entry& entry)
     {
         const Operation* operation = entry.operation;
         return operation->m_opcode == key.opcode && operation->m_type == key.type && entry.payload == key.payload
@@ -317,6 +318,12 @@ private:
         return time;
     }
     bool patchWasEndedByWrite(const Entry&) const;
+    struct ReadThatPhiStandsFor {
+        const Operation* phi;
+        const Operation* operand;
+        HeapIndex heap;
+    };
+    const ReadThatPhiStandsFor* readThatPhiStandsFor(const Operation* phi) const;
     JS_EXPORT_PRIVATE void makeTimesOfWrites();
     JS_EXPORT_PRIVATE void didWriteListedHeaps(std::span<const HeapIndex>);
     JS_EXPORT_PRIVATE void growBuckets();
@@ -343,6 +350,7 @@ private:
     std::span<TimesOfWrites> m_timesOfWrites;
     ArenaVector<SuspendedBlock> m_suspendedBlocks;
     ArenaVector<uint32_t> m_placeOfSuspendedBlock;
+    ArenaVector<ReadThatPhiStandsFor> m_readsThatPhisStandFor;
 
     ArenaVector<Entry> m_withoutPosition;
     ArenaVector<uint32_t> m_bucketsWithoutPosition;

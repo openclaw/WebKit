@@ -9,6 +9,7 @@
 #if ENABLE(AOT)
 
 #include "AOTArrivals.h"
+#include "AOTBodyIndex.h"
 #include "AOTEntryEmitter.h"
 #include "AOTFacts.h"
 #include "AOTLinkTables.h"
@@ -19,10 +20,12 @@
 #include "AOTThreads.h"
 #include <algorithm>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
 #include <wtf/BitVector.h>
+#include <wtf/Deque.h>
 #include <wtf/MonotonicTime.h>
 
 namespace JSC { namespace AOT {
@@ -41,6 +44,53 @@ struct OutputOfCompileThread {
     WTF::BitSet<numberOfEntries> entriesUsed;
     Typed::CompileWorker::InstructionsOfSteps instructionsOfSteps;
     Vector<UseOfCompileThreads::Unit> timesOfUnits;
+};
+
+class RetiredBodyCaches {
+    WTF_MAKE_NONCOPYABLE(RetiredBodyCaches);
+public:
+    explicit RetiredBodyCaches(unsigned numberOfThreads)
+        : m_threads(numberOfThreads, [](size_t) { return makeUniqueWithoutFastMallocCheck<OfThread>(); })
+    {
+    }
+
+    void didBeginUnit(unsigned thread) { m_threads[thread]->startOfUnit.store(m_clock.load()); }
+
+    void didEndUnit(unsigned thread, const Typed::BodyIndex* body)
+    {
+        OfThread& own = *m_threads[thread];
+        own.startOfUnit.store(notInUnit);
+        if (body) {
+            std::unique_ptr<const Typed::KeptWithBodyIndex> kept = body->takeKeptByWalk();
+            std::unique_ptr<const Typed::BodyLivenessData> liveness = body->takeLiveness();
+            if (kept || liveness)
+                own.retired.append(Retired { m_clock.fetch_add(1), WTF::move(kept), WTF::move(liveness) });
+        }
+        if (own.retired.isEmpty())
+            return;
+        uint64_t oldestStart = notInUnit;
+        for (const std::unique_ptr<OfThread>& other : m_threads)
+            oldestStart = std::min(oldestStart, other->startOfUnit.load());
+        while (!own.retired.isEmpty() && own.retired.first().time < oldestStart)
+            own.retired.removeFirst();
+    }
+
+private:
+    static constexpr uint64_t notInUnit = UINT64_MAX;
+
+    struct Retired {
+        uint64_t time;
+        std::unique_ptr<const Typed::KeptWithBodyIndex> kept;
+        std::unique_ptr<const Typed::BodyLivenessData> liveness;
+    };
+
+    struct OfThread {
+        std::atomic<uint64_t> startOfUnit { notInUnit };
+        Deque<Retired> retired;
+    };
+
+    std::atomic<uint64_t> m_clock { 0 };
+    Vector<std::unique_ptr<OfThread>> m_threads;
 };
 
 struct PlaceOfCompiledCode {
@@ -71,7 +121,7 @@ void forEachUnitMentionedBy(const CompiledCode& code, const Typed::CompileInputs
 
 void mentionUnitNamedOutsideCode(UnitQueue& queue, unsigned thread, CodeUnit unit)
 {
-    queue.mention(thread, unit);
+    queue.mention(thread, unit, Typed::isGenericEntry(unit.role) ? MentionKind::ClosureWord : MentionKind::Call);
 }
 
 void mentionWhatCodeNames(UnitQueue& queue, unsigned thread, const CompiledCode& code, const Typed::CompileInputs& inputs)
@@ -94,7 +144,7 @@ void mentionWhatCodeNames(UnitQueue& queue, unsigned thread, const CompiledCode&
             return false;
         if (const Vector<CodeUnit>* unitsThatAsk = queue.unitsThatAskAmongMentionedUnitsOfClass(classOrNoneBehindLast)) {
             for (CodeUnit unit : *unitsThatAsk)
-                queue.mention(thread, unit);
+                queue.mention(thread, unit, MentionKind::ClosureWord);
             return false;
         }
         classesGoneThrough.append({ classOrNoneBehindLast, { } });
@@ -107,11 +157,11 @@ void mentionWhatCodeNames(UnitQueue& queue, unsigned thread, const CompiledCode&
         if (namesSelector && queue.hasMentionedUnitsBehindSelector(keyOf(mention, body.mentionWords.span())[0]))
             continue;
         bool queueAsksWhoMentions = false;
-        forEachUnitBehind(mention, body.mentionWords.span(), walk.program, walk.facts, walk.plan, scopedLambda<void(Typed::CodeUnit, MentionKind)>([&](CodeUnit unit, MentionKind) {
+        forEachUnitBehind(mention, body.mentionWords.span(), walk.program, walk.facts, walk.plan, scopedLambda<void(Typed::CodeUnit, MentionKind)>([&](CodeUnit unit, MentionKind kind) {
             queueAsksWhoMentions |= namesSelector && queue.asksWhoMentions(unit);
             if (goesThroughClass && queue.asksWhoMentions(unit))
                 classesGoneThrough.last().unitsThatAskWhoMentions.append(unit);
-            queue.mention(thread, unit);
+            queue.mention(thread, unit, kind);
         }), &asksForUnitsOfClass);
         if (namesSelector && !queueAsksWhoMentions)
             queue.didMentionUnitsBehindSelector(keyOf(mention, body.mentionWords.span())[0]);
@@ -215,7 +265,14 @@ static std::optional<LinkedFunctions> linkCodeOfCompileThreads(std::span<OutputO
         return WTF::move(outputs[index].blocks);
     });
 
-    return LinkedFunctions(WTF::move(linked), describeFusedCallEntries(fusedCallEntries, inputs, loops));
+    Vector<FusedCallEntry> described = describeFusedCallEntries(fusedCallEntries, inputs, loops);
+    if (AOT::hasFlag(build.options().injectedFaults, Wire::FaultInjection::ReverseFusedCallEntries))
+        described.reverse();
+    if (!std::ranges::is_sorted(described, { }, &FusedCallEntry::unitIndex) || !std::ranges::is_sorted(described, { }, &FusedCallEntry::place)) {
+        build.diagnostics().add(InternalError { .kind = InternalErrorKind::ProgramTableCheckFailed, .detail = "TableNotSorted: fusedCallEntries"_s });
+        return std::nullopt;
+    }
+    return LinkedFunctions(WTF::move(linked), WTF::move(described));
 }
 
 static Vector<Typed::WalkNotes> takeNotesOfCompileThreads(std::span<OutputOfCompileThread> outputs, const ParallelLoops& loops)
@@ -329,6 +386,7 @@ CompiledProgram compileQueuedUnits(const Typed::CompileInputs& inputs, Typed::Ty
     queue.addSeeds(seeds.span(), loops);
     std::atomic<bool> didFail { false };
     Vector<OutputOfCompileThread> outputs(numberOfThreads);
+    RetiredBodyCaches retiredCaches(numberOfThreads);
     bool timesUnits = build.options().logging.logsPhaseTimes;
     MonotonicTime startOfUnits = MonotonicTime::now();
 
@@ -342,17 +400,23 @@ CompiledProgram compileQueuedUnits(const Typed::CompileInputs& inputs, Typed::Ty
         for (; unit; unit = queue.take(thread)) {
             MonotonicTime startOfUnit = timesUnits ? MonotonicTime::now() : MonotonicTime();
             Typed::CompileWorker::InstructionsOfSteps instructionsInFront = worker.instructionsOfSteps();
+            retiredCaches.didBeginUnit(index);
             std::optional<CompiledCode> code = worker.compile(*unit);
+            bool walksBody = unit->role == Typed::CodeRole::Body || unit->role == Typed::CodeRole::CoroutineBody || unit->role == Typed::CodeRole::SlowBody;
+            retiredCaches.didEndUnit(index, walksBody ? inputs.walk.facts.bodies().find(unit->function) : nullptr);
             if (timesUnits) [[unlikely]] {
                 const Typed::CompileWorker::InstructionsOfSteps& instructions = worker.instructionsOfSteps();
                 output.timesOfUnits.append({ *unit, startOfUnit - startOfUnits, MonotonicTime::now() - startOfUnit, instructions.walkAndSweep - instructionsInFront.walkAndSweep, instructions.emitToEncode - instructionsInFront.emitToEncode });
             }
             if (code && prepareCodeOfCompileThread(*code, conventions, build)) {
+                for (FunctionID entered : worker.functionsThatUnitMayEnterByValue())
+                    queue.noteEntryByValue(thread, entered, inputs.walk.options.verifiesCode);
                 mentionWhatCodeNames(queue, thread, *code, inputs);
                 keepCodeOfCompileThread(output, WTF::move(*code));
             } else {
                 didFail.store(true, std::memory_order_relaxed);
             }
+            worker.functionsThatUnitMayEnterByValue().shrink(0);
             queue.didFinish(thread);
         }
         output.notes = WTF::move(worker.notes());

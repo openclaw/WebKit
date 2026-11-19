@@ -174,8 +174,8 @@ void AssemblyHelpers::jitAssertIsJSDouble(GPRReg gpr)
     if (!Options::useJITAsserts())
         return;
     JIT_COMMENT(*this, "ASSERT is JS boxed double (non-int32 number)");
-    Jump checkJSInt32 = branchIfInt32(gpr);
-    Jump checkJSNumber = branchIfNumber(gpr);
+    Jump checkJSInt32 = branchIfInt32(gpr, DoNotHaveTagRegisters);
+    Jump checkJSNumber = branchIfNumber(gpr, DoNotHaveTagRegisters);
     checkJSInt32.link(this);
     abortWithReason(AHIsNotJSDouble);
     checkJSNumber.link(this);
@@ -1112,10 +1112,10 @@ AssemblyHelpers::FreeListRefill AssemblyHelpers::emitAllocateFromFreeList(GPRReg
     refill.isExhausted = branchPtr(RelationalCondition::AboveOrEqual, resultGPR, Address(allocatorGPR, LocalAllocator::offsetOfFreeList() + FreeList::offsetOfIntervalEnd()));
     refill.hasRoom = label();
     // The stores that fill cells wait for one line of memory after the other. Small cells share a line, and each would ask for the same next one.
-    constexpr int32_t cacheLineSize = 64;
+    constexpr int32_t distanceToPrefetch = 512;
     constexpr unsigned minCellSizeToPrefetchBehind = 48;
     if (constantCellSize && *constantCellSize >= minCellSizeToPrefetchBehind)
-        prefetch(Address(resultGPR, cacheLineSize));
+        prefetch(Address(resultGPR, distanceToPrefetch));
     if (constantCellSize)
         add64(TrustedImm32(*constantCellSize), Address(allocatorGPR, LocalAllocator::offsetOfFreeList() + FreeList::offsetOfIntervalStart()));
     else {
@@ -2175,11 +2175,10 @@ AssemblyHelpers::JumpList AssemblyHelpers::checkWasmStackOverflow(GPRReg instanc
     overflow.append(branchPtr(LessThan, framePointerGPR, memoryTempRegister));
     return overflow;
 #elif CPU(X86_64)
-    loadPtr(Address(instanceGPR, JSWebAssemblyInstance::offsetOfSoftStackLimit()), scratchRegister());
     JumpList overflow;
-    // Because address is within 48bit, this addition never causes overflow.
-    addPtr(checkSize, scratchRegister());
-    overflow.append(branchPtr(LessThan, framePointerGPR, scratchRegister()));
+    // Because address is within 48bit, this subtraction never causes overflow.
+    addPtr(TrustedImm32(-checkSize.m_value), framePointerGPR, scratchRegister());
+    overflow.append(branchPtr(LessThan, scratchRegister(), Address(instanceGPR, JSWebAssemblyInstance::offsetOfSoftStackLimit())));
     return overflow;
 #elif CPU(RISCV64)
     loadPtr(Address(instanceGPR, JSWebAssemblyInstance::offsetOfSoftStackLimit()), memoryTempRegister);

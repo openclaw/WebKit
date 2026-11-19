@@ -677,8 +677,9 @@ void clobberize(Graph& graph, Node* node, NOESCAPE const ReadFunctor& read, NOES
     case PhantomDirectArguments:
     case PhantomClonedArguments:
         // DFG backend requires that the locals that this reads are flushed. FTL backend can handle those
-        // locals being promoted.
-        if (!graph.m_plan.isFTL())
+        // locals being promoted, but not the arguments of the machine frame: OSR exit copies those from
+        // their stack slots, which a recursive tail call that became a jump writes.
+        if (!graph.m_plan.isFTL() || !node->origin.semantic.inlineCallFrame())
             read(Stack);
         
         // Even though it's phantom, it still has the property that one can't be replaced with another.
@@ -838,6 +839,7 @@ void clobberize(Graph& graph, Node* node, NOESCAPE const ReadFunctor& read, NOES
     case Construct:
     case DirectConstruct:
     case CallVarargs:
+    case CallVarargsWithSpread:
     case CallForwardVarargs:
     case TailCallVarargsInlinedCaller:
     case TailCallForwardVarargsInlinedCaller:
@@ -1046,13 +1048,39 @@ void clobberize(Graph& graph, Node* node, NOESCAPE const ReadFunctor& read, NOES
     }
         
     case VarargsLength: {
+        if (node->argumentsChild().useKind() == KnownCellUse) {
+            read(Butterfly_publicLength);
+            return;
+        }
         clobberTop();
-        return;  
+        return;
+    }
+
+    case VarargsLengthWithSpread: {
+        clobberTop();
+        return;
+    }
+
+    case LoadVarargsWithSpread: {
+        clobberTop();
+        LoadVarargsData* data = node->loadVarargsData();
+        write(AbstractHeap(Stack, data->count));
+        for (unsigned i = data->limit; i--;)
+            write(AbstractHeap(Stack, data->start + static_cast<int>(i)));
+        return;
     }
 
     case LoadVarargs: {
-        if (node->argumentsChild().useKind() != OtherUse)
+        switch (node->argumentsChild().useKind()) {
+        case OtherUse:
+            break;
+        case KnownCellUse:
+            read(IndexedContiguousProperties);
+            break;
+        default:
             clobberTop();
+            break;
+        }
         LoadVarargsData* data = node->loadVarargsData();
         write(AbstractHeap(Stack, data->count));
         for (unsigned i = data->limit; i--;)
@@ -2310,6 +2338,7 @@ void clobberize(Graph& graph, Node* node, NOESCAPE const ReadFunctor& read, NOES
     case NewSet:
     case NewWeakMap:
     case NewWeakSet:
+    case NewProxyObject:
     case PhantomNewObject:
     case MaterializeNewObject:
     case PhantomNewFunction:

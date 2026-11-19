@@ -13,9 +13,11 @@
 #include "AOTResultRules.h"
 #include "AOTTypeArena.h"
 #include "AOTTypeRelations.h"
+#include "AOTTypedArrayKinds.h"
 #include "AOTVector.h"
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <optional>
 #include <span>
 #include <wtf/StdLibExtras.h>
@@ -117,6 +119,8 @@ static TypeID anyFunctionWrittenByTable(const BuiltinTypeReading& reading)
 
 static TypingContext typingContextOfBuiltinTypes(const BuiltinTypeContext& context)
 {
+    if (context.asksPositions)
+        *context.asksPositions = true;
     return { context.program, context.types, context.positions ? *context.positions : PositionTypes::knowingNothing(), context.level };
 }
 
@@ -151,8 +155,8 @@ static TypeID typeOfBuiltinInstance(const BuiltinTypeReading& reading, const Bui
         TypeID held = typeOfBuiltinTypeRead(readingOfContents, declared.type);
         if (reading.operands && holdsResolvedValueOfPromise(slot))
             held = typeOfAwaited(typingContextOfBuiltinTypes(context), held);
-        bool saysNothing = types.at(held).isAnything() || (isNeverType(held) && !holdsResolvedValueOfPromise(slot));
-        contents[*position] = saysNothing ? TypeTable::anything : held;
+        bool isUninformative = types.at(held).isAnything() || (isNeverType(held) && !holdsResolvedValueOfPromise(slot));
+        contents[*position] = isUninformative ? TypeTable::anything : held;
         numberOfContents = std::max<unsigned>(numberOfContents, *position + 1);
     }
     return types.builtinClass(part.builtinClass, std::span<const TypeID>(contents).first(numberOfContents));
@@ -285,8 +289,20 @@ static TypeID typeOfBuiltinTypePartRead(const BuiltinTypeReading& reading, const
             TypeID iterated = typeOfValuesIteratedByBuiltin(reading, iterable);
             return part.isSettled ? typeOfAwaited(typingContextOfBuiltinTypes(context), iterated) : iterated;
         });
-    case BuiltinTypePartKind::CallbackResult:
-        return anyValueWrittenByTable(reading, UnknownSeed::ResultOfUnknownCallee);
+    case BuiltinTypePartKind::CallbackResult: {
+        TypeID ofUnknownCallee = anyValueWrittenByTable(reading, UnknownSeed::ResultOfUnknownCallee);
+        if (!part.operand)
+            return ofUnknownCallee;
+        return typeFromBuiltinOperand(reading, *part.operand, ofUnknownCallee, [&](TypeID callee) -> TypeID {
+            BuiltinID called = types.at(callee).isObject() ? singleBuiltinOf(types, types.at(callee)) : BuiltinID();
+            if (!called)
+                return ofUnknownCallee;
+            TypeID result = TypeTable::never;
+            for (BuiltinOverloadID row : table.overloadIDsOf(table.canonicalID(called)))
+                result = types.unionOf(result, resultTypeOfBuiltinCallOnList(context, row, { }));
+            return result;
+        });
+    }
     case BuiltinTypePartKind::Prototype:
         return types.withPrimitives(anyObjectWrittenByTable(reading), Primitive::Null);
     }
@@ -410,15 +426,44 @@ TypeID typeExpectedByLibraryFunction(const Program& program, TypeArena& types, F
     return taken;
 }
 
+uint32_t kindsOfViewsOfNumbersIn(const Program& program, TypeReader types, TypeID id)
+{
+    if (!id || holdsOnlyPrimitives(id))
+        return 0;
+    Type type = types.at(id);
+    if (!type.isObject() || !type.hasOnlyClassObjects())
+        return 0;
+    const BuiltinTable& table = program.builtins();
+    uint32_t kinds = 0;
+    for (const ClassPart& part : classPartsOf(types, type)) {
+        TypedArrayType kind = table.typedArrayTypeOf(part.builtinClass);
+        if (!hasInlineElementAccess(kind))
+            return 0;
+        kinds |= 1u << kind;
+    }
+    return std::has_single_bit(kinds) ? 0 : kinds;
+}
+
+BuiltinClassID classAboveViewsOfSeveralKinds(const Program& program, TypeReader types, TypeID id)
+{
+    if (!kindsOfViewsOfNumbersIn(program, types, id))
+        return { };
+    const BuiltinTable& table = program.builtins();
+    return table.at(table.typedArrayClassOf(classPartsOf(types, types.at(id)).front().builtinClass)).parent;
+}
+
 TypedArrayType typedArrayTypeOf(const BuiltinTypeContext& context, TypeID id)
 {
     if (!id)
         return NotTypedArray;
     Type type = context.types.at(id);
-    if (!type.hasOnlyClassObjects())
-        return NotTypedArray;
-
     const BuiltinTable& table = context.program.builtins();
+    if (!type.hasOnlyClassObjects()) {
+        if (!type.hasOnlyLayouts() || type.hasOnlyClosures() || !holdsOneMember(type.layouts))
+            return NotTypedArray;
+        const Layout& layout = context.program.at(LayoutID(positionOf(type.layouts)));
+        return layout.writtenBuiltinBase && !layout.mayBeOrdinaryObject ? table.typedArrayTypeOf(layout.writtenBuiltinBase) : NotTypedArray;
+    }
     std::span<const ClassPart> parts = classPartsOf(context.types, type);
     if (parts.empty())
         return NotTypedArray;

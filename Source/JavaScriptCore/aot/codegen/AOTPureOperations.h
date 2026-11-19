@@ -17,15 +17,21 @@ enum class PureOperation : uint16_t {
     BigIntConstant,
     BuiltinCell,
     ToInt32,
+    TruncateToInt32,
     TruncateToInt64,
+    ExactInt32,
     NonNegativeInt32,
     RuntimeOperation,
     BoxNumber,
     ResolveCallTarget,
     ReadFieldInExtension,
+    ReadFieldInExtensionInLine,
+    LengthOfFixedView,
+    VectorOfFixedView,
     ModuleNamespace,
     ModuleBuiltinCell,
     SingletonClosure,
+    ClampToByte,
 };
 
 constexpr Machine::PureFunction pureFunction(PureOperation operation, uint32_t payload = 0, bool dependsOnChildren = false)

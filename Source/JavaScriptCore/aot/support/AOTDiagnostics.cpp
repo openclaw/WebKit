@@ -22,6 +22,7 @@
 #include <wtf/DataLog.h>
 #include <wtf/EnumSet.h>
 #include <wtf/HexNumber.h>
+#include <wtf/PtrTag.h>
 #include <wtf/text/MakeString.h>
 #include <wtf/text/StringBuilder.h>
 
@@ -344,11 +345,11 @@ static String formatMessage(const InternalError& error, const Typed::Program* pr
 
 static bool isAboutInt32Promise(UserDiagnosticKind kind)
 {
-    return kind == UserDiagnosticKind::UnprovenInt32 || kind == UserDiagnosticKind::ConstantNotInt32 || kind == UserDiagnosticKind::Int32OfDependencyNotProven;
+    return kind == UserDiagnosticKind::UnprovenInt32 || kind == UserDiagnosticKind::ConstantNotInt32 || kind == UserDiagnosticKind::UnprovenDependencyInt32;
 }
 
 static_assert(static_cast<uint32_t>(UserDiagnosticKind::ConstantNotInt32) == static_cast<uint32_t>(UserDiagnosticKind::UnprovenInt32) + 1);
-static_assert(static_cast<uint32_t>(UserDiagnosticKind::Int32OfDependencyNotProven) == static_cast<uint32_t>(UserDiagnosticKind::UnprovenInt32) + 2);
+static_assert(static_cast<uint32_t>(UserDiagnosticKind::UnprovenDependencyInt32) == static_cast<uint32_t>(UserDiagnosticKind::UnprovenInt32) + 2);
 static_assert(failsBuild(UserDiagnosticKind::UnprovenInt32) && failsBuild(UserDiagnosticKind::ConstantNotInt32));
 
 static bool isRepeatedDiagnostic(const UserDiagnostic& a, const UserDiagnostic& b)
@@ -422,7 +423,7 @@ NEVER_INLINE size_t collectReturnAddressesOfCallers(std::span<void*> addresses)
     auto* frame = static_cast<void**>(__builtin_frame_address(0));
     size_t count = 0;
     while (count < addresses.size() && frame[1]) {
-        addresses[count++] = frame[1];
+        addresses[count++] = removeReturnAddressSignature(frame[1]);
         auto next = reinterpret_cast<uintptr_t>(frame[0]);
         auto current = reinterpret_cast<uintptr_t>(frame);
         if (next <= current || next - current > largestFrame || next % sizeof(void*))

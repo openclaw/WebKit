@@ -8,6 +8,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTArrayStorageForms.h"
 #include "AOTEffectsOfOperations.h"
 #include "AOTIRProgram.h"
 #include "AOTOpcodeSets.h"
@@ -17,6 +18,7 @@
 #include "AOTStringTable.h"
 #include "AOTTypeArena.h"
 #include "AOTTypeTable.h"
+#include "AOTWalkKnown.h"
 #include "YarrFlags.h"
 #include <array>
 #include <limits>
@@ -24,7 +26,7 @@
 
 namespace JSC { namespace AOT { namespace Typed {
 
-Reference boxedUnlessNumbersAreUnboxed(Walker&, Reference, Origin);
+Reference boxNumberIfNeeded(Walker&, Reference, Origin);
 
 static constexpr OptionSet<RegExpFlags> flagsOfRegExpsThatSearchForNoText { RegExpFlags::Global, RegExpFlags::Sticky, RegExpFlags::IgnoreCase, RegExpFlags::Unicode, RegExpFlags::UnicodeSets };
 
@@ -49,10 +51,10 @@ static Reference buildTestOfWrittenEndForStringSearches(Walker& walker, Referenc
 
 static bool buildTestOfJoinedTextsForStringSearches(Walker& walker, const CallByOneRow& call, bool testsStart)
 {
-    if (call.call.opcode() != Opcode::Call || call.call.argumentsOperands().empty())
+    if (call.call.opcode() != Opcode::Call || call.writtenArguments().empty())
         return false;
     const BodyIndex& index = walker.currentBodyIndex();
-    ValueID written = call.call.argumentsOperands()[0];
+    ValueID written = call.writtenArguments()[0];
     Reference joined = rootForStrings(walker, call.arguments[0]);
     if (!joined.isValue() || !index.hasOneUse(written) || rootForStrings(walker, walker.referenceBoundTo(written)) != joined)
         return false;
@@ -73,11 +75,12 @@ static bool buildTestOfJoinedTextsForStringSearches(Walker& walker, const CallBy
     if (!atEnd)
         return true;
 
-    Reference asBound = walker.referenceBoundTo(written);
-    walker.bind(written, atEnd);
     walker.bind(call.call.id(), { });
-    bool isCalled = callBuiltin(walker, call.call);
-    walker.bind(written, asBound);
+    bool isCalled;
+    {
+        Walker::StandIn partInPlaceOfWholeText(walker, written, atEnd);
+        isCalled = callBuiltin(walker, call.call);
+    }
     if (!isCalled)
         return false;
     Reference holdsOfPart = walker.isUnreachable() ? Reference() : walker.referenceBoundTo(call.call.id());
@@ -110,11 +113,11 @@ bool buildTestOfEndOfString(Walker& walker, const CallByOneRow& call)
     return true;
 }
 
-static Reference buildStartOfSearchForStringSearches(Walker& walker, Reference string, Reference position, Origin origin)
+static Reference buildStartOfSearchForStringSearches(Walker& walker, Reference string, const std::optional<PieceOfString>& piece, Reference position, Origin origin)
 {
     if (position == integerForStrings(walker, 0))
         return position;
-    Reference length = buildLengthOfString(walker, string, origin);
+    Reference length = piece ? buildLengthOfPiece(walker, *piece, origin) : buildLengthOfString(walker, string, origin);
     if (!length)
         return { };
     if (Reference clamped = clampedPositionForStrings(walker, position, length, false, origin); clamped && walker.types().at(walker.typeOf(clamped)).isInt32())
@@ -128,19 +131,65 @@ static Reference buildStartOfSearchForStringSearches(Walker& walker, Reference s
     return buildResultOfRangeForStrings(walker, walker.build(WTF::move(range)), startOfStringRange, origin);
 }
 
-static Reference buildSearchForWrittenTextForStringSearches(Walker& walker, Reference string, StringID text, Reference position, bool searchesFromEnd, Origin origin)
+static std::optional<PieceOfString> searchedStringPiece(Walker& walker, Reference string, StringID text, Origin origin)
+{
+    Vector<char16_t> buffer;
+    StringView view = walker.types().viewOf(text, buffer);
+    if (!view.is8Bit() && !WTF::charactersAreAllLatin1(view.span16()))
+        return std::nullopt;
+    return pieceReadInLoop(walker, string, origin);
+}
+
+static Reference buildSearchForWrittenTextForStringSearches(Walker& walker, Reference string, const std::optional<PieceOfString>& piece, StringID text, Reference position, bool searchesFromEnd, Origin origin)
 {
     if (walker.isUnreachable() || !position)
         return { };
     std::optional<char16_t> unit = searchesFromEnd ? std::nullopt : onlyCodeUnitOfText(walker, text);
     Draft search(searchesFromEnd ? Opcode::StringLastIndexOfLiteral : unit ? Opcode::StringIndexOfCharacter : Opcode::StringIndexOfLiteral, origin);
-    search.setStringOperand(stringReadByStringSearches(walker, string, origin));
+    search.setStringOperand(stringReadByStringSearches(walker, piece ? piece->string : string, origin));
     search.setPositionOperand(position);
+    if (piece) {
+        search.setStartOperand(piece->start);
+        search.setEndOperand(piece->end);
+    }
     if (unit)
         search.setCodeUnit(*unit);
     else
         search.setLiteral(text);
     return walker.isUnreachable() ? Reference() : walker.build(WTF::move(search));
+}
+
+static const DataNode::Array* findSearchedLiteral(Walker& walker, const CallByOneRow& call)
+{
+    const Code& code = walker.code();
+    if (!call.receiver || !call.receiver.isValue() || code.isConstant(call.receiver.id()) || call.call.opcode() != Opcode::Call)
+        return nullptr;
+    const Operation& literal = code.at(call.receiver.id());
+    if (literal.opcode != Opcode::Data || literal.encoding() != DataEncoding::CopyOnWriteArray || !literal.data())
+        return nullptr;
+    const BodyIndex& index = walker.currentBodyIndex();
+    auto written = call.call.as<Opcode::Call>();
+    ValueID read = index.stripCasts(written.calleeOperand());
+    ValueID made = written.thisValueOperand();
+    static constexpr uint32_t readAndCall = 2;
+    if (!read || !made || index.isParameter(read) || index.isParameter(made) || index.opcodeOf(made) != Opcode::Data || index.opcodeOf(read) != Opcode::PropGet || index.value(read).objectOperand() != made || index.useCount(made) != readAndCall)
+        return nullptr;
+    return walker.program().at(literal.data()).root.tryAs<DataNode::Array>();
+}
+
+bool buildSearchOfWords(Walker& walker, const CallByOneRow& call)
+{
+    static constexpr size_t fewestWords = 2;
+    if (call.arguments.size() != 1 || !call.arguments[0] || call.isForwarded || walker.isUnreachable())
+        return false;
+    const auto* literal = findSearchedLiteral(walker, call);
+    if (!literal || literal->elements.size() < fewestWords || !isShortStringList(*literal))
+        return false;
+    AnswerOfSearch asked = *call.codeInLine == InlineBuiltin::ArrayIncludes ? AnswerOfSearch::Membership : AnswerOfSearch::Place;
+    Reference answer = buildSearchAmongWords(walker, *literal, call.arguments[0], asked, call.origin);
+    if (answer)
+        bindForStrings(walker, call.call.id(), answer, call.origin);
+    return answer || walker.isUnreachable() || walker.hasFailed();
 }
 
 bool buildSearchInString(Walker& walker, const CallByOneRow& call)
@@ -166,17 +215,34 @@ bool buildSearchInString(Walker& walker, const CallByOneRow& call)
         return true;
     }
 
-    Reference position = integerForStrings(walker, searchesFromEnd ? std::numeric_limits<int32_t>::max() : 0);
     if (hasPosition) {
         Type type = walker.types().at(walker.typeOf(call.arguments[1]));
         if (searchesFromEnd ? !type.isInt32() : !type.isNumber())
             return false;
-        position = searchesFromEnd ? call.arguments[1] : buildStartOfSearchForStringSearches(walker, call.receiver, call.arguments[1], origin);
     }
-
-    Reference found = buildSearchForWrittenTextForStringSearches(walker, call.receiver, sought, position, searchesFromEnd, origin);
-    if (found && asksWhetherFound)
-        found = buildNegationForStrings(walker, buildOperatorForStrings(walker, Opcode::StrictEq, found, integerForStrings(walker, -1), origin), origin);
+    std::optional<PieceOfString> piece = searchedStringPiece(walker, call.receiver, sought, origin);
+    auto buildAnswer = [&] {
+        Reference position = integerForStrings(walker, searchesFromEnd ? std::numeric_limits<int32_t>::max() : 0);
+        if (hasPosition)
+            position = searchesFromEnd ? call.arguments[1] : buildStartOfSearchForStringSearches(walker, call.receiver, piece, call.arguments[1], origin);
+        Reference place = buildSearchForWrittenTextForStringSearches(walker, call.receiver, piece, sought, position, searchesFromEnd, origin);
+        if (!place || !asksWhetherFound)
+            return place;
+        return buildNegationForStrings(walker, buildOperatorForStrings(walker, Opcode::StrictEq, place, integerForStrings(walker, -1), origin), origin);
+    };
+    auto isInvariant = [&](Reference reference) {
+        return reference.isConstant() || walker.isInvariantInInnermostLoop(reference);
+    };
+    Reference found;
+    if (isInvariant(call.receiver) && (!hasPosition || isInvariant(call.arguments[1]))) {
+        stringReadByStringSearches(walker, piece ? piece->string : call.receiver, origin);
+        TypeID answers = asksWhetherFound ? TypeTable::boolean : walker.types().integer(Range { -1, std::numeric_limits<int32_t>::max() });
+        found = walker.buildOnFirstArrival(call.call.id(), answers, origin, scopedLambda<Reference()>(buildAnswer));
+        if (walker.hasFailed())
+            return true;
+    }
+    if (!found)
+        found = buildAnswer();
     if (found)
         bindForStrings(walker, call.call.id(), found, origin);
     return true;
@@ -204,11 +270,12 @@ Reference buildSearchForAtomOfRegExp(Walker& walker, const BodyValue&, BuiltinOv
         return { };
 
     StringID text = pattern == StringView(summary.atom) ? regExp.pattern : walker.types().internText(encodeProgramString(StringView(summary.atom)).span());
-    Reference found = buildSearchForWrittenTextForStringSearches(walker, string, text, integerForStrings(walker, 0), false, origin);
+    std::optional<PieceOfString> piece = searchedStringPiece(walker, string, text, origin);
+    Reference found = buildSearchForWrittenTextForStringSearches(walker, string, piece, text, integerForStrings(walker, 0), false, origin);
     if (!found)
         return { };
     if (*codeInLine == InlineBuiltin::StringSearch)
-        return boxedUnlessNumbersAreUnboxed(walker, found, origin);
+        return boxNumberIfNeeded(walker, found, origin);
     return buildOperatorForStrings(walker, Opcode::GreaterEq, found, integerForStrings(walker, 0), origin);
 }
 

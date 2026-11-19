@@ -10,6 +10,7 @@
 
 #include "AOTBuiltinTable.h"
 #include "AOTBuiltinTableBindings.h"
+#include "AOTConstantEmitter.h"
 #include "AOTGuardEmitter.h"
 #include "AOTInstance.h"
 #include "AOTTypeTable.h"
@@ -86,7 +87,7 @@ void RuntimeIntrinsicEmitter::generateFindsDeclaredMember(const ValueContext& va
 
 void RuntimeIntrinsicEmitter::generateFindsNoMember(const ValueContext& value)
 {
-    if (value->receivers()) {
+    if (value->receivers() || value->asksObjectByInquiry()) {
         emitter<GuardEmitter>().defineWhetherNoMemberIsFound(value);
         return;
     }
@@ -104,6 +105,25 @@ void RuntimeIntrinsicEmitter::generateIsPlainHeirOf(const ValueContext& value)
         return;
     }
     defineAs(value, boolean(false), m_program.at(TypeTable::boolean));
+}
+
+void RuntimeIntrinsicEmitter::generateIsPrototypeChainPlain(const ValueContext& value)
+{
+    if (!value->conditions().isEmpty()) {
+        emitter<GuardEmitter>().defineWhetherPrototypeChainIsPlain(value);
+        return;
+    }
+    generateIsPlainHeirOf(value);
+}
+
+void RuntimeIntrinsicEmitter::generateIsAsBorn(const ValueContext& value)
+{
+    generateIsPlainHeirOf(value);
+}
+
+void RuntimeIntrinsicEmitter::generateIsAsBornExceptForAddedNames(const ValueContext& value)
+{
+    generateIsPlainHeirOf(value);
 }
 
 void RuntimeIntrinsicEmitter::generateIsPlainInstanceOf(const ValueContext& value)
@@ -143,7 +163,10 @@ void RuntimeIntrinsicEmitter::generatePutInternalField(const ValueContext& value
     m_out.store64(boxedValue.value(), internalField(value.value()));
     CellPointer object = cellOperand(value->objectOperand());
     barrierAfterStore(value, object, typeOf(stored));
-    defineAs(value, get(stored), typeOf(stored));
+    if (m_code.useCountOf(value.id()))
+        defineAs(value, get(stored), typeOf(stored));
+    else
+        define(value, emitter<ConstantEmitter>().zeroOf(value.representation()));
 }
 
 } } } // namespace JSC::AOT::Typed

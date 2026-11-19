@@ -87,7 +87,7 @@ bool acceptsEveryValue(const RuntimeType& type)
 
 static bool typeAlwaysFits(const RuntimeLayoutTable& layouts, const FieldData& from, const FieldData& to)
 {
-    if (from.type == to.type)
+    if (from.typeNumber == to.typeNumber)
         return true;
     const RuntimeType& fromType = layouts.typeOf(from);
     const RuntimeType& toType = layouts.typeOf(to);
@@ -142,6 +142,7 @@ std::optional<AcceptedValue> acceptInSlot(Object& target, const FieldData& to, J
 
 static uint32_t offsetOfInlineProperty(PropertyOffset offset)
 {
+    static_assert(JSObject::offsetOfInlineStorage() + firstOutOfLineOffset * sizeof(EncodedJSValue) <= std::numeric_limits<decltype(FieldMovePlan::BoxedWordMove::to)>::max());
     ASSERT(isInlineOffset(offset));
     return JSObject::offsetOfInlineStorage() + offsetInInlineStorage(offset) * sizeof(EncodedJSValue);
 }
@@ -271,7 +272,7 @@ const FieldMovePlan& FieldMovePlanCache::add(FieldMovePlanKey&& key, std::unique
 {
     ASSERT(plan);
     if (!m_sets)
-        m_sets.make();
+        m_sets.makeFromZeros();
     m_lastFound = nullptr;
     Set& set = setFor(key);
     auto way = std::ranges::find_if(set.ways, [](auto& candidate) {
@@ -324,7 +325,7 @@ static bool listFieldsMovedToOrdinaryCopy(VM& vm, State& state, const Object& so
     RuntimeLayoutTable& layouts = state.objects->layouts;
     const LayoutData& layout = source.layout();
     uint32_t orderWord = source.orderWord();
-    for (uint16_t index : state.objects->keyOrders.entriesInOrder(layout, orderOf(orderWord)).first(countOf(orderWord))) {
+    for (uint16_t index : state.objects->keyOrders.entriesListedBy(layout, orderWord)) {
         if (index >= layout.numberOfFields)
             return false;
         const FieldData& field = layout.fields()[index];
@@ -439,7 +440,7 @@ JSFinalObject* tryCopyAsOrdinaryObject(VM& vm, JSGlobalObject* realm, JSObject* 
     const FieldMovePlan* plan = plans.find(key);
     if (!plan) {
         plan = &plans.add(WTF::move(key), createPlanForOrdinaryCopy(vm, state, realm, source, excluded));
-        countEvent(vm, RuntimeCounterID::FieldMovePlansMade);
+        countEvent(vm, RuntimeCounterID::FieldMovePlansCreated);
     }
     if (!plan->isUsable())
         return nullptr;

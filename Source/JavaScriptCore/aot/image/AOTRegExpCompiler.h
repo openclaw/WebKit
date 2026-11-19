@@ -71,6 +71,7 @@ struct RegExpCode {
     PCRelativeReach reach { PCRelativeReach::Near };
     unsigned analysisLimitHits { 0 };
     bool hasElidedFrame { false };
+    bool isBitParallel { false };
     bool handsLongSearchesOver { false };
 };
 
@@ -79,13 +80,15 @@ using RegExpCodeOrFailureReason = std::expected<std::unique_ptr<RegExpCode>, Yar
 class JS_EXPORT_PRIVATE ImageCodeAddressing final : public Yarr::CodeAddressing {
     WTF_MAKE_TZONE_ALLOCATED_INLINE(ImageCodeAddressing);
 public:
-    ImageCodeAddressing(CCallHelpers&, PCRelativeReach, const AssemblerPolicy&, BuildContext*);
+    ImageCodeAddressing(ImageAssembler&, PCRelativeReach, const AssemblerPolicy&, BuildContext*);
 
     void moveAddress(Yarr::SharedTableID, GPRReg dest) final;
     void moveAddress(const Yarr::ClassTable&, GPRReg dest) final;
     void moveAddressOfData(std::span<const uint8_t>, GPRReg dest) final;
     MacroAssembler::Jump branchTestBuiltInClassTable(MacroAssembler::ResultCondition, GPRReg character, Yarr::CharacterClass::Table) final;
     MacroAssembler::Jump branchTestLatin1Table(MacroAssembler::ResultCondition, GPRReg character, const Yarr::CharacterClass::ByteTable&) final;
+    MacroAssembler::Jump branchTestLatin1Set(MacroAssembler::ResultCondition, GPRReg character, const WTF::BitSet<256>&);
+    uint8_t moveAddressOfLatin1Set(const WTF::BitSet<256>&, GPRReg dest);
     void canonicalizeLatin1(GPRReg character) final;
     bool tryLoadConstant(uint64_t, GPRReg dest) final;
     void callRoutine(const Yarr::SharedRoutine&) final;
@@ -120,6 +123,7 @@ struct CompiledRegExp {
     RegExpRecordForm form { RegExpRecordForm::NoMetadata };
     std::optional<RegExpDeclineReason> reason { };
     std::array<std::unique_ptr<RegExpCode>, 2> code { };
+    std::unique_ptr<RegExpCode> matcher { };
 };
 
 enum class RegExpCodeFor16BitSubjects : uint8_t {
@@ -151,6 +155,7 @@ struct RegExpSectionItem {
     enum class Kind : uint8_t {
         Body,
         DuplicateBody,
+        Matcher,
         Routine,
         Table,
     };
@@ -167,15 +172,19 @@ struct RegExpSection {
     Vector<uint8_t> bytes;
     uint32_t dataOffset { 0 };
     Vector<std::array<uint32_t, 2>> entries;
+    Vector<std::optional<uint32_t>> matchers;
     Vector<RegExpSectionItem> items;
 };
 
 JS_EXPORT_PRIVATE std::optional<RegExpSection> layOutRegExpSection(std::span<const CompiledRegExp>, const AssemblerPolicy&, const CodeTemplates&, BuildContext*);
 
+class StringNumbers;
+
 struct RegExpRecordInputs {
     const RegExpRequests& requests;
     const CompiledRegExps& compiled;
     const RegExpSection& section;
+    const StringNumbers& strings;
 };
 
 inline constexpr uint32_t regExpOutputSizeWithoutSubpatterns = 2;

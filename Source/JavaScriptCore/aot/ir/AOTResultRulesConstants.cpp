@@ -13,8 +13,10 @@
 #include "AOTBuiltinTypes.h"
 #include "AOTCode.h"
 #include "AOTIRProgram.h"
+#include "AOTInliningAcrossFiles.h"
 #include "AOTObjects.h"
 #include "AOTVector.h"
+#include <algorithm>
 #include <span>
 #include <wtf/StdLibExtras.h>
 
@@ -78,6 +80,53 @@ TypeID typeOfBuiltinObject(const TypingContext& context, BuiltinID builtin)
     return typeOfBuiltinConstant({ context.program, types }, builtin);
 }
 
+static bool hasCompleteSignature(const BuiltinTable& builtins, BuiltinID function)
+{
+    if (builtins.at(function).marks || builtins.letsInUnseenCode(function) || !builtins.calledFunctionsOf(function).empty() || !builtins.moduleLoadsOf(function).empty())
+        return false;
+    return std::ranges::all_of(builtins.overloadsOf(function), [](const BuiltinOverload& overload) {
+        if (overload.mode == BuiltinCallMode::Get)
+            return true;
+        bool runsCode = overload.effects.capability == BuiltinCapability::JS && !overload.flags.contains(BuiltinOverloadFlag::RunsOnlyOperandCode);
+        return !overload.isUndeclared() && !runsCode && overload.flow.callbacks.empty() && overload.flow.handlerCalls.empty() && overload.flow.propertyActions.empty();
+    });
+}
+
+static bool hasDescribedResult(const BuiltinTable& builtins, BuiltinID function)
+{
+    return std::ranges::any_of(builtins.overloadsOf(function), [&](const BuiltinOverload& overload) {
+        if (overload.mode != BuiltinCallMode::Call || !overload.result.type)
+            return false;
+        const BuiltinType& answer = builtins.at(overload.result.type);
+        return !answer.isAnything() && (!answer.primitives.isEmpty() || !answer.stringLiterals.empty() || !answer.parts.empty());
+    });
+}
+
+BuiltinID findNativeFunction(const BuiltinTable& builtins, BuiltinID binding)
+{
+    BuiltinID answered;
+    for (const BuiltinOverload& overload : builtins.overloadsOf(binding)) {
+        if (overload.mode != BuiltinCallMode::Get)
+            continue;
+        if (answered || overload.isUndeclared() || overload.resultIsDeclaredOnly() || !overload.result.type)
+            return { };
+        const BuiltinType& written = builtins.at(overload.result.type);
+        if (!written.flags.isEmpty() || !written.primitives.isEmpty() || !written.stringLiterals.empty() || written.parts.size() != 1 || written.parts[0].kind != BuiltinTypePartKind::Builtin)
+            return { };
+        answered = builtins.canonicalID(written.parts[0].builtin);
+        if (builtins.at(answered).kind != BuiltinKind::Function)
+            return { };
+    }
+    bool isDescribed = answered && hasDescribedResult(builtins, answered) && hasCompleteSignature(builtins, binding) && hasCompleteSignature(builtins, answered);
+    return isDescribed ? answered : BuiltinID();
+}
+
+static TypeID typeOfNativeBinding(const TypingContext& context, BuiltinID binding)
+{
+    BuiltinID function = findNativeFunction(context.program.builtins(), binding);
+    return function ? context.types.forBuiltin(function) : context.types.anything(UnknownSeed::UndescribedNativeResult);
+}
+
 static TypeID typeOfBuiltinObjectOfModule(const TypingContext& context, BuiltinID builtin, ModuleID module)
 {
     const BuiltinTable& builtins = context.program.builtins();
@@ -100,7 +149,7 @@ struct WrittenContentsOfData {
 
 } // anonymous namespace
 
-static TypeID typeOfArrayInData(const TypingContext&, const DataNode::Array&);
+static TypeID typeOfArrayInData(const TypingContext&, const DataNode::Array&, DataID whoseRootItIs = { });
 
 static void addToWrittenContentsOfData(const TypingContext& context, const DataNode& node, WrittenContentsOfData& contents)
 {
@@ -150,14 +199,28 @@ static TypeID typeOfWrittenContentsOfData(TypeArena& types, const WrittenContent
     return types.unionOf(types.intern(parts), contents.objects);
 }
 
-static TypeID typeOfArrayInData(const TypingContext& context, const DataNode::Array& array)
+static TypeID typeOfArrayInData(const TypingContext& context, const DataNode::Array& array, DataID whoseRootItIs)
 {
     TypeArena& types = context.types;
-    WrittenContentsOfData contents;
-    for (const DataNode& element : array.elements)
-        addToWrittenContentsOfData(context, element, contents);
+    auto askEachElement = [&] {
+        WrittenContentsOfData contents;
+        for (const DataNode& element : array.elements)
+            addToWrittenContentsOfData(context, element, contents);
+        return typeOfWrittenContentsOfData(types, contents);
+    };
 
-    TypeID written = array.elements.isEmpty() ? array.contents : typeOfWrittenContentsOfData(types, contents);
+    TypeID written = array.contents;
+    if (whoseRootItIs && array.elements.size() >= TypeArena::fewestElementsOfArrayWhoseContentsAreKeptForBuild) {
+        if (std::optional<TypeID> remembered = types.rememberedContentsOfArrayInData(whoseRootItIs)) {
+            written = *remembered;
+            if constexpr (SharedAnswers::worksFoundAnswersOutAgain)
+                RELEASE_ASSERT(askEachElement() == written);
+        } else {
+            written = askEachElement();
+            types.rememberContentsOfArrayInData(whoseRootItIs, written);
+        }
+    } else if (!array.elements.isEmpty())
+        written = askEachElement();
     if (!written || isNeverType(written))
         return types.builtinClass(BuiltinClasses::Array);
     return types.builtinClass(BuiltinClasses::Array, singleElementSpan(written));
@@ -218,7 +281,7 @@ TypeID typeOfDeclaredLayout(const TypingContext& context, LayoutID layout)
 }
 
 template<typename Operation>
-TypeID typeOfConstant(const TypingContext& context, const Operation& operation, ObjectID created)
+ALWAYS_INLINE_INTO_OTHER_FILES TypeID typeOfConstant(const TypingContext& context, const Operation& operation, ObjectID created)
 {
     TypeArena& types = context.types;
     switch (opcodeOf(operation)) {
@@ -242,10 +305,16 @@ TypeID typeOfConstant(const TypingContext& context, const Operation& operation, 
         return typeOfBuiltinObject(context, operation.builtin());
     case Opcode::ModuleBuiltin:
         return typeOfBuiltinObjectOfModule(context, operation.builtin(), operation.module());
+    case Opcode::NativeBinding:
+        return typeOfNativeBinding(context, operation.builtin());
     case Opcode::KeyConstant:
         return typeOfKeyConstant(context, operation.key());
-    case Opcode::Data:
-        return typeOfData(context, context.program.at(operation.data()).root, created);
+    case Opcode::Data: {
+        const DataNode& root = context.program.at(operation.data()).root;
+        if (const auto* array = created ? nullptr : root.tryAs<DataNode::Array>())
+            return typeOfArrayInData(context, *array, operation.data());
+        return typeOfData(context, root, created);
+    }
     case Opcode::NewClosure:
         return created ? types.forObject(created) : types.forFunction(operation.function());
     default:

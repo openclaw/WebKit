@@ -199,7 +199,7 @@ static void checkCells(RealmComparison& comparison, BuiltinID id)
         comparison.report(id, "is not a constructor"_s);
 }
 
-static bool liesInside(const BuiltinType& type, JSValue value)
+static bool typeContains(const BuiltinType& type, JSValue value)
 {
     if (type.isAnything())
         return true;
@@ -236,7 +236,7 @@ static void checkValue(RealmComparison& comparison, BuiltinID id)
         return;
     }
     for (const BuiltinOverload& overload : table.overloadsOf(id)) {
-        if (overload.mode == BuiltinCallMode::Get && !liesInside(table.at(overload.result.type), *found))
+        if (overload.mode == BuiltinCallMode::Get && !typeContains(table.at(overload.result.type), *found))
             comparison.report(id, "holds a value outside the type that the table gives it"_s);
     }
     std::optional<double> number = table.numberOf(id);
@@ -331,6 +331,28 @@ static void checkPrivateAliases(RealmComparison& comparison)
         if (builtin.holder && builtin.flags.contains(BuiltinFlag::HasPrivateAlias))
             checkPrivateAlias(comparison, id, object);
     });
+}
+
+static void checkReadOnlyMembers(RealmComparison& comparison)
+{
+    VM& vm = comparison.vm();
+    for (const BuiltinMarkedEntry& marked : comparison.table.marked(BuiltinMark::IsReportedAsReadOnly)) {
+        const Builtin& member = comparison.table.at(marked.builtin);
+        JSObject* holder = member.holder ? comparison.objectOf(member.holder) : nullptr;
+        if (!holder)
+            continue;
+        PropertyDescriptor descriptor;
+        auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
+        bool isOwn = holder->getOwnPropertyDescriptor(comparison.realm, comparison.table.identifierOf(vm, member.name), descriptor);
+        if (scope.exception()) [[unlikely]] {
+            scope.clearException();
+            isOwn = false;
+        }
+        if (!isOwn || !descriptor.isDataDescriptor() || !descriptor.writable() || !descriptor.configurable())
+            comparison.report(marked.builtin, "is reported as read-only, and is no writable and configurable data property"_s);
+        if (holder->type() == FinalObjectType)
+            comparison.report(marked.builtin, "is reported as read-only, and lies on a plain object, whose descriptors AOT__describeUnlessOrdinary() leaves to the structure"_s);
+    }
 }
 
 static bool hasDeclaredPrototype(const RealmComparison& comparison, const Builtin& builtin, JSObject* object)
@@ -481,6 +503,28 @@ static void checkMembersAddedAtFirstRead(RealmComparison& comparison)
     });
 }
 
+static void checkMembersThatNoLoopLists(RealmComparison& comparison)
+{
+    VM& vm = comparison.vm();
+    auto& table = comparison.table;
+    forEachFoundObject(comparison, [&](BuiltinID holder, JSObject* object) {
+        if (table.at(holder).sameObjectAs)
+            return;
+        for (BuiltinID member : table.membersOf(holder)) {
+            const Builtin& entry = table.at(member);
+            if (!entry.name || entry.canBeListed || table.isSymbolName(entry.name) || !isExpectedInRealm(comparison, member))
+                continue;
+            auto scope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
+            PropertySlot slot(object, PropertySlot::InternalMethodType::VMInquiry, &vm);
+            bool isThere = object->methodTable()->getOwnPropertySlot(object, comparison.realm, table.identifierOf(vm, entry.name), slot);
+            if (scope.exception()) [[unlikely]]
+                scope.clearException();
+            else if (isThere && !(slot.attributes() & PropertyAttribute::DontEnum))
+                comparison.report(member, "is enumerable, and the table says that no loop over names lists it"_s);
+        }
+    });
+}
+
 static void checkClassInfo(RealmComparison& comparison, BuiltinClassID classID)
 {
     auto& table = comparison.table;
@@ -597,11 +641,13 @@ Vector<String> BuiltinTable::mismatches(JSGlobalObject* realm) const
     checkEntries(comparison);
     checkNativeFunctions(comparison);
     checkPrivateAliases(comparison);
+    checkReadOnlyMembers(comparison);
     checkInheritance(comparison);
     checkObjectIdentities(comparison);
     checkClosedHolders(comparison);
     checkMethodsCallingStartupLoads(comparison);
     checkMembersAddedAtFirstRead(comparison);
+    checkMembersThatNoLoopLists(comparison);
     checkClasses(comparison);
     checkInstanceTestsOfEntries(comparison);
     return WTF::move(comparison.mismatches);

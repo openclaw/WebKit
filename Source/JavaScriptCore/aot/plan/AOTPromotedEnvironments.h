@@ -7,13 +7,13 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
 #include "AOTFactRecords.h"
 #include "AOTID.h"
 #include "AOTVector.h"
 #include <algorithm>
 #include <span>
 #include <utility>
-#include <wtf/BitVector.h>
 
 namespace JSC { namespace AOT { namespace Typed {
 
@@ -30,6 +30,14 @@ struct PromotedVariable {
     uint32_t field { 0 };
     FunctionID function;
     uint32_t capture { 0 };
+    FunctionID holder;
+    PropertyKeyID key;
+};
+
+struct FunctionNameMirror {
+    FunctionID holder;
+    PropertyKeyID key;
+    VariableID variable;
 };
 
 struct PromotedLayout {
@@ -50,6 +58,7 @@ struct StoreOfCapturedValue {
 };
 
 struct PromotedEnvironments {
+    uint32_t numberOfCapturesOfClassesStoredForGood { 0 };
     uint32_t numberOfRemovedCapturesOf(FunctionID function) const { return function.index() < numbersOfRemovedCaptures.size() ? numbersOfRemovedCaptures[function.index()] : 0; }
     const PromotedVariable* find(VariableID id) const LIFETIME_BOUND
     {
@@ -68,6 +77,16 @@ struct PromotedEnvironments {
     }
 
     bool isMaker(FunctionID function) const { return makers.get(function.index()); }
+
+    VariableID mirrorOfFunctionName(FunctionID holder, PropertyKeyID key) const
+    {
+        if (!holder || !keysOfFunctionNameMirrors.get(key.index()))
+            return { };
+        auto found = std::ranges::lower_bound(functionNameMirrors, std::pair { holder, key }, { }, [](const FunctionNameMirror& mirror) {
+            return std::pair { mirror.holder, mirror.key };
+        });
+        return found != functionNameMirrors.end() && found->holder == holder && found->key == key ? found->variable : VariableID();
+    }
 
     const RemovedCapture* findRemoved(FunctionID function, uint32_t capture) const LIFETIME_BOUND
     {
@@ -101,10 +120,12 @@ struct PromotedEnvironments {
     Vector<PromotedLayout> layouts;
     Vector<RemovedCapture> removedCaptures;
     Vector<StoreOfCapturedValue> stores;
+    Vector<FunctionNameMirror> functionNameMirrors;
+    BitVector keysOfFunctionNameMirrors;
     BitVector makers;
 };
 
-PromotedEnvironments planPromotedEnvironments(const Program&, const Facts&, const SlotPlanParts&);
+PromotedEnvironments planPromotedEnvironments(const Program&, const Facts&, const SlotPlanParts&, std::span<const LayoutID> scopesTakenByClosuresMadeForCallsAlone);
 void appendPromotedVariables(const PromotedEnvironments&, SlotPlanParts&);
 
 } } } // namespace JSC::AOT::Typed

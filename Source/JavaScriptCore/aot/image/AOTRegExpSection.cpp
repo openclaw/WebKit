@@ -9,9 +9,11 @@
 #if ENABLE(AOT) && ENABLE(YARR_JIT)
 
 #include "AOTBuildContext.h"
+#include "AOTNumbering.h"
 #include "AOTSectionLinker.h"
 #include "AOTSectionWriter.h"
 #include "AOTSort.h"
+#include "AOTStubsRegExp.h"
 #include "AOTVector.h"
 #include <algorithm>
 #include <limits>
@@ -122,11 +124,16 @@ public:
                     m_bodies.append({ numberUnit(*m_regExps[regExp].code[charSizeIndex], regExp), regExp, charSizeIndex });
             }
         }
+        for (uint32_t regExp = 0; regExp < m_regExps.size(); ++regExp) {
+            if (m_regExps[regExp].matcher)
+                m_matchers.append({ numberUnit(*m_regExps[regExp].matcher, regExp), regExp });
+        }
         if (!compileRoutines())
             return std::nullopt;
 
         addTablesAndRoutines();
         addBodies();
+        addMatchers();
         if (!addFailureRoutine())
             return std::nullopt;
 
@@ -142,10 +149,6 @@ public:
             reportFailure(linked.error());
             return std::nullopt;
         }
-        if (linked->numberOfVeneers) {
-            reportFailure({ SectionLinkError::OutOfPCRelativeReach, 0, 0 });
-            return std::nullopt;
-        }
         return createSection(WTF::move(*linked));
     }
 
@@ -156,6 +159,12 @@ private:
         RegExpUnit unit;
         uint32_t regExp;
         uint8_t charSizeIndex;
+        uint32_t number { 0 };
+    };
+
+    struct Matcher {
+        RegExpUnit unit;
+        uint32_t regExp;
         uint32_t number { 0 };
     };
 
@@ -290,6 +299,15 @@ private:
         }
     }
 
+    void addMatchers()
+    {
+        for (Matcher& matcher : m_matchers) {
+            matcher.number = addUnit(Kind::Matcher, regExpBodyAlignment, matcher.unit.code->body, matcher.regExp);
+            m_unitInfos[matcher.number].targets = targetsOf(matcher.unit);
+            m_sizeOfMatchers += matcher.unit.code->body.bytes.size();
+        }
+    }
+
     [[nodiscard]] bool addFailureRoutine()
     {
         auto withoutCode = std::ranges::find_if(m_regExps, [](const CompiledRegExp& regExp) {
@@ -354,6 +372,9 @@ private:
         section.dataOffset = linked.dataOffset;
         uint32_t entryWithoutCode = m_failureRoutineUnit ? linked.uniqueUnitOffsets[*m_failureRoutineUnit] : 0;
         section.entries.fill({ entryWithoutCode, entryWithoutCode }, m_regExps.size());
+        section.matchers.fill(std::nullopt, m_regExps.size());
+        for (const Matcher& matcher : m_matchers)
+            section.matchers[matcher.regExp] = linked.uniqueUnitOffsets[matcher.number] + sizeOfMatcherHeader;
         uint32_t endOfCode = 0;
         for (uint32_t unit = 0; unit < m_units.size(); ++unit) {
             addItem(m_unitInfos[unit].kind, unit, linked.uniqueUnitOffsets[unit], m_unitInfos[unit].regExp);
@@ -365,6 +386,8 @@ private:
             Statistics& statistics = m_context->statistics();
             statistics.count(StatisticID::RegExpCodeBytesEmitted, endOfCode);
             statistics.count(StatisticID::RegExp16BitCodeBytes, m_sizeOf16BitBodies);
+            statistics.count(StatisticID::RegExpMatchers, m_matchers.size());
+            statistics.count(StatisticID::RegExpMatcherBytes, m_sizeOfMatchers);
             statistics.count(StatisticID::RegExpTableBytesEmitted, section.bytes.size() - section.dataOffset);
             statistics.count(StatisticID::PaddingBytesBetweenCodeParts, section.dataOffset - endOfCode);
         }
@@ -407,8 +430,10 @@ private:
     Vector<SymbolState> m_symbolStates;
     Vector<Routine> m_routines;
     Vector<Body> m_bodies;
+    Vector<Matcher> m_matchers;
     Vector<uint32_t> m_unitOfBody;
     uint64_t m_sizeOf16BitBodies { 0 };
+    uint64_t m_sizeOfMatchers { 0 };
 
     Vector<LinkUnit> m_units;
     Vector<UnitInfo> m_unitInfos;
@@ -424,13 +449,13 @@ std::optional<RegExpSection> layOutRegExpSection(std::span<const CompiledRegExp>
     return RegExpSectionBuilder(regExps, policy, templates, context).build();
 }
 
-static uint32_t encodeRegExpNamedGroups(SectionWriter& details, const RegExpRequest& request, const RegExpSummary& summary)
+static uint32_t encodeRegExpNamedGroups(SectionWriter& details, const RegExpRequest& request, const RegExpSummary& summary, const StringNumbers& strings)
 {
     Vector<uint32_t> words;
     for (StringID name : request.captureGroupNames)
-        words.append(name ? name.index() + 1 : 0);
+        words.append(name ? strings.requiredNumberOf(name) + 1 : 0);
     for (const RegExpNamedGroupStrings& group : request.namedGroups) {
-        words.append(group.name.index());
+        words.append(strings.requiredNumberOf(group.name));
         words.append(static_cast<uint32_t>(group.parenIndices.size()));
         words.appendVector(group.parenIndices);
     }
@@ -446,7 +471,35 @@ static uint32_t encodeRegExpNamedGroups(SectionWriter& details, const RegExpRequ
     return offset;
 }
 
-static void encodeRegExpMetadata(ImageRegExp& record, const RegExpRequest& request, const RegExpSummary& summary, SectionWriter& details)
+static std::optional<uint32_t> coverFirstCharacters(const WTF::BitSet<256>& characters)
+{
+    constexpr unsigned maxCovered = 32;
+    const unsigned first = characters.findBit(0, true);
+    if (first >= 256)
+        return std::nullopt;
+    unsigned last = first;
+    unsigned widestGap = 0;
+    unsigned lastOfFirstRange = 0;
+    unsigned firstOfSecondRange = first;
+    while (true) {
+        const unsigned next = characters.findBit(last + 1, true);
+        if (next >= 256)
+            break;
+        if (next - last - 1 > widestGap) {
+            widestGap = next - last - 1;
+            lastOfFirstRange = last;
+            firstOfSecondRange = next;
+        }
+        last = next;
+    }
+    if (!widestGap)
+        lastOfFirstRange = last;
+    if (last - first + 1 - widestGap > maxCovered)
+        return std::nullopt;
+    return first | (lastOfFirstRange - first) << 8 | firstOfSecondRange << 16 | (last - firstOfSecondRange) << 24;
+}
+
+static void encodeRegExpMetadata(ImageRegExp& record, const RegExpRequest& request, const RegExpSummary& summary, const StringNumbers& strings, SectionWriter& details)
 {
     record.numSubpatterns = summary.numSubpatterns;
     record.minimumSize = summary.minimumSize;
@@ -455,7 +508,7 @@ static void encodeRegExpMetadata(ImageRegExp& record, const RegExpRequest& reque
     record.hasNamedGroups = summary.hasNamedGroups();
     RELEASE_ASSERT(!record.hasNamedGroups || !record.hasCharacterSet());
     if (record.hasNamedGroups)
-        record.details = encodeRegExpNamedGroups(details, request, summary);
+        record.details = encodeRegExpNamedGroups(details, request, summary, strings);
     if (record.hasCharacterSet()) {
         RELEASE_ASSERT(summary.characterSet);
         const Yarr::CharacterSetWithRanges& set = *summary.characterSet;
@@ -465,15 +518,21 @@ static void encodeRegExpMetadata(ImageRegExp& record, const RegExpRequest& reque
         record.details = details.append(asByteSpan(header), ImageRegExpCharacterSet::alignment);
         details.append(asByteSpan(set.wideRanges.span()), alignof(Yarr::CharacterRange));
     }
+    if (summary.firstCharacters && !record.hasNamedGroups && !record.hasCharacterSet()) {
+        if (std::optional<uint32_t> ranges = coverFirstCharacters(*summary.firstCharacters)) {
+            record.hasFirstCharacters = true;
+            record.details = *ranges;
+        }
+    }
 }
 
-static ImageRegExp createRegExpRecord(const RegExpRequest& request, const CompiledRegExp& compiled, const RegExpSummary& summary, const std::array<uint32_t, 2>& entries, SectionWriter& details)
+static ImageRegExp createRegExpRecord(const RegExpRequest& request, const CompiledRegExp& compiled, const RegExpSummary& summary, const std::array<uint32_t, 2>& entries, const StringNumbers& strings, SectionWriter& details)
 {
     RegExpRecordForm form = compiled.form;
     ASSERT(request.flags == ImageRegExp::significantFlags(request.flags));
     RELEASE_ASSERT((form == RegExpRecordForm::NoMetadata) == (summary.metadata == RegExpMetadata::Unknown));
     ImageRegExp record { };
-    record.pattern = request.pattern.index();
+    record.pattern = strings.requiredNumberOf(request.pattern);
     record.rawFlags = request.flags.toRaw();
     record.rawForm = static_cast<uint8_t>(form);
     record.isLiteral = request.origin == RegExpRequestOrigin::Literal;
@@ -482,7 +541,7 @@ static ImageRegExp createRegExpRecord(const RegExpRequest& request, const Compil
     case RegExpMetadata::Unknown:
         break;
     case RegExpMetadata::Known:
-        encodeRegExpMetadata(record, request, summary, details);
+        encodeRegExpMetadata(record, request, summary, strings, details);
         break;
     }
 
@@ -496,7 +555,7 @@ static ImageRegExp createRegExpRecord(const RegExpRequest& request, const Compil
         break;
     case RegExpRecordForm::Atom:
         RELEASE_ASSERT(request.atom);
-        record.atom = request.atom.index();
+        record.atom = strings.requiredNumberOf(request.atom);
         break;
     case RegExpRecordForm::NoCode:
     case RegExpRecordForm::NoMetadata:
@@ -538,9 +597,9 @@ RegExpSections encodeRegExpRecords(const RegExpRecordInputs& inputs, BuildContex
         const RegExpSummary* summary = context.regExpSummaries().summaryIfComputed(request.pattern, request.flags);
         RELEASE_ASSERT(summary);
 
-        records.append(createRegExpRecord(request, compiled, *summary, inputs.section.entries[index], details));
+        records.append(createRegExpRecord(request, compiled, *summary, inputs.section.entries[index], inputs.strings, details));
         hashes.append(ImageRegExpHash { ImageRegExp::hashOf(summary->patternHash, request.flags), recordNumber });
-        if (compiled.form == RegExpRecordForm::Code)
+        if (compiled.form == RegExpRecordForm::Code || compiled.form == RegExpRecordForm::NoCode)
             maxOutputSize = std::max(maxOutputSize, (summary->numSubpatterns + 1) * 2 + summary->numDuplicateNamedCaptureGroups);
     }
     if (details.didOverflow())

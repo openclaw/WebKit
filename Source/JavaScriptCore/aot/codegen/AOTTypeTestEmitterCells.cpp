@@ -15,10 +15,13 @@
 #include "AOTElementAccessEmitter.h"
 #include "AOTGuardEmitter.h"
 #include "AOTModuleEmitter.h"
+#include "AOTRuntimeCallEmitter.h"
 #include "AOTShapeTestEmitter.h"
+#include "AOTStubsValues.h"
 #include "AOTTypeArena.h"
 #include "AOTTypeRelations.h"
 #include "AOTVector.h"
+#include "JSArrayBufferView.h"
 #include "JSTypeInfo.h"
 #include <utility>
 
@@ -35,14 +38,16 @@ void TypeTestEmitter::forEachCellCase(CellPointer cell, const TypeTestPlan& plan
 
     const Type from = types().at(plan.from);
     auto visitCellTest = [&](const CellTest& test) {
+        MarkedObjects marked = MarkedObjects::Pass;
         if (test.kind == CellTestKind::ShapeIn && m_casesAreBranchedOn && emitter<ShapeTestEmitter>().paysForMark(test.layouts, from)) {
             visit([&] {
                 m_nextCaseIsUnlikely = true;
                 return passesCellTest(cell, test, from, MarkedObjects::AreAskedAgain);
             });
+            marked = MarkedObjects::PassAlone;
         }
         visit([&] {
-            return passesCellTest(cell, test, from);
+            return passesCellTest(cell, test, from, marked);
         });
     };
 
@@ -81,7 +86,7 @@ void TypeTestEmitter::forEachCellCase(CellPointer cell, const TypeTestPlan& plan
         if (test.kind == CellTestKind::IsClosureOf)
             functions.append(test.function);
     }
-    bool testsClosureNumber = functions.size() > 1;
+    bool testsClosureNumber = functions.size() > 1 && !m_isEmittingPerFunctionBranch;
     if (testsClosureNumber) {
         visit([&] {
             Machine::DeclaredAccessesSuspension suspension(m_out);
@@ -99,6 +104,12 @@ void TypeTestEmitter::forEachCellCase(CellPointer cell, const TypeTestPlan& plan
         visit([&] {
             return emitter<ClosureTestEmitter>().isSlimClosureAsCreated(cell);
         });
+        if (asksStubForCallable()) {
+            visit([&] {
+                return isCallableByStub(cell);
+            });
+            continue;
+        }
         visit([&] {
             return emitter<ClosureTestEmitter>().hasFunctionCellType(cell);
         });
@@ -167,6 +178,8 @@ Condition TypeTestEmitter::passesCellTest(CellPointer cell, const CellTest& test
     case CellTestKind::IsCallable:
         return isCallable(cell);
     case CellTestKind::CellTypeIs:
+        if (m_arrayHeaderTest)
+            return emitter<ElementAccessEmitter>().passesHeaderTest(cell, *m_arrayHeaderTest);
         return hasCellTypeIn(cell, test.cellTypes);
     case CellTestKind::ShapeIn: {
         Condition hasShape = emitter<ShapeTestEmitter>().hasShapeIn(cell, test.layouts, from, marked);
@@ -233,11 +246,27 @@ Condition TypeTestEmitter::isCallable(CellPointer cell)
     return selectByBranch<Condition>(emitter<ClosureTestEmitter>().isSlimClosureAsCreated(cell), [&] {
         return boolean(true);
     }, [&] {
+        if (asksStubForCallable())
+            return isCallableByStub(cell);
         return selectByBranch<Condition>(emitter<ClosureTestEmitter>().hasFunctionCellType(cell), [&] {
             return boolean(true);
         }, [&] {
             return isCallableByCallData(cell);
         });
+    });
+}
+
+bool TypeTestEmitter::asksStubForCallable()
+{
+    const OperationContext* context = generator().contextBeingGenerated();
+    return context && context->block() && !generator().runsRepeatedly(context->block());
+}
+
+Condition TypeTestEmitter::isCallableByStub(CellPointer cell)
+{
+    return asBoolean([&](BranchTargets targets) {
+        LValue operand = cell.value();
+        emitter<RuntimeCallEmitter>().callStubWithoutSiteAndBranch(isCallableCell(), singleElementSpan(operand), { }, targets);
     });
 }
 
@@ -282,13 +311,50 @@ Condition TypeTestEmitter::isPristine(CellPointer cell, BuiltinClassID classID, 
     bool asksCellAlone = aspects.contains(PristineAspects::CellAlone);
     aspects.remove(PristineAspects::CellAlone);
     Condition isAsMade = isAsItsClassMadeIt(cell, classID, aspects);
-    if (asksCellAlone || !m_program.admitsReplacedBuiltins || !aspects.containsAny({ PristineAspects::Names, PristineAspects::NamesKeptBelow }))
+    if (asksCellAlone || !m_program.admitsReplacedBuiltins || !aspects.containsAny({ PristineAspects::Names, PristineAspects::InheritedNamesKept }))
         return isAsMade;
     return logicalAnd(isAsMade, nothingWasWrittenAbove(classID));
 }
 
+void TypeTestEmitter::branchOnPristineView(CellPointer cell, BuiltinClassID classID, OptionSet<PristineAspects> aspects, BranchTargets targets)
+{
+    auto continueIfTrue = [&](Condition condition) {
+        LBasicBlock passed = newBlock();
+        branch(condition, { normalEdge(passed), targets.notTaken });
+        m_out.appendTo(passed);
+    };
+
+    bool mayKeepInheritedNames = aspects.contains(PristineAspects::InheritedNamesKept) && !aspects.containsAny(aspectsWithoutTest) && pristineTestOf(m_builtins, classID) == PristineTest::MayPass;
+    if (!mayKeepInheritedNames)
+        continueIfTrue(isPristine(cell, classID, aspects));
+    else {
+        bool asksCellAlone = aspects.contains(PristineAspects::CellAlone);
+        OptionSet<PristineAspects> aspectsOfEither = aspects - OptionSet<PristineAspects> { PristineAspects::InheritedNamesKept, PristineAspects::Storage, PristineAspects::CellAlone };
+        aspectsOfEither.add(PristineAspects::Names);
+        BuiltinClassID below = classBelowWithTestedStructure(m_builtins, classID);
+        RELEASE_ASSERT(below);
+        LBasicBlock hasNames = newBlock();
+        LBasicBlock mayBeOfClassBelow = newBlock();
+        branch(emitter<ElementAccessEmitter>().isPristineInstance(cell, aspectsOfEither), { normalEdge(hasNames), unlikelyEdge(mayBeOfClassBelow) });
+        m_out.appendTo(mayBeOfClassBelow);
+        branch(isPristine(cell, below, aspectsOfEither), { normalEdge(hasNames), targets.notTaken });
+        m_out.appendTo(hasNames);
+        if (!asksCellAlone && m_program.admitsReplacedBuiltins)
+            continueIfTrue(nothingWasWrittenAbove(classID));
+    }
+    branch(hasNoBits(loadByte(cell, m_heaps.JSArrayBufferView_sharingOfMemory), isGrowableSharedMode), targets);
+}
+
 Condition TypeTestEmitter::nothingWasWrittenAbove(BuiltinClassID classID)
 {
+    if (standsAboveClassesOfViews(m_builtins, classID)) {
+        Condition nothing = boolean(true);
+        for (uint32_t index = 0; index < m_builtins.classCount(); ++index) {
+            if (m_builtins.at(BuiltinClassID(index)).parent == classID && isTypedView(m_builtins.typedArrayTypeOf(BuiltinClassID(index))))
+                nothing = logicalAnd(nothing, nothingWasWrittenAbove(BuiltinClassID(index)));
+        }
+        return nothing;
+    }
     Pointer classesWrittenAbove = loadImmutablePointer(AOT_INSTANCE_OFFSET(builtins.classesWrittenAbove));
     Word32 wasWrittenAbove(m_out.load8ZeroExt32(m_out.address(m_heaps.entire(AbstractHeap::NamedProperties), classesWrittenAbove.value(), classID.index())));
     return isZero(wasWrittenAbove);
@@ -298,6 +364,10 @@ Condition TypeTestEmitter::isAsItsClassMadeIt(CellPointer cell, BuiltinClassID c
 {
     if (aspects.containsAny(aspectsWithoutTest))
         return boolean(false);
+    if (standsAboveClassesOfViews(m_builtins, classID)) {
+        aspects.remove(PristineAspects::Storage);
+        return aspects.contains(PristineAspects::InheritedNamesKept) ? boolean(false) : emitter<ElementAccessEmitter>().isPristineInstance(cell, aspects);
+    }
     switch (pristineTestOf(m_builtins, classID)) {
     case PristineTest::NeverPasses:
         return boolean(false);
@@ -306,14 +376,19 @@ Condition TypeTestEmitter::isAsItsClassMadeIt(CellPointer cell, BuiltinClassID c
             return emitter<ElementAccessEmitter>().isPristineArray(cell, aspects);
         if (isTypedView(m_builtins.typedArrayTypeOf(classID)))
             aspects.remove(PristineAspects::Storage);
-        if (aspects.contains(PristineAspects::NamesKeptBelow)) {
+        if (aspects.contains(PristineAspects::InheritedNamesKept)) {
             BuiltinClassID below = classBelowWithTestedStructure(m_builtins, classID);
             RELEASE_ASSERT(below);
-            OptionSet<PristineAspects> aspectsOfEither = aspects - PristineAspects::NamesKeptBelow;
+            OptionSet<PristineAspects> aspectsOfEither = aspects - PristineAspects::InheritedNamesKept;
             aspectsOfEither.add(PristineAspects::Names);
-            Condition isPristineArray = emitter<ElementAccessEmitter>().isPristineInstance(cell, aspectsOfEither);
-            return logicalOr(isPristineArray, isPristine(cell, below, aspectsOfEither));
+            return selectByBranch<Condition>(emitter<ElementAccessEmitter>().isPristineInstance(cell, aspectsOfEither), [&] {
+                return boolean(true);
+            }, [&] {
+                return isPristine(cell, below, aspectsOfEither);
+            });
         }
+        if (aspects.contains(PristineAspects::Names) && pristineFlagOfCellCoversElements(m_builtins.at(classID).type))
+            aspects.remove(PristineAspects::Storage);
         return emitter<ElementAccessEmitter>().isPristineInstance(cell, aspects);
     case PristineTest::ClosureAsCreated:
         return emitter<GuardEmitter>().isClosureAsCreated(cell, classID, aspects);

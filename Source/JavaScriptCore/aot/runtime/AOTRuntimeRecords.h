@@ -97,7 +97,7 @@ enum class SlotKindFlag : uint8_t {
     v(FieldGetter, Field, HiddenWordOffset, ReadsSlot, AbsentIsUndefined) \
     v(FieldCreation, Field, HiddenWordOffset, Unknown, None) \
     v(FieldOrInherited, FieldAndHolder, WordIndex, Unknown, InheritsGetter) \
-    v(FieldOrInheritedSetter, FieldAndHolder, WordIndex, Unknown, None) \
+    v(FieldOrInheritedAccessor, FieldAndHolder, WordIndex, Unknown, None) \
     v(InheritedField, Holder, None, Unknown, None) \
     v(FieldOrInheritedField, FieldAndHolder, HiddenWordOffset, Unknown, None) \
     v(Variable, Field, HiddenWordOffset, Present, None) \
@@ -125,6 +125,9 @@ struct alignas(16) Slot {
 #undef AOT_DECLARE_SLOT_KIND
     };
 
+    static constexpr Kind fieldOfGetter = Kind::FieldCreation;
+    static constexpr Kind closureAddition = Kind::ClosureName;
+
     static constexpr uint8_t isOutOfLine = 1 << 0;
     static constexpr uint8_t dependsOnChain = 1 << 1;
     static constexpr uint8_t isOwn = 1 << 2;
@@ -134,11 +137,16 @@ struct alignas(16) Slot {
     static constexpr uint8_t storageHasIndexingHeader = 1 << 6;
     static constexpr uint8_t needsHandler = 1 << 7;
     static constexpr uint8_t inheritedIsOutOfLine = storageHasIndexingHeader;
+    static constexpr uint8_t fieldTakesAnyValue = storageHasIndexingHeader;
+    static constexpr uint8_t clearsPristineFlag = absentIsUndefined;
+    static constexpr uint8_t copiesElements = inheritsGetter;
     static constexpr uint8_t undefinedNeedsNoStorage = absentIsUndefined;
     static constexpr uint8_t remembersOrder = growsStorage;
     static constexpr uint8_t emptySlotMayBeUndefined = growsStorage;
     static constexpr uint8_t leavesStateOfBirth = absentIsUndefined;
     static constexpr uint8_t readsByteOffset = isOutOfLine;
+    static constexpr uint8_t isLastIndexOfRegExp = isOutOfLine;
+    static constexpr uint8_t isInModuleInstance = isOutOfLine;
     static constexpr unsigned absentPatternShift = 4;
     static constexpr uint8_t absentPatternMask = 7;
     static constexpr uint8_t allFlags = UINT8_MAX;
@@ -274,6 +282,13 @@ struct alignas(16) Slot {
         slot.customAccessor = { index, 0 };
         return slot;
     }
+    static Slot createReportedReplacement(StructureID structureID, PropertyOffset offset)
+    {
+        int32_t index = wordIndexFor(offset);
+        if (!fitsInLocation(index))
+            return createWithoutPayload(structureID, Kind::Uncacheable, 0);
+        return create(structureID, Kind::Uncacheable, isInlineOffset(offset) ? isOwn : isOwn | isOutOfLine, static_cast<uint16_t>(static_cast<int16_t>(index)));
+    }
     static Slot createForProxies(StructureID structureID, JSCell* key, uint16_t columnOfName)
     {
         Slot slot = create(structureID, Kind::Uncacheable, 0, columnOfName);
@@ -288,6 +303,7 @@ struct alignas(16) Slot {
     }
 
     bool isEmpty() const { return kind == Kind::Empty; }
+    bool isForProxies() const { return kind == Kind::Uncacheable && holder; }
     bool has(uint8_t flag) const { return flags & flag; }
     int32_t wordIndex() const
     {
@@ -307,6 +323,7 @@ struct alignas(16) Slot {
     {
         static_assert(OBJECT_OFFSETOF(FieldPayload, slot) == OBJECT_OFFSETOF(FieldAndHolderPayload, slot));
         ASSERT(payloadOf(kind) == SlotPayload::Field || payloadOf(kind) == SlotPayload::FieldAndHolder);
+        ASSERT(kind != Kind::FieldOrInheritedAccessor || !has(emptySlotMayBeUndefined));
         return field.slot;
     }
     bool namesOnlyLiveCells(const Invocable<bool(JSCell*)> auto& isMarked, uintptr_t cageBase) const;
@@ -426,6 +443,8 @@ inline std::optional<Slot> Slot::tryCreateTransition(StructureID structureID, ui
         ASSERT(newStorageCapacityOrZero == storageCapacityAfterAdding(index));
         flags |= growsStorage;
     }
+    if (flags & clearsPristineFlag)
+        flags |= growsStorage | storageHasIndexingHeader;
     Slot slot = create(structureID, Kind::Transition, flags | isOwn, static_cast<uint16_t>(static_cast<int16_t>(index)));
     slot.transition = { newStructureID, newStorageCapacityOrZero };
     return slot;
@@ -445,10 +464,11 @@ bool Slot::namesOnlyLiveCells(const Invocable<bool(JSCell*)> auto& isMarked, uin
     switch (payloadOf(kind)) {
     case SlotPayload::None:
     case SlotPayload::WordIndex:
-    case SlotPayload::Field:
     case SlotPayload::OrderWords:
     case SlotPayload::CustomAccessor:
         return true;
+    case SlotPayload::Field:
+        return kind != Kind::Variable || !field.type || isMarked(MarkedBlockCage::decode(cageBase, field.type));
     case SlotPayload::Holder:
     case SlotPayload::Key:
         return !holder || isMarked(holder);
@@ -505,7 +525,12 @@ inline std::optional<PackedSlot> PackedSlot::tryPack(const Slot& slot, uint16_t 
 {
     ASSERT(name != noName);
     uint8_t carriedFlag = Slot::kindFlagOf(slot.kind);
-    if (slot.flags & ~(Slot::isOwn | Slot::isOutOfLine | Slot::dependsOnChain | Slot::needsHandler | carriedFlag))
+    uint8_t slotFlags = slot.flags;
+    if (slot.kind == Slot::Kind::Field && (slotFlags & (Slot::isOwn | Slot::absentIsUndefined | Slot::emptySlotMayBeUndefined)) == (Slot::isOwn | Slot::emptySlotMayBeUndefined))
+        slotFlags = (slotFlags & ~(Slot::isOwn | Slot::emptySlotMayBeUndefined)) | Slot::absentIsUndefined;
+    else if (slot.kind == Slot::Kind::Field && (slotFlags & (Slot::isOwn | Slot::absentIsUndefined)) == Slot::absentIsUndefined)
+        return std::nullopt;
+    if (slotFlags & ~(Slot::isOwn | Slot::isOutOfLine | Slot::dependsOnChain | Slot::needsHandler | carriedFlag))
         return std::nullopt;
     Slot::Kind kind = slot.kind;
     uint32_t payload = 0;
@@ -560,8 +585,13 @@ inline std::optional<PackedSlot> PackedSlot::tryPack(const Slot& slot, uint16_t 
         payload = slot.customAccessor.index;
         break;
     case SlotPayload::Key:
-        if (slot.holder)
+        if (slot.has(Slot::isOwn))
             return std::nullopt;
+        if (!slot.holder)
+            break;
+        if (MarkedBlockCage::baseOf(slot.holder) != cageBase || (slot.location && slot.location != name))
+            return std::nullopt;
+        payload = MarkedBlockCage::encode(cageBase, slot.holder);
         break;
     case SlotPayload::FieldAndHolder:
     case SlotPayload::ExtraPropertyAddition:
@@ -571,11 +601,11 @@ inline std::optional<PackedSlot> PackedSlot::tryPack(const Slot& slot, uint16_t 
         return std::nullopt;
     }
     uint8_t kindAndFlags = static_cast<uint8_t>(kind);
-    if (slot.flags & Slot::isOwn)
+    if (slotFlags & Slot::isOwn)
         kindAndFlags |= isOwn;
-    if (slot.flags & Slot::isOutOfLine)
+    if (slotFlags & Slot::isOutOfLine)
         kindAndFlags |= isOutOfLine;
-    if (carriedFlag && slot.flags & carriedFlag)
+    if (carriedFlag && slotFlags & carriedFlag)
         kindAndFlags |= kindFlag;
     return PackedSlot { payload, location, static_cast<uint8_t>(kindAndFlags ^ ownInlineValueBits), name };
 }
@@ -588,11 +618,12 @@ inline bool PackedSlot::canOutliveWhatItNames() const
     case SlotPayload::Transition:
     case SlotPayload::CustomAccessor:
         return true;
+    case SlotPayload::Key:
+        return payload;
     case SlotPayload::None:
     case SlotPayload::WordIndex:
     case SlotPayload::Field:
     case SlotPayload::ExtraProperty:
-    case SlotPayload::Key:
         return false;
     case SlotPayload::FieldAndHolder:
     case SlotPayload::ExtraPropertyAddition:
@@ -617,11 +648,16 @@ inline Slot PackedSlot::unpack(StructureID structureID, uintptr_t cageBase, bool
         flags |= Slot::isOutOfLine;
     if (kindAndFlags & kindFlag)
         flags |= Slot::kindFlagOf(kind);
+    if (kind == Slot::Kind::Field && (kindAndFlags & (isOwn | kindFlag)) == kindFlag)
+        flags = (flags & ~Slot::absentIsUndefined) | Slot::isOwn | Slot::emptySlotMayBeUndefined;
     int32_t shortWordIndex = static_cast<int8_t>(location);
     uint16_t hiddenWordOffset = static_cast<uint16_t>(location << hiddenWordOffsetShift);
     switch (Slot::payloadOf(kind)) {
-    case SlotPayload::None:
     case SlotPayload::Key:
+        if (payload)
+            return Slot::createForProxies(structureID, MarkedBlockCage::decode(cageBase, payload), name);
+        [[fallthrough]];
+    case SlotPayload::None:
         return Slot::create(structureID, kind, flags, 0);
     case SlotPayload::Holder: {
         if (kind == Slot::Kind::InheritedField)
@@ -656,12 +692,22 @@ struct SiteCacheState {
     static constexpr uint32_t offsetMask = (numberOfStates - 1) * 2;
     static constexpr unsigned missesOfEmptySitesPerSample = 32;
     static constexpr unsigned sampleStep = (UINT8_MAX + 1) / missesOfEmptySitesPerSample;
+    static constexpr uint32_t offsetOfStateOf(uintptr_t key) { return static_cast<uint32_t>(key >> slotAddressShift) & offsetMask; }
+    static constexpr uintptr_t keyOfPlaceOfAnswers(uint32_t place) { return static_cast<uintptr_t>(place) << (slotAddressShift + 1); }
     static constexpr uint16_t missesBeforeRefill(unsigned refillCount) { return static_cast<uint16_t>((4u << (2 * std::min(refillCount, maxRefillCount))) - 1); }
 
     uint16_t missesLeft;
 };
 
-enum class SiteUse : uint8_t { Read, Call };
+enum class SiteUse : uint8_t { Read, Call, AbsenceAmongExtraProperties, ReadUnderNameOfField };
+constexpr bool isRead(SiteUse use) { return use == SiteUse::Read || use == SiteUse::ReadUnderNameOfField; }
+static constexpr uint32_t tablesAreFiledForSiteWithoutAnswers = 1u << 8;
+static constexpr uint32_t stubOfSiteFollowsFurtherAnswers = 1u << 9;
+static constexpr uint32_t visitorHitFurtherAnswer = 1u << 10;
+static constexpr uint32_t stubJumpsToArmOfAnswer = 1u << 11;
+static constexpr uint32_t stubAsksForPresence = 1u << 12;
+static constexpr uint32_t stubReadsForOtherReceiver = 1u << 13;
+static constexpr uint16_t indexOfSiteAnswersThatHoldNothing = 2;
 
 struct alignas(16) SiteAnswers {
     enum class Form : uint8_t {
@@ -679,11 +725,14 @@ struct alignas(16) SiteAnswers {
         LengthOfTypedArray,
         OwnNarrowReferenceInCell,
         OwnInt32InCell,
+        OwnFieldInExtension,
         Nothing = 15,
+        ExtraGetterInCellAtCall = OwnValueInCell,
+        ExtraGetterInStorageAtCall = LengthOfTypedArray,
     };
     static constexpr uint32_t formMask = 15;
     static constexpr unsigned indexShiftInOperandOfExtraValue = 8;
-    static constexpr Form mostCommonForm(SiteUse use) { return use == SiteUse::Read ? Form::OwnValueInStorage : Form::ValueInStorageOfHolder; }
+    static constexpr Form mostCommonForm(SiteUse use) { return use == SiteUse::Read ? Form::OwnValueInStorage : use == SiteUse::ReadUnderNameOfField ? Form::OwnFieldInCell : use == SiteUse::Call ? Form::ValueInStorageOfHolder : Form::Nothing; }
     static constexpr uint32_t bitsOf(SiteUse use, Form form) { return static_cast<uint32_t>(form) ^ static_cast<uint32_t>(mostCommonForm(use)); }
     static constexpr Form formOf(SiteUse use, uint32_t key) { return static_cast<Form>((key & formMask) ^ static_cast<uint32_t>(mostCommonForm(use))); }
 
@@ -717,6 +766,12 @@ struct alignas(16) SiteAnswers {
         if (!(shapeWord & bitTurnedForFieldInExtension) || offsetInGranule(offsetInExtension))
             return std::nullopt;
         return Answer { shapeWord ^ bitTurnedForFieldInExtension, maxExtensionGranules - 1 - granuleOf(offsetInExtension) };
+    }
+    static std::optional<uint32_t> operandOfFieldInExtension(uint32_t offsetInExtension)
+    {
+        if (offsetInGranule(offsetInExtension))
+            return std::nullopt;
+        return maxExtensionGranules - 1 - granuleOf(offsetInExtension);
     }
     static constexpr uint32_t bitTurnedForInt32InCell = 1u << 29;
     static constexpr uint32_t bitTurnedForInt64InCell = 1u << 28;
@@ -770,12 +825,12 @@ struct alignas(16) SiteAnswers {
         return Answer { bits | bitsOf(use, form), operand };
     }
     static constexpr SiteAnswers forPlacesWithout() { return { { keyOfNoShape, 0 }, { 0, 0 } }; }
-    static constexpr Answer withoutKey(SiteUse use, bool isFirst, uint32_t operand = 0) { return { use == SiteUse::Read && isFirst ? keyOfNoShape : 0, operand }; }
+    static constexpr Answer withoutKey(SiteUse use, bool isFirst, uint32_t operand = 0) { return { isRead(use) && isFirst ? keyOfNoShape : 0, operand }; }
     bool holdsShape() const { return first.isByShape() && first.key != keyOfNoShape; }
     bool isEmpty() const { return (!first.key || first.key == keyOfNoShape) && !second.key; }
 
-    Answer& newestByStructure(SiteUse use) { return use == SiteUse::Read ? second : first; }
-    Answer& besideNewestByStructure(SiteUse use) { return use == SiteUse::Read ? first : second; }
+    Answer& newestByStructure(SiteUse use) { return isRead(use) ? second : first; }
+    Answer& besideNewestByStructure(SiteUse use) { return isRead(use) ? first : second; }
 
     Answer first;
     Answer second;
@@ -785,7 +840,14 @@ static_assert(sizeof(SiteAnswers) == 16 && sizeof(SiteAnswers::Answer) == 8 && s
 struct alignas(16) WideSiteAnswers {
     static constexpr unsigned numberOfFurtherAnswers = 2;
     static constexpr unsigned numberOfStructuresThatLackName = 4;
-    static constexpr std::array formsOfFurtherAnswers { SiteAnswers::Form::ExtraValueInCell, SiteAnswers::Form::OwnFieldInCell, SiteAnswers::Form::OwnValueInCell, SiteAnswers::Form::ExtraValueInStorage, SiteAnswers::Form::ValueInWordOfCage };
+    static constexpr std::array formsOfFurtherAnswers { SiteAnswers::Form::ExtraValueInCell, SiteAnswers::Form::OwnFieldInCell, SiteAnswers::Form::OwnValueInCell, SiteAnswers::Form::ExtraValueInStorage, SiteAnswers::Form::ValueInWordOfCage, SiteAnswers::Form::Nothing };
+    static constexpr std::array formsOfFurtherAnswersWithIndex { SiteAnswers::Form::ValueInStorageOfHolder, SiteAnswers::Form::GetterInStorageOfHolder };
+    static constexpr bool canBeFurtherAnswer(SiteAnswers::Form form, int32_t indexInStorageOfHolder)
+    {
+        if (std::ranges::contains(formsOfFurtherAnswers, form))
+            return true;
+        return std::ranges::contains(formsOfFurtherAnswersWithIndex, form) && indexInStorageOfHolder && indexInStorageOfHolder > std::numeric_limits<int8_t>::min() && indexInStorageOfHolder <= std::numeric_limits<int8_t>::max();
+    }
 
     bool namesNoStructure() const
     {
@@ -814,14 +876,17 @@ struct alignas(16) WideSiteAnswers {
     uint32_t structureThatLeavesFieldOut;
     uint32_t holderOrWordAbove;
     int32_t indexInStorageOfHolderAbove;
-    std::array<uint8_t, numberOfFurtherAnswers> bitsOfFormsOfFurtherAnswers;
-    uint16_t unused;
+    struct FormOfFurtherAnswer {
+        uint8_t bits;
+        int8_t indexInStorageOfHolder;
+    };
+    std::array<FormOfFurtherAnswer, numberOfFurtherAnswers> formsOfFurtherAnswersHeld;
 };
 static_assert(sizeof(WideSiteAnswers) == 64 && !OBJECT_OFFSETOF(WideSiteAnswers, answers) && std::is_trivially_default_constructible_v<WideSiteAnswers>);
 static_assert(SiteAnswers::keyOfNoShape == (compiledObjectShapeBit | SiteAnswers::bitsOf(SiteUse::Call, SiteAnswers::Form::Nothing)) && !SiteAnswers::looksLikeKeyByShape(SiteAnswers::keyOfNoShape));
 static_assert(SiteAnswers::looksLikeKeyByShape(shapeWordOf(1)) && SiteAnswers::looksLikeKeyByShape(shapeWordOf(Number24::max)) && SiteAnswers::looksLikeKeyByShape(shapeWordOf(1) ^ SiteAnswers::bitTurnedForFieldInExtension) && SiteAnswers::looksLikeKeyByShape(shapeWordOf(Number24::max) ^ SiteAnswers::bitTurnedForEncodedByteInCell));
 static_assert(!SiteAnswers::looksLikeKeyByShape(0x80000040u) && !SiteAnswers::looksLikeKeyByShape(0xc0000040u) && !SiteAnswers::looksLikeKeyByShape(0xf8000040u) && !SiteAnswers::looksLikeKeyByShape(0xfe000040u) && SiteAnswers::looksLikeKeyByShape(0xff000040u) && SiteAnswers::looksLikeKeyByShape(0xbf000040u));
-static_assert(!SiteAnswers::bitsOf(SiteUse::Read, SiteAnswers::Form::OwnValueInStorage) && !SiteAnswers::bitsOf(SiteUse::Call, SiteAnswers::Form::ValueInStorageOfHolder));
+static_assert(!SiteAnswers::bitsOf(SiteUse::Read, SiteAnswers::Form::OwnValueInStorage) && !SiteAnswers::bitsOf(SiteUse::ReadUnderNameOfField, SiteAnswers::Form::OwnFieldInCell) && !SiteAnswers::bitsOf(SiteUse::Call, SiteAnswers::Form::ValueInStorageOfHolder));
 static_assert(SiteAnswers::formOf(SiteUse::Call, SiteAnswers::bitsOf(SiteUse::Call, SiteAnswers::Form::OwnValueInCell)) == SiteAnswers::Form::OwnValueInCell);
 
 struct CustomAccessorRecord {

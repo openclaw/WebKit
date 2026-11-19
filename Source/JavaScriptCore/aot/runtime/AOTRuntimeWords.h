@@ -9,6 +9,7 @@
 
 #include "AOTRuntimeRecords.h"
 #include "JSCJSValue.h"
+#include "JSTypeInfo.h"
 #include "PropertyOffset.h"
 #include "StructureID.h"
 #include <array>
@@ -28,10 +29,11 @@ namespace AOT {
 struct ExceptionWords {
     EncodedJSValue thrownValue;
     void* stackPointerOfHandler;
+    const void* returnAddressOfAwaitedCall;
     uint32_t pollLeavesOwedError;
     uint32_t stateOfGuessesThatFail;
 };
-static_assert(sizeof(ExceptionWords) == 24);
+static_assert(sizeof(ExceptionWords) == 32);
 
 struct GlobalBinding {
     EncodedJSValue constant;
@@ -46,7 +48,15 @@ struct BindingWords {
     GlobalBinding* globalBindings;
 };
 
+struct TextInCell {
+    static constexpr unsigned flag = HasStaticPropertyTable;
+    static constexpr unsigned maxLength = sizeof(uint64_t);
+};
+
 struct ConstantCellWords {
+    static constexpr unsigned flagOfStringConstant = OverridesGetPrototype;
+    static constexpr unsigned flagsOfNamedText = flagOfStringConstant | TypeInfoPerCellBit;
+
     void* stringAllocator;
     uint8_t* cardsOfStringCells;
     uint8_t* nextStringHeader;
@@ -61,6 +71,8 @@ struct ConstantCellWords {
 
 struct EffectsNetWords {
     uint64_t entriesIntoCode;
+    uint64_t operationsThatDidSomething;
+    uint64_t operationsThatRanOtherCode;
     uint8_t* exercised;
     uint64_t callHeldToThrowNothing;
     uint64_t rowsOfCallHeldToThrowNothing;

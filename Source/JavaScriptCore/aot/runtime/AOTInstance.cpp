@@ -17,6 +17,7 @@
 #include "AOTCallSiteCache.h"
 #include "AOTCellFormat.h"
 #include "AOTChainDependents.h"
+#include "AOTCheckedSpan.h"
 #include "AOTClassGuards.h"
 #include "AOTClosure.h"
 #include "AOTCompactTable.h"
@@ -40,6 +41,8 @@
 #include "AOTObjectModel.h"
 #include "AOTOperationData.h"
 #include "AOTOperationScope.h"
+#include "AOTPoisonedCell.h"
+#include "AOTPrefixCode.h"
 #include "AOTProgramIdentifiers.h"
 #include "AOTProgramStatics.h"
 #include "AOTProgramStrings.h"
@@ -47,6 +50,7 @@
 #include "AOTPropertyCachesStringKeys.h"
 #include "AOTRealmStartup.h"
 #include "AOTRegExpRecords.h"
+#include "AOTRuntimeCheckFailure.h"
 #include "AOTRuntimeFunctions.h"
 #include "AOTRuntimeHooks.h"
 #include "AOTRuntimeReporter.h"
@@ -63,9 +67,12 @@
 #include "AbstractSlotVisitorInlines.h"
 #include "AddressSpaceBudget.h"
 #include "BooleanConstructor.h"
+#include "ProxyConstructor.h"
 #include "DeferGC.h"
+#include "ArrayConstructor.h"
 #include "ErrorConstructor.h"
 #include "FastMarkAppender.h"
+#include "GlobalObjectMethodTable.h"
 #include "HeapAnalyzer.h"
 #include "HeapIterationScope.h"
 #include "IntlObject.h"
@@ -73,6 +80,8 @@
 #include "JSBoundFunction.h"
 #include "JSCInlines.h"
 #include "JSCJSValueInlines.h"
+#include "JSCustomGetterFunction.h"
+#include "JSArrayBufferView.h"
 #include "JSFunction.h"
 #include "JSModuleLoader.h"
 #include "JSPromise.h"
@@ -81,11 +90,15 @@
 #include "LocalAllocator.h"
 #include "MarkedBlockCage.h"
 #include "NativeExecutable.h"
+#include "NumberConstructor.h"
+#include "ObjectConstructor.h"
 #include "ObjectPrototype.h"
 #include "Opcode.h"
 #include "Options.h"
+#include "ParserArena.h"
 #include "ReservedRangeHeap.h"
 #include "SlotVisitorInlines.h"
+#include "StringConstructor.h"
 #include "SubspaceInlines.h"
 #include "Symbol.h"
 #include "VM.h"
@@ -106,6 +119,7 @@
 #include <wtf/MathExtras.h>
 #include <wtf/OSAllocator.h>
 #include <wtf/PageBlock.h>
+#include <wtf/Scope.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/WTFConfig.h>
@@ -162,11 +176,17 @@ static void fillMethodTable(Instance& instance, const Image& image)
     std::span<uint32_t> methodTable = instance.methodTable();
     if (methodTable.empty())
         return;
-#if OS(DARWIN)
+#if OS(DARWIN) || OS(LINUX)
     std::span<const uint8_t> pagesOfImage { reinterpret_cast<const uint8_t*>(image.methodTable().data()), roundUpToMultipleOf(pageSize(), methodTable.size_bytes()) };
     if (mapPrivateCloneOfImagePages(image, pagesOfImage, methodTable.data()))
         return;
 #endif
+    volatile uint32_t* to = methodTable.data();
+    const volatile uint32_t* from = image.methodTable().data();
+    for (size_t index = 0; index < methodTable.size(); index += pageSize() / sizeof(uint32_t)) {
+        to[index] = 0;
+        static_cast<void>(from[index]);
+    }
     memcpySpan(methodTable, image.methodTable());
     OSAllocator::protect(methodTable.data(), InstanceLayout::bytesReservedForMethodTable(instance.tables().instanceSizes), true, false);
 }
@@ -180,7 +200,12 @@ static void fillHeaderAndPrefix(Instance& instance, VM& vm, JSGlobalObject* real
     instance.numberTag = JSValue::NumberTag;
     instance.notCellMask = JSValue::NotCellMask;
     instance.singleCharacterStrings = vm.smallStrings.singleCharacterStrings();
+    static_assert(static_cast<unsigned>(TypeofType::Function) + 1 == InstanceHeader::numberOfTypeStrings);
+    for (unsigned type = 0; type < InstanceHeader::numberOfTypeStrings; ++type)
+        instance.typeStrings[type] = vm.smallStrings.typeString(static_cast<TypeofType>(type));
+    static constexpr uint8_t unknownLevel1Weights[256] { };
     instance.collation.ducetLevel1Weights = ducetLevel1Weights;
+    instance.defaultCollator.knownLevel1Weights = unknownLevel1Weights;
 
     InstancePrefix& prefix = instance.prefix();
     prefix.structureIDBase = JSC::structureIDBase();
@@ -225,10 +250,17 @@ static void fillImageWords(Instance& instance, VM& vm, const Image& image, Progr
     words.fieldRecordIndices = image.programTables().fieldRecordIndices().data();
     words.classAccessors = image.programTables().classAccessors().data();
     words.data = image.programTables().data().data();
-    words.closureFunctionKinds = image.programTables().closureFunctionKinds().data();
+    words.closureFactNumbers = image.programTables().closureFactNumbers().data();
+    words.closureFacts = image.programTables().closureFacts().data();
+    static constexpr ReturnedCaptureData noReturnedCapture { };
+    std::span<const ReturnedCaptureData> returnedCaptures = image.programTables().returnedCaptures();
+    words.returnedCaptures = returnedCaptures.empty() ? &noReturnedCapture : returnedCaptures.data();
+    words.capacityOfReturnedCaptures = returnedCaptures.empty() ? 0 : returnedCaptures.size() - ReturnedCaptureData::numberOfRowsBehind;
+    words.statics = instance.statics();
     words.regExps = image.section<ImageRegExp>(ImageSection::RegExps).data();
     words.regExpCode = image.regExpCode().data();
-    words.functionStarts = image.section<uint32_t>(ImageSection::FunctionStarts).data();
+    words.functionSteps = image.functionStarts().steps();
+    words.functionStartGroups = image.functionStarts().groups();
 #if ENABLE(AOT_POSITION_INDEPENDENT_IMAGE)
     words.stringRecords = image.text().stringRecords().data();
     words.lazyStringHeaderOffsets = image.text().lazyHeaderOffsets();
@@ -238,10 +270,14 @@ static void fillImageWords(Instance& instance, VM& vm, const Image& image, Progr
     words.sizeOfProgramIdentifiers = static_cast<uint64_t>(vm.aotState().identifiers->count()) * sizeof(UniquedStringImpl);
 #endif
     static_assert(sizeof(ImageStringWord) == sizeof(uint32_t));
-    words.stringWords = image.section<uint32_t>(ImageSection::Strings).data();
+    words.endOfIdentifiers = image.header().numbers.endOfIdentifiers;
+    words.stringWords = std::bit_cast<const uint32_t*>(std::bit_cast<uintptr_t>(image.section<uint32_t>(ImageSection::Strings).data()) - words.endOfIdentifiers * sizeof(uint32_t));
     words.stringConstants = image.section<uint32_t>(ImageSection::StringConstants).data();
+    words.hashesOfPlacedConstants = image.text().hashesOfPlacedConstants().data();
+    words.numberOfPlacedConstants = image.text().hashesOfPlacedConstants().size();
     static_assert(!(InstanceLayout::largestPageSize % InstanceLayout::sizeOfIndexOfSiteAnswers) && !(InstanceLayout::distanceToPageEdge % InstanceLayout::sizeOfIndexOfSiteAnswers));
     static_assert(sizeof(uint16_t) == InstanceLayout::sizeOfIndexOfSiteAnswers);
+    RELEASE_ASSERT(InstanceLayout::offsetOfIndexOfSiteAnswers(image.programTables().instanceSizes, image.programTables().instanceSizes.numberOfSiteCaches) <= INT32_MAX);
     words.namesOfSitesByDistance = reinterpret_cast<const uint8_t*>(image.section<uint16_t>(ImageSection::NamesOfSites).data()) - InstanceLayout::offsetOfIndicesOfSiteAnswers(image.programTables().instanceSizes);
     words.listedStrings = image.section<uint32_t>(ImageSection::LongStrings).data();
     words.text = image.section<uint8_t>(ImageSection::Text).data();
@@ -274,6 +310,7 @@ static void fillNumberWords(Instance& instance)
     static_assert(std::size(WTF::intHashSecrets) == std::extent_v<decltype(NumberWords::hashSecrets)>);
     for (size_t i = 0; i < std::size(WTF::intHashSecrets); ++i)
         words.hashSecrets[i] = WTF::intHashSecrets[i];
+    words.keyMultiplierOfTables = CompactTable::keyMultiplier;
 }
 
 static void fillAllocationSpaces(Instance& instance, VM& vm)
@@ -313,10 +350,12 @@ static void fillRealmWords(Instance& instance, VM& vm, JSGlobalObject* realm)
     RealmWords& words = instance.realm;
     words.boundFunctionStructureID = realm->boundFunctionStructure()->id().bits();
     words.hostFunctionStructureID = realm->hostFunctionStructure()->id().bits();
+    words.atomListStructureID = realm->vm().cellButterflyOnlyAtomStringsStructure->id().bits();
     constexpr bool targetIsJSFunction = false;
     words.boundFunctionExecutable = vm.getBoundFunction(targetIsJSFunction, SourceTaintedOrigin::Untainted);
     words.emptyExtraPropertiesStructure = JSFinalObject::createStructure(vm, realm, jsNull(), extraPropertiesInlineCapacity);
     words.extraPropertiesWithElementsStructure = Structure::nonPropertyTransition(vm, words.emptyExtraPropertiesStructure, TransitionKind::AllocateContiguous, nullptr);
+    words.headerOfExtraPropertiesWithElements = cellHeaderFor(words.extraPropertiesWithElementsStructure);
     words.boundFunctionClassInfo = JSBoundFunction::info();
     words.objectPrototype = realm->objectPrototype();
     words.functionPrototypeCall = realm->linkTimeConstant(LinkTimeConstant::callFunction);
@@ -324,6 +363,10 @@ static void fillRealmWords(Instance& instance, VM& vm, JSGlobalObject* realm)
     words.intStrings = vm.numericStrings.intCache();
     words.keysOfPairs = StringKeyCache::noKeysOfPairs();
     words.keyOfPairMask = 0;
+    words.stringsOfImmediates[JSValue::ValueNull] = vm.smallStrings.nullString();
+    words.stringsOfImmediates[JSValue::ValueUndefined] = vm.smallStrings.undefinedString();
+    words.stringsOfImmediates[JSValue::ValueTrue] = vm.smallStrings.trueString();
+    words.stringsOfImmediates[JSValue::ValueFalse] = vm.smallStrings.falseString();
 }
 
 static void fillInstanceClassInfos(Instance& instance)
@@ -336,7 +379,7 @@ static void fillInstanceClassInfos(Instance& instance)
 
 CONCURRENT_SAFE void setPollsEnabled(Instance& instance, bool enabled)
 {
-    WTF::atomicStore(&instance.pollIsDue, static_cast<uintptr_t>(enabled), std::memory_order_relaxed);
+    WTF::atomicStore<MemoryOrder::Relaxed>(&instance.pollIsDue, static_cast<uintptr_t>(enabled));
     if constexpr (hasFaultingLoopPolls)
         OSAllocator::protect(reinterpret_cast<char*>(&instance) + InstanceLayout::offsetOfLoopPollPage(), WTF::pageSize(), !enabled, !enabled);
 }
@@ -496,16 +539,27 @@ Instance* Instance::create(JSGlobalObject* realm)
         instance->effectsNet.exercised = makeEffectsNetExercised().data();
 
     State::create(*instance);
+    instance->state->caches->addClearedEachCollection("loops that prefetch"_s, asMutableByteSpan(instance->state->prefetchingLoops));
+    instance->state->caches->addClearedEachCollection("growing flat text"_s, asMutableByteSpan(instance->state->growingFlatText));
+    instance->state->caches->addClearedEachCollection("wide character strings"_s, asMutableByteSpan(instance->state->wideCharacterStrings));
+    instance->state->caches->addClearedEachCollection("texts of few strings"_s, asMutableByteSpan(instance->state->textsOfFewStrings));
+    instance->state->caches->addClearedEachCollection("released heap frames"_s, asMutableByteSpan(instance->coroutines.releasedHeapFrames));
+    instance->state->caches->addClearedEachCollection("released array"_s, asMutableByteSpan(instance->arrays.releasedArray));
+    instance->state->caches->addClearedEachCollection("released copy"_s, asMutableByteSpan(instance->arrays.releasedCopy));
+    instance->state->caches->addClearedEachCollection("sort keys"_s, asMutableByteSpan(instance->arrays.sortKeys));
+    instance->state->caches->addClearedEachCollection("last lookup in a Map"_s, asMutableByteSpan(instance->arrays.lastMapLookup));
     instance->state->caches->addClearedEachCollection("chains above lists without names"_s, asMutableByteSpan(instance->arrays.chainsAboveListsWithoutNames));
     instance->state->caches->addClearedEachCollection("structures of lists without names"_s, asMutableByteSpan(instance->arrays.structuresOfListsWithoutNames));
+    instance->state->caches->addClearedEachCollection("structures around the first shift"_s, asMutableByteSpan(instance->arrays.structuresAroundFirstShift));
     instance->state->caches->addClearedEachCollection("copies without frame"_s, asWritableBytes(instance->copiesWithoutFrame()));
-    instance->state->caches->addClearedEachCollection("keyed value places"_s, asWritableBytes(instance->keyedValuePlaces()));
-    instance->state->caches->addClearedEachCollection("places filed from slots"_s, asMutableByteSpan(instance->propertyCaches.placesFiledFromSlots));
-    instance->state->caches->addClearedEachCollection("places filed from slots and cleared"_s, asMutableByteSpan(instance->propertyCaches.placesFiledFromSlotsAndCleared));
-    instance->state->caches->addClearedEachCollection("accepted kinds of values"_s, asWritableBytes(instance->acceptedKindsOfValues()));
-    instance->state->caches->addClearedEachCollection("access table"_s, asMutableByteSpan(accessTableOf(*instance, *instance->program)));
-    instance->state->caches->addClearedEachCollection("keys of the access table that depend on chains"_s, asMutableByteSpan(instance->propertyCaches.accessTable.numberOfKeysThatDependOnChains));
-    instance->state->caches->addClearedEachCollection("access table holds stores to unwatched structures"_s, asMutableByteSpan(instance->propertyCaches.accessTable.holdsStoresToUnwatchedStructures));
+    const uint8_t* hasRunSinceClear = &instance->propertyCaches.hasRunSinceClear;
+    instance->state->caches->addClearedEachCollection("keyed value places"_s, asWritableBytes(instance->keyedValuePlaces()), hasRunSinceClear);
+    instance->state->caches->addClearedEachCollection("places hold copies of slots"_s, asMutableByteSpan(instance->propertyCaches.hasCachedSlotValues), hasRunSinceClear);
+    instance->state->caches->addClearedEachCollection("forwarding handlers of proxies"_s, asMutableByteSpan(instance->propertyCaches.forwardingProxyHandlers), hasRunSinceClear);
+    instance->state->caches->addClearedEachCollection("accepted kinds of values"_s, asWritableBytes(instance->acceptedKindsOfValues()), hasRunSinceClear);
+    instance->state->caches->addClearedEachCollection("access table"_s, asMutableByteSpan(accessTableOf(*instance, *instance->program)), hasRunSinceClear);
+    instance->state->caches->addClearedEachCollection("keys of the access table that depend on chains"_s, asMutableByteSpan(instance->propertyCaches.accessTable.numberOfKeysThatDependOnChains), hasRunSinceClear);
+    instance->state->caches->addClearedEachCollection("replaced members"_s, asMutableByteSpan(instance->propertyCaches.replacedMembers));
     fillInstanceClassInfos(*instance);
     initializeRuntimeWords(*instance);
 
@@ -515,6 +569,9 @@ Instance* Instance::create(JSGlobalObject* realm)
         Locker locker { vmState.instancesLock };
         vmState.instances.append(instance);
         vmState.didChangeInstances();
+        vmState.lendTablesOfLivingInstances();
+        for (Instance* each : vmState.instances)
+            each->propertyCaches.forgetReplacedMembers();
     }
     vmState.propertyCaches->didCreateInstance(*instance);
     RuntimeHooks::didChangeMicrotaskQueueing(vm);
@@ -525,6 +582,31 @@ Instance* Instance::create(JSGlobalObject* realm)
 #endif
     releaseUnusedPagesOfThread();
     return instance;
+}
+
+void VMState::didChangeInstances()
+{
+    onlyInstance = instances.size() == 1 ? instances.first() : nullptr;
+    if (onlyInstance)
+        onlyInstance->propertyCaches.hasRunSinceClear = true;
+    instanceOfRecentRun = { };
+}
+
+Instance* VMState::findInstanceThatLendsTables() const
+{
+    for (Instance* instance : instances) {
+        if (instance->state)
+            return instance;
+    }
+    return nullptr;
+}
+
+void VMState::lendTablesOfLivingInstances()
+{
+    for (JSGlobalObject* realm : realmsWithBorrowedTables) {
+        if (!realm->aotInstance() && !instances.contains(realm->aotTableInstance()))
+            realm->setAOTTableInstance(findInstanceThatLendsTables());
+    }
 }
 
 void Instance::destroy(Instance* instance)
@@ -693,7 +775,9 @@ static_assert(numberOfRuntimeOperations == 0 FOR_EACH_AOT_RUNTIME_OPERATION(AOT_
 
 static void JIT_OPERATION_ATTRIBUTES operationNotUsedByImage()
 {
-    dataLogLn("AOT: compiled code called an operation that its image does not list as used.");
+    RuntimeCheckFailure failure("operation table check failed"_s);
+    failure.detail("compiled code called a runtime operation that its image does not list as used");
+    failure.report();
     RELEASE_ASSERT_NOT_REACHED();
 }
 
@@ -823,7 +907,13 @@ static void fillThunkAndPointers(void** entries, const Image& image)
     set(Entry::VirtualCallTrampoline, LLInt::getCodePtr<JSEntryPtrTag>(llint_virtual_call_trampoline).taggedPtr());
     set(Entry::NonConstructorHostFunction, std::bit_cast<void*>(&callHostFunctionAsConstructor));
     set(Entry::ErrorConstructorClassInfo, const_cast<ClassInfo*>(ErrorConstructor::info()));
+    set(Entry::ArrayConstructorClassInfo, const_cast<ClassInfo*>(ArrayConstructor::info()));
+    set(Entry::ObjectConstructorClassInfo, const_cast<ClassInfo*>(ObjectConstructor::info()));
     set(Entry::BooleanConstructorClassInfo, const_cast<ClassInfo*>(BooleanConstructor::info()));
+    set(Entry::ProxyConstructorClassInfo, const_cast<ClassInfo*>(ProxyConstructor::info()));
+    set(Entry::CustomGetterClassInfo, const_cast<ClassInfo*>(JSCustomGetterFunction::info()));
+    set(Entry::NumberConstructorClassInfo, const_cast<ClassInfo*>(NumberConstructor::info()));
+    set(Entry::StringConstructorClassInfo, const_cast<ClassInfo*>(StringConstructor::info()));
     set(Entry::GeneratorClassInfo, const_cast<ClassInfo*>(Generator::info()));
     set(Entry::AsyncGeneratorClassInfo, const_cast<ClassInfo*>(JSAsyncGenerator::info()));
 #if ENABLE(WEBASSEMBLY)
@@ -860,12 +950,12 @@ static void trapUnusedEntries(void** entries, const Image& image)
     }
 }
 
-static_assert(!isFamilyOfOperations(static_cast<RemovableFeature>(0)));
+static_assert(!isOperationFamily(static_cast<RemovableFeature>(0)));
 static constexpr auto familiesOfEntries = [] {
     std::array<uint16_t, entriesThatAreCalled.size() * 32> families { };
     for (unsigned index = 0; index < numberOfEntries; ++index) {
         std::optional<RemovableFeature> feature = featureOf(static_cast<Entry>(index));
-        if (feature && isFamilyOfOperations(*feature))
+        if (feature && isOperationFamily(*feature))
             families[index] = static_cast<uint16_t>(*feature);
     }
     return families;
@@ -964,6 +1054,19 @@ VMState::~VMState()
     RELEASE_ASSERT(!hasCompiledCode);
 }
 
+void VMState::didParseSource(VM& vm, size_t length, std::unique_ptr<IdentifierArena>&& identifiers)
+{
+    constexpr size_t lengthBetweenPrunes = 1 * MB;
+    lengthOfSourcesSincePrune += length;
+    if (lengthOfSourcesSincePrune >= lengthBetweenPrunes) {
+        lengthOfSourcesSincePrune = 0;
+        vm.pruneUnusedSourceProviderCaches();
+    }
+    constexpr size_t mostTimesAsLarge = 8;
+    if (identifiers && (!identifiersOfLastSource || identifiersOfLastSource->size() <= mostTimesAsLarge * identifiers->size()))
+        identifiersOfLastSource = WTF::move(identifiers);
+}
+
 #if OS(LINUX) && ENABLE(AOT_GUARDED_PAGES)
 static void didMapPropertyCachesOfThread();
 #endif
@@ -987,6 +1090,7 @@ void VMState::attachImage(VM& vm)
     caches = makeUnique<CacheRegistry>();
     caches->add(CacheKind::WeakByKey, "structures with fast indexing"_s, structuresWithFastIndexing);
     hasCompiledCode = true;
+    mayLockBuiltins = true;
     vm.setMayHaveUncacheableTransitions();
 
     vm.heap.setValidatesCellVisits(Options::verifyGC());
@@ -1002,6 +1106,7 @@ void VMState::attachImage(VM& vm)
 #endif
     regExpLiterals = makeUnique<RegExpLiterals>(*caches);
     regExpMatchOutput = makeUniqueArray<int>(sizeOfRegExpMatchOutput);
+    this->sizeOfRegExpMatchOutput = sizeOfRegExpMatchOutput;
 
     moduleRecordStructure.setWithoutWriteBarrier(ModuleRecord::createStructure(vm, nullptr, jsNull()));
     stringBuilderStorageStructure.setWithoutWriteBarrier(StringBuilderStorage::createStructure(vm, nullptr, jsNull()));
@@ -1012,6 +1117,7 @@ void VMState::willShutDownHeap()
     if (propertyCaches)
         propertyCaches->front().clear();
     formatPatternState = nullptr;
+    computedFunctionNames.clear();
 }
 
 void VMState::countWithoutImage(VM& vm)
@@ -1023,7 +1129,7 @@ void VMState::countWithoutImage(VM& vm)
 void VMState::releaseImage(VM& vm)
 {
     counts = nullptr;
-    forgetErrorOfCodeLeftOut(vm);
+    clearOmittedCodeError(vm);
     if (!hasCompiledCode)
         return;
     ASSERT(vm.heap.isShuttingDown());
@@ -1034,13 +1140,20 @@ void VMState::releaseImage(VM& vm)
 
     regExpLiterals = nullptr;
     regExpMatchOutput = nullptr;
+    sizeOfRegExpMatchOutput = 0;
     propertyCaches = nullptr;
     functionTables = nullptr;
     cyclesOfImports = nullptr;
+    importersOfModules = nullptr;
+    statementImporters = nullptr;
+    importersOfEveryImport = nullptr;
+    modulesWithQuery = std::nullopt;
+    reexportedNames = nullptr;
     callSiteCache = nullptr;
     runtimeTable = nullptr;
     identifiers = nullptr;
     countedFiles = { };
+    poisonedCellSites = nullptr;
     caches = nullptr;
     pages = nullptr;
 
@@ -1132,7 +1245,6 @@ static thread_local size_t t_sizeOfPagesOfThread;
 static thread_local bool t_isStarting;
 static std::atomic<unsigned> s_numberOfThreadsStarting;
 #if ENABLE(AOT_GUARDED_PAGES)
-// Of the threads that are starting, those whose VM has not mapped its caches of properties, by far the largest of its tables.
 static thread_local bool t_hasNoPropertyCaches;
 static std::atomic<unsigned> s_numberOfThreadsWithoutPropertyCaches;
 
@@ -1198,9 +1310,7 @@ static void* tryReservePagesForTables(const Image& image, unsigned numberOfThrea
     if (!MarkedBlockCage::tryEnsureRoomForNewVMs(numberOfThreads))
         return nullptr;
 #if ENABLE(AOT_GUARDED_PAGES)
-    // Each table gets pages at an address of its own when its VM is made, so none are reserved here: there must be room for every thread that is starting.
     ++s_numberOfThreadsWithoutPropertyCaches;
-    // The count is read in front of the room: a thread that maps its caches in between is counted twice, never not at all.
     size_t needed = sizeOfPagesThatStartingThreadsWillMap(image, numberOfThreads) + sizeToLeaveFree;
     if (addressSpaceLeft() >= needed)
         return &s_numberOfThreadsStarting;
@@ -1454,6 +1564,9 @@ void ProgramStatics::putBack(uint32_t offset, uint32_t size)
         at<Slot>(offset) = static_cast<Slot>(initialWordAt(offset / sizeof(uint64_t)) >> (offset % sizeof(uint64_t) * 8));
         offset += sizeof(Slot);
     };
+    auto refreshMirrors = makeScopeExit([&] {
+        refreshViewMirrors();
+    });
     for (uint32_t end = offset + size; offset < end;) {
         uint32_t left = end - offset;
         if (!(offset % sizeof(uint64_t)) && left >= sizeof(uint64_t))
@@ -1464,6 +1577,82 @@ void ProgramStatics::putBack(uint32_t offset, uint32_t size)
             putBackSlot(uint16_t());
         else
             putBackSlot(uint8_t());
+    }
+}
+
+std::span<ProgramStatics::VariableWithViewMirror> ProgramStatics::viewMirrorVariables(const StaticsRange& range)
+{
+    return { reinterpret_cast<VariableWithViewMirror*>(m_instance.statics() + range.offset), range.size / sizeof(VariableWithViewMirror) };
+}
+
+void ProgramStatics::refreshViewMirrors()
+{
+    bool mirrorAlone = true;
+    for (const StaticsRange& range : m_tables.variablesWithViewMirror()) {
+        std::span<VariableWithViewMirror> views = viewMirrorVariables(range);
+        if (!std::exchange(mirrorAlone, false)) {
+            VariableWithViewMirror::refreshViewsOfOneBuffer(views);
+            continue;
+        }
+        for (VariableWithViewMirror& mirrored : views)
+            mirrored.refresh();
+    }
+}
+
+void ProgramStatics::VariableWithViewMirror::refresh()
+{
+    JSValue held = JSValue::decode(variable);
+    auto* view = held && held.isCell() ? dynamicDowncast<JSArrayBufferView>(held.asCell()) : nullptr;
+    bool hasFixedLength = view && isTypedView(typedArrayType(view->type())) && !isResizableOrGrowableShared(view->mode());
+    vector = hasFixedLength ? view->vector() : nullptr;
+    length = hasFixedLength ? std::min<uint64_t>(view->lengthRaw(), (1ull << 31) >> logElementSize(typedArrayType(view->type()))) : 0;
+}
+
+void ProgramStatics::VariableWithViewMirror::refreshViewsOfOneBuffer(std::span<VariableWithViewMirror> views)
+{
+    auto logElementSizeOf = [](const VariableWithViewMirror& mirrored) {
+        return logElementSize(typedArrayType(JSValue::decode(mirrored.variable).asCell()->type()));
+    };
+    uint64_t size = UINT64_MAX;
+    bool haveOneVector = true;
+    for (VariableWithViewMirror& mirrored : views) {
+        mirrored.refresh();
+        haveOneVector &= mirrored.length && mirrored.vector == views.front().vector;
+        if (haveOneVector)
+            size = std::min(size, mirrored.length << logElementSizeOf(mirrored));
+    }
+    for (VariableWithViewMirror& mirrored : views)
+        mirrored.lengthOfBuffer = haveOneVector ? size >> logElementSizeOf(mirrored) : 0;
+}
+
+void ProgramStatics::didWriteVariable(uint32_t offset)
+{
+    std::span<const StaticsRange> ranges = m_tables.variablesWithViewMirror();
+    auto range = std::ranges::find_if(ranges, [&](const StaticsRange& range) {
+        return range.contains(offset);
+    });
+    if (range == ranges.begin() && range != ranges.end())
+        at<VariableWithViewMirror>(offset).refresh();
+    else if (range != ranges.end())
+        VariableWithViewMirror::refreshViewsOfOneBuffer(viewMirrorVariables(*range));
+}
+
+void ProgramStatics::didMoveStorageOf(JSCell* view)
+{
+    bool mirrorAlone = true;
+    for (const StaticsRange& range : m_tables.variablesWithViewMirror()) {
+        std::span<VariableWithViewMirror> views = viewMirrorVariables(range);
+        bool areOfOneBuffer = !std::exchange(mirrorAlone, false);
+        bool holdsView = false;
+        for (VariableWithViewMirror& mirrored : views) {
+            if (mirrored.variable != JSValue::encode(view))
+                continue;
+            holdsView = true;
+            if (!areOfOneBuffer)
+                mirrored.refresh();
+        }
+        if (areOfOneBuffer && holdsView)
+            VariableWithViewMirror::refreshViewsOfOneBuffer(views);
     }
 }
 
@@ -1520,6 +1709,11 @@ void ProgramStatics::writeVariable(Instance& instance, SlotData slot, JSValue va
     write(instance, slot, value);
 }
 
+void ProgramStatics::emptyVariableWhoseValueHasMoved(Instance& instance, SlotData slot)
+{
+    write(instance, slot, JSValue());
+}
+
 void ProgramStatics::write(Instance& instance, SlotData slot, JSValue value)
 {
     SlotRepresentation representation = slot.representation();
@@ -1529,10 +1723,12 @@ void ProgramStatics::write(Instance& instance, SlotData slot, JSValue value)
     if (!value) {
         RELEASE_ASSERT(traitsOf(representation).hasAbsent);
         clearSlot(representation, address);
+        statics.didWriteVariable(slot.offset);
         return;
     }
     bool didWrite = tryWriteSlot(instance, representation, address, value);
     RELEASE_ASSERT(didWrite);
+    statics.didWriteVariable(slot.offset);
     if (traitsOf(representation).holdsCell)
         statics.didStoreRootInStatics(slot.offset);
 }
@@ -1582,7 +1778,7 @@ const ClassInfo ModuleEnvironment::s_info = { "JSModuleEnvironment"_s, nullptr, 
 
 } // anonymous namespace
 
-bool HeapHooks::standsForModuleInHeapSnapshots(JSCell* cell)
+bool HeapHooks::representsModuleInHeapSnapshot(JSCell* cell)
 {
     return cell->classInfo() == ModuleEnvironment::info();
 }
@@ -1609,15 +1805,16 @@ void ProgramStatics::willAnalyzeHeap(VM& vm)
 {
     if (m_tables.namedVariables().empty())
         return;
+    m_scopesOfClosures.variablesShown.clear();
     if (m_firstNamedVariablesOfModules.isEmpty()) {
         m_placesOfModulesOfClosureNumbers.fill(UINT32_MAX, m_tables.closureFunctions.end - m_tables.closureFunctions.first);
-        bool endsWhereModuleEnds = forEachNamedVariable(m_tables.namedVariables(), [&](uint32_t module, size_t) {
+        bool endsWhereModuleEnds = forEachNamedVariable(decodeVarintBytes(m_tables.namedVariables()).span(), [&](uint32_t module, size_t) {
             m_modulesInHeapSnapshots.append(module);
             m_firstNamedVariablesOfModules.append(static_cast<uint32_t>(m_namedVariables.size()));
         }, [&](const VariableData& variable) {
             m_namedVariables.append(variable);
         }, [&](uint32_t first, uint32_t length) {
-            std::ranges::fill(m_placesOfModulesOfClosureNumbers.mutableSpan().subspan(first, length), static_cast<uint32_t>(m_modulesInHeapSnapshots.size() - 1));
+            std::ranges::fill(checkedSubspan(m_placesOfModulesOfClosureNumbers.mutableSpan(), first, length), static_cast<uint32_t>(m_modulesInHeapSnapshots.size() - 1));
         });
         RELEASE_ASSERT(endsWhereModuleEnds);
         m_firstNamedVariablesOfModules.append(static_cast<uint32_t>(m_namedVariables.size()));
@@ -1670,8 +1867,10 @@ void ProgramStatics::willAnalyzeHeap(VM& vm)
 
 void ProgramStatics::ScopesOfClosures::clear()
 {
-    if (!vm->isAnalyzingHeap())
-        list.clear();
+    if (vm->isAnalyzingHeap())
+        return;
+    list.clear();
+    variablesShown.clear();
 }
 
 JSCell* ProgramStatics::scopeInHeapSnapshotOf(JSCell* closure) const
@@ -1689,6 +1888,19 @@ JSCell* ProgramStatics::environmentOfModuleThatDefines(uint32_t closureNumber) c
     return place < m_environmentsOfModules.size() ? m_environmentsOfModules[place] : nullptr;
 }
 
+JSCell* ProgramStatics::environmentOfModule(uint32_t module) const
+{
+    std::span<const uint32_t> modules = m_modulesInHeapSnapshots.span();
+    size_t place = std::ranges::lower_bound(modules, module) - modules.begin();
+    return place < modules.size() && modules[place] == module && place < m_environmentsOfModules.size() ? m_environmentsOfModules[place] : nullptr;
+}
+
+void ProgramStatics::analyzeVariableOfModule(JSCell* standIn, JSCell* held, UniquedStringImpl* name, HeapAnalyzer& analyzer) const
+{
+    if (m_scopesOfClosures.variablesShown.add({ standIn, held, name }).isNewEntry)
+        analyzer.analyzeVariableNameEdge(standIn, held, name);
+}
+
 void ProgramStatics::analyzeVariablesOfModule(JSCell* standIn, uint32_t module, HeapAnalyzer& analyzer) const
 {
     analyzer.analyzeEdge(m_instance.globalObject->moduleLoader(), standIn, RootMarkReason::None);
@@ -1697,7 +1909,7 @@ void ProgramStatics::analyzeVariablesOfModule(JSCell* standIn, uint32_t module, 
         JSCell* held = cellIn(variable.slot);
         UniquedStringImpl* name = held ? identifiers.nameInHeapSnapshots(&variable) : nullptr;
         if (name)
-            analyzer.analyzeVariableNameEdge(standIn, held, name);
+            analyzeVariableOfModule(standIn, held, name, analyzer);
     }
 }
 
@@ -1766,6 +1978,16 @@ ProgramStatics::ProgramStatics(State& state)
     state.caches->add(CacheKind::ClearedEachCollection, "scopes of closures in a heap snapshot"_s, m_scopesOfClosures);
     for (const StaticsRange& range : m_tables.staticsClearedEachCollection())
         state.caches->addClearedAndGivenBackEachCollection("statics cleared each collection"_s, { statics + range.offset, range.size });
+}
+
+void ProgramStatics::clearCaches()
+{
+    for (const StaticsRange& range : m_tables.staticsClearedEachCollection()) {
+        for (uint64_t& word : std::span { reinterpret_cast<uint64_t*>(m_instance.statics() + range.offset), range.size / sizeof(uint64_t) }) {
+            if (word)
+                word = 0;
+        }
+    }
 }
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_END

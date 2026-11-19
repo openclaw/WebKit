@@ -53,13 +53,7 @@ struct ReadOfSubjectInUnionSwitches {
 
 static ValueID valueBehindNamesInUnionSwitches(const Code& code, ValueID value)
 {
-    while (value && opcodesThatGiveSameValue.contains(code.at(value).opcode)) {
-        ValueID source = code.at(value).valueOperand();
-        if (source.index() >= value.index())
-            return { };
-        value = source;
-    }
-    return value;
+    return code.valueBehindNames<valuePreservingOpcodes, Code::SourcesOfNames::StandEarlier>(value);
 }
 
 static bool isOperationOfBlockInUnionSwitches(const BodyIndex& index, BodyBlock block, ValueID value)
@@ -69,13 +63,13 @@ static bool isOperationOfBlockInUnionSwitches(const BodyIndex& index, BodyBlock 
 
 static bool isConstantBehindCastsInUnionSwitches(const BodyIndex& index, ValueID value)
 {
-    ValueID root = index.valueBehindCasts(value);
+    ValueID root = index.stripCasts(value);
     return root && !index.isParameter(root) && primitiveConstants.contains(index.opcodeOf(root));
 }
 
 static std::optional<ConstantOfUnionSwitches> caseBehindCastsInUnionSwitches(const BodyIndex& index, ValueID value)
 {
-    ValueID root = index.valueBehindCasts(value);
+    ValueID root = index.stripCasts(value);
     if (!root || index.isParameter(root))
         return std::nullopt;
     BodyValue operation = index.value(root);
@@ -138,7 +132,7 @@ static ReadOfSubjectInUnionSwitches findReadThatMayBeRepeatedInUnionSwitches(con
         if (!built || !code.at(built).traits().isRemovableWhenUnused())
             return { };
     }
-    return { index.valueBehindCasts(written.objectOperand()), written.key() };
+    return { index.stripCasts(written.objectOperand()), written.key() };
 }
 
 static void removeRepeatedCasesInUnionSwitches(Vector<CaseOfUnionSwitches, 16>& cases)
@@ -207,7 +201,7 @@ public:
             return false;
         m_isDisjunction = !first.isNegated;
         m_comparesTexts = first.constant.isText;
-        m_rootOfSubject = m_index.valueBehindCasts(first.subject);
+        m_rootOfSubject = m_index.stripCasts(first.subject);
         m_subject = m_walker.referenceOf(first.subject);
         if (!m_rootOfSubject || !m_subject || !m_subject.isValue())
             return false;
@@ -292,11 +286,11 @@ private:
 
     bool readsSubjectAnew(BodyBlock block, ValueID value) const
     {
-        ValueID root = m_index.valueBehindCasts(value);
+        ValueID root = m_index.stripCasts(value);
         if (!m_readOfSubject.object || !isOperationOfBlockInUnionSwitches(m_index, block, root) || m_index.opcodeOf(root) != Opcode::PropGet)
             return false;
         BodyOperation<Opcode::PropGet> read = m_index.value(root).as<Opcode::PropGet>();
-        return !read.isFreeName() && read.key() == m_readOfSubject.key && m_index.valueBehindCasts(read.objectOperand()) == m_readOfSubject.object;
+        return !read.isFreeName() && read.key() == m_readOfSubject.key && m_index.stripCasts(read.objectOperand()) == m_readOfSubject.object;
     }
 
     bool holdsNothingBesideAlternative(BodyBlock block, const Alternative& alternative) const
@@ -349,7 +343,7 @@ private:
             return false;
         if (alternative.isNegated == m_isDisjunction || alternative.constant.isText != m_comparesTexts)
             return false;
-        if (m_index.valueBehindCasts(alternative.subject) != m_rootOfSubject && !readsSubjectAnew(rightSide, alternative.subject))
+        if (m_index.stripCasts(alternative.subject) != m_rootOfSubject && !readsSubjectAnew(rightSide, alternative.subject))
             return false;
         if (!holdsNothingBesideAlternative(rightSide, alternative) || m_index.numberOfIncomingEdges(toJoin.block()) != 2 || toJoin.block() == m_head.id())
             return false;
@@ -421,7 +415,7 @@ void Walker::endWithSwitchOverOwnBlocks(TerminatorDraft& terminator, std::span<c
         if (isUnreachable())
             return;
     }
-    hearEffectsInTries(effects);
+    recordTrialEffects(effects);
     m_state.invalidate(effects);
     if (effects.mayThrow && has(Mechanism::Handlers))
         noteStateAtThrowForHandler(terminator.operands());
@@ -459,6 +453,17 @@ void Walker::switchOn(Reference subject, std::span<const int64_t> cases, std::sp
     endWithSwitchOverOwnBlocks(terminator, targets, otherwise);
 }
 
+void Walker::switchOnString(Reference subject, std::span<const StringID> strings, std::span<const BlockID> targets, BlockID otherwise, Origin origin)
+{
+    RELEASE_ASSERT(strings.size() == targets.size());
+    if (isUnreachable())
+        return;
+    TerminatorDraft terminator(TerminatorKind::SwitchString, origin);
+    terminator.setSubjectOperand(subject);
+    terminator.setStrings(strings);
+    endWithSwitchOverOwnBlocks(terminator, targets, otherwise);
+}
+
 void Walker::takeNarrowerNamesPast(std::span<const BlockID> blocksPassedBy)
 {
     size_t frameIndex = m_frames.size() - 1;
@@ -474,13 +479,13 @@ bool Walker::endBlockWithSwitchOverAlternatives(const BodyTerminator& terminator
     if (!has(Mechanism::TypedOperations) || terminator.kind() != TerminatorKind::Branch || isUnreachable())
         return false;
     const BodyIndex& index = currentBodyIndex();
-    if (index.hasIrreducibleFlow() || isWalkingBlockForEachWay(m_frames.size() - 1))
+    if (index.hasIrreducibleFlow() || isTailDuplicatingBlock(m_frames.size() - 1))
         return false;
 
     RowOfAlternativesInUnionSwitches row(*this, index.block(terminator.block()));
     if (!row.find() || row.cases().size() < leastCasesOfUnionSwitches)
         return false;
-    if (m_makerOfListsBehindEntry && m_frames.last().isOfUnit && std::ranges::contains(row.blocksPassedBy(), m_whereListsAreMadeBehindEntry))
+    if (m_restArrayAllocator && m_frames.last().isOfUnit && std::ranges::contains(row.blocksPassedBy(), m_restArrayAllocationBlock))
         return false;
     Reference subject = row.subject();
     TypeID typeOfSubject = typeOf(subject);
@@ -510,6 +515,88 @@ bool Walker::endBlockWithSwitchOverAlternatives(const BodyTerminator& terminator
     };
     leadToJoinWith(equalsSomeConstant, row.blockThatAnswersAtOnce(), row.answerHandedOnAtOnce(), row.isDisjunction());
     leadToJoinWith(equalsNoConstant, row.blockOfLastAlternative(), row.lastAlternative(), !row.isDisjunction());
+    m_block = { };
+    m_state.clear();
+    return true;
+}
+
+bool Walker::endBlockWithConditionNumber(const BodyTerminator& terminator)
+{
+    if (!has(Mechanism::TypedOperations) || isUnreachable() || !isInLoop() || terminator.numberOfTargets() != 2)
+        return false;
+    const BodyIndex& index = currentBodyIndex();
+    auto joinBehind = [&](BlockID side) {
+        BodyTerminator end = index.terminator(side);
+        return end.kind() == TerminatorKind::Jump ? end.next().block() : BlockID();
+    };
+    BlockID joinOfSides = joinBehind(terminator.taken().block());
+    if (!joinOfSides || index.block(joinOfSides).numberOfParameters() != 1 || joinBehind(terminator.notTaken().block()) != joinOfSides)
+        return false;
+    if (index.hasIrreducibleFlow() || isTailDuplicatingBlock(m_frames.size() - 1))
+        return false;
+    Reference condition = referenceOf(terminator.as<TerminatorKind::Branch>().conditionOperand());
+    if (!condition || !condition.isValue() || m_code.isConstant(condition.id()) || typeOf(condition) != TypeID(TypeTable::boolean))
+        return false;
+
+    BodyBlock head = index.block(terminator.block());
+    std::array<BlockID, 2> sides { terminator.taken().block(), terminator.notTaken().block() };
+    std::array<ValueID, 2> arguments;
+    std::array<int64_t, 2> numbers;
+    BlockID join;
+    for (size_t side = 0; side < sides.size(); ++side) {
+        BodyBlock block = index.block(sides[side]);
+        if (!mayBePassedByInUnionSwitches(index, head, block, 1) || block.terminator().kind() != TerminatorKind::Jump)
+            return false;
+        for (uint32_t parameter = 0; parameter < block.numberOfParameters(); ++parameter) {
+            if (!index.isUnused(block.parameter(parameter)))
+                return false;
+        }
+        BodyTarget next = block.terminator().next();
+        if (!next.proofs().empty() || next.arguments().size() != 1 || next.block() == head.id() || (join && next.block() != join) || index.numberOfIncomingEdges(next.block()) != 2)
+            return false;
+        join = next.block();
+        arguments[side] = next.arguments()[0];
+        std::optional<ConstantOfUnionSwitches> constant = caseBehindCastsInUnionSwitches(index, arguments[side]);
+        if (!constant || constant->isText || (constant->number != 0 && constant->number != 1))
+            return false;
+        numbers[side] = constant->number;
+        for (BodyValue operation : block.values()) {
+            if (!primitiveConstants.contains(operation.opcode()) && operation.opcode() != Opcode::Convert)
+                return false;
+        }
+    }
+    if (sides[0] == sides[1] || numbers[0] == numbers[1])
+        return false;
+    static constexpr OpcodeSet arithmetic { Opcode::Add, Opcode::Sub, Opcode::Mul, Opcode::BitOr, Opcode::BitXor, Opcode::LShift };
+    ValueID joined = index.block(join).numberOfParameters() == 1 ? index.block(join).parameter(0) : ValueID();
+    ValueID user = joined ? index.onlyUsingValue(joined) : ValueID();
+    while (user && index.opcodeOf(user) == Opcode::Convert)
+        user = index.onlyUsingValue(user);
+    if (!user || !arithmetic.contains(index.opcodeOf(user)))
+        return false;
+
+    takeNarrowerNamesPast(std::span<const BlockID>(sides));
+    count(StatisticID::ConditionalsConvertedToNumbers);
+    if (!numbers[0]) {
+        Draft negated(Opcode::LogicalNot, m_origin);
+        negated.setValueOperand(condition);
+        condition = build(WTF::move(negated));
+    }
+    Reference number;
+    if (condition) {
+        Draft conversion(Opcode::ToNumber, m_origin);
+        chooseConservativeFields(conversion);
+        conversion.setValueOperand(condition);
+        conversion.setForm(OperatorForm::Booleans);
+        number = build(WTF::move(conversion));
+    }
+    if (!number || isUnreachable() || m_hasFailed)
+        return true;
+    Reference constant = referenceBoundTo(arguments[0]);
+    bind(arguments[0], number);
+    EdgeToTargetOfBody jumpOfBody { sides[0], 0 };
+    endBlockLeadingTo(TerminatorDraft(TerminatorKind::Jump, m_origin), singleElementSpan(jumpOfBody));
+    bind(arguments[0], constant);
     m_block = { };
     m_state.clear();
     return true;

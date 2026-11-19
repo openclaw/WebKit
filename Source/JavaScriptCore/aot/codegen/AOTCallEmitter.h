@@ -28,7 +28,6 @@ struct ValueCall {
     std::span<const Boxed> arguments;
     bool calleeIsCell { false };
     uint8_t lentArguments { 0 };
-    uint64_t argumentsLetGo { 0 };
     std::optional<BuiltinBoxedStub> methodOfBuiltinClass;
     bool receiverIsProvenOfBuiltinClass { false };
     bool methodMayBeUnread { false };
@@ -39,9 +38,7 @@ struct ConventionCall {
     std::span<const LValue> stubOperands { };
     LValue callee { nullptr };
     LValue thisValue { nullptr };
-    LValue count { nullptr };
     std::span<const LValue> arguments { };
-    uint64_t argumentsLetGo { 0 };
 };
 
 class CallEmitter final : public OperationEmitter {
@@ -54,6 +51,7 @@ public:
     void generateCall(const ValueContext&);
     void generateConstruct(const ValueContext&);
     void generateCallList(const ValueContext&);
+    void callWithLiteralAndList(const ValueContext&, Boxed callee, Boxed thisValue, const Operation& literal);
     void generateConstructList(const ValueContext&);
     void generateCallDirect(const ValueContext&);
     void generateCallTable(const ValueContext&);
@@ -61,12 +59,16 @@ public:
     void generateResults(const ValueContext&);
     void generateResultAt(const ValueContext&);
 
+    const ArgumentLocations& ownLocations();
+
     Boxed callValue(const OperationContext&, const ValueCall&, const CallOptions& = { });
+    Boxed callDelegate(const ValueContext&);
     void defineResultOfCallByValue(const ValueContext&, Boxed result);
     static CallPosition positionOf(const OperationContext& context) { return context.origin().isTailCall ? CallPosition::Tail : CallPosition::Ordinary; }
     Boxed callByConvention(const OperationContext&, const ConventionCall&, const CallOptions& = { });
+    Boxed callAddressByConvention(const OperationContext&, Pointer address, const ConventionCall&, const CallOptions& = { });
     Boxed constructValue(const OperationContext&, ConstructSyntax, Boxed callee, Boxed newTarget, std::span<const ValueID> arguments, std::optional<ThrowSite> siteThatNamesCallee = std::nullopt);
-    Boxed superConstructWithArray(const OperationContext&, Boxed parent, Boxed newTarget, CellPointer list);
+    Boxed constructWithArray(const OperationContext&, ConstructSyntax, Boxed callee, Boxed newTarget, CellPointer list);
     Operand callDirect(const OperationContext&, CodeUnit, std::span<const Operand> arguments, const CallOptions& = { });
     Vector<Operand, 2> callEntry(const OperationContext&, CodeUnit, uint16_t entry, const ArgumentLocations&, std::span<const Operand> arguments, const CallOptions& = { });
     void tailCallEntry(const OperationContext&, CodeUnit, uint16_t entry, const ArgumentLocations&, std::span<const Operand> arguments);
@@ -84,6 +86,9 @@ public:
 
     void returnValues(const TerminatorContext&, std::span<const Operand>);
     void returnValues(std::span<const Operand>);
+    void returnAsyncResult(Boxed promise, Boxed result);
+    void returnFulfilledPromise(Boxed value);
+    std::optional<unsigned> findArgumentForPromiseBefore(CodeUnit body);
 
 private:
     ValueID listThatApplyWouldRead(const Operation& call);
@@ -106,7 +111,6 @@ private:
     struct PlacedArguments {
         Vector<Machine::ConstrainedValue, 8> inRegisters;
         Vector<LValue, 4> onStack;
-        Vector<LValue, 2> letGoByCallee;
         uint32_t stackWordsToReserve { 0 };
     };
 
@@ -125,11 +129,9 @@ private:
     Vector<Boxed, 8> boxedOperands(std::span<const ValueID>);
 
     CodeUnit calleeOf(const ValueContext& callDirect) const;
-    const ArgumentLocations& ownLocations();
     PlacedArguments placeArguments(CodeUnit callee, const ArgumentLocations&, std::span<const Operand>);
     PlacedArguments placeConventionArguments(const ConventionCall&);
     PlacedArguments placeConventionArguments(const ConventionCall&, const StubSignature&);
-    static void emitClearOfReleasedRegisters(CCallHelpers&, const Machine::PatchParameters&);
     void callStartOfModule(const ValueContext&, CodeUnit start, const ArgumentLocations&);
 
     Machine::PatchOperation* emitCall(const OperationContext&, const CallTarget&, const PlacedArguments&, std::span<const ArgumentLocation> results, const CallOptions&, const AnswersOfCalledStub* = nullptr);
@@ -141,6 +143,7 @@ private:
     void chooseStubThatCallsValue(ConventionCall&, LValue& countOperand, bool calleeIsCell);
 
     void emitTailCall(const OperationContext&, const CallTarget&, const PlacedArguments&, const ArgumentLocations* locationsOfCalledUnit = nullptr);
+    void enterBodyAfterNewPromise(const ValueContext&, CodeUnit body, const ArgumentLocations&);
     Machine::PatchOperation* leaveAfterFrameTeardown(std::span<const Machine::ConstrainedValue> inRegisters, std::span<const StackWord>, const Invocable<void(CCallHelpers&)> auto& leave);
     void jumpAfterFrameTeardown(const CallTarget&, const PlacedArguments&);
     void callFromArgumentListFrame(const CallTarget&, const PlacedArguments&);
@@ -148,6 +151,7 @@ private:
     bool hasStackWordsOfCaller(uint32_t numberOfWords) const;
 
     std::optional<ArgumentLocations> m_ownLocations;
+    uint32_t m_numberOfCallsOfCopies { 0 };
 };
 
 } } } // namespace JSC::AOT::Typed

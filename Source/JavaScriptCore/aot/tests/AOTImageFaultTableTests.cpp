@@ -53,9 +53,7 @@ static void appendFault(CodeSketch& sketch, Vector<ExpectedFault>& faults, uint3
         return;
     }
     uint32_t offset = sketch.pinned(word);
-    FaultingAccess access { offset, { }, { } };
-    access.throwSite.appendVector(words);
-    sites.faultingAccesses.append(WTF::move(access));
+    sites.faultingAccesses.append(FaultingAccess { offset, { }, ThrowSiteWords(words.span()) });
     faults.append(ExpectedFault { offset, FaultSiteKind::NullCheck, hasFrame, WTF::move(words) });
 }
 
@@ -226,7 +224,12 @@ static void testFaultSitesSecondWords()
             return { i };
         return { i, 5 };
     });
-    for (uint32_t first : { 0x80u, 0xff00u, 0xffff00u, 0xfffffe00u }) {
+    for (uint32_t distinct : { 1u, 60u, 61u, 62u, 64u }) {
+        checkFramedBodyFaults(300, [&](unsigned i) -> FaultWords {
+            return { i, i % 64 < 2 ? 5u : 1000 + i % distinct };
+        });
+    }
+    for (uint32_t first : { 0x80u, 0xff00u, 0xbfff80u, 0xffff00u, 0xfffffe00u }) {
         checkFramedBodyFaults(300, [&](unsigned i) -> FaultWords {
             if (i % 5 == 4)
                 return { i };
@@ -367,7 +370,7 @@ static void testHandlersTypes()
 
 static std::optional<HandlerRecord> handlerAt(const Image& image, uint32_t function, CallSiteIndex site)
 {
-    return findHandler(SideTableParts::read(image.function(function), image.section<uint8_t>(ImageSection::SideTables).data()).handlers, site);
+    return image.handlerAt(function, site);
 }
 
 static void testHandlersThroughImage()

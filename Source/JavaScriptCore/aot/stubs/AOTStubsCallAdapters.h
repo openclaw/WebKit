@@ -18,11 +18,12 @@ class StubAssembler;
 constexpr StubKey enterClosure() { return StubKey(StubFamily::EnterClosure); }
 constexpr StubKey enterSlimClosure() { return StubKey(StubFamily::EnterSlimClosure); }
 constexpr StubKey enterModuleBody() { return StubKey(StubFamily::EnterModuleBody); }
+constexpr StubKey enterClosureWithLoadedArguments() { return StubKey(StubFamily::EnterClosureWithLoadedArguments); }
 constexpr StubKey enterClosureForConstruct() { return StubKey(StubFamily::EnterClosureForConstruct); }
 constexpr StubKey startModule() { return StubKey(StubFamily::StartModule); }
+constexpr StubKey startModuleThatRunTimeNames() { return StubKey(StubFamily::StartModuleThatRunTimeNames); }
 
-enum class AdapterCaller : uint8_t { NativeCodeOrInterpreter, NativeCodeForJobOfCoroutine };
-void emitEnterAdapter(StubAssembler&, AdapterCaller, unsigned extraBytes = 0);
+void emitEnterAdapter(StubAssembler&, unsigned extraBytes = 0);
 static constexpr unsigned adapterArgumentCountWithOutOfLineArguments = numberOfArgumentGPRs + 2;
 static constexpr unsigned outOfLineArgumentCountTagShift = 48;
 static constexpr uint16_t outOfLineArgumentCountTag = 1;

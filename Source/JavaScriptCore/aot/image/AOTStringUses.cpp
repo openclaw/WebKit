@@ -9,6 +9,7 @@
 #if ENABLE(AOT)
 
 #include "AOTBuildContext.h"
+#include "AOTCodedTexts.h"
 #include "AOTFieldTable.h"
 #include "AOTIRProgram.h"
 #include "AOTIdentifierNumbering.h"
@@ -19,6 +20,7 @@
 #include "AOTRegExpRequests.h"
 #include "AOTSectionWriter.h"
 #include "AOTSort.h"
+#include "AOTStartOrder.h"
 #include "AOTThreads.h"
 #include "AOTVector.h"
 #include <algorithm>
@@ -27,6 +29,7 @@
 #include <span>
 #include <wtf/BitVector.h>
 #include <wtf/StdLibExtras.h>
+#include <wtf/text/ASCIIFastPath.h>
 #include <wtf/text/MakeString.h>
 
 namespace JSC { namespace AOT {
@@ -62,7 +65,7 @@ static uint32_t numberOfFunctionsMentioning(const GatheredMentions::ByID& mentio
     return id < mentions.numberOfFunctions.size() ? mentions.numberOfFunctions[id] : 0;
 }
 
-static Vector<NameCandidate> collectNumberedNames(const Typed::Program& program, const GatheredMentions& mentions, const NamesOfTables& tables, const BitVector& keysWithColumn)
+static Vector<NameCandidate> collectNumberedNames(const Typed::Program& program, const GatheredMentions& mentions, const NamesOfTables& tables, const Typed::BitVector& keysWithColumn)
 {
     const GatheredMentions::ByID& mentionedKeys = mentions.byID(NumberSpace::Name);
     const GatheredMentions::ByID& mentionedTexts = mentions.byID(NumberSpace::NameOfText);
@@ -94,6 +97,7 @@ static Vector<NameCandidate> collectNumberedNames(const Typed::Program& program,
 
     BitVector textsWithoutNumberedKey(program.strings.size());
     textsWithoutNumberedKey.merge(mentionedTexts.isMentioned);
+    textsWithoutNumberedKey.merge(mentions.byID(NumberSpace::NameHeader).isMentioned);
     textsWithoutNumberedKey.merge(tables.textsNamedAsKeys);
     textsWithoutNumberedKey.exclude(isTextOfNumberedKey);
     for (size_t index : textsWithoutNumberedKey) {
@@ -104,17 +108,6 @@ static Vector<NameCandidate> collectNumberedNames(const Typed::Program& program,
         });
     }
 
-    BitVector textsOnlyCompared(program.strings.size());
-    textsOnlyCompared.merge(mentions.byID(NumberSpace::AtomOfComparedText).isMentioned);
-    textsOnlyCompared.exclude(isTextOfNumberedKey);
-    textsOnlyCompared.exclude(textsWithoutNumberedKey);
-    for (size_t index : textsOnlyCompared) {
-        names.append(NameCandidate {
-            .identifier = { PropertyKeyID(), StringID(index) },
-            .isOnlyCompared = true,
-            .firstFunction = mentions.firstFunctionMentioning(NumberSpace::AtomOfComparedText, static_cast<uint32_t>(index)),
-        });
-    }
     return names;
 }
 
@@ -149,7 +142,7 @@ static void sortNamesByWordAndThen(const ParallelLoops& loops, std::span<NameCan
 static void sortByUse(const Typed::Program& program, const ParallelLoops& loops, std::span<NameCandidate> names)
 {
     sortNamesByWordAndThen(loops, names, [](const NameCandidate& name) {
-        return static_cast<uint64_t>(name.isOnlyCompared) << 34 | static_cast<uint64_t>(!name.hasPromisedColumn) << 33 | static_cast<uint64_t>(UINT32_MAX - name.numberOfFunctions) << 1 | static_cast<uint64_t>(!name.isLookedUpByCode());
+        return static_cast<uint64_t>(!name.hasPromisedColumn) << 33 | static_cast<uint64_t>(UINT32_MAX - name.numberOfFunctions) << 1 | static_cast<uint64_t>(!name.isLookedUpByCode());
     }, [&](const NameCandidate& a, const NameCandidate& b) {
         if (a.identifier.key != b.identifier.key)
             return isNameKeyOrderedBefore(program, a.identifier.key, b.identifier.key);
@@ -168,7 +161,7 @@ static void groupColumnsByFirstFunction(std::span<NameCandidate> namesWithColumn
 static void sortNamesWithoutColumn(const Typed::Program& program, const ParallelLoops& loops, std::span<NameCandidate> names)
 {
     sortNamesByWordAndThen(loops, names, [](const NameCandidate& name) {
-        return static_cast<uint64_t>(!name.isLookedUpByCode()) << 34 | static_cast<uint64_t>(name.isOnlyCompared) << 33 | static_cast<uint64_t>(!name.isEngineSymbol) << 32 | name.identifier.text.index();
+        return static_cast<uint64_t>(!name.isLookedUpByCode()) << 33 | static_cast<uint64_t>(!name.isEngineSymbol) << 32 | name.identifier.text.index();
     }, [&](const NameCandidate& a, const NameCandidate& b) {
         return isNameKeyOrderedBefore(program, a.identifier.key, b.identifier.key);
     });
@@ -233,14 +226,15 @@ static BitVector collectNumberedStringConstants(const Typed::Program& program, c
     return constants;
 }
 
-static Vector<FunctionByModule> findFirstFunctionsNamingTexts(const Typed::Program& program, const GatheredMentions& mentions, std::span<const NameCandidate> names)
+static Vector<FunctionByModule> findFirstFunctionsNamingTexts(const NumberingInputs& inputs, const GatheredMentions& mentions, std::span<const NameCandidate> names, std::span<const uint32_t> startRanks)
 {
+    const Typed::Program& program = inputs.program;
     Vector<FunctionByModule> firstFunctions(FillWith { }, program.strings.size(), FunctionByModule { });
     auto lowerTo = [&](StringID text, FunctionByModule function) {
         if (text)
             firstFunctions[text.index()] = std::min(firstFunctions[text.index()], function);
     };
-    for (NumberSpace space : { NumberSpace::String, NumberSpace::StringCell, NumberSpace::NameOfText, NumberSpace::AtomOfComparedText }) {
+    for (NumberSpace space : { NumberSpace::String, NumberSpace::StringCell, NumberSpace::StringCharacters, NumberSpace::NameOfText }) {
         for (size_t string : mentions.byID(space).isMentioned)
             lowerTo(StringID(string), mentions.firstFunctionMentioning(space, static_cast<uint32_t>(string)));
     }
@@ -250,7 +244,12 @@ static Vector<FunctionByModule> findFirstFunctionsNamingTexts(const Typed::Progr
             lowerTo(name.identifier.text, mentions.firstFunctionMentioning(NumberSpace::KeyCell, name.identifier.key.index()));
     }
     for (size_t index = 0; index < program.functions.size(); ++index)
-        lowerTo(program.functions[index].name, FunctionByModule::forFunction(program, FunctionID(index)));
+        lowerTo(program.functions[index].name, FunctionByModule::forFunction(program, FunctionID(index), startRanks));
+    if (!startRanks.empty()) {
+        forEachTextOfListedData(inputs, startRanks, scopedLambda<void(StringID, FunctionID)>([&](StringID text, FunctionID function) {
+            lowerTo(text, FunctionByModule::forFunction(program, function, startRanks));
+        }));
+    }
     return firstFunctions;
 }
 
@@ -276,10 +275,44 @@ static Vector<StringID> sortStringsByFirstFunction(const ParallelLoops& loops, c
     });
 }
 
+static Vector<StringID> sortTextsForCoding(const Typed::StringTable& strings, const BitVector& candidates, const ParallelLoops& loops)
+{
+    struct TextByFront {
+        uint64_t front;
+        StringID id;
+    };
+    Vector<TextByFront> texts;
+    for (size_t index : candidates) {
+        StringID id(index);
+        std::span<const uint8_t> text = strings[id];
+        if (!CodedTexts::canHold(text))
+            continue;
+        uint64_t front = 0;
+        for (size_t place = 0; place < sizeof(front); ++place)
+            front = front << 8 | (place < text.size() ? text[place] : 0);
+        texts.append({ front, id });
+    }
+    sortByWordOnPoolKeepingEqualElementsInOrder(loops, texts.mutableSpan(), [](const TextByFront& text) {
+        return text.front;
+    });
+    for (size_t begin = 0; begin < texts.size();) {
+        size_t end = begin + 1;
+        while (end < texts.size() && texts[end].front == texts[begin].front)
+            ++end;
+        AOT::sort(texts.mutableSpan().subspan(begin, end - begin), [&](const TextByFront& a, const TextByFront& b) {
+            return std::ranges::lexicographical_compare(strings[a.id], strings[b.id]);
+        });
+        begin = end;
+    }
+    return texts.map([](const TextByFront& text) {
+        return text.id;
+    });
+}
+
 void ImageNumbersBuilder::collectNamesAndStringsWithText()
 {
     const Typed::Program& program = inputs.program;
-    const BitVector& keysWithColumn = inputs.plan.slots().keysWithColumn();
+    const Typed::BitVector& keysWithColumn = inputs.plan.slots().keysWithColumn();
 
     if (size_t numberOfPromises = keysWithColumn.bitCount(); numberOfPromises > RowDisplacementTable::maxColumn) {
         context.diagnostics().add(InternalError {
@@ -293,20 +326,25 @@ void ImageNumbersBuilder::collectNamesAndStringsWithText()
     toNumber->names = collectNumberedNames(program, mentions, tables, keysWithColumn);
     std::span<const NameCandidate> names = toNumber->names.span();
     RELEASE_ASSERT(numbers.m_regExpRequests);
+    numbers.m_bytesBetweenNameHeaders = context.recordedOptions().form() == ImageForm::PositionIndependent ? sizeof(uint32_t) : sizeof(ImageStringHeader);
     runLanes(context.parallelLoops(), {
         [&] {
             BitVector textsWhoseCellsHoldAtoms = collectTextsWhoseCellsHoldAtoms(program, mentions, tables);
             BitVector stringsReadThroughHeaders = collectStringsReadThroughHeaders(inputs, mentions, textsWhoseCellsHoldAtoms, *numbers.m_regExpRequests, names);
             const BitVector& stringsShownByCode = mentions.byID(NumberSpace::ShownString).isMentioned;
+            toNumber->numberedConstants = collectNumberedStringConstants(program, mentions, tables);
+            BitVector stringsWithOnlyPlacedCharacters = mentions.byID(NumberSpace::StringCharacters).isMentioned;
+            stringsWithOnlyPlacedCharacters.exclude(toNumber->numberedConstants);
             numbers.m_stringsOnlyShown = tables.strings;
             numbers.m_stringsOnlyShown.merge(stringsShownByCode);
+            numbers.m_stringsOnlyShown.merge(stringsWithOnlyPlacedCharacters);
             numbers.m_stringsOnlyShown.exclude(tables.stringsWithOtherUsesThanShowing);
             numbers.m_stringsOnlyShown.exclude(stringsReadThroughHeaders);
             numbers.m_namedStrings = WTF::move(stringsReadThroughHeaders);
             numbers.m_namedStrings.merge(tables.strings);
             numbers.m_namedStrings.merge(stringsShownByCode);
+            numbers.m_namedStrings.merge(stringsWithOnlyPlacedCharacters);
 
-            toNumber->numberedConstants = collectNumberedStringConstants(program, mentions, tables);
             numbers.m_atomsOfStrings = collectAtomsOfStrings(program, textsWhoseCellsHoldAtoms, *numbers.m_regExpRequests);
             numbers.m_otherStringsWithText = numbers.m_namedStrings;
             numbers.m_otherStringsWithText.merge(toNumber->numberedConstants);
@@ -318,9 +356,17 @@ void ImageNumbersBuilder::collectNamesAndStringsWithText()
                     numbers.m_textsOfNames.quickSet(name.identifier.text.index());
             }
             numbers.m_otherStringsWithText.exclude(numbers.m_textsOfNames);
+
+            BitVector candidates = numbers.m_stringsOnlyShown;
+            candidates.exclude(toNumber->numberedConstants);
+            candidates.exclude(stringsWithOnlyPlacedCharacters);
+            candidates.exclude(tables.modulePathStrings);
+            toNumber->codedStrings = sortTextsForCoding(program.strings, candidates, context.parallelLoops());
+            for (StringID id : toNumber->codedStrings)
+                numbers.m_otherStringsWithText.quickClear(id.index());
         },
         [&] {
-            toNumber->firstFunctionsNamingTexts = findFirstFunctionsNamingTexts(program, mentions, names);
+            toNumber->firstFunctionsNamingTexts = findFirstFunctionsNamingTexts(inputs, mentions, names, context.startRanks());
         },
     });
     numbers.m_namesAndStringsToNumber = WTF::move(toNumber);
@@ -339,6 +385,18 @@ void ImageNumbersBuilder::numberIdentifiersAndStrings()
         return toNumber->firstFunctionsNamingTexts[string];
     };
 
+    auto isASCII = [&](StringID string) {
+        return charactersAreAllASCII(byteCast<Latin1Character>(std::span<const uint8_t> { program.strings[string] }));
+    };
+    auto fitsConstantSlots = [&] {
+        uint64_t mostBytesOfText = 0;
+        for (const BitVector* strings : { &numbers.m_textsOfNames, &numbers.m_otherStringsWithText }) {
+            for (size_t string : *strings)
+                mostBytesOfText += isASCII(StringID(string)) ? program.strings[StringID(string)].size() : program.strings[StringID(string)].size() * sizeof(char16_t);
+        }
+        return mostBytesOfText <= ImagePlacedString::maxOffset;
+    };
+
     IdentifierNumbering identifiers;
     uint64_t mentionedWithoutColumn = 0;
     Vector<StringID> otherStrings;
@@ -346,10 +404,7 @@ void ImageNumbersBuilder::numberIdentifiersAndStrings()
     runLanes(context.parallelLoops(), {
         [&] {
             sortByUse(program, context.parallelLoops(), names.mutableSpan());
-            auto numberOfNamesLookedUp = static_cast<uint64_t>(std::ranges::count_if(names, [](const NameCandidate& name) {
-                return !name.isOnlyCompared;
-            }));
-            auto columnCount = static_cast<uint32_t>(std::min<uint64_t>(numberOfNamesLookedUp, RowDisplacementTable::maxColumn));
+            auto columnCount = static_cast<uint32_t>(std::min<uint64_t>(names.size(), RowDisplacementTable::maxColumn));
             runLanes(context.parallelLoops(), {
                 [&] { groupColumnsByFirstFunction(names.mutableSpan().first(columnCount)); },
                 [&] { sortNamesWithoutColumn(program, context.parallelLoops(), names.mutableSpan().subspan(columnCount)); },
@@ -386,8 +441,16 @@ void ImageNumbersBuilder::numberIdentifiersAndStrings()
         },
         [&] {
             constants.m_strings = sortStringsByFirstFunction(context.parallelLoops(), toNumber->numberedConstants, [&](size_t string) {
-                return mentions.firstFunctionMentioning(NumberSpace::StringCell, static_cast<uint32_t>(string));
+                FunctionByModule first = mentions.firstFunctionMentioning(NumberSpace::StringCell, static_cast<uint32_t>(string));
+                return context.startRanks().empty() ? first : std::min(first, firstFunctionNamingText(string));
             });
+            if (fitsConstantSlots()) {
+                auto others = std::ranges::stable_partition(constants.m_strings, [&](StringID string) {
+                    return ImagePlacedString::fitsLength(program.strings[string].size()) && !numbers.m_textsOfNames.get(string.index()) && !numbers.m_atomsOfStrings.get(string.index()) && !numbers.m_namedStrings.get(string.index())
+                        && isASCII(string);
+                });
+                constants.m_numberOfPlaced = static_cast<uint32_t>(others.begin() - constants.m_strings.begin());
+            }
             constants.m_numbersPlusOne.fill(0, numberOfStrings);
             for (uint32_t number = 0; number < constants.count(); ++number)
                 constants.m_numbersPlusOne[constants.m_strings[number].index()] = number + 1;
@@ -399,6 +462,7 @@ void ImageNumbersBuilder::numberIdentifiersAndStrings()
     context.statistics().count(StatisticID::NamesWithoutColumn, mentionedWithoutColumn);
     context.statistics().count(StatisticID::StringConstantsNumbered, constants.count());
 
+    numbers.m_stringNumbers = StringNumbers(numbers.m_namedStrings, WTF::move(toNumber->codedStrings), numberOfStrings, &identifiers);
     numbers.m_identifiers = makeUniqueWithoutFastMallocCheck<IdentifierNumbering>(WTF::move(identifiers));
     numbers.m_stringConstants = makeUniqueWithoutFastMallocCheck<StringConstantNumbering>(WTF::move(constants));
     destroyInBackground(context.backgroundJobs(), WTF::move(toNumber));

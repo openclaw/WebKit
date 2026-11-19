@@ -26,7 +26,7 @@ OpcodeSet StraightEmitter::opcodesOfEngineIntrinsics()
     return {
         Opcode::IsConstructor, Opcode::ReadsIteratorOfListUnseen, Opcode::ArraySpeciesCreate, Opcode::GetByValWithThis, Opcode::GetOwnProperty, Opcode::ToLength,
         Opcode::ThrowNewError, Opcode::ResumeGenerator, Opcode::StepGenerator, Opcode::IsGeneratorSuspendedAtStart,
-        Opcode::CreateIteratorResult, Opcode::StepArrayIterator, Opcode::StepMapIterator, Opcode::StepSetIterator,
+        Opcode::CreateIteratorResult, Opcode::StepMatchIterator, Opcode::StepArrayIterator, Opcode::StepMapIterator, Opcode::StepSetIterator,
     };
 }
 
@@ -67,8 +67,7 @@ static bool takesBoxedValueOfIteratorResult(const PlacedSlot& slot)
 
 static bool staysEmptyInZeroedIteratorResult(const PlacedSlot& slot)
 {
-    SlotTraits traits = traitsOf(slot.representation);
-    return slot.storage != SlotStorage::Inline || !traits.hasAbsent || !traits.absentBits;
+    return slot.storage != SlotStorage::Inline || !bitsBeforeCreation(slot.representation);
 }
 
 static void generateCreateIteratorResult(StraightEmitter& emitter, const BodyValue& value)
@@ -157,6 +156,10 @@ void StraightEmitter::generateEngineIntrinsic(const BodyValue& value)
         return;
     case Opcode::CreateIteratorResult:
         generateCreateIteratorResult(*this, value);
+        return;
+    case Opcode::StepMatchIterator:
+        callOperation(value, RuntimeOperation::StepMatchIterator, { value.iteratorOperand() });
+        define(value);
         return;
     case Opcode::StepArrayIterator:
         generateStepOfEngineIterator(*this, value, RuntimeOperation::StraightStepArrayIterator);

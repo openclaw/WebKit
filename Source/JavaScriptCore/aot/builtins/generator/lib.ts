@@ -67,6 +67,7 @@ import type {
   TypeNameSpec,
   TypeSpec,
   UseSpec,
+  WordOfCell,
 } from "./vocabulary.ts";
 import { callbackAftermaths, targetPlatforms } from "./vocabulary.ts";
 
@@ -375,6 +376,12 @@ export const resultFieldHoldingOnlyWhatIsStored = (field: string | number): Plac
   field,
   holdsOnlyWhatIsStored: true,
 });
+export const resultElementField = (field: string | number): PlaceSpec => ({
+  place: "ResultField",
+  field,
+  holdsOnlyWhatIsStored: true,
+  isOfElements: true,
+});
 export const ownValues = (name: OperandName): PlaceSpec => ({ place: "OwnValues", operand: name });
 export const nativeCell = (cell: string): PlaceSpec => ({ place: "NativeCell", cell });
 export const everyOwnValue = null;
@@ -388,7 +395,7 @@ export const anyKey: KeySpec = { key: "Any" };
 export const inspected: readonly UseSpec[] = [];
 export const everything: UseSpec = { use: "Everything" };
 export const retained: UseSpec = { use: "Retains", in: nativeMemory };
-export const handedOver: readonly UseSpec[] = [retained];
+export const retainedByNativeCode: readonly UseSpec[] = [retained];
 export const returned: UseSpec = { use: "Returns" };
 export const movesElements: UseSpec = { use: "MovesElements" };
 export const evaluatedAsText: UseSpec = { use: "Role", role: "EvaluatedAsText" };
@@ -599,7 +606,7 @@ export const createdIn = (value: TableType, place: PlaceLike): UseSpec => ({
 });
 export const returnedFrom = (cell: string): UseSpec => ({ use: "ReturnsKept", cell });
 export const handedBackFrom = (cell: string): UseSpec => ({ use: "ReturnsKept", cell, holdsOnlyWhatIsStored: true });
-export const handedOutFrom = (cell: string): UseSpec => ({ use: "HandsOutKept", cell });
+export const exposedFrom = (cell: string): UseSpec => ({ use: "ExposesKept", cell });
 
 export const functionIn = (file: string, name: string): FunctionRef => ({ file, name });
 export const generic: ImplementationSpec = { how: "Generic" };
@@ -657,6 +664,11 @@ export const whenOperandHasProperty = (name: OperandName, property: string): Con
   operand: name,
   hasProperty: property,
 });
+export const whenPropertyOfOperandStartsWith = (
+  name: OperandName,
+  property: string,
+  ...prefixes: readonly string[]
+): ConditionSpec => ({ operand: name, hasProperty: property, startsWith: prefixes });
 export const whenBuildAdmitsRuntimeCode: ConditionSpec = { buildAdmitsRuntimeCode: true };
 export const whenCallRunsOtherCode: ConditionSpec = { callRunsOtherCode: true };
 export const whenObjectNobodyKnowsIsWritten: ConditionSpec = { objectNobodyKnowsIsWritten: true };
@@ -792,6 +804,7 @@ const entryColumnKeys = [
   "privateAlias",
   "defaultExport",
   "constructable",
+  "canBeListed",
   "length",
   "nativeSymbols",
   "customGetter",
@@ -1018,8 +1031,9 @@ export const internalField = (index: number, heap: Heap, holds?: TableType): Slo
   ...state(heap, holds),
   internalField: index,
 });
-export const handedOutBySteps = (heap: Heap): SlotSpec => ({ ...state(heap), holdsWhatStepsHandOut: true });
+export const stepValueSlot = (heap: Heap): SlotSpec => ({ ...state(heap), holdsStepValues: true });
 export const thrownValue = (slot: SlotSpec): SlotSpec => ({ ...slot, holdsWhatIsThrown: true });
+export const wordOfCell = (followed: Exclude<WordOfCell, "None">, slot: SlotSpec): SlotSpec => ({ ...slot, wordOfCell: followed });
 export const exactType = (path: string, ...typeArguments: readonly SlotName[]): TypeNameSpec => ({
   path: path.split("."),
   isView: false,
@@ -1054,6 +1068,7 @@ const classColumnKeys = [
   "isNeverPristine",
   "pristineTest",
   "hasClosureInstances",
+  "isFollowedBesideUnseenObject",
   "instancesAreEntries",
   "keepsStructuresOfClassesBelow",
   "definesCharactersOnNewInstances",

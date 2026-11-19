@@ -38,7 +38,7 @@ enum class EvaluationSiteRule : uint32_t {
 static BodyValue stripCastsForCallRules(const BodyIndex& index, ValueID id)
 {
     BodyValue value = index.value(id);
-    while (inputOperationsThatHandOn.contains(value.opcode()))
+    while (inputPassThroughOpcodes.contains(value.opcode()))
         value = index.value(value.operand(0));
     return value;
 }
@@ -351,7 +351,8 @@ void BodyVerifier::verifyDirectEval(const BodyBlock& block, const BodyValue& val
 
     size_t numberOfOperands = evaluation.environmentsOperands().size();
     for (const EvalBinding& binding : scope.bindings) {
-        for (std::optional<uint32_t> operandIndex : { binding.operand, binding.function, binding.setter }) {
+        bool namesBindings = binding.kind == EvalBindingKind::PrivateMethod || binding.kind == EvalBindingKind::PrivateAccessor;
+        for (std::optional<uint32_t> operandIndex : { binding.operand, namesBindings ? std::nullopt : binding.function, namesBindings ? std::nullopt : binding.setter }) {
             if (operandIndex && *operandIndex >= numberOfOperands) {
                 fail(InternalErrorKind::PayloadOutOfRange, block.id(), value.id(), *operandIndex);
                 return;
@@ -382,6 +383,8 @@ void BodyVerifier::verifyModuleEvaluation(const BodyBlock& block, const BodyValu
         return;
     if (!canBeEvaluatedBySite(program().at(target)))
         return failRule(EvaluationSiteRule::TargetIsFileThatEndsAtOnce);
+    if (value.opcode() == Opcode::RecordRequire && referrer == function().module)
+        return;
 
     bool isBare = value.opcode() == Opcode::EvaluateModule && value.as<Opcode::EvaluateModule>().isBare();
     m_moduleEvaluations.append(ModuleEvaluationInBody { referrer, target, block.id(), value.id(), isBare });

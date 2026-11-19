@@ -249,13 +249,13 @@ Reference BuilderOfEntries::positionalArgument(uint32_t argumentIndex, const Dec
     Reference marker = m_walker.constant(WTF::move(absent));
 
     BlockID leftOut = m_walker.addBlock();
-    BlockID handedOver = m_walker.addBlock();
+    BlockID passedBlock = m_walker.addBlock();
     BlockID next = m_walker.addBlock();
     Reference either = m_walker.addParameter(next, m_types.unionOf(m_walker.typeOf(marker), m_walker.typeOf(argument)), Representation::JSValue);
-    m_walker.branch(isLeftOut, leftOut, handedOver);
+    m_walker.branch(isLeftOut, leftOut, passedBlock);
     m_walker.continueIn(leftOut);
     m_walker.jumpTo(next, singleElementSpan(marker));
-    m_walker.continueIn(handedOver);
+    m_walker.continueIn(passedBlock);
     m_walker.jumpTo(next, singleElementSpan(argument));
     return either;
 }
@@ -293,7 +293,7 @@ Reference BuilderOfEntries::inFormThatUnitTakes(Reference operand, CodeUnit targ
         return { };
     Representation wanted = m_conventions.parameterRepresentation(m_program, target, entryParameter);
     auto allowsWantedForm = [&] {
-        return isLegalRepresentation(m_types.at(m_walker.typeOf(operand)), wanted);
+        return (target.role == CodeRole::Body && m_conventions.isScalarizedParameter(target.function, entryParameter)) || isLegalRepresentation(m_types.at(m_walker.typeOf(operand)), wanted);
     };
     TypeID promised = typeAtEntryOfFunction(entryParameter);
     bool isAsked = m_types.at(promised).isJavaScriptValue() && m_types.at(m_walker.typeOf(operand)).isJavaScriptValue() && !m_types.isSubset(m_walker.typeOf(operand), m_walker.typeThatUnitMayTestFor(m_types.testablePartOf(promised)));
@@ -366,7 +366,7 @@ Reference BuilderOfEntries::callUnit(CodeUnit target, std::span<const Reference>
 {
     if (!m_conventions.exists(target))
         fail("a unit goes on to a unit that does not exist"_s);
-    else if (m_conventions.numberOfResults(target) != 1 || m_conventions.numberOfResults(m_unit) != 1)
+    else if ((m_conventions.numberOfResults(target) != 1 && !m_conventions.returnsScalars(target)) || m_conventions.numberOfResults(m_unit) != 1)
         fail("a unit goes on to a unit that does not return one value as it does itself"_s);
     if (m_cannotGoOn)
         return { };
@@ -387,7 +387,8 @@ void BuilderOfEntries::returnResultOf(Reference call)
 {
     if (m_cannotGoOn)
         return;
-    bool isLastOperation = call.isValue() && m_walker.code().lastOperationOf(m_walker.currentBlock()) == call.id();
+    static constexpr OpcodeSet calls { Opcode::Call, Opcode::CallList, Opcode::CallDirect, Opcode::CallTable };
+    bool isLastOperation = call.isValue() && m_walker.code().lastOperationOf(m_walker.currentBlock()) == call.id() && calls.contains(m_walker.code().at(call.id()).opcode);
     if (!isLastOperation || !haveSameRegisterRepresentation(m_walker.representationOf(call), m_conventions.resultRepresentation(m_unit))) {
         returnValue(call);
         return;
@@ -404,8 +405,12 @@ void BuilderOfEntries::refuseCall()
     call.setCalleeOperand(closure());
     call.setThisValueOperand(thisValue());
     call.setIsNeverInlined(true);
-    build(WTF::move(call));
-    endAsUnreachable();
+    Reference refusal = build(WTF::move(call));
+    if (m_walker.checksProofsOf(ProofSource::EntryParameter)) {
+        endAsUnreachable();
+        return;
+    }
+    returnResultOf(refusal);
 }
 
 void BuilderOfEntries::refuseUnlessConstructing(Reference newTarget)
@@ -461,7 +466,6 @@ void BuilderOfEntries::returnWhatWasConstructed(Reference returned, Reference ob
     finish.setObjectOperand(object);
     if (lookMayFinishBirthOf(m_walker, object))
         build(WTF::move(finish));
-    showWhatIsHeldFilledWhereConstructionEnds(m_walker, m_unit.function, object, m_origin);
     if (m_walker.isUnreachable())
         return;
 
@@ -476,7 +480,9 @@ void BuilderOfEntries::returnWhatWasConstructed(Reference returned, Reference ob
     continueIn(takesReturned);
     returnValue(returned);
     continueIn(takesThis);
-    returnValue(object);
+    showWhatIsHeldFilledWhereConstructionEnds(m_walker, m_unit.function, object, m_origin);
+    if (!m_walker.isUnreachable())
+        returnValue(object);
 }
 
 bool BuilderOfEntries::buildGenericEntry()
@@ -496,6 +502,12 @@ bool BuilderOfEntries::buildGenericEntry()
     }
     if (!entry.target || !m_conventions.exists(entry.target)) {
         throwInPlaceOfEntering();
+        return !m_walker.hasFailed();
+    }
+    if (m_walker.arrivals().entriesAreClosed(m_unit.function)) {
+        m_walker.count(StatisticID::GenericEntriesProvenUnreachable);
+        m_walker.buildCheckOfProof(thisValue(), TypeTable::never, TypeTable::anything, ProofSource::EntryParameter, m_origin);
+        endAsUnreachable();
         return !m_walker.hasFailed();
     }
 
@@ -523,7 +535,7 @@ bool BuilderOfEntries::buildGenericEntry()
         layOutOperands(values, entry.target, operands, ListsOfArguments::AreLeftOut);
         if (m_cannotGoOn)
             return !m_walker.hasFailed();
-        return m_walker.walkBodyBehindEntry(operands.span(), whereListsAreNamed, scopedLambda<Reference(unsigned)>([&](unsigned entryParameter) {
+        return m_walker.visitBodyFromEntry(operands.span(), whereListsAreNamed, scopedLambda<Reference(unsigned)>([&](unsigned entryParameter) {
             m_cannotGoOn = false;
             return inFormThatUnitTakes(listOfArgumentsBehindParameters(), entry.target, entryParameter);
         }));
@@ -541,7 +553,14 @@ bool BuilderOfEntries::buildParameterGuard()
 {
     CodeUnit fastVersion = m_conventions.entryBehindGuardOf(m_unit.function);
     CodeUnit slowVersion { m_unit.function, CodeRole::SlowBody };
+    ArgumentLocations locations = m_conventions.locationsOf(m_program, m_unit);
     takeParameters([&](unsigned index) {
+        if (!m_walker.checksWalk() || !m_walker.checksProofsOf(ProofSource::EntryParameter))
+            return m_walker.typeArrivingAtEntryParameter(index);
+        TypeID withoutCallers = m_walker.facts().typeBelievedOfEntryParameter(m_types, m_unit.function, index, TypeID());
+        Representation form = locations.parameters[index].representation;
+        if (form == Representation::JSValue || form == Representation::Cell || !m_types.at(withoutCallers).isJavaScriptValue())
+            return withoutCallers;
         return m_walker.typeArrivingAtEntryParameter(index);
     });
     RELEASE_ASSERT(m_parameters.size() == m_function.numberOfEntryParameters());
@@ -560,6 +579,23 @@ bool BuilderOfEntries::buildParameterGuard()
     BlockID failing;
     if (!m_cannotGoOn)
         m_walker.letGuessFailUnasked(failing, m_origin);
+    const BeforeEvaluation& beforeEvaluation = m_walker.facts().beforeEvaluation();
+    for (VariableID mark : beforeEvaluation.holdsIn(m_unit.function) ? beforeEvaluation.marks.span() : std::span<const VariableID>()) {
+        Draft read = draft(Opcode::GetModuleVariable);
+        read.setVariable(mark);
+        Reference marked = m_cannotGoOn ? Reference() : build(WTF::move(read));
+        if (!marked || m_types.isSubset(m_walker.typeOf(marked), TypeTable::undefined))
+            continue;
+        Draft test = draft(Opcode::TypeTest);
+        test.setValueOperand(marked);
+        test.setTestedType(TypeTable::undefined);
+        Reference passes = build(WTF::move(test));
+        BlockID passing = m_walker.addBlock();
+        if (!failing)
+            failing = m_walker.addBlock(BlockFrequency::Rare);
+        branch(passes, passing, failing);
+        continueIn(passing);
+    }
     Vector<Reference, 16> passed(m_parameters.span());
     for (unsigned index = 0; index < m_parameters.size() && !m_cannotGoOn; ++index) {
         TypeID tested = m_conventions.typeBehindGuard(m_unit.function, index);

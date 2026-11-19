@@ -8,16 +8,18 @@
 
 #if ENABLE(AOT)
 
-#include "AOTCellAllocationEmitter.h"
+#include "AOTAccessEmitter.h"
 #include "AOTCodeRecords.h"
 #include "AOTCodeSites.h"
 #include "AOTCompileUnit.h"
 #include "AOTConstantEmitter.h"
-#include "AOTConvention.h"
+#include "AOTConversionEmitter.h"
+#include "AOTElementAccessEmitter.h"
 #include "AOTExceptionEmitter.h"
 #include "AOTInstance.h"
 #include "AOTPoisonedCell.h"
 #include "AOTRuntimeCallEmitter.h"
+#include "AOTStaleAnswers.h"
 #include "AOTStubCatalog.h"
 #include "AOTStubRegisters.h"
 #include "AOTStubsOperations.h"
@@ -25,8 +27,6 @@
 #include "AllowMacroScratchRegisterUsage.h"
 #include "LinkBuffer.h"
 #include "StackManager.h"
-#include <algorithm>
-#include <optional>
 
 namespace JSC { namespace AOT { namespace Typed {
 
@@ -55,11 +55,16 @@ static void emitFaultingLoad(CCallHelpers& jit, const Machine::PatchParameters& 
     });
 }
 
+CCallHelpers::Jump branchIfStopRequest(CCallHelpers& jit, StopRequest request)
+{
+    return jit.branch64(request == StopRequest::IsPending ? CCallHelpers::LessThan : CCallHelpers::GreaterThanOrEqual, CCallHelpers::Address(instanceGPR, offsetOfTrapAwareSoftStackLimit), CCallHelpers::TrustedImm32(0));
+}
+
 static void emitCompareAndCall(CCallHelpers& jit, const Machine::PatchParameters& params, CodeRecords* records, uint32_t site, bool leavesOwedError)
 {
     AllowMacroScratchRegisterUsage allowScratch(jit);
     RELEASE_ASSERT(params.frameIsSetUp());
-    CCallHelpers::Jump isInterrupted = jit.branch64(CCallHelpers::LessThan, CCallHelpers::Address(instanceGPR, offsetOfTrapAwareSoftStackLimit), CCallHelpers::TrustedImm32(0));
+    CCallHelpers::Jump isInterrupted = branchIfStopRequest(jit, StopRequest::IsPending);
     CCallHelpers::Label done = jit.label();
     params.addLatePath([=](CCallHelpers& jit) {
         AllowMacroScratchRegisterUsage allowScratch(jit);
@@ -71,70 +76,105 @@ static void emitCompareAndCall(CCallHelpers& jit, const Machine::PatchParameters
     });
 }
 
-static std::optional<size_t> findEntryParameterNamedByHint(const Code& code, ValueID definition)
-{
-    if (code.at(definition).opcode != Opcode::Parameter)
-        return std::nullopt;
-    std::span<const ValueID> parameters = code.at(code.entries()[primaryEntry].block).parameters();
-    auto found = std::ranges::find(parameters, definition);
-    if (found == parameters.end())
-        return std::nullopt;
-    return static_cast<size_t>(found - parameters.begin());
-}
-
 void HintEmitter::generateLoopHint(const ValueContext& value)
 {
     emitPoll(value);
 }
 
-void HintEmitter::generateReleaseHint(const ValueContext& value)
+void HintEmitter::generateEndCellLifetime(const ValueContext& value)
 {
-    if (m_code.marksOf(value.id()).contains(SweepMark::ReleasesOperand))
-        release(value->valueOperand());
+    emitLifetimeEnd(value, value->cellOperand());
 }
 
-void HintEmitter::release(ValueID operand)
+void HintEmitter::generateReleaseArray(const ValueContext& value)
 {
-    if (isDeferredClosure(operand))
+    m_out.store64(generator().wordOf(value->arrayOperand()), instanceField(m_heaps.entire(AbstractHeap::AllocatorState), AOT_INSTANCE_OFFSET(arrays.releasedArray)));
+}
+
+void HintEmitter::generateReleaseList(const ValueContext& value)
+{
+    Boxed list = in<Boxed>(value->listOperand());
+    bool mayBeNoCell = typeOf(value->listOperand()).primitives;
+    if (shouldEmitLifetimeEnds()) {
+        LBasicBlock isCellHere = newBlock();
+        LBasicBlock goesOn = newBlock();
+        branch(isCell(list), { normalEdge(isCellHere), normalEdge(goesOn) });
+        m_out.appendTo(isCellHere);
+        m_out.suspendDeclaredAccesses();
+        callVoidOperation(value, RuntimeOperation::PoisonCell, { unboxCell(list), word32(static_cast<int32_t>(generator().code().inlineFrames()[value->inlineFrame].callee.index())) });
+        m_out.resumeDeclaredAccesses();
+        m_out.jump(goesOn);
+        m_out.appendTo(goesOn);
         return;
-    Operand released = get(operand);
-    if (!released.value || released.value->type() != Machine::Int64 || released.value->hasInt64())
-        return;
-    ValueID definition = definitionOf(operand);
-    const Operation& named = operationAt(definition);
-    if (Operation::opcodesWithStorage.contains(named.opcode) && named.storage() != AllocationStorage::Heap)
-        return;
-    if (conventions().entryConventionOf(m_unit) == EntryConvention::Direct && !functionSuspends()) {
-        if (std::optional<size_t> parameter = findEntryParameterNamedByHint(m_code, definition)) {
-            ArgumentLocation location = conventions().locationsOf(m_program, m_unit).parameters[*parameter];
-            if (location.kind == ArgumentLocation::Kind::Stack)
-                m_out.store64(m_out.constInt64(0), m_out.address(m_heaps.argumentBuffer, m_out.framePointer(), offsetOfStackWordFromFrame(location.stackIndex)));
-        }
     }
-    Machine::PatchOperation* patchpoint = m_out.patchpoint(Machine::Void);
-    patchpoint->append(released.value, Machine::ValueRep::ColdAny);
-    patchpoint->effects = Machine::Effects::none();
-    patchpoint->effects.writesLocalState = true;
-    patchpoint->setReleasesDeadValues(true);
-    patchpoint->setGenerator([](CCallHelpers& jit, const Machine::PatchParameters& params) {
-        RegisterSet registers = params.value()->registersToRelease();
-        registers.exclude(params.usedRegisters());
-        registers.forEach([&](Reg reg) {
-            jit.move(CCallHelpers::TrustedImm32(0), reg.gpr());
-        });
-    });
+    Integer released(list.value());
+    if (mayBeNoCell)
+        released = select(isCell(list), released, integer(0));
+    ptrdiff_t place = value->isCopy() ? AOT_INSTANCE_OFFSET(arrays.releasedCopy) : AOT_INSTANCE_OFFSET(arrays.releasedArray);
+    m_out.store64(released.value(), instanceField(m_heaps.entire(AbstractHeap::AllocatorState), place));
 }
 
-void HintEmitter::generateEndLifeOfCell(const ValueContext& value)
+void HintEmitter::generatePrefetchElements(const ValueContext& value)
 {
-    endLifeOf(value, value->cellOperand());
+    Type listType = typeOf(value->listOperand());
+    Boxed list = emitter<ConversionEmitter>().box(value, get(value->listOperand()), listType);
+    LBasicBlock continuation = newBlock();
+    if (listType.primitives & ~cellPrimitives) {
+        LBasicBlock listIsCell = newBlock();
+        branch(isCell(list), { normalEdge(listIsCell), rareEdge(continuation) });
+        m_out.appendTo(listIsCell);
+    }
+    CellPointer array = unboxCell(list);
+    LBasicBlock isArray = newBlock();
+    LBasicBlock holdsBoxed = newBlock();
+    LBasicBlock isLong = newBlock();
+    branch(hasCellType(array, ArrayType), { normalEdge(isArray), rareEdge(continuation) });
+    m_out.appendTo(isArray);
+    ElementAccessEmitter& elements = emitter<ElementAccessEmitter>();
+    branch(equal(elements.indexingMode(array, IndexingShapeMask), word32(ContiguousShape)), { normalEdge(holdsBoxed), rareEdge(continuation) });
+    m_out.appendTo(holdsBoxed);
+    branch(aboveOrEqual(elements.arrayLength(array), integer(value->minLength())), { rareEdge(isLong), normalEdge(continuation) });
+    m_out.appendTo(isLong);
+    Integer position = emitter<ConversionEmitter>().inRepresentation(value, get(value->positionOperand()), typeOf(value->positionOperand()), Representation::Int64).as<Integer>();
+    callLeaf<Integer>(RuntimeOperation::PrefetchElements, { array, position, numberOf(m_mentions.request(RequestKind::Prefetch, value->steps())), Pointer(m_instance) });
+    m_out.jump(continuation);
+    m_out.appendTo(continuation);
+}
+
+void HintEmitter::generateAskObjectAgain(const ValueContext& value)
+{
+    if (!emitter<AccessEmitter>().verifiesFastPathAnswers(value->key()))
+        return;
+    ConversionEmitter& conversions = emitter<ConversionEmitter>();
+    ValueID object = value->objectOperand();
+    if (FunctionID function = value->function()) {
+        if (!conventions().exists(conventions().closureEntryOf(function)))
+            return;
+        LBasicBlock goesOn = nullptr;
+        if (ValueID onlyWhere = value->onlyWhereOperand()) {
+            LBasicBlock asks = newBlock();
+            goesOn = newBlock();
+            branch(in<Condition>(onlyWhere), { normalEdge(asks), normalEdge(goesOn) });
+            m_out.appendTo(asks);
+        }
+        int32_t kindAndStub = static_cast<int32_t>(kindAndStubOfAnswer(value->functionIsGetter() ? KindOfAnswer::Accessor : KindOfAnswer::Value, value->asksChainAbovePrototype() ? StubThatAnswers::ChainAbovePrototype : StubThatAnswers::FunctionThatNameFinds));
+        callVoidOperation(value, RuntimeOperation::StopAtStaleAnswer, { conversions.box(value, get(object), typeOf(object)), boxInt32(numberOf(m_mentions.add(NumberSpace::ClosureFunction, function))), identifierNumber(value->key()), word32(kindAndStub) });
+        if (goesOn) {
+            m_out.jump(goesOn);
+            m_out.appendTo(goesOn);
+        }
+        return;
+    }
+    ValueID answered = value->answeredOperand();
+    int32_t kindAndStub = static_cast<int32_t>(kindAndStubOfAnswer(KindOfAnswer::Value, StubThatAnswers::StateOfWalk) | (value->answerIsMethod() ? accessorIsNoAnswerOfWalk : 0));
+    callVoidOperation(value, RuntimeOperation::StopAtStaleAnswer, { conversions.box(value, get(object), typeOf(object)), conversions.box(value, get(answered), typeOf(answered)), identifierNumber(value->key()), word32(kindAndStub) });
 }
 
 void HintEmitter::generateGuessFailsUnasked(const ValueContext& value)
 {
-    uint32_t period = build().options().periodOfGuessesThatFail;
+    uint32_t period = build().options().speculationFailurePeriod;
     RELEASE_ASSERT(period);
-    int32_t step = static_cast<int32_t>(drawBySeed(build().options().seedOfShuffles, DrawnFor::StepOfGuessesThatFail, 0, 0) | 1);
+    int32_t step = static_cast<int32_t>(drawBySeed(build().options().shuffleSeed, DrawnFor::StepOfGuessesThatFail, 0, 0) | 1);
     Machine::PatchOperation* drawn = m_out.patchpoint(Machine::Int64);
     drawn->effects = Machine::Effects::none();
     drawn->effects.writesLocalState = true;
@@ -150,19 +190,40 @@ void HintEmitter::generateGuessFailsUnasked(const ValueContext& value)
     defineTest(value, belowOrEqual(Integer(drawn), integer(UINT32_MAX / period)));
 }
 
-bool HintEmitter::endsLivesAtRunTime()
+void HintEmitter::generateBeginEffectsCheck(const ValueContext& value)
+{
+    emitter<RuntimeCallEmitter>().beginWatchOfWhatMayRunAgain(value);
+    defineTest(value, belowOrEqual(integer(1), integer(0)));
+}
+
+void HintEmitter::generateCheckIterationRestart(const ValueContext& value)
+{
+    emitter<RuntimeCallEmitter>().endWatchOfWhatRunsAgain(value, definitionOf(value->beginningOperand()));
+}
+
+void HintEmitter::generateCheckInlineeFallback(const ValueContext& value)
+{
+    emitter<RuntimeCallEmitter>().endWatchOfWhatRunsAgain(value, definitionOf(value->beginningOperand()));
+}
+
+void HintEmitter::generateCheckReloadBypass(const ValueContext& value)
+{
+    emitter<RuntimeCallEmitter>().endWatchOfWhatRunsAgain(value, definitionOf(value->beginningOperand()));
+}
+
+bool HintEmitter::shouldEmitLifetimeEnds()
 {
     return sourcesOfProofsCheckedUnder(build().options().testing) & bitOfSourceOfProofs(ProofSource::Lifetime);
 }
 
-void HintEmitter::endLifeOf(const OperationContext& context, ValueID cell)
+void HintEmitter::emitLifetimeEnd(const OperationContext& context, ValueID cell)
 {
     const Operation& made = operationAt(definitionOf(cell));
     if ((made.opcode == Opcode::NewObject && made.storage() == AllocationStorage::Frame) || emitter<ConstantEmitter>().closureLentLiesInFrame(definitionOf(cell)))
-        return emitter<CellAllocationEmitter>().clearWhatCellLentHolds(definitionOf(cell));
+        return;
     FunctionID madeIn = generator().code().inlineFrames()[made.inlineFrame].callee;
     m_out.suspendDeclaredAccesses();
-    callVoidOperation(context, RuntimeOperation::PoisonCell, { in<CellPointer>(cell), word32(static_cast<int32_t>(madeIn.index())), word32(static_cast<int32_t>(made.position)) });
+    callVoidOperation(context, RuntimeOperation::PoisonCell, { in<CellPointer>(cell), word32(static_cast<int32_t>(madeIn.index())) });
     m_out.resumeDeclaredAccesses();
 }
 
@@ -170,16 +231,16 @@ void HintEmitter::noteThatCellIsLent(const ValueContext& made, CellPointer cell)
 {
     FunctionID madeIn = generator().code().inlineFrames()[made->inlineFrame].callee;
     m_out.suspendDeclaredAccesses();
-    callVoidOperation(made, RuntimeOperation::PoisonCell, { cell, word32(static_cast<int32_t>(madeIn.index() | PoisonedCell::isLentForCallAhead)), word32(static_cast<int32_t>(made->position)) });
+    callVoidOperation(made, RuntimeOperation::PoisonCell, { cell, word32(static_cast<int32_t>(madeIn.index() | PoisonedCell::isLentForCallAhead)) });
     m_out.resumeDeclaredAccesses();
 }
 
-void HintEmitter::stopWhereLifeHasEnded(const OperationContext& context, CellPointer cell)
+void HintEmitter::crashIfLifetimeEnded(const OperationContext& context, CellPointer cell)
 {
-    if (!endsLivesAtRunTime())
+    if (!shouldEmitLifetimeEnds())
         return;
     Word32 type(m_out.load8ZeroExt32(m_out.address(m_heaps.collectorState, cell.value(), JSCell::typeInfoTypeOffset())));
-    emitter<ThrowEmitter>().requireOrStopAtFalseProof(context, notEqual(type, word32(ObjectType)), boxCell(cell), ProofSource::Lifetime);
+    emitter<ThrowEmitter>().requireOrCrash(context, notEqual(type, word32(ObjectType)), boxCell(cell), ProofSource::Lifetime);
 }
 
 void HintEmitter::pollWhereNoFrameIsSetUp(const OperationContext& context)
@@ -188,6 +249,7 @@ void HintEmitter::pollWhereNoFrameIsSetUp(const OperationContext& context)
     Machine::PatchOperation* patchpoint = m_out.patchpoint(Machine::Void);
     patchpoint->clobber(RegisterSet::macroClobberedGPRs());
     patchpoint->setRunsWithoutFrame(true);
+    patchpoint->setShowsRegistersToCollector(true);
     uint32_t site = emitter<RuntimeCallEmitter>().addSite(context);
     patchpoint->setGenerator([records = &m_records, site](CCallHelpers& jit, const Machine::PatchParameters& params) {
         if (!params.frameIsSetUp())
@@ -203,11 +265,13 @@ void HintEmitter::emitPoll(const ValueContext& value)
     effects.writes.remove(AbstractHeapSet { AbstractHeap::RuntimeState });
     emitter<RuntimeCallEmitter>().applyEffects(patchpoint, effects, ArgumentBufferAccess::None, false, RuntimeCallEmitter::CellConversions::None);
     patchpoint->clobber(RegisterSet::macroClobberedGPRs());
+    m_out.procedure().noteLoopPoll(patchpoint);
     uint32_t site = emitter<RuntimeCallEmitter>().addSite(value);
 
     bool leavesOwedError = m_code.marksOf(value.id()).contains(SweepMark::LeavesOwedError);
     if (hasFaultingLoopPolls) {
         patchpoint->setRunsWithoutFrame(!isARM64());
+        patchpoint->setShowsRegistersToCollector(true);
         patchpoint->setGenerator([records = &m_records, site, leavesOwedError](CCallHelpers& jit, const Machine::PatchParameters& params) {
             emitFaultingLoad(jit, params, records, site, leavesOwedError);
         });

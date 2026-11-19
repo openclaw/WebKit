@@ -1,3 +1,4 @@
+import { collectNativeReads, type NativeReads } from "./check-host-uses.ts";
 import { GeneratorError, Problems } from "./declarations.ts";
 import { hashOfHostBindings } from "./emit-cpp-bindings.ts";
 import { collectArrayDeclarations } from "./emit-cpp-ids.ts";
@@ -29,7 +30,6 @@ import {
   type ModelLayout,
   type ModelLayoutField,
   type ModelModule,
-  type ModelName,
   type ModelRealmStructure,
   type ModelSlot,
   type TableModel,
@@ -185,6 +185,15 @@ function formatBuiltin(builtin: ModelBuiltin): string {
         builtinFlags.filter(flag => builtin.flags.includes(flag)),
       ),
     ],
+    [
+      "marks",
+      builtin.marks.length === 0
+        ? null
+        : builtinMarks
+            .filter(mark => builtin.marks.includes(mark))
+            .map(mark => `bitOfMark(${formatEnumerator("BuiltinMark", mark)})`)
+            .join(" | "),
+    ],
     ["holder", formatId("BuiltinID", builtin.holder)],
     ["name", formatName(builtin.name)],
     ["inheritsFrom", formatId("BuiltinID", prototype.link === "Builtin" ? prototype.builtin : null)],
@@ -197,6 +206,7 @@ function formatBuiltin(builtin: ModelBuiltin): string {
     ["isNamedByText", builtin.hostNumber === noHostNumber ? null : "true"],
     ["isAddedAtFirstRead", builtin.isAddedAtFirstRead ? "true" : null],
     ["isAddedAsEnumerable", builtin.isAddedAsEnumerable ? "true" : null],
+    ["canBeListed", builtin.canBeListed ? "true" : null],
     ["isReadWithoutType", isReadWithoutType ? "true" : null],
   ]);
 }
@@ -222,6 +232,7 @@ function formatClass(builtinClass: ModelClass, pools: ClassPools): string {
     ["isNeverPristine", formatUnlessFalse(builtinClass.isNeverPristine)],
     ["pristineTest", formatUnlessDefault("BuiltinPristineTest", builtinClass.pristineTest, "Mark")],
     ["hasClosureInstances", formatUnlessFalse(builtinClass.hasClosureInstances)],
+    ["isFollowedBesideUnseenObject", formatUnlessFalse(builtinClass.isFollowedBesideUnseenObject)],
     ["instancesAreEntries", formatUnlessFalse(builtinClass.instancesAreEntries)],
     ["keepsStructuresOfClassesBelow", formatUnlessFalse(builtinClass.keepsStructuresOfClassesBelow)],
     ["definesCharactersOnNewInstances", formatUnlessFalse(builtinClass.definesCharactersOnNewInstances)],
@@ -249,8 +260,9 @@ function formatSlot(slot: ModelSlot): string {
     ["heap", formatHeap(slot.heap)],
     ["holds", formatId("BuiltinTypeID", slot.holds)],
     ["internalField", slot.internalField === null ? null : String(slot.internalField)],
-    ["holdsWhatStepsHandOut", formatUnlessFalse(slot.holdsWhatStepsHandOut)],
+    ["holdsStepValues", formatUnlessFalse(slot.holdsStepValues)],
     ["holdsWhatIsThrown", formatUnlessFalse(slot.holdsWhatIsThrown)],
+    ["wordOfCell", formatUnlessDefault("BuiltinWordOfCell", slot.wordOfCell, "None")],
   ]);
 }
 
@@ -277,23 +289,6 @@ function formatRealmStructure({ getter, names }: ModelRealmStructure, realmStruc
   ]);
 }
 
-interface NativeReads {
-  readsEveryExport: boolean;
-  names: Map<number, ModelName>;
-}
-
-function collectNativeReads(model: TableModel): Map<ModelModule, NativeReads> {
-  const reads = new Map<ModelModule, NativeReads>();
-  const loads = [...model.builtins.flatMap(builtin => builtin.attachments.moduleLoads), ...model.startup.loads];
-  for (const { module, exports } of loads) {
-    let read = reads.get(module);
-    if (read === undefined) reads.set(module, (read = { readsEveryExport: false, names: new Map() }));
-    if (exports === null) read.readsEveryExport = true;
-    else for (const { name } of exports) read.names.set(name.number, name);
-  }
-  return reads;
-}
-
 function formatModule(
   module: ModelModule,
   exportsHeldByNamespaces: Pool,
@@ -318,6 +313,15 @@ function formatModule(
       "exportsReadByNativeCode",
       exportsReadByNativeCode.add(
         [...(nativeReads?.names.values() ?? [])]
+          .sort((left, right) => left.number - right.number)
+          .map(name => formatName(name)),
+      ),
+    ],
+    [
+      "memberOnlyExports",
+      exportsReadByNativeCode.add(
+        [...(nativeReads?.names.values() ?? [])]
+          .filter(name => !nativeReads!.readsEveryExport && !nativeReads!.namesWithOtherUses.has(name.number))
           .sort((left, right) => left.number - right.number)
           .map(name => formatName(name)),
       ),

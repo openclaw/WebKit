@@ -12,17 +12,24 @@
 
 namespace JSC {
 
+class CallFrame;
 class InlineWatchpointSet;
 class JSArray;
 class JSCell;
+class InternalFunction;
+class JSFunction;
+class JSValue;
 class ObjectPropertyCondition;
+class PropertyDescriptor;
 class PropertyName;
+struct CallerFrameAndPC;
 
 namespace AOT {
 
 enum class RejectedWrite : uint8_t { Store, Definition, Deletion, Prototype };
 
 void didChangeChainObject(VM&, JSObject* changed, UniquedStringImpl* uidOrNull);
+void didSetPrototypeOfChainObject(VM&, JSObject* changed);
 
 } // namespace AOT
 
@@ -31,16 +38,20 @@ namespace AOT::RuntimeHooks {
 using AOT::didCreateClass;
 using AOT::didCreateStaticProperty;
 using AOT::didRejectWrite;
+using AOT::isReportedAsReadOnly;
 using AOT::lockedObjectErrorMessage;
 using AOT::reflectThrowsOnLockedProperty;
-using AOT::takeStaticPropertyMadeAhead;
+using AOT::takePreallocatedStaticProperty;
 
 void willInitializeRealm(JSGlobalObject*);
-Structure* structureOfHostFunctions(JSGlobalObject*, Structure*);
-bool refusesNameOnNativeConstructor(JSGlobalObject*, PropertyName);
-inline bool keepsPrototypeOfNativeConstructors(JSGlobalObject* realm) { return locksBuiltins(realm); }
-String messageOfNameRefusedOnBuiltinFunction(PropertyName);
-String messageOfPrototypeRefusedOnBuiltinFunction();
+Structure* structureForHostFunctions(JSGlobalObject*, Structure*);
+bool rejectsNativeConstructorProperty(JSGlobalObject*, PropertyName);
+bool definesInheritedValue(JSObject* function, PropertyName, const PropertyDescriptor&);
+bool closeNamesOfFunction(VM&, JSObject* function, PropertyName);
+bool acceptsHasInstanceOfHost(InternalFunction*, PropertyName, JSValue method);
+inline bool locksNativeConstructorPrototypes(JSGlobalObject* realm) { return locksBuiltins(realm); }
+String lockedBuiltinPropertyErrorMessage(PropertyName);
+String lockedBuiltinPrototypeErrorMessage();
 void didCreateRealm(JSGlobalObject*);
 enum class DeferredWatchpointKind : bool { Structure, PropertyChange };
 void willWatchBuiltins(JSGlobalObject*);
@@ -48,19 +59,30 @@ void didWatchBuiltins(JSGlobalObject*);
 bool defersWatchpoints(JSGlobalObject*);
 bool deferWatchpoint(JSGlobalObject*, const ObjectPropertyCondition&, InlineWatchpointSet&, DeferredWatchpointKind);
 void installDeferredWatchpoints(JSGlobalObject*);
-[[noreturn]] void stopBecauseRealmHasABadTime();
+[[noreturn]] void crashOnHavingABadTime();
+[[noreturn]] void stopAtHostResult(Instance&, CallerFrameAndPC* operationFrameRecord, JSValue found, JSCell* function, uint32_t kinds);
 inline void didChangePrototypeChain(VM& vm, JSObject* changed, UniquedStringImpl* nameOrNull) { didChangeChainObject(vm, changed, nameOrNull); }
-bool becomesDictionaryByAddition(VM&, JSObject*, Structure*, UniquedStringImpl*);
-void didMakeStructureForAddition(VM&, Structure* made);
+inline void didSetPrototypeOfPrototype(VM& vm, JSObject* changed) { didSetPrototypeOfChainObject(vm, changed); }
+void willAddElementsToPrototype(VM&);
+bool shouldUseDictionaryForAddition(VM&, JSObject*, Structure*, UniquedStringImpl*);
+void didCreateAdditionTransition(VM&, Structure* made);
+Structure* addBrandForSuperCall(VM&, JSFunction* newTarget, Structure*);
 void finishFillingObjects(VM&);
-void runFilesThatWaitInLoader(VM&);
+void transferEagerLoadsToLoader(VM&);
 void didStartWatchingReplacements(VM&);
 void didChangeMicrotaskQueueing(VM&);
+void didMoveStorageOf(VM&, JSCell* view);
+void willRecompileRegExp(VM&);
 void didChangeGlobalLexicalBindings(JSGlobalObject*);
 void setLoopPollsEnabled(VM&, bool);
-JSObject* targetThatProxyDefinesOn(VM&, JSValue receiver);
+JSObject* proxyDefinePropertyTarget(VM&, JSValue receiver);
+JSObject* proxyOwnKeysTarget(VM&, JSObject* proxy, bool asksDescriptors);
 
 JSArray* tryCreateArrayOfPairs(JSGlobalObject*, JSCell* items);
+JSObject* tryMakeSetOfIterable(JSGlobalObject*, CallFrame* constructor, Structure*, JSValue iterable);
+JSObject* tryMakeMapOfIterable(JSGlobalObject*, CallFrame* constructor, Structure*, JSValue iterable);
+
+JSObject* tryCopyObject(JSGlobalObject*, JSObject* compiledObject);
 
 class NoHelperThreadsScope {
     WTF_MAKE_NONCOPYABLE(NoHelperThreadsScope);

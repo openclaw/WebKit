@@ -123,6 +123,14 @@ BuiltinCellKey cellThatNamesMemberAskedByItsByte(const BuiltinTable& table, Buil
     return table.at(object).kind == BuiltinKind::Accessor ? BuiltinCellKey::getter(object) : BuiltinCellKey::object(object);
 }
 
+bool isMemberAskedByByteAlone(const BuiltinTable& table, BuiltinID member)
+{
+    const Builtin& entry = table.at(member);
+    if (entry.kind != BuiltinKind::Accessor || entry.scope != BuiltinScope::Realm || entry.mutability != BuiltinMutability::ConstantUnlessWritten || entry.flags.contains(BuiltinFlag::IsOwnPropertyOfInstances))
+        return false;
+    return entry.holder && entry.name && table.canonicalID(member) == member && !BuiltinCellKey::getter(member).hasCell(table);
+}
+
 bool BuiltinCellKey::hasCell(const BuiltinTable& table) const
 {
     if (table.at(m_builtin).scope == BuiltinScope::Module)
@@ -395,6 +403,7 @@ static ALWAYS_INLINE void visitInstanceStructuresOfEngine(JSGlobalObject* realm,
     AOT_VISIT_INSTANCE_STRUCTURE(ArrayBuffer, realm->arrayBufferStructureConcurrently(ArrayBufferSharingMode::Default))
     AOT_VISIT_INSTANCE_STRUCTURE(SharedArrayBuffer, realm->arrayBufferStructureConcurrently(ArrayBufferSharingMode::Shared))
     AOT_VISIT_INSTANCE_STRUCTURE(DataView, realm->typedArrayStructureConcurrently(TypeDataView, false))
+    AOT_VISIT_INSTANCE_STRUCTURE(DataView, realm->typedArrayStructureConcurrently(TypeDataView, true))
     AOT_VISIT_INSTANCE_STRUCTURE(RegExp, realm->regExpStructure())
     AOT_VISIT_INSTANCE_STRUCTURE(Promise, realm->promiseStructure())
     AOT_VISIT_INSTANCE_STRUCTURE(String, realm->stringObjectStructure())
@@ -402,7 +411,9 @@ static ALWAYS_INLINE void visitInstanceStructuresOfEngine(JSGlobalObject* realm,
     AOT_VISIT_INSTANCE_STRUCTURE(Date, realm->dateStructureConcurrently())
     AOT_VISIT_INSTANCE_STRUCTURE(IntlDateTimeFormat, realm->m_dateTimeFormatStructure.getConcurrently())
     AOT_VISIT_INSTANCE_STRUCTURE(IntlNumberFormat, realm->m_numberFormatStructure.getConcurrently())
-#define AOT_VISIT_TYPED_ARRAY_STRUCTURE(name) AOT_VISIT_INSTANCE_STRUCTURE(name##Array, realm->typedArrayStructureConcurrently(Type##name, false))
+#define AOT_VISIT_TYPED_ARRAY_STRUCTURE(name) \
+    AOT_VISIT_INSTANCE_STRUCTURE(name##Array, realm->typedArrayStructureConcurrently(Type##name, false)) \
+    AOT_VISIT_INSTANCE_STRUCTURE(name##Array, realm->typedArrayStructureConcurrently(Type##name, true))
     FOR_EACH_TYPED_ARRAY_TYPE_EXCLUDING_DATA_VIEW(AOT_VISIT_TYPED_ARRAY_STRUCTURE)
 #undef AOT_VISIT_TYPED_ARRAY_STRUCTURE
     AOT_VISIT_INSTANCE_STRUCTURE(ArrayIterator, realm->arrayIteratorStructure())
@@ -452,12 +463,8 @@ BuiltinClassID findClassWithInstanceStructure(JSGlobalObject* realm, Structure* 
         if (original == structure)
             found = builtinClass;
     });
-    const ClassInfo* info = structure->classInfoForCells();
-    BuiltinBindings::forEachInstanceStructureOfHost(realm, [&](const BuiltinClassBinding& binding, Structure* original) {
-        if (original == structure && (!binding.instanceClassInfo || info->isSubClassOf(binding.instanceClassInfo)))
-            found = binding.builtinClass;
-    });
-    return found;
+    BuiltinClassID hostClass = BuiltinBindings::findHostClass(realm, structure);
+    return hostClass ? hostClass : found;
 }
 
 static JSObject* findExistingHiddenPrototype(JSGlobalObject* realm, BuiltinClassID builtinClass)
@@ -676,7 +683,7 @@ static CellLookup checkFound(const BuiltinTable& table, BuiltinCellKey key, JSVa
         if (isOverloadOfKey(key.kind(), overload.mode) && !hasExpectedCallee(overload.callee, value))
             return makeUnexpected(BuiltinLookupFailure::HasOtherCallee);
     }
-    if (key.kind() == BuiltinCellKey::Kind::Object && table.isHostFunctionOfEngine(id)) {
+    if (key.kind() == BuiltinCellKey::Kind::Object && (table.isHostFunctionOfEngine(id) || table.isNativeFunctionOfHost(id))) {
         Structure* structure = value.asCell()->structure();
         if (structure->globalObject()->hostFunctionStructure()->mayHaveImmutableProperties() && !structure->mayHaveImmutableProperties())
             return makeUnexpected(BuiltinLookupFailure::HasOtherCallee);
@@ -937,7 +944,7 @@ namespace {
 
 class FixedNamesOfBuiltin final : public ImmutablePropertyNames::OutsideNames {
 public:
-    FixedNamesOfBuiltin(VM& vm, BuiltinID holder, std::span<const uint32_t> constantMembers, WritesToBuiltinMembers* writes, std::span<const uint32_t> unlockedMembers, bool reflectThrows, std::span<const Identifier> openedNames, std::optional<std::span<const uint32_t>> namesTakenForAbsent)
+    FixedNamesOfBuiltin(VM& vm, BuiltinID holder, std::span<const uint32_t> constantMembers, WritesToBuiltinMembers* writes, std::span<const uint32_t> unlockedMembers, bool reflectThrows, std::span<const Identifier> openedNames, std::optional<std::span<const uint32_t>> namesTakenForAbsent, std::span<const uint64_t> lockedAbsentNames)
         : m_vm(vm)
         , m_holder(holder)
         , m_closedKeys(BuiltinTable::singleton().closedKeysOf(holder))
@@ -946,6 +953,7 @@ public:
         , m_reflectThrows(reflectThrows)
         , m_writes(writes)
         , m_namesTakenForAbsent(namesTakenForAbsent)
+        , m_lockedAbsentNames(lockedAbsentNames)
     {
         for (const Identifier& opened : openedNames) {
             if (m_namesTakenForAbsent || m_reflectThrows)
@@ -957,11 +965,16 @@ public:
 
     void willWrite(UniquedStringImpl* uid) const final
     {
-        if (!m_writes || m_vm.allowLazyMaterializationOfImmutablePropertiesCount)
+        if (m_vm.allowLazyMaterializationOfImmutablePropertiesCount || m_membersWrittenBefore.contains(uid))
             return;
         const BuiltinTable& table = BuiltinTable::singleton();
         BuiltinName name = table.nameOf(m_vm, uid);
-        if (BuiltinID member = name ? table.findOwnMember(m_holder, name) : BuiltinID())
+        BuiltinID member = name ? table.findOwnMember(m_holder, name) : BuiltinID();
+        if (member && !refusalDependsOnWriter(uid))
+            m_membersWrittenBefore.add(uid);
+        if (!m_writes)
+            return;
+        if (member)
             m_writes->willWrite(member, uid);
         else
             m_writes->willAddNameTo(m_holder);
@@ -969,6 +982,8 @@ public:
 
     bool contains(UniquedStringImpl* uid) const final
     {
+        if (m_membersWrittenBefore.contains(uid))
+            return false;
         const BuiltinTable& table = BuiltinTable::singleton();
         BuiltinName name = table.nameOf(m_vm, uid);
         if (table.at(m_holder).flags.contains(BuiltinFlag::IsLockedObject)) {
@@ -979,10 +994,12 @@ public:
         }
         if (name && isFixed(name))
             return true;
+        if (!m_lockedAbsentNames.empty() && !uid->isSymbol() && std::ranges::binary_search(m_lockedAbsentNames, ProgramTables::encodeAbsentName(BuiltinTable::singleton().canonicalID(m_holder).index(), numberOfName(uid))))
+            return true;
         return m_namesTakenForAbsent && !uid->isSymbol() && !m_openedTexts.contains(uid) && !(name && table.findOwnMember(m_holder, name)) && isTakenForAbsent(uid);
     }
 
-    bool refusesWrite(UniquedStringImpl* uid) const final { return contains(uid) || (refusalDependsOnWriter(uid) && isWrittenByFileOfProduct(m_vm)); }
+    bool refusesWrite(UniquedStringImpl* uid) const final { return !m_membersWrittenBefore.contains(uid) && (contains(uid) || (refusalDependsOnWriter(uid) && isWrittenByFileOfProduct(m_vm))); }
 
     bool refusalDependsOnWriter(UniquedStringImpl* uid) const final
     {
@@ -1009,13 +1026,15 @@ public:
 private:
     LockedIn lockedIn() const { return m_reflectThrows && !isWrittenByFileOfProduct(m_vm) ? LockedIn::TestRun : LockedIn::Executable; }
 
-    bool isTakenForAbsent(UniquedStringImpl* uid) const
+    static uint32_t numberOfName(UniquedStringImpl* uid)
     {
         if (uid->is8Bit() && charactersAreAllASCII(uid->span8()))
-            return std::ranges::binary_search(*m_namesTakenForAbsent, ProgramTables::numberOfNameTakenForAbsent(byteCast<uint8_t>(uid->span8())));
+            return ProgramTables::numberOfNameTakenForAbsent(byteCast<uint8_t>(uid->span8()));
         CString utf8 = String(uid).utf8();
-        return std::ranges::binary_search(*m_namesTakenForAbsent, ProgramTables::numberOfNameTakenForAbsent(byteCast<uint8_t>(utf8.span())));
+        return ProgramTables::numberOfNameTakenForAbsent(byteCast<uint8_t>(utf8.span()));
     }
+
+    bool isTakenForAbsent(UniquedStringImpl* uid) const { return std::ranges::binary_search(*m_namesTakenForAbsent, numberOfName(uid)); }
 
     bool isFixed(BuiltinName name) const
     {
@@ -1044,12 +1063,14 @@ private:
     bool m_reflectThrows;
     WritesToBuiltinMembers* m_writes;
     std::optional<std::span<const uint32_t>> m_namesTakenForAbsent;
+    std::span<const uint64_t> m_lockedAbsentNames;
     IdentifierSet m_openedTexts;
+    mutable IdentifierSet m_membersWrittenBefore;
 };
 
 } // anonymous namespace
 
-Ref<ImmutablePropertyNames> immutablePropertyNamesOf(VM& vm, BuiltinID holder, std::span<const uint32_t> constantMembers, WritesToBuiltinMembers* writes, std::span<const uint32_t> unlockedMembers, bool reflectThrows, std::span<const Identifier> openedNames, std::optional<std::span<const uint32_t>> namesTakenForAbsent)
+Ref<ImmutablePropertyNames> immutablePropertyNamesOf(VM& vm, BuiltinID holder, std::span<const uint32_t> constantMembers, WritesToBuiltinMembers* writes, std::span<const uint32_t> unlockedMembers, bool reflectThrows, std::span<const Identifier> openedNames, std::optional<std::span<const uint32_t>> namesTakenForAbsent, std::span<const uint64_t> lockedAbsentNames)
 {
     const BuiltinTable& table = BuiltinTable::singleton();
     OptionSet<ImmutablePropertyNames::Part> parts;
@@ -1073,7 +1094,7 @@ Ref<ImmutablePropertyNames> immutablePropertyNamesOf(VM& vm, BuiltinID holder, s
                 openStrings.add(table.identifierOf(vm, table.at(member).name).impl());
         }
     }
-    return ImmutablePropertyNames::create({ }, parts, WTF::move(openStrings), adoptRef(*new FixedNamesOfBuiltin(vm, holder, constantMembers, writes, unlockedMembers, reflectThrows, openedNames, namesTakenForAbsent)));
+    return ImmutablePropertyNames::create({ }, parts, WTF::move(openStrings), adoptRef(*new FixedNamesOfBuiltin(vm, holder, constantMembers, writes, unlockedMembers, reflectThrows, openedNames, namesTakenForAbsent, lockedAbsentNames)));
 }
 
 } // namespace JSC::AOT

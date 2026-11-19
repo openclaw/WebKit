@@ -10,11 +10,14 @@
 
 #include "AOTArrayStorageForms.h"
 #include "AOTBarrierEmitter.h"
+#include "AOTBuildContext.h"
 #include "AOTBuiltinTypes.h"
+#include "AOTByteLiterals.h"
 #include "AOTConversionEmitter.h"
 #include "AOTElementAccessEmitter.h"
 #include "AOTElementEmitterAllocation.h"
 #include "AOTResultRules.h"
+#include "AOTStringEmitter.h"
 #include "AOTStubsAllocation.h"
 #include "AOTStubsElements.h"
 #include "AOTTypeArena.h"
@@ -105,14 +108,69 @@ void ArrayBufferViewBuiltinEmitter::generateTypedArrayByteOffset(const InlineCal
     finish(call, byteOffsetOf(view), bufferSizeRange);
 }
 
+Integer ArrayBufferViewBuiltinEmitter::lengthOfViewInArgument(const InlineCall& call)
+{
+    ValueID argument = call.argument(0);
+    Boxed value = in<Boxed>(argument);
+    if (typeOf(argument).primitives)
+        missUnless(call, isCell(value));
+    CellPointer view = unboxCell(value);
+    missUnless(call, hasCellTypeIn(view, { Int8ArrayType, BigUint64ArrayType }));
+    missUnless(call, hasFixedLength(view));
+    Integer length = lengthOf(view);
+    missUnless(call, isNotZero(length));
+    return length;
+}
+
+void ArrayBufferViewBuiltinEmitter::generateViewLength(const InlineCall& call)
+{
+    finish(call, lengthOfViewInArgument(call), bufferSizeRange);
+}
+
+void ArrayBufferViewBuiltinEmitter::generateViewIsOutOfBounds(const InlineCall& call)
+{
+    lengthOfViewInArgument(call);
+    finish(call, boolean(false));
+}
+
 void ArrayBufferViewBuiltinEmitter::generateTypedArrayWithLength(const InlineCall& call)
 {
     BuiltinClassID constructedClass = m_builtins.at(m_builtins.at(call.overload()).builtin).instanceClass;
     RELEASE_ASSERT(constructedClass);
     TypedArrayType type = m_builtins.typedArrayTypeOf(constructedClass);
     RELEASE_ASSERT(isTypedView(type) && m_builtins.typedArrayClassOf(constructedClass) == constructedClass);
-    StubCallResult view = callStub(call.context(), newTypedArray(), { word32(type).value(), numberOperand(call.argument(0)).value() }, { .calledBuiltin = functionOf(call.overload()) });
-    finish(call, CellPointer(view.first));
+    ValueID length = call.argument(0);
+    auto finishWith = [&](StubKey stub, LValue lengthOperand) {
+        StubCallResult view = callStub(call.context(), stub, { word32(type).value(), lengthOperand }, { .calledBuiltin = functionOf(call.overload()) });
+        finish(call, CellPointer(view.first));
+    };
+    if (typeOf(length).isInt32())
+        finishWith(newTypedArray(LengthOfTypedArray::WholeNumber), int32Operand(length).value());
+    else
+        finishWith(newTypedArray(LengthOfTypedArray::Number), numberOperand(length).value());
+}
+
+void ArrayBufferViewBuiltinEmitter::generateByteLiteral(const InlineCall& call)
+{
+    auto stringOf = [&](ValueID argument) {
+        const Operation& definition = operationAt(definitionOf(argument));
+        RELEASE_ASSERT(definition.opcode == Opcode::String);
+        return definition.string();
+    };
+    auto kind = call.parameter<ByteLiteralKind>(0);
+    ValueID encoding = call.argumentOrNull(1);
+    StringID string = stringOf(call.argument(0));
+    std::optional<Vector<uint8_t>> bytes = encodeByteLiteral(types(), build().stringEncoders(), kind, string, encoding ? stringOf(encoding) : StringID());
+    RELEASE_ASSERT(bytes);
+    if (StringEmitter& strings = emitter<StringEmitter>(); m_records.inlinedStrings.areRecorded() && bytes->size() >= strings.textOf(string).length()) [[unlikely]]
+        strings.recordInlined(string);
+    Pointer address(bytes->isEmpty() ? m_out.constInt64(0) : m_out.relocatable(SymbolSpace::Constant, m_out.addConstantData(bytes->span(), ConstantKind::ByteLiteral)));
+    finish(call, callOperation<CellPointer>(call.context(), RuntimeOperation::CopyByteLiteral, { address, word32(static_cast<uint32_t>(bytes->size())), word32(kind == ByteLiteralKind::BufferFrom) }, { .calledBuiltin = functionOf(call.overload()) }));
+}
+CellPointer ArrayBufferViewBuiltinEmitter::askedAnewWherePositionsAreTested(CellPointer view)
+{
+    ElementAccessEmitter& accesses = emitter<ElementAccessEmitter>();
+    return accesses.checksBounds() ? accesses.askedAnew(view) : view;
 }
 
 void ArrayBufferViewBuiltinEmitter::generateTypedArraySet(const InlineCall& call)
@@ -121,8 +179,8 @@ void ArrayBufferViewBuiltinEmitter::generateTypedArraySet(const InlineCall& call
     TypedArrayType type = typedArrayTypeOf(typeContext, typeIDOf(call.receiver()));
     RELEASE_ASSERT(isTypedView(type) && typedArrayTypeOf(typeContext, typeIDOf(call.argument(0))) == type);
     unsigned shift = logElementSize(type);
-    CellPointer target = cellOperand(call.receiver());
-    CellPointer source = cellOperand(call.argument(0));
+    CellPointer target = askedAnewWherePositionsAreTested(cellOperand(call.receiver()));
+    CellPointer source = askedAnewWherePositionsAreTested(cellOperand(call.argument(0)));
     ValueID offset = call.argumentOrNull(1);
     Integer position = !offset ? integer(0) : typeOf(offset).isInteger() ? integerOperand(offset) : emitter<ConversionEmitter>().toInteger(numberOperand(offset));
     missUnless(call, haveFixedLength(target, source));

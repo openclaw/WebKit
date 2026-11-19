@@ -180,7 +180,7 @@ function withConstructedClass(spec: TypeSpec, constructed: ClassName): TypeSpec 
     return { type: "Union", members: spec.members.map(member => withConstructedClass(member, constructed)) };
   }
   if (spec.type !== "InstanceOfReceiverClass") return spec;
-  return { type: "Instance", class: constructed, freshness: spec.freshness };
+  return { type: "Instance", class: constructed, freshness: spec.freshness, isOfClassItself: true };
 }
 
 function resultSpecOf(context: OverloadContext): TypeSpec {
@@ -337,6 +337,7 @@ function resolveRangeOperand(context: OverloadContext): ModelOperand | null {
     case "AbsoluteValue":
     case "IntegerPart":
     case "Sign":
+    case "CodeUnitOrNaN":
       if (range.operand === undefined) context.report(`the range rule ${range.rule} needs the operand it applies to`);
       return written;
   }

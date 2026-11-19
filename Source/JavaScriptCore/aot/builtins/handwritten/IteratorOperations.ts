@@ -24,7 +24,9 @@ export function iteratorGenericClose(iterator) {
 // What the iterator hands out: iteratorGenericNext(), a read of `done` and, unless that holds, a read of `value`.
 // Where the iterator is done: the mark of a closed iterator, which no program ever holds, so that no value can be mistaken for it.
 // Where `nextMethod` is the own method of an iterator of the engine, nobody sees the object that a call of it answers with, and none is made.
+// A loop that knows the method has a copy of the one arm that is left.
 $linkTimeConstant;
+$alwaysInline;
 export function iteratorStepValue(nextMethod, iterator) {
     "use strict";
 
@@ -53,6 +55,10 @@ export function iteratorStepValue(nextMethod, iterator) {
             return answer.done === true ? $collectionIteratorClosedMark() : answer.value;
         }
         return status === $generatorStepStatusCompleted ? $collectionIteratorClosedMark() : value;
+    }
+    if (nextMethod === $regExpStringIteratorProtoNext && $isRegExpStringIterator(iterator)) {
+        const match = $stepMatchIterator(iterator);
+        return match === null ? $collectionIteratorClosedMark() : match;
     }
     const result = $iteratorGenericNext(nextMethod, iterator);
     return result.done ? $collectionIteratorClosedMark() : result.value;

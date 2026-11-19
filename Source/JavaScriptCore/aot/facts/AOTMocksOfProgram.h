@@ -7,8 +7,8 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
 #include "AOTID.h"
-#include <wtf/BitVector.h>
 
 namespace JSC { namespace AOT { namespace Typed {
 
@@ -17,7 +17,7 @@ class Program;
 struct MocksOfProgram {
     BitVector modulesThatMayBeMocked;
     BitVector namespacesHandedOnByMockedModules;
-    BitVector modulesThatLeadToMocks;
+    BitVector modulesReachingMocks;
     bool isAnyModuleMocked { false };
 };
 MocksOfProgram findMocksOfProgram(const Program&);

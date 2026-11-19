@@ -264,8 +264,10 @@ Frame* planFrame(Procedure& proc)
         int32_t* offsetOfSpill = static_cast<int32_t*>(arena.allocate(spills.size() * sizeof(int32_t), alignof(int32_t)));
         for (SpillIndex spill = 0; spill < spills.size(); ++spill) {
             const uint32_t distance = slots.distanceOf(spill);
-            ASSERT(distance && distance <= slots.bytesInAll() && !(distance % bytesForWidth(spills[spill].width)));
-            offsetOfSpill[spill] = form.topOfSlots - static_cast<int32_t>(distance);
+            ASSERT(distance && distance <= slots.bytesInAll() && !(distance % std::min<uint32_t>(bytesForWidth(spills[spill].width), plannedFrameWordSize)));
+            const int32_t offset = form.topOfSlots - static_cast<int32_t>(distance);
+            RELEASE_ASSERT(!(offset & Frame::deadSlotTag));
+            offsetOfSpill[spill] = spills[spill].isDeadSlot ? offset | Frame::deadSlotTag : offset;
         }
         frame->m_offsetOfSpill = std::span<int32_t>(offsetOfSpill, spills.size());
     }
@@ -306,7 +308,7 @@ static bool someLeafNamesFrameToBePlanned(const Liveness& liveness, const Operat
 {
     if (operation->isUnconditionalJump())
         return false;
-    constexpr uint16_t hasLeavesOfItsOwn = static_cast<uint16_t>(ValueFlag::WorksInMemory) | static_cast<uint16_t>(ValueFlag::GoesByOverflow);
+    constexpr uint16_t hasLeavesOfItsOwn = static_cast<uint16_t>(ValueFlag::WorksInMemory) | static_cast<uint16_t>(ValueFlag::UsesOverflowFlag);
     if (liveness.of(operation).flags & hasLeavesOfItsOwn) [[unlikely]] {
         bool namesFrame = false;
         forEachLeaf(liveness, operation, [&](const Operation*, unsigned, const Operation* leaf) {
@@ -323,7 +325,7 @@ static bool someLeafNamesFrameToBePlanned(const Liveness& liveness, const Operat
 
 static ALWAYS_INLINE bool everyLeafIsValueOrConstantAheadOfFrame(const ValueFacts* valueFacts, const Operation* operation)
 {
-    constexpr uint16_t hasLeavesOfItsOwn = static_cast<uint16_t>(ValueFlag::WorksInMemory) | static_cast<uint16_t>(ValueFlag::GoesByOverflow);
+    constexpr uint16_t hasLeavesOfItsOwn = static_cast<uint16_t>(ValueFlag::WorksInMemory) | static_cast<uint16_t>(ValueFlag::UsesOverflowFlag);
     if (valueFacts[operation->index()].flags & hasLeavesOfItsOwn)
         return false;
     for (const Operation* child : operation->children()) {
@@ -406,6 +408,117 @@ static bool blockLeavesFunctionAheadOfFrame(const Block* block)
     return !block->numSuccessors() && block->last()->opcode() != Oops;
 }
 
+using CountsOfValuesByBank = std::array<uint16_t, numberOfBanks>;
+
+static NEVER_INLINE CountsOfValuesByBank* countWhatIsLiveByPositionAlone(Allocator& allocator, unsigned mostGPRs, unsigned mostFPRs)
+{
+    std::span<Block* const> blocksInOrder = allocator.m_order.blocksInOrder();
+    auto isOverBound = [&](unsigned numberOfGPRs, unsigned numberOfFPRs) {
+        return numberOfGPRs > mostGPRs || numberOfFPRs > mostFPRs;
+    };
+    auto asksWhatIsLiveByPositionAlone = [&](const Block* block) {
+        return !allocator.m_order.of(block).isRare() && allocator.m_liveness.endOfWhatWaysLeadToFrom(block) != noPosition && isOverBound(allocator.m_liveness.mostLiveIn(block, Bank::GP), allocator.m_liveness.mostLiveIn(block, Bank::FP));
+    };
+    CountsOfValuesByBank* const liveByPositionAlone = allocator.m_arena.createSpan<CountsOfValuesByBank>(allocator.m_proc.numberOfBlocks()).data();
+    Position firstHead = noPosition;
+    Position lastHead = 0;
+    Position firstEnd = noPosition;
+    Position lastEnd = 0;
+    size_t behindLastBlockThatAsks = 0;
+    for (size_t index = 0; index < blocksInOrder.size(); ++index) {
+        const Block* block = blocksInOrder[index];
+        if (!asksWhatIsLiveByPositionAlone(block))
+            continue;
+        firstHead = std::min(firstHead, allocator.m_order.headOf(block));
+        lastHead = allocator.m_order.headOf(block);
+        firstEnd = std::min(firstEnd, allocator.m_liveness.endOfWhatWaysLeadToFrom(block));
+        lastEnd = std::max(lastEnd, allocator.m_liveness.endOfWhatWaysLeadToFrom(block));
+        behindLastBlockThatAsks = index + 1;
+    }
+    struct Event {
+        Position position;
+        uint32_t value;
+    };
+    struct ValueThatOutlivesItsBlock {
+        uint32_t rankOfNextRead;
+        uint8_t bank;
+    };
+    constexpr uint32_t isDefinition = 1u << 31;
+    constexpr uint32_t isNotLive = UINT32_MAX;
+    ArenaVector<ValueThatOutlivesItsBlock> values;
+    ArenaVector<Event> events;
+    uint32_t numberReadNextBehindLastEnd[numberOfBanks] { 0, 0 };
+    auto noteValue = [&](const Operation* value, Position endOfBlock) ALWAYS_INLINE_LAMBDA {
+        const ValueFacts& facts = allocator.m_valueFacts[value->index()];
+        if (facts.lastUse < endOfBlock || facts.definition >= lastHead || facts.lastUse == noPosition || facts.has(ValueFlag::IsKeptForCollector) || !value->type().isNumeric())
+            return;
+        const uint32_t key = values.size();
+        const uint8_t bank = static_cast<uint8_t>(bankOf(value->type()));
+        values.append(allocator.m_arena, ValueThatOutlivesItsBlock { isNotLive, bank });
+        if (facts.definition >= firstHead)
+            events.append(allocator.m_arena, Event { facts.definition, key | isDefinition });
+        for (uint32_t use = facts.firstUse; use; use = allocator.m_liveness.use(use).next) {
+            Position read = allocator.m_liveness.use(use).position;
+            if (read >= lastEnd) {
+                values[key].rankOfNextRead = 0;
+                ++numberReadNextBehindLastEnd[bank];
+                break;
+            }
+            if (read >= firstHead)
+                events.append(allocator.m_arena, Event { read, key });
+        }
+    };
+    for (size_t index = 0; index < behindLastBlockThatAsks; ++index) {
+        const Position endOfBlock = std::max(firstEnd, allocator.m_order.endOf(blocksInOrder[index]));
+        for (const Operation* phi : blocksInOrder[index]->phis())
+            noteValue(phi, endOfBlock);
+        for (const Operation* operation : blocksInOrder[index]->operations())
+            noteValue(operation, endOfBlock);
+    }
+    std::ranges::sort(events.span(), [](const Event& first, const Event& second) {
+        return first.position > second.position;
+    });
+    const uint32_t numberOfEvents = events.size();
+    uint32_t* const numbersByRank[numberOfBanks] { allocator.m_arena.createSpan<uint32_t>(numberOfEvents + 1).data(), allocator.m_arena.createSpan<uint32_t>(numberOfEvents + 1).data() };
+    auto leave = [&](ValueThatOutlivesItsBlock& value) {
+        if (value.rankOfNextRead == isNotLive)
+            return;
+        if (!value.rankOfNextRead)
+            --numberReadNextBehindLastEnd[value.bank];
+        for (uint32_t rank = value.rankOfNextRead; rank && rank <= numberOfEvents; rank += rank & -rank)
+            --numbersByRank[value.bank][rank];
+        value.rankOfNextRead = isNotLive;
+    };
+    uint32_t nextEvent = 0;
+    for (size_t index = behindLastBlockThatAsks; index--;) {
+        const Block* block = blocksInOrder[index];
+        if (!asksWhatIsLiveByPositionAlone(block))
+            continue;
+        const Position head = allocator.m_order.headOf(block);
+        for (; nextEvent < numberOfEvents && events[nextEvent].position >= head; ++nextEvent) {
+            ValueThatOutlivesItsBlock& value = values[events[nextEvent].value & ~isDefinition];
+            leave(value);
+            if (events[nextEvent].value & isDefinition)
+                continue;
+            value.rankOfNextRead = nextEvent + 1;
+            for (uint32_t rank = nextEvent + 1; rank <= numberOfEvents; rank += rank & -rank)
+                ++numbersByRank[value.bank][rank];
+        }
+        const Position endOfWays = allocator.m_liveness.endOfWhatWaysLeadToFrom(block);
+        const uint32_t numberOfEventsBehindWays = static_cast<uint32_t>(std::ranges::partition_point(events.span(), [&](const Event& event) {
+            return event.position >= endOfWays;
+        }) - events.span().begin());
+        CountsOfValuesByBank& counts = liveByPositionAlone[block->index()];
+        for (unsigned bank = 0; bank < numberOfBanks; ++bank) {
+            uint32_t number = numberReadNextBehindLastEnd[bank];
+            for (uint32_t rank = numberOfEventsBehindWays; rank; rank -= rank & -rank)
+                number += numbersByRank[bank][rank];
+            counts[bank] = static_cast<uint16_t>(std::min<uint32_t>(number, allocator.m_liveness.mostLiveIn(block, static_cast<Bank>(bank))));
+        }
+    }
+    return liveByPositionAlone;
+}
+
 void Allocator::findFramedPart()
 {
     const ProcedureTraits& traits = m_proc.traits();
@@ -417,23 +530,39 @@ void Allocator::findFramedPart()
     const Block* entry = m_proc.entrypoints().data()->block;
     const unsigned numberOfGPRsThatNoCallerCountsOn = static_cast<unsigned>(std::popcount(m_file.allocatableIn(Bank::GP) & ~m_file.calleeSaved));
     const unsigned numberOfFPRsThatNoCallerCountsOn = static_cast<unsigned>(std::popcount(m_file.allocatableIn(Bank::FP) & ~m_file.calleeSaved));
-    auto runsOutOfRegisters = [&](const Block* block) {
-        return m_liveness.mostLiveIn(block, Bank::GP) > numberOfGPRsThatNoCallerCountsOn || m_liveness.mostLiveIn(block, Bank::FP) > numberOfFPRsThatNoCallerCountsOn;
+    CountsOfValuesByBank* liveByPositionAlone = nullptr;
+    auto runsOutOfRegistersOnWaysFrom = [&](const Block* block, unsigned numberOfGPRs, unsigned numberOfFPRs) NEVER_INLINE {
+        if (m_order.of(block).isRare() || m_liveness.endOfWhatWaysLeadToFrom(block) == noPosition)
+            return true;
+        if (!liveByPositionAlone)
+            liveByPositionAlone = countWhatIsLiveByPositionAlone(*this, numberOfGPRsThatNoCallerCountsOn, numberOfFPRsThatNoCallerCountsOn);
+        const CountsOfValuesByBank& counts = liveByPositionAlone[block->index()];
+        return numberOfGPRs - counts[0] > numberOfGPRsThatNoCallerCountsOn || numberOfFPRs - counts[1] > numberOfFPRsThatNoCallerCountsOn;
+    };
+    auto runsOutOfRegisters = [&](const Block* block) ALWAYS_INLINE_LAMBDA {
+        const unsigned numberOfGPRs = m_liveness.mostLiveIn(block, Bank::GP);
+        const unsigned numberOfFPRs = m_liveness.mostLiveIn(block, Bank::FP);
+        if (numberOfGPRs <= numberOfGPRsThatNoCallerCountsOn && numberOfFPRs <= numberOfFPRsThatNoCallerCountsOn) [[likely]]
+            return false;
+        return runsOutOfRegistersOnWaysFrom(block, numberOfGPRs, numberOfFPRs);
     };
     bool hasCalls = m_liveness.nextCallBehindHeadOf(entry, Bank::GP) != noPosition || m_liveness.nextCallBehindHeadOf(entry, Bank::FP) != noPosition;
-    if (!hasCalls && std::ranges::none_of(blocksInOrder, runsOutOfRegisters))
+    if (!hasCalls && std::ranges::none_of(blocksInOrder, [&](const Block* block) { return runsOutOfRegisters(block) || blockHoldsPatchThatNeedsFrameToBePlanned(m_liveness, block); }))
         return;
 
     const BlockPlace* const places = m_order.places();
     auto placeOf = [places](const Block* block) ALWAYS_INLINE_LAMBDA -> const BlockPlace& {
         return places[block->index()];
     };
+    auto standsInLoopThatMayTurn = [&](const BlockPlace& place) ALWAYS_INLINE_LAMBDA {
+        return m_liveness.standsInLoopThatMayTurn(m_order, place);
+    };
     auto needsFrameByFacts = [&](const Block* block, const FactsOfBlockAheadOfFrame& facts) {
         return facts.holdsPatchThatNeedsFrame || facts.namesFrame || runsOutOfRegisters(block);
     };
 
     const bool mayNameFrame = someOperationMayNameFrameToBePlanned(m_proc);
-    auto needsFrameForPatchOrRegisters = [&](const Block* block) {
+    auto needsFrameForPatchOrRegisters = [&](const Block* block) ALWAYS_INLINE_LAMBDA {
         ASSERT(!mayNameFrame);
         return runsOutOfRegisters(block) || blockHoldsPatchThatNeedsFrameToBePlanned(m_liveness, block);
     };
@@ -539,13 +668,13 @@ void Allocator::findFramedPart()
         const Block* block = blocks[index];
         const BlockPlace& place = placeOf(block);
         const bool isRare = place.isRare();
-        const bool mayBeHead = !isRare && place.loop == noLoop;
+        const bool mayBeHead = !isRare && !standsInLoopThatMayTurn(place);
         bool blockFollowsSetup = marks[block->index()] & followsSetup;
         if (!mayBeHead) {
             blockFollowsSetup = blockFollowsSetup || (!isRare && needsFrame(block));
             if (blockFollowsSetup) {
                 const Block* above = block;
-                while (above && !blocksAboveLoopsAndRareRegions[above->index()] && (placeOf(above).isRare() || placeOf(above).loop != noLoop))
+                while (above && !blocksAboveLoopsAndRareRegions[above->index()] && (placeOf(above).isRare() || standsInLoopThatMayTurn(placeOf(above))))
                     above = dominatorOf(above);
                 if (!above)
                     return;
@@ -593,7 +722,7 @@ void Allocator::findFramedPart()
             if (!(marksOfBlock & everyWayOnNeedsFrame))
                 continue;
             const BlockPlace& place = placeOf(block);
-            if (place.isRare() || place.loop != noLoop)
+            if (place.isRare() || standsInLoopThatMayTurn(place))
                 continue;
             if (!(marksOfBlock & followsSetup) && !needsFrame(block)) {
                 bool someWayLeavesPartUnused = false;
@@ -609,6 +738,131 @@ void Allocator::findFramedPart()
         isInFramedPart.set(block->index());
     }
 
+    std::span<const RareRegion> rareRegions = m_order.rareRegions();
+    ArenaVector<uint32_t>& headAboveBlock = m_allocation.m_headAboveBlock;
+    ArenaVector<uint32_t>& setOfHeadsAboveBlock = m_allocation.m_setOfHeadsAboveBlock;
+    headAboveBlock.fill(m_arena, m_order.mostBlocks(), UINT32_MAX);
+    size_t* const endsOfRegionsAsked = m_arena.createSpan<size_t>(rareRegions.size()).data();
+    auto endOfRegionThatMayJoinFramedPart = [&](uint32_t region) -> size_t {
+        if (endsOfRegionsAsked[region])
+            return endsOfRegionsAsked[region];
+        endsOfRegionsAsked[region] = SIZE_MAX;
+        const Block* entryOfRegion = rareRegions[region].onlyEntry;
+        if (!entryOfRegion || entryOfRegion == entry)
+            return SIZE_MAX;
+        const BlockPlace& placeOfEntry = placeOf(entryOfRegion);
+        if (standsInLoopThatMayTurn(placeOfEntry) || (placeOfEntry.orderIndex && placeOf(blocks[placeOfEntry.orderIndex - 1]).rareRegion == region))
+            return SIZE_MAX;
+        for (const Block* predecessor : placeOfEntry.predecessors) {
+            if (liesInFramedPart(predecessor))
+                return SIZE_MAX;
+        }
+        size_t end = placeOfEntry.orderIndex;
+        for (; end < numberOfBlocksInOrder && placeOf(blocks[end]).rareRegion == region; ++end) {
+            if (blocks[end]->isLandingPad() || liesInFramedPart(blocks[end]))
+                return SIZE_MAX;
+        }
+        endsOfRegionsAsked[region] = end;
+        return end;
+    };
+    auto setAbove = [&](const Block* block) {
+        return setOfHeadsAboveBlock.isEmpty() ? UINT32_MAX : setOfHeadsAboveBlock[block->index()];
+    };
+    auto standsUnderHeadsOf = [&](const Block* block, const Block* other) {
+        headAboveBlock[block->index()] = headAboveBlock[other->index()];
+        if (!setOfHeadsAboveBlock.isEmpty())
+            setOfHeadsAboveBlock[block->index()] = setOfHeadsAboveBlock[other->index()];
+    };
+    struct SetThatHeadWasAddedTo {
+        uint32_t rest { UINT32_MAX };
+        uint32_t withHead { UINT32_MAX };
+    };
+    ArenaVector<SetThatHeadWasAddedTo> lastSetsThatHeadsWereAddedTo;
+    auto becomesHead = [&](const Block* block) {
+        lastSetsThatHeadsWereAddedTo.append(m_arena, SetThatHeadWasAddedTo { });
+        marks[block->index()] |= isHead;
+        isInFramedPart.set(block->index());
+        headAboveBlock[block->index()] = m_allocation.m_headsOfFramedPart.size();
+        m_allocation.m_headsOfFramedPart.append(m_arena, Allocation::HeadOfFramedPart { block });
+    };
+    for (size_t index = 0; index < numberOfBlocksInOrder; ++index) {
+        const Block* block = blocks[index];
+        const bool wasHead = marks[block->index()] & isHead;
+        if (liesInFramedPart(block) && !wasHead) {
+            if (headAboveBlock[block->index()] == UINT32_MAX)
+                standsUnderHeadsOf(block, dominatorOf(block));
+            continue;
+        }
+        if (const Block* dominator = dominatorOf(block); dominator && liesInFramedPart(dominator)) {
+            marks[block->index()] &= ~isHead;
+            isInFramedPart.set(block->index());
+            standsUnderHeadsOf(block, dominator);
+            continue;
+        }
+        const BlockPlace& place = placeOf(block);
+        const Block* usualWayIn = nullptr;
+        bool someRareWayInBringsHeads = false;
+        bool everyWayInMayLieInPart = block != entry && !block->isLandingPad() && !standsInLoopThatMayTurn(place);
+        for (const Block* predecessor : place.predecessors) {
+            if (!everyWayInMayLieInPart)
+                break;
+            const BlockPlace& placeOfPredecessor = placeOf(predecessor);
+            if (!liesInFramedPart(predecessor)) {
+                everyWayInMayLieInPart = placeOfPredecessor.isRare() && placeOfPredecessor.rareRegion != place.rareRegion && endOfRegionThatMayJoinFramedPart(placeOfPredecessor.rareRegion) <= index;
+                someRareWayInBringsHeads = true;
+            } else if (placeOfPredecessor.orderIndex >= index)
+                everyWayInMayLieInPart = false;
+            else if (placeOfPredecessor.isRare()) {
+                someRareWayInBringsHeads = true;
+                everyWayInMayLieInPart = setAbove(predecessor) == UINT32_MAX;
+            }
+            else if (!usualWayIn)
+                usualWayIn = predecessor;
+            else
+                everyWayInMayLieInPart = headAboveBlock[usualWayIn->index()] == headAboveBlock[predecessor->index()] && setAbove(usualWayIn) == setAbove(predecessor);
+        }
+        if (!everyWayInMayLieInPart || !usualWayIn) {
+            if (wasHead)
+                becomesHead(block);
+            continue;
+        }
+        marks[block->index()] &= ~isHead;
+        isInFramedPart.set(block->index());
+        standsUnderHeadsOf(block, usualWayIn);
+        if (!someRareWayInBringsHeads)
+            continue;
+        for (const Block* predecessor : place.predecessors) {
+            if (liesInFramedPart(predecessor))
+                continue;
+            const uint32_t region = placeOf(predecessor).rareRegion;
+            const Block* entryOfRegion = rareRegions[region].onlyEntry;
+            becomesHead(entryOfRegion);
+            for (size_t joining = placeOf(entryOfRegion).orderIndex + 1; joining < endsOfRegionsAsked[region]; ++joining) {
+                isInFramedPart.set(blocks[joining]->index());
+                standsUnderHeadsOf(blocks[joining], entryOfRegion);
+            }
+        }
+        uint32_t set = setAbove(usualWayIn);
+        for (const Block* predecessor : place.predecessors) {
+            if (!placeOf(predecessor).isRare())
+                continue;
+            const uint32_t head = headAboveBlock[predecessor->index()];
+            if (head == headAboveBlock[usualWayIn->index()] || (set != UINT32_MAX && m_allocation.m_setsOfHeads[set].head == head))
+                continue;
+            SetThatHeadWasAddedTo& last = lastSetsThatHeadsWereAddedTo[head];
+            if (last.withHead == UINT32_MAX || last.rest != set) {
+                last = SetThatHeadWasAddedTo { set, static_cast<uint32_t>(m_allocation.m_setsOfHeads.size()) };
+                m_allocation.m_setsOfHeads.append(m_arena, Allocation::FurtherHeadOfFramedPart { head, set });
+            }
+            set = last.withHead;
+        }
+        if (set == setAbove(usualWayIn))
+            continue;
+        if (setOfHeadsAboveBlock.isEmpty())
+            setOfHeadsAboveBlock.fill(m_arena, m_order.mostBlocks(), UINT32_MAX);
+        setOfHeadsAboveBlock[block->index()] = set;
+    }
+
     bool someWayLeavesFunctionWithoutPassingHead = false;
     reach(isReachedWithoutPassingHead, entry);
     while (numberOfBlocksToVisit && !someWayLeavesFunctionWithoutPassingHead) {
@@ -619,14 +873,18 @@ void Allocator::findFramedPart()
                 reach(isReachedWithoutPassingHead, edge.block());
         }
     }
-    if (!someWayLeavesFunctionWithoutPassingHead)
+    if (!someWayLeavesFunctionWithoutPassingHead) {
+        m_allocation.m_headsOfFramedPart.shrink(0);
         return;
+    }
 
+    m_untilByRareRegion.fill(m_arena, static_cast<uint32_t>(m_order.rareRegions().size()), 0);
     for (size_t index = 0; index < numberOfBlocksInOrder;) {
         const BlockPlace& place = placeOf(blocks[index]);
         Position first = noPosition;
         Position last = noPosition;
         bool comesBack = !place.isRare();
+        Position endOfWhatWaysLeadToFromSafepoints = 0;
         size_t end = index;
         do {
             const Block* block = blocks[end];
@@ -636,25 +894,21 @@ void Allocator::findFramedPart()
             const FactsOfBlockAheadOfFrame& facts = factsOf(block);
             if (facts.firstSafepoint == noPosition)
                 continue;
+            endOfWhatWaysLeadToFromSafepoints = std::max(endOfWhatWaysLeadToFromSafepoints, m_liveness.endOfWhatWaysLeadToFrom(block));
             if (first == noPosition)
                 first = facts.firstSafepoint;
             last = facts.lastSafepoint;
         } while (++end < numberOfBlocksInOrder && place.isRare() && placeOf(blocks[end]).rareRegion == place.rareRegion);
-        if (first != noPosition)
-            m_safepointsAheadOfFramedPart.append(m_arena, SafepointsAheadOfFramedPart { first, last, comesBack ? noPosition : m_order.endOf(blocks[end - 1]) });
+        if (first != noPosition) {
+            const Position until = comesBack ? endOfWhatWaysLeadToFromSafepoints : m_order.endOf(blocks[end - 1]);
+            if (place.isRare())
+                m_untilByRareRegion[place.rareRegion] = std::max(m_untilByRareRegion[place.rareRegion], until);
+            else
+                m_safepointsAheadOfFramedPart.append(m_arena, SafepointsAheadOfFramedPart { first, last, until });
+        }
         index = end;
     }
 
-    m_allocation.m_headAboveBlock.fill(m_arena, m_order.mostBlocks(), UINT32_MAX);
-    for (const Block* block : blocksInOrder) {
-        if (!liesInFramedPart(block))
-            continue;
-        if (marks[block->index()] & isHead) {
-            m_allocation.m_headAboveBlock[block->index()] = m_allocation.m_headsOfFramedPart.size();
-            m_allocation.m_headsOfFramedPart.append(m_arena, Allocation::HeadOfFramedPart { block });
-        } else
-            m_allocation.m_headAboveBlock[block->index()] = m_allocation.m_headAboveBlock[dominatorOf(block)->index()];
-    }
     m_allocation.m_isInFramedPart = isInFramedPart;
     m_allocation.m_writesMemoryAheadOfFramedPart = writesMemoryOnWayToNeed;
 }
@@ -699,7 +953,7 @@ void Allocator::settleFramedPart()
         if (spill.isSaveInRareRegion || spill.isPointerBesideNarrowReference || m_liveness.isSunk(value))
             continue;
         const Block* blockOfStore = value->endsBlock() ? value->owner()->successor(0).block() : value->owner();
-        spill.isStoredAtHeadOfFramedPart = isAheadOfFramedPart(blockOfStore) && !m_order.of(blockOfStore).isRare();
+        spill.isStoredAtHeadOfFramedPart = isOutsideFramedPart(blockOfStore) && !m_order.of(blockOfStore).isRare();
         someSpillIsStoredAtHead |= spill.isStoredAtHeadOfFramedPart;
     }
     auto setUpFrameAtEntryAfterAll = [&] {
@@ -730,7 +984,7 @@ void Allocator::settleFramedPart()
         return true;
     };
     for (const Block* block : m_order.blocksInOrder()) {
-        if (!isAheadOfFramedPart(block))
+        if (!isOutsideFramedPart(block))
             continue;
         const BlockPlace& place = m_order.of(block);
         const BlockSteps& steps = m_allocation.stepsOf(block);
@@ -785,13 +1039,64 @@ void Allocator::settleFramedPart()
     if (!someSpillIsStoredAtHead)
         return;
 
+    struct SavedByEveryHeadOfSet {
+        uint32_t begin { 0 };
+        uint32_t end { 0 };
+    };
+    ArenaVector<Location> savedByEveryHeadOfSets;
+    ArenaVector<SavedByEveryHeadOfSet> whatSetsSaved;
+    auto isSavedByEveryHeadOf = [&](uint32_t set, Location location) {
+        if (set == UINT32_MAX)
+            return true;
+        for (uint32_t index = whatSetsSaved[set].begin; index < whatSetsSaved[set].end; ++index) {
+            if (savedByEveryHeadOfSets[index] == location)
+                return true;
+        }
+        return false;
+    };
+    for (const Allocation::FurtherHeadOfFramedPart& set : m_allocation.m_setsOfHeads) {
+        const Allocation::HeadOfFramedPart& head = m_allocation.m_headsOfFramedPart[set.head];
+        const uint32_t beginOfSaved = savedByEveryHeadOfSets.size();
+        for (uint32_t index = head.beginOfSteps; index < head.endOfSteps; ++index) {
+            if (isSavedByEveryHeadOf(set.rest, m_allocation.m_steps[index].destination))
+                savedByEveryHeadOfSets.append(m_arena, m_allocation.m_steps[index].destination);
+        }
+        whatSetsSaved.append(m_arena, SavedByEveryHeadOfSet { beginOfSaved, static_cast<uint32_t>(savedByEveryHeadOfSets.size()) });
+    }
+    ArenaVector<uint8_t> saveIsRead;
+    saveIsRead.fill(m_arena, m_allocation.m_steps.size() - begin, 0);
+    ArenaVector<uint8_t> whatSetSavedIsRead;
+    whatSetSavedIsRead.fill(m_arena, savedByEveryHeadOfSets.size(), 0);
+    auto noteReadOfWhatHeadSaved = [&](const Allocation::HeadOfFramedPart& head, Location location) {
+        for (uint32_t index = head.beginOfSteps; index < head.endOfSteps; ++index) {
+            if (m_allocation.m_steps[index].destination == location)
+                saveIsRead[index - begin] = 1;
+        }
+    };
+    auto noteReadOfWhatSetSaved = [&](uint32_t set, Location location) {
+        for (; set != UINT32_MAX; set = m_allocation.m_setsOfHeads[set].rest) {
+            uint32_t index = whatSetsSaved[set].begin;
+            while (savedByEveryHeadOfSets[index] != location)
+                ++index;
+            if (whatSetSavedIsRead[index])
+                return;
+            whatSetSavedIsRead[index] = 1;
+            noteReadOfWhatHeadSaved(m_allocation.m_headsOfFramedPart[m_allocation.m_setsOfHeads[set].head], location);
+        }
+    };
     auto isSavedAbove = [&](const Block* block, Location location) {
         if (!isStoredAtHead(location))
             return true;
         const Allocation::HeadOfFramedPart& head = m_allocation.headOfFramedPartAbove(block);
         for (uint32_t index = head.beginOfSteps; index < head.endOfSteps; ++index) {
-            if (m_allocation.m_steps[index].destination == location)
-                return true;
+            if (m_allocation.m_steps[index].destination != location)
+                continue;
+            const uint32_t furtherHeads = m_allocation.furtherHeadsOfFramedPartAbove(block);
+            if (!isSavedByEveryHeadOf(furtherHeads, location))
+                return false;
+            saveIsRead[index - begin] = 1;
+            noteReadOfWhatSetSaved(furtherHeads, location);
+            return true;
         }
         return false;
     };
@@ -802,7 +1107,7 @@ void Allocator::settleFramedPart()
                     return false;
             }
         }
-        if (step.kind != StepKind::Execute || step.patchAssignment == UINT32_MAX)
+        if (step.kind != StepKind::Execute || step.patchAssignment == UINT32_MAX || m_proc.traits().shouldDropPatchOnlySaves)
             return true;
         return std::ranges::all_of(m_allocation.patchAssignment(step.patchAssignment).locations, [&](Location location) {
             return isSavedAbove(block, location);
@@ -825,6 +1130,28 @@ void Allocator::settleFramedPart()
         setUpFrameAtEntryAfterAll();
         return;
     }
+
+    uint32_t endOfSavesThatAreRead = begin;
+    for (Allocation::HeadOfFramedPart& head : m_allocation.m_headsOfFramedPart) {
+        const uint32_t beginOfSavesThatAreRead = endOfSavesThatAreRead;
+        for (uint32_t index = head.beginOfSteps; index < head.endOfSteps; ++index) {
+            if (!saveIsRead[index - begin] && !hasImplicitReader(spills[m_allocation.m_steps[index].destination.spillIndex()]))
+                continue;
+            if (endOfSavesThatAreRead != index)
+                m_allocation.m_steps[endOfSavesThatAreRead] = m_allocation.m_steps[index];
+            ++endOfSavesThatAreRead;
+        }
+        head.beginOfSteps = beginOfSavesThatAreRead;
+        head.endOfSteps = endOfSavesThatAreRead;
+    }
+    m_allocation.m_leavesOutSavesAtHeads = endOfSavesThatAreRead != m_allocation.m_steps.size();
+    m_allocation.m_steps.shrink(endOfSavesThatAreRead);
+}
+
+Position Allocator::endOfWhatWaysLeadToFromSafepointsOfRareRegion() const
+{
+    const Position until = m_untilByRareRegion.isEmpty() ? 0 : m_untilByRareRegion[m_rareRegion];
+    return until ? until : noPosition;
 }
 
 bool Allocator::pointerWaitsForFramedPart(Operation* reference)
@@ -835,7 +1162,7 @@ bool Allocator::pointerWaitsForFramedPart(Operation* reference)
     for (const SafepointsAheadOfFramedPart& safepoints : m_safepointsAheadOfFramedPart) {
         if (facts.definition >= safepoints.last)
             continue;
-        if (safepoints.until == noPosition) {
+        if (safepoints.until == noPosition || facts.has(ValueFlag::IsKeptForCollector)) {
             if (facts.lastUse != noPosition && facts.lastUse > safepoints.first)
                 return false;
             continue;

@@ -165,7 +165,7 @@ static const LayoutData& layoutNamed(LoadedProgram& program, ASCIILiteral name)
 {
     const ProgramTables& tables = program.state().tables;
     for (uint32_t shape = 1; shape < tables.firstEnvironmentShape; ++shape) {
-        if (tables.hasLayoutForShape(shape) && imageText().equals(StringID(tables.layoutForShape(shape).name), name))
+        if (tables.hasLayoutForShape(shape) && isNamedInTextOfLoadedProgram(tables.layoutForShape(shape), name))
             return tables.layoutForShape(shape);
     }
     failNativeTest(__FILE__, __LINE__, name.characters());
@@ -187,7 +187,7 @@ static uint32_t shapeTestFor(LoadedProgram& program, ASCIILiteral layoutName)
     const ProgramTables& tables = program.state().tables;
     uint32_t shape = layoutNamed(program, layoutName).shape;
     for (const FieldData& field : layoutNamed(program, "Holder"_s).fields()) {
-        for (const RuntimeCellTest& test : tables.typeAt(field.type).cellTests()) {
+        for (const RuntimeCellTest& test : tables.typeAt(tables.offsetOfTypeOf(field)).cellTests()) {
             if (test.kind != CellTestKind::ShapeIn)
                 continue;
             const ShapeTestData& members = tables.shapeTestAt(test.shapeTestOffset());

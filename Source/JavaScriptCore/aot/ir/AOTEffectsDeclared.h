@@ -23,8 +23,8 @@ public:
     {
     }
 
-    void reads(const MemoryLocation& location) { m_effects.reads.add(m_program, location); }
-    void writes(const MemoryLocation& location) { m_effects.writes.add(m_program, location); }
+    ALWAYS_INLINE void reads(const MemoryLocation& location) { m_effects.reads.addRead(m_program, location); }
+    ALWAYS_INLINE void writes(const MemoryLocation& location) { m_effects.writes.add(m_program, location); }
     void readsAllHeaps() { m_effects.reads = LocationMasks::top(); }
     void throws() { m_effects.mayThrow = true; }
     void collects() { m_effects.mayCollect = true; }
@@ -62,7 +62,8 @@ inline constexpr OpcodeSet opcodesThrowingOnlyForLackOfMemory {
     Opcode::Data, Opcode::NewSetFromData, Opcode::NewMapFromData, Opcode::LoopHint,
     Opcode::GetStringCodeUnit, Opcode::Substring, Opcode::FlattenString, Opcode::StringOrder, Opcode::StringStartsWithLiteral, Opcode::StringEndsWithLiteral,
     Opcode::StringOrderToCharacter, Opcode::StringIndexOfLiteral, Opcode::StringIndexOfCharacter, Opcode::StringLastIndexOfLiteral,
-    Opcode::StringRangeEqualsLiteral, Opcode::StringRangeToNumber, Opcode::StringRangeParseInt
+    Opcode::StringRangeEqualsLiteral, Opcode::StringRangeToNumber, Opcode::StringRangeParseInt, Opcode::FindStringRangeInMap,
+    Opcode::SubstringOrUndefined, Opcode::NewRegExpMatchArray, Opcode::NewArrayOfRegExpMatch, Opcode::BoundsOfStringSplit, Opcode::NewStringSplitArray
 };
 
 constexpr Effects withDeclaredKindOfThrow(Opcode opcode, Effects effects)
@@ -83,9 +84,17 @@ inline constexpr AbstractHeapSet heapsThatOnlyFlagsOfLooksAtCellRead { AbstractH
 template<typename Operation>
 ALWAYS_INLINE bool lookAtCellHasNoFlagThatReads(Opcode opcode, const Operation& operation)
 {
+    if (opcode == Opcode::ShapeTest)
+        return !operation.rejectsMarkedObjects();
     if (opcode == Opcode::IsNotFrozen)
         return !operation.hasNoExtraProperties() && !operation.hasNoFieldOutsideSlot();
     return opcode == Opcode::HasLayoutPrototype && !operation.hasNoFieldOutsideSlot();
+}
+
+template<typename Operation>
+ALWAYS_INLINE bool dependsOnBufferVariables(Opcode opcode, const Operation& operation)
+{
+    return opcode == Opcode::GetMirroredLength && operation.isOfBuffer();
 }
 
 template<typename Operation>
@@ -101,6 +110,10 @@ Effects declaredEffectsOfOperation(const Program& program, Opcode opcode, const 
     Effects effects = Effects::none();
     EffectsBuilder builder(program, effects);
     forEachDeclaredEffect(operation, builder);
+    if (dependsOnBufferVariables(opcode, operation))
+        effects.reads.add(AbstractHeap::ModuleVariables);
+    if (lookAtCellHasNoFlagThatReads(opcode, operation))
+        effects.reads.remove(heapsThatOnlyFlagsOfLooksAtCellRead);
     if (effects.mayThrow && opcodesThrowingOnlyForLackOfMemory.contains(opcode))
         effects.mayThrow = ThrowEffect::onlyForLackOfMemory();
     return effects;
@@ -119,6 +132,10 @@ const Effects& declaredEffectsOfOperation(const Program& program, Opcode opcode,
     storage = Effects::none();
     EffectsBuilder builder(program, storage);
     forEachDeclaredEffect(operation, builder);
+    if (dependsOnBufferVariables(opcode, operation))
+        storage.reads.add(AbstractHeap::ModuleVariables);
+    if (lookAtCellHasNoFlagThatReads(opcode, operation))
+        storage.reads.remove(heapsThatOnlyFlagsOfLooksAtCellRead);
     if (storage.mayThrow && opcodesThrowingOnlyForLackOfMemory.contains(opcode))
         storage.mayThrow = ThrowEffect::onlyForLackOfMemory();
     return storage;

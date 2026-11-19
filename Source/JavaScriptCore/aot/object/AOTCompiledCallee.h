@@ -36,6 +36,7 @@ JS_EXPORT_PRIVATE String name(JSObject* callee);
 JS_EXPORT_PRIVATE unsigned length(JSObject* callee);
 JS_EXPORT_PRIVATE bool canAssumeNameAndLengthAreOriginal(VM&, JSObject* callee);
 JS_EXPORT_PRIVATE JSValue sourceText(JSGlobalObject*, JSObject* callee);
+JSString* functionStringIfCreated(VM&, JSObject* callee);
 JSString* sourceStringIfCreated(VM&, JSObject* callee);
 JS_EXPORT_PRIVATE FunctionKind kind(JSObject* callee);
 
@@ -52,7 +53,10 @@ JS_EXPORT_PRIVATE void setCachedBoundFunctionStructure(VM&, JSObject*, Structure
 enum class DeclaredAs : uint8_t { NotCompiled, Function, AsyncFunction, GeneratorFunction, AsyncGeneratorFunction, Class };
 
 JS_EXPORT_PRIVATE DeclaredAs declaredAs(JSCell*);
-JS_EXPORT_PRIVATE bool awaitsByItself(JSCell*);
+JS_EXPORT_PRIVATE bool hasOwnAwait(JSCell*);
+JS_EXPORT_PRIVATE bool mayImportOwnOriginal(JSCell*);
+JS_EXPORT_PRIVATE Vector<String> requestedOriginals(JSCell*);
+JS_EXPORT_PRIVATE String declaringFilePath(JSCell*);
 JS_EXPORT_PRIVATE String closureDeclaredName(JSObject*);
 JS_EXPORT_PRIVATE bool belongsToBuiltinModule(JSCell*);
 JS_EXPORT_PRIVATE bool isCompiledClassObject(JSFunction*);

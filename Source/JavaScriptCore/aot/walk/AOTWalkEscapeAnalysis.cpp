@@ -16,28 +16,15 @@
 #include "AOTOpcodeSets.h"
 #include "AOTOperandKinds.h"
 #include "AOTRepresentation.h"
+#include "AOTSlotPlan.h"
 #include "AOTSweep.h"
+#include "AOTWalkBirths.h"
 #include "AOTWalkKnown.h"
+#include "AOTWalkTextBuilders.h"
 #include <algorithm>
 #include <optional>
 
 namespace JSC { namespace AOT { namespace Typed {
-
-static constexpr OpcodeSet allocationsOfEscapeAnalysis = opcodesWhere([](Opcode opcode) {
-    if (opcode == Opcode::NewClosure || opcode == Opcode::Data)
-        return true;
-    if (resultRuleOf(opcode) != ResultRule::Allocation || effectRuleOf(opcode) != EffectRule::Declared || boundToOf(opcode) == BoundTo::Site)
-        return false;
-    Effects bound = declaredBoundOf(opcode);
-    return bound.writes.containsOnly(heapsWhoseWritesNobodySees) && !bound.mayRunOtherCode();
-});
-static_assert(allocationsOfEscapeAnalysis.contains(Opcode::NewObject) && allocationsOfEscapeAnalysis.contains(Opcode::NewArray) && allocationsOfEscapeAnalysis.contains(Opcode::CreateIteratorResult));
-static_assert(!allocationsOfEscapeAnalysis.contains(Opcode::NewTemplateObject) && !allocationsOfEscapeAnalysis.contains(Opcode::TruncateNewArray));
-
-static constexpr OpcodeSet namesOfOperandInEscapeAnalysis = opcodesThatHandOn({ HandedOn::PassedCheck, HandedOn::Mark });
-static constexpr OpcodeSet argumentsObjectsOfEscapeAnalysis { Opcode::CreateUnmappedArguments, Opcode::CreateMappedArguments };
-static_assert(allocationsOfEscapeAnalysis.contains(Opcode::CreateUnmappedArguments) && allocationsOfEscapeAnalysis.contains(Opcode::CreateMappedArguments));
-static constexpr OpcodeSet opcodesOfEscapeAnalysis = allocationsOfEscapeAnalysis | namesOfOperandInEscapeAnalysis | OpcodeSet { Opcode::StrictEq, Opcode::GetMappedArgument };
 
 static constexpr OperandUses usesThatKeepFreshObjectHere {
     OperandUse::Inspects,
@@ -71,7 +58,7 @@ static Reference freshObjectNamedBy(Walker& walker, Reference name)
     if (!name || !name.isValue())
         return { };
     const Code& code = walker.code();
-    ValueID cell = rootOfCellInSweptCode(code, name.id());
+    ValueID cell = underlyingCellOf(code, name.id());
     if (code.isConstant(cell))
         return { };
     Reference object = Reference::value(cell);
@@ -104,17 +91,17 @@ static Reference rootOfObjectBuiltFor(Walker& walker, const BodyValue& value, ui
     if (!name || !name.isValue())
         return { };
     const Code& code = walker.code();
-    ValueID cell = rootOfCellInSweptCode(code, name.id());
+    ValueID cell = underlyingCellOf(code, name.id());
     if (code.isConstant(cell) || cell.index() < numberOfRecordsBefore)
         return { };
     return Reference::value(cell);
 }
 
-static bool givesObjectThatNothingElseNames(const Operation& made)
+static ALWAYS_INLINE bool givesObjectThatNothingElseNames(const Operation& made)
 {
     Opcode opcode = made.opcode;
     EffectTraits traits = made.traits();
-    if (!allocationsOfEscapeAnalysis.contains(opcode) || traits.mayWriteWhatIsSeen() || traits.mayRunOtherCode())
+    if (!allocationsOfEscapeAnalysis.contains(opcode) || traits.mayWriteObservableState() || traits.mayRunOtherCode())
         return false;
 
     if (opcode == Opcode::NewClosure) {
@@ -153,7 +140,9 @@ static void noteWhatNewObjectFillsIn(Walker& walker, Reference object, const Ope
 
     WalkState& state = walker.state();
     std::span<const FieldIndex> fillers = walker.fillersOfAllocation(object);
-    bool isAsAllocated = fillers.empty() && (numberOfFieldsWritten == SIZE_MAX || made.fields().size() == numberOfFieldsWritten);
+    std::optional<FieldIndex> environmentOfClosures = walker.plan().layout(layout).environmentOfDeferredClosures;
+    size_t numberOfNamesListed = made.fields().size() - (environmentOfClosures && !made.fields().empty() && made.fields().back() == *environmentOfClosures);
+    bool isAsAllocated = fillers.empty() && (numberOfFieldsWritten == SIZE_MAX || numberOfNamesListed == numberOfFieldsWritten);
     if (made.prototypeOperand() && program.prototypeMaySelectOtherClass(layout)) {
         std::optional<PlacedAllocation> placed = isAsAllocated ? walker.plan().allocation(program, layout, made.fields()) : std::nullopt;
         if (placed && placed->orderWord == unorderedOrderWord)
@@ -166,12 +155,12 @@ static void noteWhatNewObjectFillsIn(Walker& walker, Reference object, const Ope
         walker.noteThatUnitMakesScope();
     state.noteShape(object, isEnvironment ? walker.types().forEnvironment(layout) : walker.types().forLayout(layout));
     if (!isEnvironment) {
-        OptionSet<FactOfCell> facts { FactOfCell::NotFrozen };
+        OptionSet<CellFact> facts { CellFact::NotFrozen, CellFact::IsExtensible };
         if (!made.prototypeOperand())
-            facts.add(FactOfCell::HasLayoutPrototype);
+            facts.add(CellFact::HasLayoutPrototype);
         if (isAsAllocated)
-            facts.add(FactOfCell::NoFieldOutsideSlot);
-        state.noteFactsOfCell(object, facts);
+            facts.add(CellFact::NoFieldOutsideSlot);
+        state.recordCellFacts(object, facts);
         std::optional<PlacedAllocation> placed = isAsAllocated ? walker.plan().allocation(program, layout, made.fields()) : std::nullopt;
         if (placed)
             state.noteOrderWord(object, placed->orderWord);
@@ -198,6 +187,7 @@ static void noteWhatNewObjectFillsIn(Walker& walker, Reference object, const Ope
     }
     if (!isEnvironment && fields.size() == numberOfFieldsWritten && fillers.empty())
         state.noteElement(object, keyOfPropertiesAsListed(), object);
+    state.noteElementsLieOutsideViews(object);
 }
 
 static Reference positionInFreshList(Walker& walker, uint32_t position)
@@ -214,6 +204,12 @@ static Reference keyOfLengthOfFreshList(Walker& walker)
     return walker.constant(WTF::move(key));
 }
 
+bool isListOfKnownLength(Walker& walker, const WalkState& state, Reference list)
+{
+    Reference length = state.element(list, keyOfLengthOfFreshList(walker));
+    return length ? length.isConstant() : lengthOfListMadeInSight(walker, state, list).has_value();
+}
+
 static void noteWhatNewArrayFillsIn(Walker& walker, Reference object, const Operation& made)
 {
     WalkState& state = walker.state();
@@ -226,6 +222,7 @@ static void noteWhatNewArrayFillsIn(Walker& walker, Reference object, const Oper
             state.noteElement(object, key, valueHeldByFreshObject(walker.code(), element));
     }
     state.noteElement(object, keyOfLengthOfFreshList(walker), positionInFreshList(walker, position + static_cast<uint32_t>(holes.size())));
+    state.noteElementsLieOutsideViews(object);
     state.noteShape(object, made.type);
 }
 
@@ -259,18 +256,37 @@ static void noteWhatArgumentsObjectHolds(Walker& walker, Reference object, const
     if (function && walker.program().at(function).has(FunctionFlags::HasHiddenRest))
         state.noteElement(object, keyOfListBehindParameters(), list);
     state.noteElement(object, keyOfLengthOfFreshList(walker), valueHeldByFreshObject(code, made.countOperand()));
+    state.noteElementsLieOutsideViews(object);
     state.noteShape(object, made.type);
 }
 
 static size_t numberOfFieldsWrittenForEscapeAnalysis(const Walker& walker, const BodyValue& allocation, const Operation& made)
 {
     if (allocation.opcode() == Opcode::NewObject)
-        return allocation.as<Opcode::NewObject>().fields().size();
+        return allocation.as<Opcode::NewObject>().fields().size() + walker.numberOfValuesThatBirthListsFromBehind();
     if (allocation.opcode() != Opcode::Data)
         return SIZE_MAX;
     DataID data = allocation.as<Opcode::Data>().data();
     const DataNode::Object* constant = data ? walker.program().at(data).root.tryAs<DataNode::Object>() : nullptr;
-    return constant && constant->members.size() != made.fields().size() ? constant->members.size() : SIZE_MAX;
+    return constant ? constant->members.size() : SIZE_MAX;
+}
+
+static_assert(allocationsOfEscapeAnalysis.contains(Opcode::NewArrayLike));
+
+static bool noteWhatListMadeWithLengthHolds(Walker& walker, Reference object, const Operation& made)
+{
+    const Code& code = walker.code();
+    ValueID length = made.lengthOperand();
+    if (made.sourceOperand() || !length || !code.isConstant(length) || code.at(length).opcode != Opcode::Integer)
+        return false;
+    int64_t known = code.at(length).integer();
+    if (known < 0 || known > static_cast<int64_t>(UINT32_MAX))
+        return false;
+    WalkState& state = walker.state();
+    state.noteElement(object, keyOfLengthOfFreshList(walker), positionInFreshList(walker, static_cast<uint32_t>(known)));
+    state.noteElementsLieOutsideViews(object);
+    state.noteShape(object, made.type);
+    return true;
 }
 
 static bool buildAllocationOfFreshObject(Walker& walker, const BodyValue& allocation)
@@ -287,13 +303,16 @@ static bool buildAllocationOfFreshObject(Walker& walker, const BodyValue& alloca
 
     if (made.opcode == Opcode::NewObject)
         noteWhatNewObjectFillsIn(walker, object, made, numberOfFieldsWrittenForEscapeAnalysis(walker, allocation, made));
-    else if (made.opcode == Opcode::NewArray)
+    else if (made.opcode == Opcode::NewArray) {
+        if (made.elementsOperands().empty())
+            walker.noteReleasableArrayMade();
         noteWhatNewArrayFillsIn(walker, object, made);
-    else if (argumentsObjectsOfEscapeAnalysis.contains(made.opcode))
+    } else if (argumentsObjectsOfEscapeAnalysis.contains(made.opcode))
         noteWhatArgumentsObjectHolds(walker, object, made);
     else if ((made.opcode == Opcode::Data && hasKind(walker.types(), made.type, OperandKind::Array)) || made.opcode == Opcode::NewRegExp)
         walker.state().noteShape(object, made.type);
     walker.state().noteFresh(object);
+    noteStorageOfListMade(walker, object);
     walker.bind(allocation.id(), object);
     return true;
 }
@@ -303,17 +322,25 @@ void noteFreshList(Walker& walker, Reference list)
     if (!walker.has(Mechanism::EscapeAnalysis) || !list || !list.isValue())
         return;
     const Operation& made = walker.code().at(list.id());
-    if (made.opcode != Opcode::NewArray || !givesObjectThatNothingElseNames(made))
+    if ((made.opcode != Opcode::NewArray && made.opcode != Opcode::NewArrayLike) || !givesObjectThatNothingElseNames(made))
         return;
+    if (made.opcode == Opcode::NewArrayLike) {
+        if (noteWhatListMadeWithLengthHolds(walker, list, made))
+            walker.state().noteFresh(list);
+        return;
+    }
+    if (made.elementsOperands().empty())
+        walker.noteReleasableArrayMade();
     noteWhatNewArrayFillsIn(walker, list, made);
     walker.state().noteFresh(list);
+    noteStorageOfListMade(walker, list);
 }
 
 void noteFreshObject(Walker& walker, Reference name, size_t numberOfFieldsWritten)
 {
     if (!walker.has(Mechanism::EscapeAnalysis) || !name || !name.isValue())
         return;
-    ValueID cell = rootOfCellInSweptCode(walker.code(), name.id());
+    ValueID cell = underlyingCellOf(walker.code(), name.id());
     const Operation& made = walker.code().at(cell);
     if (walker.code().isConstant(cell) || made.opcode != Opcode::NewObject || !givesObjectThatNothingElseNames(made))
         return;
@@ -332,6 +359,16 @@ static std::optional<std::span<const FieldIndex>> fieldsListedByOrderWordInEscap
     if (orderOf(orderWord) >= orders.numberOfOrdersOf(layout) || count > orders.order(layout, orderOf(orderWord)).size())
         return std::nullopt;
     return orders.order(layout, orderOf(orderWord)).first(count);
+}
+
+bool orderWordContainsField(const Walker& walker, Reference object, uint32_t orderWord, FieldIndex field)
+{
+    const Operation& made = walker.code().at(object.id());
+    std::optional<PlacedAllocation> placed = walker.plan().allocation(walker.program(), made.layout(), made.fields());
+    if (placed && orderWord == placed->orderWord && std::ranges::contains(made.fields(), field))
+        return true;
+    std::optional<std::span<const FieldIndex>> listed = fieldsListedByOrderWordInEscapeAnalysis(walker, made.layout(), orderWord);
+    return listed && std::ranges::contains(*listed, field);
 }
 
 std::optional<Vector<PropertyOfFreshObject, 8>> propertiesOfFreshObject(Walker& walker, Reference name)
@@ -369,49 +406,421 @@ std::optional<Vector<PropertyOfFreshObject, 8>> propertiesOfFreshObject(Walker& 
     return properties;
 }
 
+static void checkWhatFilledObjectRestsOn(Walker& walker, Reference object, LayoutID layout, std::span<const FieldIndex> fields, std::span<const Reference> values, Origin origin)
+{
+    walker.checkFactsRememberedOfCell(object, origin);
+    for (size_t place = 0; place < fields.size() && !walker.isUnreachable(); ++place) {
+        if (!walker.types().at(walker.typeOf(values[place])).isJavaScriptValue() || holdsBrandOfClass(walker, { layout, fields[place] }))
+            continue;
+        Draft read(Opcode::GetSlot, origin);
+        read.setObjectOperand(object);
+        read.setKey(walker.plan().slots().keyOf(walker.program(), { layout, fields[place] }));
+        read.setReceivers(walker.types().at(walker.types().forLayout(layout)).layouts);
+        read.setLevel(KnowledgeLevel::Proven);
+        walker.checkThatMemoryAnswersAsBelieved(values[place], WTF::move(read));
+    }
+}
+
+Reference allocateFilledObject(Walker& walker, Reference returned, Origin origin)
+{
+    if (!returned || !returned.isValue() || walker.isUnreachable() || !walker.has(Mechanism::EscapeAnalysis) || !walker.has(Mechanism::TypedOperations))
+        return returned;
+    const Program& program = walker.program();
+    const Plan& plan = walker.plan();
+    const Code& code = walker.code();
+    const WalkState& state = walker.state();
+    ValueID cell = underlyingCellOf(code, returned.id());
+    if (code.isConstant(cell) || code.at(cell).opcode != Opcode::NewObject || !walker.wasBuiltInCurrentFrame(cell))
+        return returned;
+    Reference object = Reference::value(cell);
+    const Operation& made = code.at(cell);
+    LayoutID layout = made.layout();
+    const PlannedLayout& planned = plan.layout(layout);
+    LayoutKind kind = program.at(layout).kind;
+    if ((kind != LayoutKind::Instance && kind != LayoutKind::Record) || !planned.holdsCompiledObjects() || planned.environmentOfDeferredClosures || planned.cellsAreHandedBack)
+        return returned;
+    ValueID prototype = made.prototypeOperand();
+    if (!state.isFresh(object) || (prototype && program.prototypeMaySelectOtherClass(layout)) || made.storage() != AllocationStorage::Heap || !walker.fillersOfAllocation(object).empty())
+        return returned;
+    if (!hasPrototypeOfConstruction(walker, object, layout))
+        return returned;
+    std::optional<uint32_t> orderWord = state.orderWordOf(object);
+    OptionSet<CellFact> known = state.cellFacts(object);
+    if (!orderWord || !known.containsAll({ CellFact::NotFrozen, CellFact::IsExtensible, CellFact::NoFieldOutsideSlot }) || (!prototype && !known.contains(CellFact::HasLayoutPrototype)))
+        return returned;
+    std::optional<std::span<const FieldIndex>> fields = fieldsListedByOrderWordInEscapeAnalysis(walker, layout, *orderWord);
+    if (!fields || fields->size() <= made.fields().size())
+        return returned;
+
+    Vector<Reference, 16> values;
+    for (FieldIndex field : *fields) {
+        Reference value = state.slot(object, { layout, field });
+        TypeID type = value && value.isRecord() && !isClosureLeftUnmade(walker, value) ? walker.typeOf(value) : TypeID();
+        if (!type || (walker.types().at(type).primitives & Primitive::Absent) || planned.slots[field].storage != SlotStorage::Inline || !valueFitsSlot(walker, { layout, field }, value))
+            return returned;
+        if (walker.hasStringsInBuilders() && isStringInBuilder(walker, value))
+            return returned;
+        values.append(value);
+    }
+    static constexpr ptrdiff_t mostWaitingValues = 16;
+    if (std::ranges::count_if(values, [](Reference value) { return value.isValue(); }) > mostWaitingValues)
+        return returned;
+    std::optional<PlacedAllocation> placed = plan.allocation(program, layout, *fields);
+    if (!placed || placed->orderWord != *orderWord)
+        return returned;
+    bool bearsNoMark = !placed->isBornUnfinished && known.contains(CellFact::BearsNoMark);
+    bool hasLayoutPrototype = known.contains(CellFact::HasLayoutPrototype);
+
+    origin.isTailCall = false;
+    if (walker.checksProofsOf(ProofSource::Lifetime)) {
+        checkWhatFilledObjectRestsOn(walker, object, layout, *fields, values.span(), origin);
+        return returned;
+    }
+    Draft allocation(Opcode::NewObject, origin);
+    allocation.standsForNoValueOfInput = true;
+    allocation.setLayout(layout);
+    if (prototype)
+        allocation.setPrototypeOperand(code.isConstant(prototype) ? Reference::constant(prototype) : Reference::value(prototype));
+    allocation.setFields(*fields);
+    allocation.setValuesOperands(values.span());
+    walker.chooseConservativeFields(allocation);
+    allocation.setEndsNoGuards(made.endsNoGuards());
+    if (walker.makerLacksWhatIsHeldFilled(allocation))
+        return returned;
+    Reference filled = walker.build(WTF::move(allocation));
+    if (!filled)
+        return returned;
+    noteFreshObject(walker, filled, fields->size());
+    notePrototypeOfConstruction(walker, filled, layout);
+    if (bearsNoMark && (hasLayoutPrototype || !planned.marksOtherPrototypes))
+        walker.state().recordCellFacts(filled, CellFact::BearsNoMark);
+    if (hasLayoutPrototype)
+        walker.state().recordCellFacts(filled, CellFact::HasLayoutPrototype);
+    return filled;
+}
+
+static constexpr OpcodeSet opcodesOfListsThatMeet { Opcode::NewArray, Opcode::Data };
+
+static constexpr OptionSet<CellFact> factsOfMergeableObject { CellFact::NotFrozen, CellFact::NoFieldOutsideSlot, CellFact::HasLayoutPrototype };
+
+static bool isAllocatedAlikeEverywhere(Walker& walker, LayoutID layout)
+{
+    const Program& program = walker.program();
+    LayoutID declared = declaredLayoutOf(program, layout);
+    if (!declared || program.at(declared).has(LayoutFlags::IsConstructorFunction))
+        return false;
+    LayoutKind kind = program.at(declared).kind;
+    return kind == LayoutKind::Record || (kind == LayoutKind::Instance && walker.facts().isEvaluatedAtMostOnce(declared));
+}
+
+static ArrayStorage numericStorageOfElements(Walker& walker, std::span<const Reference> elements)
+{
+    bool areInt32 = true;
+    bool mayHaveFraction = false;
+    for (Reference element : elements) {
+        TypeID proven = element ? walker.typeOf(element) : TypeID();
+        if (!proven || !walker.types().at(proven).isNumber())
+            return ArrayStorage::Other;
+        areInt32 &= walker.types().at(proven).isInt32();
+        mayHaveFraction |= !!(walker.types().at(proven).primitives & Primitive::Number & ~Primitive::NumberWithoutFraction);
+    }
+    if (elements.empty())
+        return ArrayStorage::Other;
+    return areInt32 ? ArrayStorage::Int32 : mayHaveFraction ? ArrayStorage::Double : ArrayStorage::Other;
+}
+
+static Draft draftOfMergeableObject(Walker& walker, const MergeableObject& merged, Origin origin)
+{
+    origin.isTailCall = false;
+    if (merged.length) {
+        const ClassPart* written = singleBuiltinClassOf(walker.types(), walker.types().at(merged.shape));
+        TypeID contents = written ? written->writtenContentsAt(walker.program().builtins(), ContentsSlot::Element) : TypeID();
+        Draft allocation(Opcode::NewArray, origin);
+        allocation.standsForNoValueOfInput = true;
+        allocation.setContents(contents ? contents : TypeID(TypeTable::anything));
+        allocation.setVariadicOperands(merged.values.span());
+        walker.chooseConservativeFields(allocation);
+        if (walker.has(Mechanism::TypedOperations) && allocation.arrayStorage() == ArrayStorage::Other && (!contents || walker.types().at(contents).isAnything()))
+            allocation.setArrayStorage(numericStorageOfElements(walker, merged.values.span()));
+        if (allocation.arrayStorage() != ArrayStorage::Other)
+            walker.count(StatisticID::MergedLiteralsAllocatedNumeric);
+        return allocation;
+    }
+    Draft allocation(Opcode::NewObject, origin);
+    allocation.standsForNoValueOfInput = true;
+    allocation.setLayout(merged.layout);
+    allocation.setFields(merged.fields.span());
+    allocation.setValuesOperands(merged.values.span());
+    walker.chooseConservativeFields(allocation);
+    return allocation;
+}
+
+TypeID typeOfMergeableObject(Walker& walker, const MergeableObject& merged)
+{
+    return walker.resultTypeOf(draftOfMergeableObject(walker, merged, walker.originOfOperation()));
+}
+
+bool holdsBrandOfClass(const Walker& walker, FieldReference field)
+{
+    constexpr OptionSet<FieldFlags> brands { FieldFlags::IsBrand, FieldFlags::IsBrandOfMethods };
+    const Vector<Field>& fields = walker.program().at(field.layout).fields;
+    return field.field < fields.size() && fields[field.field].flags.containsAny(brands);
+}
+
+static std::optional<MergeableObject> findMergeableArray(Walker&, const WalkState&, ValueID cell);
+
+std::optional<MergeableObject> findMergeableObject(Walker& walker, const WalkState& state, ValueID cell)
+{
+    static constexpr size_t maxFields = 8;
+    const Code& code = walker.code();
+    const Plan& plan = walker.plan();
+    if (code.isConstant(cell))
+        return std::nullopt;
+    Reference object = Reference::value(cell);
+    if (!state.isFresh(object))
+        return std::nullopt;
+    const Operation& made = code.at(cell);
+    bool isMergedArray = made.opcode == Opcode::Parameter && walker.isMergedFreshObject(cell) && state.element(object, keyOfLengthOfFreshList(walker));
+    if (isMergedArray || opcodesOfListsThatMeet.contains(made.opcode))
+        return findMergeableArray(walker, state, cell);
+    MergeableObject found;
+    found.shape = state.shapeOf(object);
+    if (!found.shape)
+        return std::nullopt;
+    if (made.opcode == Opcode::NewObject) {
+        if (made.prototypeOperand() || made.storage() != AllocationStorage::Heap || !walker.fillersOfAllocation(object).empty())
+            return std::nullopt;
+        found.layout = made.layout();
+    } else if (made.opcode == Opcode::Parameter && walker.isMergedFreshObject(cell) && walker.types().at(found.shape).hasOnlyLayouts())
+        found.layout = singleLayoutOf(walker.types(), walker.types().at(found.shape));
+    if (!found.layout || !isAllocatedAlikeEverywhere(walker, found.layout))
+        return std::nullopt;
+    const PlannedLayout& planned = plan.layout(found.layout);
+    if (!planned.holdsCompiledObjects() || planned.environmentOfDeferredClosures || planned.cellsAreHandedBack)
+        return std::nullopt;
+    std::optional<uint32_t> orderWord = state.orderWordOf(object);
+    if (!orderWord || !state.cellFacts(object).containsAll(factsOfMergeableObject))
+        return std::nullopt;
+    std::optional<std::span<const FieldIndex>> fields = fieldsListedByOrderWordInEscapeAnalysis(walker, found.layout, *orderWord);
+    if (!fields || fields->empty() || fields->size() > maxFields)
+        return std::nullopt;
+    std::optional<PlacedAllocation> placed = plan.allocation(walker.program(), found.layout, *fields);
+    if (!placed || placed->orderWord != *orderWord)
+        return std::nullopt;
+    found.orderWord = *orderWord;
+    for (FieldIndex field : *fields) {
+        Reference value = state.slot(object, { found.layout, field });
+        TypeID type = value && value.isRecord() && !isClosureLeftUnmade(walker, value) ? walker.typeOf(value) : TypeID();
+        if (!type || (walker.types().at(type).primitives & Primitive::Absent) || planned.slots[field].storage != SlotStorage::Inline || !valueFitsSlot(walker, { found.layout, field }, value))
+            return std::nullopt;
+        if (walker.hasStringsInBuilders() && isStringInBuilder(walker, value))
+            return std::nullopt;
+        found.fields.append(field);
+        found.values.append(value);
+    }
+    if (!walker.has(Mechanism::TypedOperations) || walker.makerLacksWhatIsHeldFilled(draftOfMergeableObject(walker, found, walker.originOfOperation())))
+        return std::nullopt;
+    return found;
+}
+
+bool arrivesAsMergedObject(Walker& walker, ValueID cell, const MergeableObject& expected)
+{
+    std::optional<MergeableObject> arriving = findMergeableObject(walker, walker.state(), cell);
+    if (arriving && expected.length)
+        return arriving->length && arriving->values.size() == expected.values.size();
+    if (!arriving || arriving->length || arriving->layout != expected.layout || arriving->shape != expected.shape || arriving->orderWord != expected.orderWord)
+        return false;
+    for (size_t place = 0; place < expected.fields.size(); ++place) {
+        if (holdsBrandOfClass(walker, { expected.layout, expected.fields[place] }) && arriving->values[place] != expected.values[place])
+            return false;
+    }
+    return true;
+}
+
+void noteMergedObject(Walker& walker, Reference parameter, const MergeableObject& merged)
+{
+    WalkState& state = walker.state();
+    state.noteShape(parameter, merged.shape);
+    if (merged.length) {
+        state.noteElement(parameter, keyOfLengthOfFreshList(walker), merged.length);
+        state.noteElementsLieOutsideViews(parameter);
+    } else {
+        state.recordCellFacts(parameter, factsOfMergeableObject);
+        state.noteOrderWord(parameter, merged.orderWord);
+        for (size_t place = 0; place < merged.fields.size(); ++place) {
+            if (FieldReference field { merged.layout, merged.fields[place] }; holdsBrandOfClass(walker, field))
+                state.noteSlot(parameter, field, merged.values[place]);
+        }
+    }
+    state.noteFresh(parameter);
+    walker.recordMergedFreshObject(parameter.id());
+}
+
+Reference allocateMergeableObject(Walker& walker, const MergeableObject& merged, Origin origin)
+{
+    if (walker.isUnreachable())
+        return { };
+    Reference object = walker.build(draftOfMergeableObject(walker, merged, origin));
+    if (!object)
+        return { };
+    if (merged.length) {
+        noteFreshList(walker, object);
+        return object;
+    }
+    noteFreshObject(walker, object, merged.fields.size());
+    walker.state().recordCellFacts(object, CellFact::HasLayoutPrototype);
+    return object;
+}
+
+Reference allocateMergedObject(Walker& walker, ValueID parameter, Origin origin)
+{
+    std::optional<MergeableObject> merged = findMergeableObject(walker, walker.state(), parameter);
+    return merged ? allocateMergeableObject(walker, *merged, origin) : Reference();
+}
+
+Reference allocateFilledObjectAtReturn(Walker& walker, Reference returned, Origin origin)
+{
+    const Function& maker = walker.program().at(walker.currentFunction());
+    return maker.isCoroutine() || maker.isModuleBody() ? returned : allocateFilledObject(walker, returned, origin);
+}
+
 static constexpr OpcodeSet readsThatProveNoSlotFilledInEscapeAnalysis { Opcode::GetSlotOrUndefined, Opcode::GetDeferredClosureSlotOrUndefined };
 
-std::optional<ObjectsThatMeet> findObjectsThatMeetAsOne(Walker& walker, std::span<const WalkState* const> ways, std::span<const Reference> arguments, uint32_t firstRecordBehindParting)
+static bool mayMeetAsSlot(Walker& walker, Reference value, Reference holder)
 {
     const Code& code = walker.code();
+    TypeID type = value && value.isRecord() && !isClosureLeftUnmade(walker, value) ? walker.typeOf(value) : TypeID();
+    return type && !(walker.types().at(type).primitives & Primitive::Absent)
+        && !(value.isValue() && (readsThatProveNoSlotFilledInEscapeAnalysis.contains(code.at(value.id()).opcode) || underlyingCellOf(code, value.id()) == holder.id()));
+}
+
+Reference knownElementOfArray(Walker& walker, const WalkState& state, Reference array, Reference position)
+{
+    Reference value = state.element(array, position);
+    if (value || !position.isConstant() || walker.code().at(position.id()).opcode != Opcode::Integer)
+        return value;
+    return elementWrittenInListMadeInSight(walker, state, array, static_cast<uint32_t>(walker.code().at(position.id()).integer()));
+}
+
+static std::optional<MergeableObject> findMergeableArray(Walker& walker, const WalkState& state, ValueID cell)
+{
+    static constexpr int64_t maxElements = 8;
+    const Code& code = walker.code();
+    Reference array = Reference::value(cell);
+    MergeableObject found;
+    found.shape = state.shapeOf(array);
+    if (!found.shape || !hasKind(walker.types(), found.shape, OperandKind::Array) || !walker.has(Mechanism::TypedOperations))
+        return std::nullopt;
+    found.length = state.element(array, keyOfLengthOfFreshList(walker));
+    if (std::optional<uint32_t> written = found.length ? std::nullopt : lengthOfListMadeInSight(walker, state, array))
+        found.length = positionInFreshList(walker, *written);
+    if (!found.length || !found.length.isConstant() || code.at(found.length.id()).opcode != Opcode::Integer)
+        return std::nullopt;
+    int64_t length = code.at(found.length.id()).integer();
+    if (length < 1 || length > maxElements)
+        return std::nullopt;
+    for (uint32_t position = 0; position < length; ++position) {
+        Reference value = knownElementOfArray(walker, state, array, positionInFreshList(walker, position));
+        if (!mayMeetAsSlot(walker, value, array) || (walker.hasStringsInBuilders() && isStringInBuilder(walker, value)))
+            return std::nullopt;
+        found.values.append(value);
+    }
+    const Operation& made = code.at(cell);
+    if (made.opcode == Opcode::Parameter && !walker.types().isSubset(typeOfMergeableObject(walker, found), made.type))
+        return std::nullopt;
+    return found;
+}
+
+static std::optional<ObjectsThatMeet> findListsThatMeetAsOne(Walker& walker, std::span<const WalkState* const> ways, std::span<const Reference> arguments, uint32_t firstRecordBehindParting)
+{
+    const Code& code = walker.code();
+    ObjectsThatMeet met;
+    Vector<Reference, 4> lists;
+    for (size_t way = 0; way < ways.size(); ++way) {
+        ValueID cell = arguments[way] && arguments[way].isValue() ? underlyingCellOf(code, arguments[way].id()) : ValueID();
+        if (!cell || code.isConstant(cell) || cell.index() < firstRecordBehindParting || !(opcodesOfListsThatMeet.contains(code.at(cell).opcode) || walker.isMergedFreshObject(cell)))
+            return std::nullopt;
+        Reference list = Reference::value(cell);
+        const WalkState& state = *ways[way];
+        TypeID shape = state.isFresh(list) ? state.shapeOf(list) : TypeID();
+        Reference length = shape ? state.element(list, keyOfLengthOfFreshList(walker)) : Reference();
+        if (std::optional<uint32_t> written = shape && !length ? lengthOfListMadeInSight(walker, state, list) : std::nullopt)
+            length = positionInFreshList(walker, *written);
+        if (!length || !length.isConstant() || code.at(length.id()).opcode != Opcode::Integer || (way && length != met.lengthOfLists))
+            return std::nullopt;
+        met.lengthOfLists = length;
+        met.shape = !way || shape == met.shape ? shape : walker.types().unionOf(met.shape, shape);
+        met.facts = way ? met.facts & state.cellFacts(list) : state.cellFacts(list);
+        lists.append(list);
+    }
+
+    uint32_t length = static_cast<uint32_t>(code.at(met.lengthOfLists.id()).integer());
+    for (uint32_t position = 0; position < length; ++position) {
+        ObjectsThatMeet::Slot slot { { }, positionInFreshList(walker, position), { }, { } };
+        for (size_t way = 0; way < ways.size(); ++way) {
+            Reference value = ways[way]->element(lists[way], slot.position);
+            if (!value)
+                value = elementWrittenInListMadeInSight(walker, *ways[way], lists[way], position);
+            if (!mayMeetAsSlot(walker, value, lists[way]))
+                return std::nullopt;
+            slot.valueOnEveryWay = !way || value == slot.valueOnEveryWay ? value : Reference();
+            slot.valuesOfWays.append(value);
+        }
+        met.slots.append(WTF::move(slot));
+    }
+    return met;
+}
+
+std::optional<ObjectsThatMeet> findObjectsThatMeetAsOne(Walker& walker, std::span<const WalkState* const> ways, std::span<const Reference> arguments, uint32_t firstRecordBehindParting, const ScopedLambda<bool(size_t way, ValueID cell)>* canMergeOlder)
+{
+    const Code& code = walker.code();
+    if (ValueID cell = arguments[0] && arguments[0].isValue() ? underlyingCellOf(code, arguments[0].id()) : ValueID(); cell && !code.isConstant(cell)) {
+        bool isMergedList = walker.isMergedFreshObject(cell) && ways[0]->element(Reference::value(cell), keyOfLengthOfFreshList(walker));
+        if (isMergedList || opcodesOfListsThatMeet.contains(code.at(cell).opcode))
+            return findListsThatMeetAsOne(walker, ways, arguments, firstRecordBehindParting);
+    }
     ObjectsThatMeet met;
     LayoutID layout;
     Vector<Reference, 4> cells;
     for (size_t way = 0; way < ways.size(); ++way) {
         if (!arguments[way] || !arguments[way].isValue())
             return std::nullopt;
-        ValueID cell = rootOfCellInSweptCode(code, arguments[way].id());
-        if (code.isConstant(cell) || cell.index() < firstRecordBehindParting)
+        ValueID cell = underlyingCellOf(code, arguments[way].id());
+        if (code.isConstant(cell) || (cell.index() < firstRecordBehindParting && !canMergeOlder))
             return std::nullopt;
         const Operation& made = code.at(cell);
         Reference object = Reference::value(cell);
         const WalkState& state = *ways[way];
-        if (made.opcode != Opcode::NewObject || made.prototypeOperand() || !state.isFresh(object))
+        bool isMerged = made.opcode == Opcode::Parameter && walker.isMergedFreshObject(cell);
+        if ((!isMerged && (made.opcode != Opcode::NewObject || made.prototypeOperand())) || !state.isFresh(object))
             return std::nullopt;
         TypeID shape = state.shapeOf(object);
         std::optional<uint32_t> orderWord = state.orderWordOf(object);
-        if (!shape || !orderWord || walker.program().at(made.layout()).isEnvironment())
+        if (!shape || !orderWord || (isMerged && !walker.types().at(shape).hasOnlyLayouts()))
+            return std::nullopt;
+        LayoutID layoutOfWay = isMerged ? singleLayoutOf(walker.types(), walker.types().at(shape)) : made.layout();
+        if (!layoutOfWay || walker.program().at(layoutOfWay).isEnvironment())
             return std::nullopt;
         if (!way) {
-            layout = made.layout();
+            layout = layoutOfWay;
             met.shape = shape;
             met.orderWord = *orderWord;
-            met.facts = state.factsOfCell(object);
-        } else if (made.layout() != layout || shape != met.shape || *orderWord != met.orderWord)
+            met.facts = state.cellFacts(object);
+        } else if (layoutOfWay != layout || shape != met.shape || *orderWord != met.orderWord)
             return std::nullopt;
         else
-            met.facts = met.facts & state.factsOfCell(object);
+            met.facts = met.facts & state.cellFacts(object);
+        if (cell.index() < firstRecordBehindParting && !(*canMergeOlder)(way, cell))
+            return std::nullopt;
         cells.append(object);
     }
 
     for (const WalkState::SlotOfObject& first : ways[0]->listSlotsOf(cells[0])) {
-        ObjectsThatMeet::Slot slot { first.field, first.value, { } };
+        ObjectsThatMeet::Slot slot { first.field, { }, first.value, { } };
         bool everyWayKnowsIt = true;
         for (size_t way = 0; way < ways.size() && everyWayKnowsIt; ++way) {
             Reference value = ways[way]->slot(cells[way], first.field);
-            TypeID type = value && value.isRecord() && !isClosureLeftUnmade(walker, value) ? walker.typeOf(value) : TypeID();
-            everyWayKnowsIt = type && !(walker.types().at(type).primitives & Primitive::Absent)
-                && !(value.isValue() && (readsThatProveNoSlotFilledInEscapeAnalysis.contains(code.at(value.id()).opcode) || rootOfCellInSweptCode(code, value.id()) == cells[way].id()));
+            everyWayKnowsIt = mayMeetAsSlot(walker, value, cells[way]);
             if (value != first.value)
                 slot.valueOnEveryWay = { };
             slot.valuesOfWays.append(value);
@@ -426,13 +835,21 @@ void noteObjectsThatHaveMetAsOne(Walker& walker, Reference parameter, const Obje
 {
     WalkState& state = walker.state();
     state.noteShape(parameter, met.shape);
-    state.noteFactsOfCell(parameter, met.facts);
-    state.noteOrderWord(parameter, met.orderWord);
+    state.recordCellFacts(parameter, met.facts);
+    if (met.lengthOfLists)
+        state.noteElement(parameter, keyOfLengthOfFreshList(walker), met.lengthOfLists);
+    else
+        state.noteOrderWord(parameter, met.orderWord);
     size_t numberOfParametersTaken = 0;
-    for (const ObjectsThatMeet::Slot& slot : met.slots)
-        state.noteSlot(parameter, slot.field, slot.valueOnEveryWay ? slot.valueOnEveryWay : parametersOfSlots[numberOfParametersTaken++]);
+    for (const ObjectsThatMeet::Slot& slot : met.slots) {
+        Reference value = slot.valueOnEveryWay ? slot.valueOnEveryWay : parametersOfSlots[numberOfParametersTaken++];
+        if (met.lengthOfLists)
+            state.noteElement(parameter, slot.position, value);
+        else
+            state.noteSlot(parameter, slot.field, value);
+    }
     state.noteFresh(parameter);
-    walker.countObjectsMetAsOne(parameter.id());
+    walker.recordMergedFreshObject(parameter.id());
 }
 
 void noteListMadeByCaller(Walker& walker, Reference list)
@@ -447,20 +864,55 @@ static Reference rootOfListInEscapeAnalysis(Walker& walker, Reference name)
 {
     if (!walker.has(Mechanism::EscapeAnalysis) || !name || !name.isValue())
         return { };
-    ValueID cell = rootOfCellInSweptCode(walker.code(), name.id());
+    ValueID cell = underlyingCellOf(walker.code(), name.id());
     return walker.code().isConstant(cell) ? Reference() : Reference::value(cell);
 }
 
-void noteListAsMade(Walker& walker, Reference name)
+static bool haveDifferentClassesInEscapeAnalysis(Walker& walker, TypeID made, TypeID named)
 {
-    if (Reference list = rootOfListInEscapeAnalysis(walker, name))
-        walker.state().noteShape(list, walker.code().at(list.id()).type);
+    if (made == named || holdsOnlyPrimitives(named))
+        return false;
+    TypeArena& types = walker.types();
+    auto classOf = [&](const Type& type) {
+        const ClassPart* part = singleBuiltinClassOf(types, type);
+        return part ? part->builtinClass : BuiltinClassID();
+    };
+    BuiltinClassID classOfNamed = classOf(types.recordOf(named));
+    if (classOfNamed != BuiltinClasses::Uint8Array && classOfNamed != BuiltinClasses::Buffer)
+        return false;
+    return holdsOnlyPrimitives(made) || classOf(types.recordOf(made)) != classOfNamed;
 }
 
-bool isListAsMade(Walker& walker, Reference name)
+void markObjectPristine(Walker& walker, Reference name)
 {
     Reference list = rootOfListInEscapeAnalysis(walker, name);
-    return list && walker.state().shapeOf(list);
+    if (!list)
+        return;
+    TypeID made = walker.code().at(list.id()).type;
+    TypeID named = walker.code().at(name.id()).type;
+    if (haveDifferentClassesInEscapeAnalysis(walker, made, named))
+        walker.state().noteShape(name, named);
+    else
+        walker.state().noteShape(list, made);
+}
+
+bool isKnownPristine(Walker& walker, Reference name)
+{
+    Reference list = rootOfListInEscapeAnalysis(walker, name);
+    if (!list)
+        return false;
+    const Code& code = walker.code();
+    TypeID named = code.at(name.id()).type;
+    if (TypeID made = walker.state().shapeOf(list); made && !haveDifferentClassesInEscapeAnalysis(walker, made, named))
+        return true;
+    if (!haveDifferentClassesInEscapeAnalysis(walker, code.at(list.id()).type, named))
+        return false;
+    for (ValueID passed = name.id(); passed != list.id(); passed = code.at(passed).operand(0)) {
+        TypeID noted = walker.state().shapeOf(Reference::value(passed));
+        if (noted && !haveDifferentClassesInEscapeAnalysis(walker, noted, named))
+            return true;
+    }
+    return false;
 }
 
 std::optional<uint32_t> lengthOfFreshList(Walker& walker, Reference name)
@@ -478,11 +930,31 @@ Reference elementOfFreshList(Walker& walker, Reference name, uint32_t position)
     return list ? walker.state().element(list, positionInFreshList(walker, position)) : Reference();
 }
 
+static std::optional<Vector<Reference, 8>> elementsOfConstantList(Walker& walker, Reference name)
+{
+    static constexpr uint32_t mostElements = 8;
+    Reference list = freshObjectNamedBy(walker, name);
+    if (!list || walker.code().at(list.id()).opcode != Opcode::Data || !walker.state().shapeOf(list))
+        return std::nullopt;
+    std::optional<uint32_t> length = lengthOfListMadeInSight(walker, list);
+    if (!length || *length > mostElements)
+        return std::nullopt;
+    Vector<Reference, 8> elements;
+    for (uint32_t position = 0; position < *length; ++position) {
+        Reference element = elementWrittenInListMadeInSight(walker, list, position);
+        if (!element)
+            return std::nullopt;
+        elements.append(element);
+    }
+    walker.count(StatisticID::ConstantListsWrittenOut);
+    return elements;
+}
+
 std::optional<Vector<Reference, 8>> elementsOfFreshList(Walker& walker, Reference name)
 {
     std::optional<uint32_t> length = lengthOfFreshList(walker, name);
     if (!length)
-        return std::nullopt;
+        return elementsOfConstantList(walker, name);
     Vector<Reference, 8> elements;
     for (uint32_t position = 0; position < *length; ++position) {
         Reference element = elementOfFreshList(walker, name, position);
@@ -508,7 +980,7 @@ Reference elementOfListInSight(Walker& walker, Reference name, uint32_t position
     return list ? walker.state().element(list, positionInFreshList(walker, position)) : Reference();
 }
 
-bool isFreshListAsMade(Walker& walker, Reference name)
+bool isFreshPristineArray(Walker& walker, Reference name)
 {
     Reference list = freshObjectNamedBy(walker, name);
     return list && walker.state().shapeOf(list) && hasKind(walker.types(), walker.typeOf(list), OperandKind::Array);
@@ -556,11 +1028,18 @@ Reference elementOfFreshArguments(Walker& walker, Reference name, uint32_t posit
     return held && !mayBeAbsentInEscapeAnalysis(walker, held) ? held : Reference();
 }
 
+Reference variableOfMappedArguments(Walker& walker, Reference name, uint32_t parameter)
+{
+    Reference object = freshArgumentsNamedBy(walker, name);
+    Reference held = object && walker.state().shapeOf(object) ? walker.state().element(object, variableInMappedArguments(parameter)) : Reference();
+    return held && !mayBeAbsentInEscapeAnalysis(walker, held) ? held : Reference();
+}
+
 std::optional<ListBehindParametersOfArguments> listBehindParametersOfFreshArguments(Walker& walker, Reference name, bool forItsOwnElementsAlone)
 {
     Reference object = freshArgumentsNamedBy(walker, name);
     Reference list = object && walker.state().shapeOf(object) ? walker.state().element(object, keyOfListBehindParameters()) : Reference();
-    if (!list || !(forItsOwnElementsAlone ? !!freshObjectNamedBy(walker, list) : isFreshListAsMade(walker, list)))
+    if (!list || !(forItsOwnElementsAlone ? !!freshObjectNamedBy(walker, list) : isFreshPristineArray(walker, list)))
         return std::nullopt;
     return ListBehindParametersOfArguments { list, static_cast<uint32_t>(walker.code().at(object.id()).parametersOperands().size()) };
 }
@@ -628,7 +1107,7 @@ static bool wasThereBeforeFreshObject(const Code& code, Reference other, Referen
 {
     if (!other || !other.isRecord())
         return false;
-    ValueID root = rootOfCellInSweptCode(code, other.id());
+    ValueID root = underlyingCellOf(code, other.id());
     return code.isConstant(root) || root.index() < object.id().index();
 }
 
@@ -654,7 +1133,94 @@ static bool foldIdentityOfFreshObject(Walker& walker, const BodyValue& compariso
     return true;
 }
 
-constinit const OpcodeSet opcodesThatBuildFreshObjectTakes = opcodesOfEscapeAnalysis;
+static std::optional<FieldReference> fieldThatDeleteClearsInFreshObject(Walker& walker, Reference object, PropertyKeyID key)
+{
+    LayoutID layout = walker.code().at(object.id()).layout();
+    std::optional<FieldReference> field = findField(walker.program(), layout, key);
+    if (!field || field->layout != layout)
+        return std::nullopt;
+    const PlacedSlot& slot = walker.plan().slot(layout, field->field);
+    if (!slot.hasStorage() || slot.isOutOfLine() || slot.holdsAccessor || slot.representation == SlotRepresentation::DeferredClosure || !canLeaveSlot(slot.representation))
+        return std::nullopt;
+    return field;
+}
+
+static std::optional<uint32_t> fieldsRemovedFromFreshRecord(Walker& walker, Reference object)
+{
+    Reference removed = walker.state().element(object, keyOfPropertiesAsListed());
+    if (!removed || removed == object || !removed.isConstant() || walker.code().at(removed.id()).opcode != Opcode::Integer)
+        return std::nullopt;
+    return static_cast<uint32_t>(walker.code().at(removed.id()).integer());
+}
+
+static Reference freshRecordThatHoldsNothingButFields(Walker& walker, Reference name)
+{
+    Reference object = freshObjectNamedBy(walker, name);
+    WalkState& state = walker.state();
+    if (!object || !state.shapeOf(object) || !state.element(object, keyOfPropertiesAsListed()))
+        return { };
+    if (!state.orderWordOf(object) && !fieldsRemovedFromFreshRecord(walker, object))
+        return { };
+    const Operation& made = walker.code().at(object.id());
+    if (made.opcode != Opcode::NewObject || walker.program().at(made.layout()).kind != LayoutKind::Record || !walker.plan().slots().layout(made.layout()).appendedKeys.isEmpty())
+        return { };
+    if (!orderWordTellsOwnKeysOf(walker, made.layout()))
+        return { };
+    return state.cellFacts(object).containsAll({ CellFact::NotFrozen, CellFact::IsExtensible, CellFact::NoFieldOutsideSlot }) ? object : Reference();
+}
+
+static constexpr size_t maxFieldsFollowedThroughRemovals = 31;
+
+std::optional<Vector<FieldIndex, 8>> remainingFieldsOfFreshRecord(Walker& walker, Reference name)
+{
+    if (!walker.state().holdsFreshObjects())
+        return std::nullopt;
+    Reference object = freshRecordThatHoldsNothingButFields(walker, name);
+    std::optional<uint32_t> removed = object && !walker.state().orderWordOf(object) ? fieldsRemovedFromFreshRecord(walker, object) : std::nullopt;
+    if (!removed)
+        return std::nullopt;
+    const Operation& made = walker.code().at(object.id());
+    Vector<FieldIndex, 8> remaining;
+    for (size_t place = 0; place < made.fields().size(); ++place) {
+        if (place >= maxFieldsFollowedThroughRemovals || !(*removed >> place & 1))
+            remaining.append(made.fields()[place]);
+    }
+    return remaining;
+}
+
+static bool followDeleteOffFreshObject(Walker& walker, const BodyValue& removal)
+{
+    if (removal.isFreeName())
+        return false;
+    Reference object = freshRecordThatHoldsNothingButFields(walker, walker.referenceOf(removal.objectOperand()));
+    if (!object)
+        return false;
+
+    std::optional<FieldReference> named = findField(walker.program(), walker.code().at(object.id()).layout(), removal.key());
+    bool isHeld = !!named;
+    if (named) {
+        Reference held = walker.state().slot(object, *named);
+        TypeID type = held && !isClosureLeftUnmade(walker, held) ? walker.typeOf(held) : TypeID();
+        if (!type || (walker.types().at(type).primitives & Primitive::Absent))
+            return false;
+    }
+    if (isHeld) {
+        if (!fieldThatDeleteClearsInFreshObject(walker, object, removal.key()))
+            return false;
+        Draft closed = walker.draftOf(removal);
+        walker.chooseConservativeFields(closed);
+        Effects effects = Effects::ofReadByNameThatRunsNoCode();
+        effects.writes = LocationMasks::top().restrictedTo(perObjectHeaps | unobservableWriteHeaps);
+        if (!walker.build(WTF::move(closed), &effects) || walker.isUnreachable())
+            return true;
+    }
+    walker.count(isHeld ? StatisticID::FreshObjectDeletesTracked : StatisticID::FreshObjectDeletesFolded);
+    Draft yes = walker.draftOf(removal);
+    yes.become(Opcode::Boolean);
+    yes.setBoolean(true);
+    walker.bind(removal.id(), walker.constant(WTF::move(yes)));
+    return true;
+}
 
 bool buildFreshObjectOfItsOpcodes(Walker& walker, const BodyValue& value)
 {
@@ -662,6 +1228,8 @@ bool buildFreshObjectOfItsOpcodes(Walker& walker, const BodyValue& value)
     if (!opcodesOfEscapeAnalysis.contains(opcode))
         return false;
 
+    if (opcode == Opcode::PropDelete)
+        return walker.state().holdsFreshObjects() && followDeleteOffFreshObject(walker, value);
     if (opcode == Opcode::StrictEq)
         return walker.state().holdsFreshObjects() && foldIdentityOfFreshObject(walker, value);
     if (opcode == Opcode::GetMappedArgument)
@@ -689,6 +1257,11 @@ static bool useLetsFreshObjectLeave(const OperandInfo& info, bool runsOtherCode)
     return runsOtherCode && !info.uses.contains(OperandUse::ReadsContents);
 }
 
+static bool fillsEmptySlotByDefinition(const Draft& draft, const FreshOperandOfEscapeAnalysis& operand)
+{
+    return draft.opcode == Opcode::DefineOwnProperty && draft.orderWordAfter() && !operand.isHeldByClosure && operand.operandIndex == OperandIndex::DefineOwnProperty::object;
+}
+
 static constexpr OpcodeSet opcodesThatMayBorrowScopesInEscapeAnalysis { Opcode::NewClosure, Opcode::Call, Opcode::CallResolved, Opcode::CallDirect };
 static constexpr OpcodeSet appendsFollowedByEscapeAnalysis { Opcode::AppendElement, Opcode::AppendHole };
 static_assert(!OperandIndex::AppendElement::array && !OperandIndex::AppendHole::array);
@@ -696,7 +1269,7 @@ static_assert(!OperandIndex::AppendElement::array && !OperandIndex::AppendHole::
 static bool followAppendToFreshList(Walker& walker, const Draft& append, const FreshOperandOfEscapeAnalysis& written)
 {
     std::optional<uint32_t> length = lengthOfFreshList(walker, written.object);
-    if (written.operandIndex || !length || *length == UINT32_MAX || !isListAsMade(walker, written.object))
+    if (written.operandIndex || !length || *length == UINT32_MAX || !isKnownPristine(walker, written.object))
         return false;
 
     WalkState& state = walker.state();
@@ -705,6 +1278,27 @@ static bool followAppendToFreshList(Walker& walker, const Draft& append, const F
         state.noteElement(written.object, positionInFreshList(walker, *length), valueHeldByFreshObject(walker.code(), append.valueOperand().id()));
     state.noteElement(written.object, keyOfLengthOfFreshList(walker), positionInFreshList(walker, *length + 1));
     state.noteFresh(written.object);
+    return true;
+}
+
+static bool followStoreUnderKnownIndexIntoFreshList(Walker& walker, const Draft& store, const FreshOperandOfEscapeAnalysis& written)
+{
+    if (written.operandIndex != OperandIndex::PutArrayElement::array || !store.fillsPlaceOfListMadeHere() || !store.valueOperand().isRecord())
+        return false;
+    std::optional<uint32_t> length = lengthOfFreshList(walker, written.object);
+    Reference position = store.positionOperand();
+    if (!length || !isKnownPristine(walker, written.object) || !position || !position.isConstant() || walker.code().at(position.id()).opcode != Opcode::Integer)
+        return false;
+    int64_t index = walker.code().at(position.id()).integer();
+    if (index < 0 || index >= static_cast<int64_t>(UINT32_MAX))
+        return false;
+    WalkState& state = walker.state();
+    state.markEscaped(written.object);
+    state.noteElement(written.object, positionInFreshList(walker, static_cast<uint32_t>(index)), valueHeldByFreshObject(walker.code(), store.valueOperand().id()));
+    if (index >= static_cast<int64_t>(*length))
+        state.noteElement(written.object, keyOfLengthOfFreshList(walker), positionInFreshList(walker, static_cast<uint32_t>(index) + 1));
+    state.noteFresh(written.object);
+    walker.count(StatisticID::StoresFollowedIntoFreshLists);
     return true;
 }
 
@@ -724,8 +1318,53 @@ static bool followStoreIntoFreshObject(Walker& walker, const Draft& store, const
     Opcode opcode = store.opcode;
     if (appendsFollowedByEscapeAnalysis.contains(opcode))
         return followAppendToFreshList(walker, store, written);
+    if (opcode == Opcode::PutArrayElement)
+        return followStoreUnderKnownIndexIntoFreshList(walker, store, written);
     if (opcode == Opcode::SetMappedArgument)
         return followStoreToMappedArgument(walker, store, written);
+    if (opcode == Opcode::PropDelete) {
+        if (written.operandIndex != OperandIndex::PropDelete::object || freshRecordThatHoldsNothingButFields(walker, written.object) != written.object)
+            return false;
+        std::optional<FieldReference> cleared = fieldThatDeleteClearsInFreshObject(walker, written.object, store.key());
+        if (!cleared)
+            return false;
+        WalkState& state = walker.state();
+        const Operation& made = walker.code().at(written.object.id());
+        std::optional<uint32_t> orderWord = state.orderWordOf(written.object);
+        std::optional<PlacedAllocation> placed = orderWord ? walker.plan().allocation(walker.program(), made.layout(), made.fields()) : std::nullopt;
+        bool isAsMade = placed && *orderWord == placed->orderWord && state.element(written.object, keyOfPropertiesAsListed()) == written.object;
+        std::optional<uint32_t> removed = isAsMade ? std::optional<uint32_t>(0) : orderWord ? std::nullopt : fieldsRemovedFromFreshRecord(walker, written.object);
+        size_t place = std::ranges::find(made.fields(), cleared->field) - made.fields().begin();
+        Reference removedWithThis;
+        if (removed && place < std::min(made.fields().size(), maxFieldsFollowedThroughRemovals)) {
+            Draft places(Opcode::Integer);
+            places.setInteger(static_cast<int64_t>(*removed | 1u << place));
+            removedWithThis = walker.constant(WTF::move(places));
+        }
+        state.noteElement(written.object, keyOfPropertiesAsListed(), removedWithThis);
+        state.noteSlot(written.object, *cleared, walker.constant(Draft(Opcode::Absent)));
+        state.noteOrderWord(written.object, std::nullopt);
+        state.invalidateCellFacts(written.object, CellFact::BearsNoMark);
+        return true;
+    }
+    if (fillsEmptySlotByDefinition(store, written)) {
+        TypeArena& types = walker.types();
+        WalkState& state = walker.state();
+        TypeID type = walker.typeOf(written.object);
+        LayoutID layout = type ? singleLayoutOf(types, types.at(type)) : LayoutID();
+        if (!layout)
+            return false;
+        StringID text = singleStringLiteralOf(types.at(walker.typeOf(store.computedKeyOperand())));
+        std::optional<PropertyKeyID> key = text ? walker.program().types.find(PropertyKey { .kind = PropertyKeyKind::Text, .text = text }) : std::nullopt;
+        std::optional<FieldReference> field = key ? findField(walker.program(), layout, *key) : std::nullopt;
+        if (!field)
+            return false;
+        state.noteSlot(written.object, *field, Reference());
+        state.noteOrderWord(written.object, store.orderWordAfter()->value());
+        state.noteElement(written.object, keyOfPropertiesAsListed(), Reference());
+        state.invalidateCellFacts(written.object, CellFact::BearsNoMark);
+        return true;
+    }
     bool storesIntoEnvironment = opcode == Opcode::PutEnvironmentField;
     bool storesIntoSlot = accessClassOf(opcode) == AccessClass::Slot && accessOf(opcode) == Access::Store;
     if (!storesIntoEnvironment && !storesIntoSlot)
@@ -758,8 +1397,13 @@ static bool followStoreIntoFreshObject(Walker& walker, const Draft& store, const
     if (!field)
         return false;
     state.noteSlot(written.object, *field, value);
-    if (opcode == Opcode::PutSlotOrAdd)
+    if (walker.code().at(written.object.id()).opcode == Opcode::NewObject && walker.runsInIterations())
+        walker.noteStoreIntoUnmadeRecord();
+    if (opcode == Opcode::PutSlotOrAdd) {
         state.noteOrderWord(written.object, store.orderWordAfter() ? std::optional<uint32_t>(store.orderWordAfter()->value()) : std::nullopt);
+        if (fieldsRemovedFromFreshRecord(walker, written.object))
+            state.noteElement(written.object, keyOfPropertiesAsListed(), Reference());
+    }
     return true;
 }
 
@@ -779,21 +1423,30 @@ static bool calleeOnlyLooksAtFreshCell(Walker& walker, const Draft& call, const 
     return linkTablesForEscapeAnalysis(walker).onlyLooksAtWhatArrivesAt(call.function(), operand.operandIndex - numberOfNamedOperands) && nothingButOwnFieldsAnswersFor(walker.program(), walker.code().at(operand.object.id()));
 }
 
+static bool laysNullAboveFreshObject(Walker& walker, const Draft& draft, const FreshOperandOfEscapeAnalysis& operand)
+{
+    if (draft.opcode != Opcode::SetLiteralPrototype || operand.isHeldByClosure || operand.operandIndex != OperandIndex::SetLiteralPrototype::object)
+        return false;
+    return walker.typeOf(draft.prototypeOperand()) == TypeTable::null;
+}
+
 void markEscapingOperands(Walker& walker, const Draft& draft, const Effects* foundByCaller)
 {
     Opcode opcode = draft.opcode;
-    if (!walker.state().holdsFreshObjects() || !draft.numberOfOperands() || opcodesThatGiveSameCell.contains(opcode))
+    if (!walker.state().holdsFreshObjects() || !draft.numberOfOperands() || cellPreservingOpcodes.contains(opcode))
         return;
 
     bool closuresHoldScopes = walker.closuresHoldScopes();
+    static constexpr OpcodeSet appendsToLists { Opcode::AppendElement, Opcode::AppendHole, Opcode::AppendElements, Opcode::AppendMembers };
+    bool shouldSkipFreshArrays = walker.shouldIgnoreFreshArrayEscapes() && !appendsToLists.contains(opcode);
     Vector<FreshOperandOfEscapeAnalysis, 4> freshOperands;
     draft.forEachOperand([&](Reference operand, uint32_t operandIndex) {
-        if (Reference object = freshObjectNamedBy(walker, operand))
+        if (Reference object = freshObjectNamedBy(walker, operand); object && !(shouldSkipFreshArrays && isFreshPristineArray(walker, operand)))
             freshOperands.append({ object, operandIndex });
         if (!closuresHoldScopes || !operand || !operand.isValue())
             return;
         const Code& code = walker.code();
-        const Operation& named = code.at(rootOfCellInSweptCode(code, operand.id()));
+        const Operation& named = code.at(underlyingCellOf(code, operand.id()));
         if (named.opcode != Opcode::NewClosure)
             return;
         for (ValueID capture : named.capturesOperands()) {
@@ -809,20 +1462,24 @@ void markEscapingOperands(Walker& walker, const Draft& draft, const Effects* fou
     Effects effects = effectsOfDraftForEscapeAnalysis(walker.program(), draft, doesGenericOperation);
     if (foundByCaller && !doesGenericOperation)
         effects.intersect(*foundByCaller);
+    walker.applyUnderstatedEffects(draft, effects);
     bool runsOtherCode = effects.mayRunOtherCode();
 
     if (opcode == Opcode::CallDirect && returnsResultOfFunction(draft.role()) && !draft.numberOfBoundArguments()) {
         const LinkedFunction& callee = linkTablesForEscapeAnalysis(walker).function(draft.function());
         effects = callee.effectsOnReturn();
         effects.merge(callee.effectsOnThrow());
+        walker.applyUnderstatedEffects(draft, effects);
     }
 
     uint32_t numberOfNamedOperands = draft.numberOfNamedOperands();
     bool someObjectHasLeft = false;
     for (const FreshOperandOfEscapeAnalysis& operand : freshOperands) {
-        if (opcode == Opcode::CallDirect && operand.operandIndex >= numberOfNamedOperands && walker.takesCalleesToKeepNothing())
+        if (opcode == Opcode::CallDirect && operand.operandIndex >= numberOfNamedOperands && walker.shouldAssumeCalleesRetainNothing())
             continue;
-        if (calleeOnlyLooksAtFreshCell(walker, draft, operand))
+        if (calleeOnlyLooksAtFreshCell(walker, draft, operand) || laysNullAboveFreshObject(walker, draft, operand) || fillsEmptySlotByDefinition(draft, operand))
+            continue;
+        if (opcode == Opcode::CallBuiltin && operand.operandIndex == OperandIndex::CallBuiltin::receiver && !operand.isHeldByClosure && writesReceiverArrayAlone(walker, draft, effects))
             continue;
         if (walker.unitHasMadeScopes() && opcodesThatMayBorrowScopesInEscapeAnalysis.contains(opcode) && walker.operationOnlyBorrowsScope(draft, operand.object, operand.operandIndex, operand.isHeldByClosure))
             continue;
@@ -834,7 +1491,7 @@ void markEscapingOperands(Walker& walker, const Draft& draft, const Effects* fou
         state.markEscaped(operand.object);
         someObjectHasLeft = true;
     }
-    if (!effects.mayRunOtherCode() && effects.writes.containsOnly(heapsWhoseWritesNobodySees))
+    if (!effects.mayRunOtherCode() && effects.writes.containsOnly(unobservableWriteHeaps))
         return;
 
     Vector<Reference, 4> lent;
@@ -847,7 +1504,26 @@ void markEscapingOperands(Walker& walker, const Draft& draft, const Effects* fou
     if (someObjectHasLeft || !lent.isEmpty()) {
         if (effects.writes.contains(AbstractHeap::MemberGuards) && !effects.mayRunOtherCode() && writerEndsNoGuard(walker, draft))
             effects.writes.remove(AbstractHeapSet { AbstractHeap::MemberGuards });
-        state.invalidate(effects);
+        std::optional<MemoryLocation> writtenAlone = storeMayLeaveWhatLiesBeside(state, draft) ? locationThatStoreNames(walker.program(), draft, effects) : std::nullopt;
+        auto findRoot = [&](Reference holder) {
+            const Code& code = walker.code();
+            ValueID cell = holder.isValue() ? underlyingCellOf(code, holder.id()) : ValueID();
+            return cell && !code.isConstant(cell) ? Reference::value(cell) : Reference();
+        };
+        auto isLent = [&](Reference holder) {
+            Reference root = findRoot(holder);
+            return root && lent.contains(root);
+        };
+        auto mayEndGuard = [](LayoutID, PropertyKeyID) {
+            return true;
+        };
+        if (someObjectHasLeft)
+            state.invalidate(effects, writtenAlone ? &*writtenAlone : nullptr);
+        else {
+            auto rootOf = scopedLambda<Reference(Reference)>(findRoot);
+            WalkState::FreshCellWriter writer { lent.span(), rootOf };
+            state.invalidate(effects, isLent, mayEndGuard, writtenAlone ? &*writtenAlone : nullptr, nullptr, &writer);
+        }
     }
     for (Reference object : lent)
         state.noteFresh(object);

@@ -27,18 +27,22 @@ public:
     void throwAt(const OperationContext&, const ThrowSite&, std::optional<Operand>);
     void requireOrThrow(const OperationContext&, Condition mustHold, const ThrowSite&, std::optional<Operand>);
     void throwError(const OperationContext&, ErrorKind, StringID message, std::optional<uint32_t> throwPosition);
-    void stopAtFalseProof(const OperationContext&, std::optional<Boxed> found, ProofSource);
-    void checkOrStopAtFalseProof(const OperationContext&, Condition holds, ProofSource);
-    void requireOrStopAtFalseProof(const OperationContext&, Condition holds, std::optional<Boxed> found, ProofSource);
-    void stopUnlessAmongKinds(const OperationContext&, Boxed found, uint32_t kinds, ProofSource, std::optional<uint32_t> mentionOfUpperHalfOfClosureWord = std::nullopt);
+    void throwRuntimeError(const OperationContext&, RuntimeErrorKind, StringID name);
+    void crashOnFalseProof(const OperationContext&, std::optional<Boxed> found, ProofSource, uint32_t expectedType = 0);
+    bool trapUnlessCell(const OperationContext&, Boxed found, ProofSource, uint32_t expectedType);
+    bool trapIfNullish(const OperationContext&, Boxed, NullishAccess, StringID name);
+    void checkOrCrash(const OperationContext&, Condition holds, ProofSource, uint32_t expectedType = 0);
+    void requireOrCrash(const OperationContext&, Condition holds, std::optional<Boxed> found, ProofSource, uint32_t expectedType = 0);
+    void stopUnlessStubPasses(const OperationContext&, Boxed found, StubKey, uint32_t kinds, ProofSource, std::optional<uint32_t> mentionAboveKinds = std::nullopt, std::optional<uint32_t> numberInRegister = std::nullopt);
 
     void requireNotNullish(const OperationContext&, Operand, const Type&, NullishAccess, StringID name);
     void requireInitialized(const OperationContext&, Operand, const Type&, StringID name);
 
 private:
     struct NewError {
-        ErrorKind kind;
-        std::optional<uint32_t> throwPosition;
+        unsigned kind;
+        std::optional<uint32_t> throwPosition { };
+        Representation representation { Representation::Void };
     };
 
     void throwAt(const OperationContext&, const ThrowSite&, std::optional<Operand>, std::optional<NewError>);

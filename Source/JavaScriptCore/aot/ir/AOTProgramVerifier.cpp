@@ -8,12 +8,15 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
 #include "AOTBuildContext.h"
 #include "AOTBuiltinTable.h"
+#include "AOTInliningAcrossFiles.h"
 #include "AOTLayout.h"
 #include "AOTNameClass.h"
 #include "AOTOperationData.h"
 #include "AOTPhaseTimes.h"
+#include "AOTRowsOfLayouts.h"
 #include "AOTSchemaWalkers.h"
 #include "AOTStringTable.h"
 #include "AOTThreads.h"
@@ -24,7 +27,6 @@
 #include <optional>
 #include <span>
 #include <wtf/Atomics.h>
-#include <wtf/BitVector.h>
 #include <wtf/StdLibExtras.h>
 
 namespace JSC { namespace AOT { namespace Typed {
@@ -38,7 +40,9 @@ std::optional<InternalError> findErrorInStringAsRead(const Program& program, uin
     std::span<const uint8_t> bytes = strings[id];
     if (!isCanonicalProgramString(bytes))
         return InternalError { .kind = InternalErrorKind::StringNotCanonical, .count = index };
-    if (classifyName(bytes) != strings.nameClass(id) || program.builtins().nameOf(bytes) != strings.builtinName(id))
+    BuiltinName name = strings.builtinName(id);
+    bool carriesNameThatItDoesNotSpell = name && (name.index() >= program.builtins().textNameCount() || !equalSpans(program.builtins().textOf(name), bytes));
+    if (classifyName(bytes) != strings.nameClass(id) || carriesNameThatItDoesNotSpell)
         return InternalError { .kind = InternalErrorKind::NameClassMismatch, .count = index };
     StringID found = strings.find(bytes);
     if (found != id)
@@ -90,7 +94,7 @@ bool canConstruct(const Function& constructor, const Layout& layout)
     bool hasClassConstructorFlags = constructor.has(FunctionFlags::HasNewTarget) && !constructor.has(FunctionFlags::HasThis);
     switch (constructor.constructorForm()) {
     case ConstructorForm::Base:
-        return !layout.has(LayoutFlags::HasHeritage) && (constructor.kind == FunctionKind::Plain || hasClassConstructorFlags);
+        return constructor.kind == FunctionKind::Plain || (!layout.has(LayoutFlags::HasHeritage) && hasClassConstructorFlags);
     case ConstructorForm::Derived:
         return layout.has(LayoutFlags::HasHeritage) && hasClassConstructorFlags;
     case ConstructorForm::NotConstructor:
@@ -204,7 +208,7 @@ public:
         RELEASE_ASSERT_NOT_REACHED();
     }
 
-    void checkClassParts(ClassPartsID parts)
+    ALWAYS_INLINE void checkClassParts(ClassPartsID parts)
     {
         if (!parts)
             return;
@@ -265,6 +269,8 @@ void checkIDsThatRecordWalkerSkips(RecordReferenceChecker& checker, const Functi
         checker.checkRequired(functionType);
     for (BuiltinID member : function.builtinMembers)
         checker.checkRequired(member);
+    for (StringID specifier : function.requestedOriginals)
+        checker.checkRequired(specifier);
 }
 
 void checkIDsThatRecordWalkerSkips(RecordReferenceChecker& checker, const TypeSite& site)
@@ -613,7 +619,7 @@ std::optional<InternalError> findFieldError(const Program& program, LayoutID id,
 
 } // anonymous namespace
 
-bool isValidPropertyKey(const PropertyKey& key)
+ALWAYS_INLINE_INTO_OTHER_FILES bool isValidPropertyKey(const PropertyKey& key)
 {
     bool hasCreationSite = key.module || key.callNumber;
     switch (key.kind) {
@@ -735,9 +741,12 @@ void ProgramVerifier::verifyIDs()
     verifyList(m_program.expectedResults);
     verifyList(m_program.variables);
     verifyList(m_program.modules);
+    verifyList(m_program.moduleInstances);
+    verifyList(m_program.moduleLinks);
     verifyList(m_program.moduleFailures);
     verifyList(m_program.ambiguousExports);
     verifyList(m_program.sourceStamps);
+    verifyList(m_program.declaredRecords);
     verifyList(m_program.evalScopes);
     verifyList(m_program.data);
     verifyList(m_program.entries);
@@ -858,6 +867,16 @@ void ProgramVerifier::verifyClasses()
     });
     for (uint32_t index : invalidClasses)
         fail({ .kind = InternalErrorKind::InvalidClass, .layout = LayoutID(index) });
+    BitVector rowsThatEnd = answerAlongRows(m_program.layouts.size(), false, [&](LayoutID id) -> StepAlongRow {
+        LayoutID base = m_program.at(id).base;
+        if (!base)
+            return { true, { } };
+        return { std::nullopt, base };
+    });
+    for (uint32_t index = 0; index < m_program.layouts.size(); ++index) {
+        if (!rowsThatEnd.quickGet(index))
+            fail({ .kind = InternalErrorKind::BaseChainCycle, .layout = LayoutID(index) });
+    }
 }
 
 bool ProgramVerifier::isValidClass(LayoutID id, const Layout& layout) const
@@ -896,7 +915,7 @@ BitVector variablesThatRunTimeMayFill(const Program& program)
     }
     for (uint32_t index = 0; index < program.variables.size(); ++index) {
         const Variable& variable = program.variables[index];
-        if (variable.flags.containsAny({ VariableFlags::HoldsMock, VariableFlags::IsReplaceable }) || variable.owner)
+        if (variable.flags.containsAny({ VariableFlags::HoldsMock, VariableFlags::IsReplaceable, VariableFlags::HoldsInstance }) || variable.owner)
             found.quickSet(index);
     }
     return found;
@@ -913,6 +932,16 @@ void ProgramVerifier::verifyVariables()
     }
 
     BitVector hasVariableThatHoldsMock(m_program.modules.size());
+    BitVector hasInstanceVariable(m_program.modules.size());
+    BitVector hasInstanceGuard(m_program.modules.size());
+    BitVector hasInstanceAllocator(m_program.modules.size());
+    BitVector hasSeveralInstancesVariable(m_program.modules.size());
+    auto hasInstanceType = [&](const Variable& variable) {
+        if (!variable.declared.isEstablished() || holdsOnlyPrimitives(variable.declared.written()))
+            return false;
+        Type written = types.at(variable.declared.written());
+        return written.environment && !written.primitives;
+    };
     auto isValid = [&](unsigned index) {
         const Variable& variable = m_program.variables[index];
         bool startsAsFunction = variable.initialization == VariableInitialization::Function;
@@ -929,6 +958,26 @@ void ProgramVerifier::verifyVariables()
         }
         if (variable.flags.contains(VariableFlags::OriginalMayRun) && !variable.flags.contains(VariableFlags::HoldsMock))
             return false;
+        if (variable.flags.contains(VariableFlags::HoldsInstance)) {
+            const Module& module = m_program.at(variable.module);
+            return !variable.flags.containsAny({ VariableFlags::IsImmutable, VariableFlags::IsReplaceable, VariableFlags::HoldsMock, VariableFlags::GuardsInstance, VariableFlags::AllocatesInstance, VariableFlags::HasSeveralInstances }) && variable.initialization == VariableInitialization::Uninitialized && !variable.owner
+                && module.kind == ModuleKind::SourceText && module.flags.contains(ModuleFlags::MayBeReevaluated) && !hasInstanceVariable.quickSet(variable.module.index()) && hasInstanceType(variable);
+        }
+        if (variable.flags.contains(VariableFlags::GuardsInstance)) {
+            if (!variable.flags.contains(VariableFlags::IsReplaceable) || variable.flags.contains(VariableFlags::HoldsMock) || variable.initialization != VariableInitialization::Undefined
+                || hasInstanceGuard.quickSet(variable.module.index()))
+                return false;
+        }
+        if (variable.flags.contains(VariableFlags::AllocatesInstance)) {
+            if (!variable.flags.contains(VariableFlags::IsReplaceable) || variable.flags.containsAny({ VariableFlags::HoldsMock, VariableFlags::GuardsInstance }) || !startsAsFunction
+                || !m_program.at(variable.function).captures.isEmpty() || !m_program.at(variable.function).parameters.isEmpty() || hasInstanceAllocator.quickSet(variable.module.index()))
+                return false;
+        }
+        if (variable.flags.contains(VariableFlags::HasSeveralInstances)) {
+            if (!variable.flags.contains(VariableFlags::IsReplaceable) || variable.flags.containsAny({ VariableFlags::HoldsMock, VariableFlags::GuardsInstance, VariableFlags::AllocatesInstance })
+                || variable.initialization != VariableInitialization::Undefined || hasSeveralInstancesVariable.quickSet(variable.module.index()))
+                return false;
+        }
         if (mayBeFilledByRunTime.quickGet(index) && variable.declared.isEstablished() && !types.at(variable.declared.written()).isAnything())
             return false;
         return !variable.owner || (m_program.at(variable.owner).kind == LayoutKind::Instance && isStaticField.quickGet(index));
@@ -937,11 +986,15 @@ void ProgramVerifier::verifyVariables()
         if (!isValid(index))
             fail({ .kind = InternalErrorKind::InvalidVariable, .function = m_program.variables[index].function, .count = index });
     }
+    for (unsigned index = 0; index < m_program.modules.size(); ++index) {
+        if (hasInstanceVariable.quickGet(index) != hasInstanceGuard.quickGet(index) || hasInstanceVariable.quickGet(index) != hasInstanceAllocator.quickGet(index) || hasInstanceVariable.quickGet(index) != hasSeveralInstancesVariable.quickGet(index))
+            fail({ .kind = InternalErrorKind::InvalidModule, .count = index });
+    }
 }
 
-bool ProgramVerifier::runOnModulesNamedInBodies()
+bool ProgramVerifier::runOnModulesNamedInBodies(Vector<MentionInCode>&& mentionsInBodies)
 {
-    verifyModulesNamedInBodies();
+    verifyModulesNamedInBodies(WTF::move(mentionsInBodies));
     return !hasFailed();
 }
 
@@ -950,9 +1003,9 @@ bool verifyRecords(const Program& program, BuildContext& build)
     return ProgramVerifier(program, build).run();
 }
 
-bool verifyModulesNamedInBodies(const Program& program, BuildContext& build)
+bool verifyModulesNamedInBodies(const Program& program, BuildContext& build, Vector<MentionInCode>&& mentionsInBodies)
 {
-    return ProgramVerifier(program, build).runOnModulesNamedInBodies();
+    return ProgramVerifier(program, build).runOnModulesNamedInBodies(WTF::move(mentionsInBodies));
 }
 
 } } } // namespace JSC::AOT::Typed

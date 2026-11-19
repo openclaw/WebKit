@@ -55,7 +55,7 @@ public:
     {
     }
 
-    PromotedEnvironments run();
+    PromotedEnvironments run(std::span<const LayoutID> scopesTakenByClosuresMadeForCallsAlone);
 
 private:
     static constexpr uint32_t noSource = 0;
@@ -70,6 +70,7 @@ private:
     struct TypesOfCapture {
         TypeID established;
         TypeID proven;
+        bool everyWriterIsKnown { false };
 
         friend bool operator==(const TypesOfCapture&, const TypesOfCapture&) = default;
     };
@@ -94,6 +95,7 @@ private:
     struct HolderMadeOnEveryWay {
         FunctionID holder;
         FunctionID maker;
+        bool isStoredForGood { false };
     };
 
     bool servesAsMaker(FunctionID, const ThinSummary&, const BodyIndex&) const;
@@ -102,7 +104,7 @@ private:
     TypesOfCapture typesOfCapture(FunctionID function, uint32_t capture) const
     {
         const LinkedCell& cell = m_facts.linked().capture(function, capture);
-        return { m_program.provenTypeOf(m_program.at(function).captures[capture]), cell.everyWriterIsKnown ? cell.proven : TypeID() };
+        return { m_program.provenTypeOf(m_program.at(function).captures[capture]), cell.everyWriterIsKnown ? cell.proven : TypeID(), cell.everyWriterIsKnown };
     }
 
     LayoutID scopeIn(TypeID type) const { return type && !holdsOnlyPrimitives(type) ? m_program.types.typeKeptAt(type).environment : LayoutID(); }
@@ -116,6 +118,8 @@ private:
     uint32_t rootOf(uint32_t node);
     void unite(uint32_t, uint32_t);
     void addSource(uint32_t node, uint32_t source);
+    static bool agrees(TypesOfCapture ofSource, TypesOfCapture ofReader) { return ofSource.established == ofReader.established && (ofSource.proven == ofReader.proven || (!ofReader.proven && ofReader.everyWriterIsKnown)); }
+    static void noteReader(Source&, FunctionID reader, uint32_t capture, TypesOfCapture);
     bool mayLieInFrameOfCaller(FunctionID, const BodyIndex&, ValueID) const;
     void followCapturedValues(FunctionID, const ThinSummary&, const BodyIndex&, bool serves);
     bool goThroughWhatStandsInFunctionsThatRunOnce();
@@ -123,7 +127,14 @@ private:
     std::optional<Candidate> candidateOfCapture(FunctionID, uint32_t capture);
     FunctionID makerOf(Candidate candidate) const { return candidate < m_sources.size() ? m_sources[candidate].function : m_scopes[candidate - m_sources.size()].maker; }
     bool hasOneClosureThatNeverDies(FunctionID) const;
+    bool isKeptByVariableThatStays(FunctionID maker, FunctionID holder) const;
+    bool isLaidOnClassEvaluatedAtMostOnce(const BodyIndex&, ValueID closure, FunctionID) const;
     FunctionID makerThatMakesOnEveryWay(FunctionID holder) const;
+    bool isStoredForGood(FunctionID holder) const;
+    bool isExportsObjectThatStays(LayoutID) const;
+    bool isEnteredUnderNoHandler(FunctionID, unsigned stepsLeft = 8) const;
+    bool storesForGood(FunctionID maker, const BodyIndex&, ValueID closure, FunctionID holder, BlockID lastBlockOnEveryWayToReturn) const;
+    bool isClassToken(TypeID type) const { return type && m_program.at(type).isOpaque(OpaqueKind::ClassToken); }
     bool listFunctionsWhoseClosuresAreHeld(Candidate, TypesOfCapture, bool& holdsClosures);
     void strike(Candidate);
     void noteThatFunctionHoldsWord(uint32_t function);
@@ -153,6 +164,10 @@ private:
     Vector<HolderMadeOnEveryWay> m_holdersMadeOnEveryWay;
     BitVector m_isStruck;
     BitVector m_isCapturedByClosureThatNeverDies;
+    BitVector m_isCapturedByClosureStoredForGood;
+    BitVector m_servesBecauseClassIsStoredForGood;
+    BitVector m_isCapturedByClosureReachableForGood;
+    BitVector m_closuresReachableForGood;
     BitVector m_holdsWord;
     Vector<uint32_t> m_functionsThatHaveComeToHoldWord;
     Vector<FunctionAndCandidate> m_candidatesByFunctionHeld;
@@ -172,7 +187,7 @@ bool PlannerOfPromotedEnvironments::mayLieAmongVariables(LayoutID id) const
 {
     const Layout& layout = m_program.at(id);
     const PlannedLayout& planned = m_slots.layouts[id.index()];
-    if (layout.kind != LayoutKind::Environment || planned.storage != LayoutStorage::Environment || planned.liesOnlyInFrames)
+    if (layout.kind != LayoutKind::Environment || planned.storage != LayoutStorage::Environment)
         return false;
     if (planned.numberOfFields() < layout.fields.size())
         return false;
@@ -267,6 +282,10 @@ void PlannerOfPromotedEnvironments::refuseScopesThatPositionsHold()
                 m_isRefused.quickSet(binding.layout.index());
         }
     }
+    for (FieldReference exported : m_program.exportedFields())
+        m_isRefused.quickSet(exported.layout.index());
+    for (const ModuleInstance& instance : m_program.moduleInstances)
+        m_isRefused.quickSet(instance.layout.index());
 }
 
 uint32_t PlannerOfPromotedEnvironments::nodeOf(FunctionID function, uint32_t capture)
@@ -307,14 +326,47 @@ void PlannerOfPromotedEnvironments::unite(uint32_t first, uint32_t second)
     addSource(first, m_sourcesOfClasses[second]);
 }
 
+void PlannerOfPromotedEnvironments::noteReader(Source& source, FunctionID reader, uint32_t capture, TypesOfCapture types)
+{
+    if (!source.types.proven && source.types.everyWriterIsKnown && types.proven && source.types.established == types.established) {
+        source.firstReader = reader;
+        source.captureOfFirstReader = capture;
+        source.types = types;
+        return;
+    }
+    source.readersAgree &= agrees(source.types, types);
+}
+
 bool PlannerOfPromotedEnvironments::mayLieInFrameOfCaller(FunctionID id, const BodyIndex& index, ValueID value) const
 {
-    while (!index.isParameter(value) && inputOperationsThatHandOn.contains(index.opcodeOf(value)) && index.value(value).operand(0))
+    while (!index.isParameter(value) && inputPassThroughOpcodes.contains(index.opcodeOf(value)) && index.value(value).operand(0))
         value = index.value(value).operand(0);
     if (!index.isParameter(value))
         return false;
     std::optional<uint32_t> entryParameter = index.block(entryBlock).indexOfParameter(value);
     return !entryParameter || m_facts.linked().onlyCallsWhatArrivesAt(id, *entryParameter);
+}
+
+static ValueID valueReturnedOnEveryWayForPromotedEnvironments(const BodyIndex& index)
+{
+    ValueID returned;
+    for (uint32_t number = 0; number < index.numberOfBlocks(); ++number) {
+        BlockID block(number);
+        if (!index.isReachable(block))
+            continue;
+        BodyTerminator end = index.terminator(block);
+        if (end.kind() == TerminatorKind::ReturnCall)
+            return { };
+        if (end.kind() != TerminatorKind::Return)
+            continue;
+        ValueID value = end.as<TerminatorKind::Return>().valueOperand();
+        while (value && !index.isParameter(value) && inputIdentityOpcodes.contains(index.opcodeOf(value)))
+            value = index.value(value).operand(0);
+        if (!value || (returned && returned != value))
+            return { };
+        returned = value;
+    }
+    return returned;
 }
 
 static BlockID lastBlockOnEveryWayToReturnForPromotedEnvironments(const BodyIndex& index)
@@ -341,6 +393,7 @@ void PlannerOfPromotedEnvironments::followCapturedValues(FunctionID id, const Th
     BodyBlock entry = index.block(entryBlock);
     uint32_t numberOfOwnCaptures = static_cast<uint32_t>(m_program.at(id).captures.size());
     std::optional<BlockID> lastBlockOnEveryWayToReturn;
+    ValueID returnedOnEveryWay = serves ? valueReturnedOnEveryWayForPromotedEnvironments(index) : ValueID();
     for (ValueID site : summary.sitesThatHandOverCaptures) {
         BodyValue value = index.value(site);
         bool makesClosure = value.opcode() == Opcode::NewClosure;
@@ -358,11 +411,15 @@ void PlannerOfPromotedEnvironments::followCapturedValues(FunctionID id, const Th
         name(callee);
         std::span<const ValueID> operands = makesClosure ? value.as<Opcode::NewClosure>().capturesOperands() : value.as<Opcode::CallDirect>().argumentsOperands();
         uint32_t numberOfCapturesOfCallee = static_cast<uint32_t>(m_program.at(callee).captures.size());
-        if (makesClosure && serves && hasOneClosureThatNeverDies(callee)) {
+        bool isMemberThatNeverDies = makesClosure && serves && isLaidOnClassEvaluatedAtMostOnce(index, site, callee);
+        bool isKeptByVariable = makesClosure && site == returnedOnEveryWay && isKeptByVariableThatStays(id, callee);
+        if (isMemberThatNeverDies || isKeptByVariable)
+            m_closuresReachableForGood.set(callee.index());
+        if (makesClosure && serves && (hasOneClosureThatNeverDies(callee) || isMemberThatNeverDies || isKeptByVariable)) {
             if (!lastBlockOnEveryWayToReturn)
                 lastBlockOnEveryWayToReturn = lastBlockOnEveryWayToReturnForPromotedEnvironments(index);
             if (*lastBlockOnEveryWayToReturn && index.dominates(index.blockOf(site), *lastBlockOnEveryWayToReturn) && !index.block(index.blockOf(site)).hasHandler())
-                m_holdersMadeOnEveryWay.append({ callee, id });
+                m_holdersMadeOnEveryWay.append({ callee, id, storesForGood(id, index, site, callee, *lastBlockOnEveryWayToReturn) });
         }
         for (uint32_t capture = 0; capture < numberOfCapturesOfCallee; ++capture) {
             if (scopeIn(m_program.provenTypeOf(m_program.at(callee).captures[capture])))
@@ -390,7 +447,7 @@ void PlannerOfPromotedEnvironments::followCapturedValues(FunctionID id, const Th
                 m_sources.append(Source { id, handed, callee, capture, types, true, mayLieInFrameOfCaller(id, index, handed), { } });
                 source = firstSource + static_cast<uint32_t>(m_sources.size()) - 1;
             } else
-                m_sources[source - firstSource].readersAgree &= m_sources[source - firstSource].types == types;
+                noteReader(m_sources[source - firstSource], callee, capture, types);
             addSource(node, source);
         }
     }
@@ -432,7 +489,7 @@ std::optional<PlannerOfPromotedEnvironments::Candidate> PlannerOfPromotedEnviron
     }
     auto node = m_nodesOfCaptures.find(m_facts.linked().firstCaptureOfFunction[id.index()] + capture);
     uint32_t found = node == m_nodesOfCaptures.end() ? noSource : m_sourcesOfClasses[rootOf(node->value)];
-    if (found < firstSource || m_sources[found - firstSource].types != typesOfCapture(id, capture))
+    if (found < firstSource || !agrees(m_sources[found - firstSource].types, typesOfCapture(id, capture)))
         return std::nullopt;
     return found - firstSource;
 }
@@ -443,6 +500,154 @@ bool PlannerOfPromotedEnvironments::hasOneClosureThatNeverDies(FunctionID functi
     return constructed && m_facts.isEvaluatedAtMostOnce(constructed);
 }
 
+bool PlannerOfPromotedEnvironments::isLaidOnClassEvaluatedAtMostOnce(const BodyIndex& index, ValueID closure, FunctionID function) const
+{
+    std::optional<BodyUser> user = index.onlyUser(closure);
+    if (!user || user->kind != BodyUseKind::Operand || index.opcodeOf(user->value) != Opcode::DefineMethod)
+        return false;
+    auto definition = index.value(user->value).as<Opcode::DefineMethod>();
+    if (definition.functionOperand() != closure || !definition.key() || !m_facts.isEvaluatedAtMostOnce(definition.layout()))
+        return false;
+    bool isListed = false;
+    for (const ClassMember& member : m_facts.membersOf(definition.layout())) {
+        if (member.side != definition.side())
+            continue;
+        if (!member.key)
+            return false;
+        if (member.key != definition.key())
+            continue;
+        bool isOtherHalfOfAccessor = member.kind != definition.methodKind() && member.kind != MethodKind::Method && definition.methodKind() != MethodKind::Method;
+        if (isOtherHalfOfAccessor && !member.isAssignedByProgram)
+            continue;
+        if (isListed || member.isAssignedByProgram || member.kind != definition.methodKind() || member.function != function)
+            return false;
+        isListed = true;
+    }
+    return isListed;
+}
+
+bool PlannerOfPromotedEnvironments::isKeptByVariableThatStays(FunctionID maker, FunctionID holder) const
+{
+    const LinkTables& linked = m_facts.linked();
+    if (!linked.function(maker).everyCallerIsKnown || !isEnteredUnderNoHandler(maker))
+        return false;
+    VariableID kept;
+    for (FunctionID referrer : linked.referrersOf(maker)) {
+        const BodyIndex* index = linked.isGroup(referrer) ? nullptr : m_facts.bodies().find(referrer);
+        if (!index)
+            return false;
+        for (const LinkedCall& call : linked.callsOf(referrer)) {
+            if (call.callee != maker)
+                continue;
+            if (kept)
+                return false;
+            std::optional<BodyUser> user = index->onlyUser(call.site);
+            while (user && user->kind == BodyUseKind::Operand && inputIdentityOpcodes.contains(index->opcodeOf(user->value)))
+                user = index->onlyUser(user->value);
+            if (!user || user->kind != BodyUseKind::Operand || index->opcodeOf(user->value) != Opcode::PutModuleVariable)
+                return false;
+            kept = index->value(user->value).as<Opcode::PutModuleVariable>().variable();
+        }
+    }
+    if (!kept)
+        return false;
+    const LinkedCell& cell = linked.variable(kept);
+    if (!cell.everyWriterIsKnown || !cell.proven)
+        return false;
+    Type held = m_program.at(cell.proven);
+    held.primitives &= ~Primitive::Absent;
+    return !held.primitives && singleFunctionOf(TypeReader(m_program), held) == holder;
+}
+
+bool PlannerOfPromotedEnvironments::isExportsObjectThatStays(LayoutID layout) const
+{
+    const LinkTables& linked = m_facts.linked();
+    ModuleID file = m_program.at(layout).module;
+    if (!file || !m_program.at(file).exportsVariable || !m_program.at(file).body || !m_facts.runsAtMostOnce(m_program.at(file).body))
+        return false;
+    if (!linked.layout(layout).possibleChanges.isEmpty() || linked.layout(layout).reachesUnseenCode)
+        return false;
+    const LinkedCell& held = linked.variable(m_program.at(file).exportsVariable);
+    return held.everyWriterIsKnown && held.isFilled && held.proven && singleLayoutOf(TypeReader(m_program), m_program.at(held.proven)) == layout && !m_program.at(held.proven).primitives;
+}
+
+bool PlannerOfPromotedEnvironments::isEnteredUnderNoHandler(FunctionID id, unsigned stepsLeft) const
+{
+    const Function& function = m_program.at(id);
+    if (function.isModuleBody())
+        return true;
+    const LinkTables& linked = m_facts.linked();
+    if (!stepsLeft || function.isCoroutine() || !linked.function(id).everyCallerIsKnown || !m_facts.runsAtMostOnce(id))
+        return false;
+    bool isCalled = false;
+    for (FunctionID referrer : linked.referrersOf(id)) {
+        const BodyIndex* index = linked.isGroup(referrer) ? nullptr : m_facts.bodies().find(referrer);
+        if (!index)
+            return false;
+        for (const LinkedCall& call : linked.callsOf(referrer)) {
+            if (call.callee != id)
+                continue;
+            if (index->block(index->blockOf(call.site)).hasHandler() || !isEnteredUnderNoHandler(referrer, stepsLeft - 1))
+                return false;
+            isCalled = true;
+        }
+    }
+    return isCalled;
+}
+
+bool PlannerOfPromotedEnvironments::storesForGood(FunctionID maker, const BodyIndex& index, ValueID closure, FunctionID holder, BlockID lastBlockOnEveryWayToReturn) const
+{
+    if (!hasOneClosureThatNeverDies(holder) || !isEnteredUnderNoHandler(maker))
+        return false;
+    const LinkTables& linked = m_facts.linked();
+    BodyBlock entry = index.block(entryBlock);
+    auto behindCasts = [&](ValueID value) {
+        while (value && !index.isParameter(value) && castsThatClaimNothing.contains(index.opcodeOf(value)))
+            value = index.value(value).operand(0);
+        return value;
+    };
+    auto withoutAbsent = [&](TypeID id) {
+        Type type = m_program.at(id);
+        type.primitives &= ~Primitive::Absent;
+        return type;
+    };
+    for (uint32_t number = 0; number < index.numberOfBlocks(); ++number) {
+        BlockID block(number);
+        if (!index.dominates(block, lastBlockOnEveryWayToReturn) || index.block(block).hasHandler())
+            continue;
+        for (BodyValue operation : index.block(block).values()) {
+            if (operation.opcode() != Opcode::PropSet)
+                continue;
+            auto store = operation.as<Opcode::PropSet>();
+            if (store.isFreeName() || behindCasts(store.valueOperand()) != closure)
+                continue;
+            ValueID object = behindCasts(store.objectOperand());
+            std::optional<uint32_t> parameter = object && index.isParameter(object) ? entry.indexOfParameter(object) : std::nullopt;
+            TypeID proven = parameter && *parameter < linked.parametersOf(maker).size() ? linked.parametersOf(maker)[*parameter].proven : TypeID();
+            LayoutID layout = proven && !m_program.at(proven).primitives ? singleLayoutOf(TypeReader(m_program), m_program.at(proven)) : LayoutID();
+            if (!layout || !isExportsObjectThatStays(layout))
+                continue;
+            uint32_t numberListed = static_cast<uint32_t>(m_program.at(layout).fields.size());
+            std::optional<uint32_t> field = m_program.at(layout).findField(store.key());
+            if (!field) {
+                std::span<const PropertyKeyID> appended = linked.appendedKeysOf(layout);
+                if (auto found = std::ranges::find(appended, store.key()); found != appended.end())
+                    field = numberListed + static_cast<uint32_t>(found - appended.begin());
+            }
+            const LinkedCell* cell = field ? linked.findCellOfField({ layout, *field }) : nullptr;
+            if (cell && cell->everyWriterIsKnown && cell->proven && !withoutAbsent(cell->proven).primitives && singleFunctionOf(TypeReader(m_program), withoutAbsent(cell->proven)) == holder)
+                return true;
+        }
+    }
+    return false;
+}
+
+bool PlannerOfPromotedEnvironments::isStoredForGood(FunctionID holder) const
+{
+    auto found = std::ranges::lower_bound(m_holdersMadeOnEveryWay, holder, { }, &HolderMadeOnEveryWay::holder);
+    return found != m_holdersMadeOnEveryWay.end() && found->holder == holder && found->isStoredForGood;
+}
+
 FunctionID PlannerOfPromotedEnvironments::makerThatMakesOnEveryWay(FunctionID holder) const
 {
     auto found = std::ranges::lower_bound(m_holdersMadeOnEveryWay, holder, { }, &HolderMadeOnEveryWay::holder);
@@ -451,6 +656,8 @@ FunctionID PlannerOfPromotedEnvironments::makerThatMakesOnEveryWay(FunctionID ho
 
 bool PlannerOfPromotedEnvironments::listFunctionsWhoseClosuresAreHeld(Candidate candidate, TypesOfCapture types, bool& holdsClosures)
 {
+    if (isClassToken(types.established))
+        return m_isCapturedByClosureThatNeverDies.quickGet(candidate);
     for (TypeID id : { types.proven, types.established }) {
         if (!id)
             continue;
@@ -464,11 +671,15 @@ bool PlannerOfPromotedEnvironments::listFunctionsWhoseClosuresAreHeld(Candidate 
         bool noneCouldBeLetGo = true;
         forEachFunctionAmongClosuresOf(TypeReader(m_program), type, scopedLambda<void(FunctionID)>([&](FunctionID function) {
             noneCouldBeLetGo &= m_isCapturedByClosureThatNeverDies.quickGet(candidate) || hasOneClosureThatNeverDies(function);
-            m_candidatesByFunctionHeld.append({ function.index(), candidate });
+            if (!m_isCapturedByClosureReachableForGood.quickGet(candidate))
+                m_candidatesByFunctionHeld.append({ function.index(), candidate });
         }));
         return noneCouldBeLetGo;
     }
-    return false;
+    if (!m_isCapturedByClosureStoredForGood.quickGet(candidate))
+        return false;
+    m_servesBecauseClassIsStoredForGood.quickSet(candidate);
+    return true;
 }
 
 void PlannerOfPromotedEnvironments::noteThatFunctionHoldsWord(uint32_t function)
@@ -490,6 +701,9 @@ void PlannerOfPromotedEnvironments::keepWhatCouldBeLetGo()
     Candidate numberOfCandidates = static_cast<Candidate>(m_sources.size() + m_scopes.size());
     m_isStruck = BitVector(numberOfCandidates);
     m_isCapturedByClosureThatNeverDies = BitVector(numberOfCandidates);
+    m_isCapturedByClosureStoredForGood = BitVector(numberOfCandidates);
+    m_servesBecauseClassIsStoredForGood = BitVector(numberOfCandidates);
+    m_isCapturedByClosureReachableForGood = BitVector(numberOfCandidates);
     if (!numberOfCandidates)
         return;
 
@@ -502,8 +716,13 @@ void PlannerOfPromotedEnvironments::keepWhatCouldBeLetGo()
         FunctionID madeOnEveryWayBy = makerThatMakesOnEveryWay(id);
         for (uint32_t capture = 0; capture < function.captures.size(); ++capture) {
             std::optional<Candidate> candidate = mayBeLeftOut || madeOnEveryWayBy ? candidateOfCapture(id, capture) : std::nullopt;
-            if (candidate && madeOnEveryWayBy == makerOf(*candidate))
+            if (candidate && madeOnEveryWayBy == makerOf(*candidate)) {
                 m_isCapturedByClosureThatNeverDies.quickSet(*candidate);
+                if (isStoredForGood(id))
+                    m_isCapturedByClosureStoredForGood.quickSet(*candidate);
+                if (m_closuresReachableForGood.get(number))
+                    m_isCapturedByClosureReachableForGood.quickSet(*candidate);
+            }
             if (candidate && mayBeLeftOut)
                 m_functionsByCandidateCaptured.append({ number, *candidate });
             else
@@ -518,7 +737,7 @@ void PlannerOfPromotedEnvironments::keepWhatCouldBeLetGo()
             return type && (m_program.at(type).primitives & Primitive::Absent);
         };
         bool holdsClosures = false;
-        bool serves = source.readersAgree && m_program.at(source.types.established).isJavaScriptValue() && !mayBeAbsent(source.types.established) && !mayBeAbsent(source.types.proven)
+        bool serves = source.readersAgree && (m_program.at(source.types.established).isJavaScriptValue() || isClassToken(source.types.established)) && !mayBeAbsent(source.types.established) && !mayBeAbsent(source.types.proven)
             && listFunctionsWhoseClosuresAreHeld(candidate, source.types, holdsClosures);
         if (!serves || (holdsClosures && source.mayLieInFrameOfCaller))
             struckFromStart.append(candidate);
@@ -530,7 +749,7 @@ void PlannerOfPromotedEnvironments::keepWhatCouldBeLetGo()
         bool serves = !m_isRefused.quickGet(scope.index());
         for (uint32_t field = 0; serves && field < layout.fields.size(); ++field) {
             bool holdsClosures = false;
-            serves = listFunctionsWhoseClosuresAreHeld(candidate, { m_program.provenTypeOf(layout.fields[field].declared), m_facts.linked().provenOfField({ scope, field }) }, holdsClosures);
+            serves = listFunctionsWhoseClosuresAreHeld(candidate, { m_program.provenTypeOf(layout.fields[field].declared), m_facts.linked().provenOfField({ scope, field }) }, holdsClosures) || m_isCapturedByClosureReachableForGood.quickGet(candidate);
         }
         if (!serves)
             struckFromStart.append(candidate);
@@ -599,10 +818,12 @@ void PlannerOfPromotedEnvironments::listStores()
     });
 }
 
-PromotedEnvironments PlannerOfPromotedEnvironments::run()
+PromotedEnvironments PlannerOfPromotedEnvironments::run(std::span<const LayoutID> scopesTakenByClosuresMadeForCallsAlone)
 {
     if (!goThroughWhatStandsInFunctionsThatRunOnce())
         return { };
+    for (LayoutID scope : scopesTakenByClosuresMadeForCallsAlone)
+        m_isRefused.quickSet(scope.index());
     if (!m_scopes.isEmpty())
         refuseScopesThatPositionsHold();
     AOT::sort(m_scopes, { }, &ScopeMadeOnce::layout);
@@ -621,16 +842,114 @@ PromotedEnvironments PlannerOfPromotedEnvironments::run()
     }
     leaveOutCaptures();
     listStores();
+    for (size_t candidate : m_servesBecauseClassIsStoredForGood)
+        m_result.numberOfCapturesOfClassesStoredForGood += !m_isStruck.quickGet(candidate);
     return WTF::move(m_result);
 }
 
 } // anonymous namespace
 
-PromotedEnvironments planPromotedEnvironments(const Program& program, const Facts& facts, const SlotPlanParts& slots)
+struct MakersOfFunctionNameHolders {
+    HashMap<uint32_t, FunctionID, DefaultHash<uint32_t>, WTF::UnsignedWithZeroKeyHashTraits<uint32_t>> makers;
+    BitVector hoisted;
+};
+
+static MakersOfFunctionNameHolders findMakersOfFunctionNameHolders(const Program& program, const Facts& facts, const BitVector& holders)
+{
+    MakersOfFunctionNameHolders found;
+    BitVector isMade(program.functions.size());
+    BitVector isRefused(program.functions.size());
+    BitVector modules;
+    for (size_t holder : holders)
+        modules.set(program.at(FunctionID(static_cast<uint32_t>(holder))).module.index());
+    for (const Variable& variable : program.variables) {
+        if (variable.initialization != VariableInitialization::Function || !holders.get(variable.function.index()))
+            continue;
+        if (isMade.quickSet(variable.function.index()) || !variable.module || !loaderEntersBodyAtMostOnce(program.at(variable.module)))
+            isRefused.quickSet(variable.function.index());
+        else
+            found.hoisted.set(variable.function.index());
+    }
+    for (uint32_t number = 0; number < program.functions.size(); ++number) {
+        FunctionID id(number);
+        if (!modules.get(program.at(id).module.index()))
+            continue;
+        const BodyIndex* index = facts.bodies().find(id);
+        if (!index || !index->opcodes().contains(Opcode::NewClosure))
+            continue;
+        std::optional<bool> serves;
+        for (uint32_t block = 0; block < index->numberOfBlocks(); ++block) {
+            for (BodyValue value : index->block(BlockID(block)).values()) {
+                if (value.opcode() != Opcode::NewClosure)
+                    continue;
+                FunctionID made = value.as<Opcode::NewClosure>().function();
+                if (!holders.get(made.index()))
+                    continue;
+                if (!serves)
+                    serves = facts.runsAtMostOnce(id) && !program.at(id).isCoroutine() && !facts.summaries().at(id).has(SummaryTrait::HasDirectEval) && !index->hasIrreducibleFlow() && program.at(program.at(id).module).kind != ModuleKind::RuntimeSource;
+                if (isMade.quickSet(made.index()) || !*serves || index->loopOf(BlockID(block)))
+                    isRefused.quickSet(made.index());
+                else
+                    found.makers.add(made.index(), id);
+            }
+        }
+    }
+    for (size_t refused : isRefused) {
+        found.makers.remove(static_cast<uint32_t>(refused));
+        found.hoisted.clear(refused);
+    }
+    return found;
+}
+
+static void planFunctionNameMirrors(const Program& program, const Facts& facts, PromotedEnvironments& promoted)
+{
+    const LinkTables& linked = facts.linked();
+    BitVector holdersWithoutClass(program.functions.size());
+    for (const LinkedNameOnFunction& name : linked.namesOnFunctions) {
+        if (name.isLaidByListedStores && !program.at(name.holder).constructedClass)
+            holdersWithoutClass.quickSet(name.holder.index());
+    }
+    MakersOfFunctionNameHolders ofHolders;
+    if (!holdersWithoutClass.isEmpty())
+        ofHolders = findMakersOfFunctionNameHolders(program, facts, holdersWithoutClass);
+    HashSet<uint64_t, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> namesStoredOtherwise;
+    for (const LinkedFunctionNameStore& store : linked.storesOfFunctionNames) {
+        const BodyIndex* index = facts.bodies().find(store.function);
+        bool isCounted = index && !index->isParameter(store.site) && (index->loopOf(index->blockOf(store.site)) || (!program.at(store.holder).constructedClass && linked.isCalledInLoops(store.function)));
+        if (!index || isCounted || index->isParameter(store.site) || index->opcodeOf(store.site) != Opcode::PropSet)
+            namesStoredOtherwise.add(static_cast<uint64_t>(store.holder.index()) << 32 | store.key.bits());
+    }
+    for (const LinkedNameOnFunction& name : linked.namesOnFunctions) {
+        if (!name.isLaidByListedStores || namesStoredOtherwise.contains(static_cast<uint64_t>(name.holder.index()) << 32 | name.key.bits()))
+            continue;
+        LayoutID layout = program.at(name.holder).constructedClass;
+        if (layout ? !program.at(layout).has(LayoutFlags::IsConstructorFunction) || !facts.isEvaluatedAtMostOnce(layout) : name.key == program.keyOf(BuiltinNames::prototype))
+            continue;
+        if (!layout && !ofHolders.hoisted.get(name.holder.index())) {
+            auto maker = ofHolders.makers.find(name.holder.index());
+            if (maker == ofHolders.makers.end())
+                continue;
+            promoted.makers.set(maker->value.index());
+        }
+        if (!promoted.firstVariable)
+            promoted.firstVariable = VariableID(static_cast<uint32_t>(program.variables.size()));
+        VariableID variable(promoted.firstVariable.index() + static_cast<uint32_t>(promoted.variables.size()));
+        PromotedVariable mirror { program.at(name.holder).module, program.at(name.key).text, { }, { }, { }, 0, { }, 0 };
+        mirror.holder = name.holder;
+        mirror.key = name.key;
+        promoted.variables.append(WTF::move(mirror));
+        promoted.functionNameMirrors.append(FunctionNameMirror { name.holder, name.key, variable });
+        promoted.keysOfFunctionNameMirrors.set(name.key.index());
+    }
+}
+
+PromotedEnvironments planPromotedEnvironments(const Program& program, const Facts& facts, const SlotPlanParts& slots, std::span<const LayoutID> scopesTakenByClosuresMadeForCallsAlone)
 {
     if (!facts.mechanisms().contains(Mechanism::PromotedEnvironments))
         return { };
-    return PlannerOfPromotedEnvironments(program, facts, slots).run();
+    PromotedEnvironments promoted = PlannerOfPromotedEnvironments(program, facts, slots).run(scopesTakenByClosuresMadeForCallsAlone);
+    planFunctionNameMirrors(program, facts, promoted);
+    return promoted;
 }
 
 void appendPromotedVariables(const PromotedEnvironments& promoted, SlotPlanParts& slots)
@@ -640,7 +959,9 @@ void appendPromotedVariables(const PromotedEnvironments& promoted, SlotPlanParts
         if (variable.layout)
             planned.representation = slots.layouts[variable.layout.index()].slots[variable.field].representation;
         SlotTraits traits = traitsOf(planned.representation);
-        if (traits.hasAbsent)
+        if (variable.holder)
+            planned.initialWord = JSValue::encode(jsUndefined());
+        else if (traits.hasAbsent)
             planned.initialWord = traits.absentBits;
         slots.variables.append(planned);
     }

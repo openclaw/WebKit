@@ -15,6 +15,7 @@
 #include "WasmCodeInImage.h"
 #include <wtf/AccessibleAddress.h>
 #include <wtf/CryptographicallyRandomNumber.h>
+#include <wtf/Lock.h>
 #include <wtf/OSAllocator.h>
 #include <wtf/PageBlock.h>
 #include <wtf/Scope.h>
@@ -394,7 +395,7 @@ static int openExecutableAt(std::span<const uint8_t> bytes, int64_t offsetInFile
     });
 }
 
-int openExecutableThatHolds(const Image& image)
+int openExecutableContaining(const Image& image)
 {
     const std::optional<Image::PlaceInExecutable>& place = image.placeInExecutable();
     if (!place)
@@ -513,6 +514,26 @@ bool mapPrivateCloneOfImagePages(const Image& image, std::span<const uint8_t> pa
 }
 #endif
 
+#if OS(LINUX)
+bool mapPrivateCloneOfImagePages(const Image& image, std::span<const uint8_t> pages, void* target)
+{
+    RELEASE_ASSERT(!(pages.size() % pageSize()) && !(reinterpret_cast<uintptr_t>(target) % pageSize()));
+    RELEASE_ASSERT(pages.data() >= image.bytes().data() && pages.data() + pages.size() <= image.bytes().data() + image.bytes().size());
+    const std::optional<Image::PlaceInExecutable>& place = image.placeInExecutable();
+    if (!place)
+        return false;
+    int64_t offsetInFile = place->offset + (pages.data() - image.bytes().data());
+    if (offsetInFile % static_cast<int64_t>(pageSize()))
+        return false;
+    int descriptor = openExecutableContaining(image);
+    if (descriptor < 0)
+        return false;
+    bool isMapped = mmap(target, pages.size(), PROT_READ, MAP_PRIVATE | MAP_FIXED, descriptor, offsetInFile) == target;
+    close(descriptor);
+    return isMapped;
+}
+#endif
+
 static void unblockAccessFaults()
 {
 #if OS(DARWIN) || OS(LINUX) || OS(FREEBSD)
@@ -561,6 +582,27 @@ static void didPublishImage(const Image& image)
 extern "C" __attribute__((used, retain)) const char JSC__AOT__startsOnlyWhereItsFileCanBeRead[] = "execute-only start: nothing moves the code that the loader mapped";
 #endif
 
+#if ENABLE(RETURN_ADDRESS_SIGNING)
+extern "C" __attribute__((used, retain)) const char JSC__AOT__savesSignedReturnAddresses[] = "return addresses: what a compiled program saves of them is signed";
+#endif
+
+#if OS(LINUX)
+static void readAheadOfStart(std::span<const uint8_t> bytes, const ImageHeader& header)
+{
+    static constexpr size_t sizeOfRequest = 128 * KB;
+    auto request = [](std::span<const uint8_t> range) {
+        uintptr_t end = std::bit_cast<uintptr_t>(range.data()) + range.size();
+        for (uintptr_t start = WTF::roundDownToMultipleOf(WTF::pageSize(), std::bit_cast<uintptr_t>(range.data())); start < end; start += sizeOfRequest)
+            madvise(std::bit_cast<void*>(start), std::min<size_t>(sizeOfRequest, end - start), MADV_WILLNEED);
+    };
+    request(bytes.subspan(header.codeOffset, std::min<uint64_t>(header.sizeOfCodeOfStart, header.executableSize)));
+    for (ImageSection section : { ImageSection::ProgramTables, ImageSection::StringHeaders, ImageSection::ClosureWords, ImageSection::RegExps, ImageSection::RegExpHashes, ImageSection::Identifiers }) {
+        const ImageSectionRange& range = header.sections[static_cast<size_t>(section)];
+        request(bytes.subspan(range.offset, range.size));
+    }
+}
+#endif
+
 Wire::ImageVerdict useImage(std::span<const uint8_t> bytes, std::optional<ImageFile> file, const std::array<uint8_t, 16>& identity)
 {
     using Wire::ImageVerdict;
@@ -582,6 +624,10 @@ Wire::ImageVerdict useImage(std::span<const uint8_t> bytes, std::optional<ImageF
         return ImageVerdict::Misaligned;
     if (!file && !isLoadedAsItsHeaderSays(bytes, header))
         return ImageVerdict::OutsideItsSegments;
+#if OS(LINUX)
+    if (header.sizeOfCodeOfStart)
+        readAheadOfStart(bytes, header);
+#endif
     if (header.sections[static_cast<size_t>(ImageSection::FaultSites)].size && !tryReserveLowPages())
         return ImageVerdict::LowPagesAccessible;
 

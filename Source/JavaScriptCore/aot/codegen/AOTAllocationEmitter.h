@@ -8,12 +8,12 @@
 #if ENABLE(AOT)
 
 #include "AOTBarrierEmitter.h"
+#include "AOTBitVector.h"
 #include "AOTCellAllocationEmitter.h"
 #include "AOTOperationEmitter.h"
 #include "AOTVector.h"
 #include <optional>
 #include <span>
-#include <wtf/BitVector.h>
 
 namespace JSC { namespace AOT { namespace Typed {
 
@@ -61,19 +61,20 @@ private:
     CellPointer allocateFrameCell(const ValueContext&, const MentionedAllocation&, const PlannedLayout&);
     using EmptySlots = Vector<FieldIndex, 8>;
     EmptySlots collectEmptySlots(LayoutID, const BitVector& isInitialField);
-    EmptySlots collectSlotsThatMayHoldCells(const Operation& made);
+    Vector<ValueID, 8> collectFirstStores(const ValueContext&);
     ZeroedBy whoZeroesBodyOfFreshCell(const ValueContext&, const MentionedAllocation&, std::span<const FieldIndex> emptySlots, AllocationStorage);
     template<typename Visitor> void forEachEmptySlot(LayoutID, const BitVector& isInitialField, const Visitor&);
     void initializeHiddenFields(CellPointer, LayoutID, AllocationStorage, ZeroedBy, bool hasStateOfFrameCell);
     static Representation representationWantedBy(const InitialField&);
     bool isNarrowedWhereStored(const InitialField&) const;
     Operand takeForSlot(const InitialField&);
-    void storeInitialFields(CellPointer, LayoutID, const InitialFields&);
-    void storeEmptySlots(CellPointer, LayoutID, std::span<const FieldIndex> emptySlots, ZeroedBy);
+    void storeInitialFields(const ValueContext&, CellPointer, LayoutID, const InitialFields&, AllocationStorage);
+    void storeEmptySlots(CellPointer, LayoutID, std::span<const FieldIndex> emptySlots, ZeroedBy, BlockID);
     void storeFieldsInExtension(const ValueContext&, CellPointer, LayoutID, const InitialFields&);
-    void storePrototype(const ValueContext&, CellPointer, ValueID prototype);
+    void storePrototype(const ValueContext&, CellPointer, CellPointer requested);
     bool looksAtPrototypeBeforeAllocating(const ValueContext&);
     CellPointer allocateInstance(const ValueContext&, const MentionedAllocation&, ValueID prototype);
+    CellPointer allocateCopyFromOtherLayout(const ValueContext&, ValueID copy);
     Vector<WordOfEmptyObject, 8> wordsOfEmptyObject(LayoutID);
     Vector<uint8_t, 64> bodyOfEmptyCell(const MentionedAllocation&);
     CellPointer createArguments(const ValueContext&, std::optional<CellPointer> callee);

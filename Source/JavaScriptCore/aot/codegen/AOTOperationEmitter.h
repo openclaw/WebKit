@@ -29,6 +29,8 @@ namespace Typed {
 class InlineCall;
 struct TypeTestPlan;
 
+using EmitterOfStubCall = void (*)(CCallHelpers&, StubCalls&, StubKey, OptionalIndex site);
+
 struct CallOptions {
     std::optional<uint32_t> immediate { };
     std::optional<NumberedImmediate> numberedImmediate { };
@@ -48,7 +50,10 @@ struct CallOptions {
     bool followsThrow { false };
     bool convertsNoCells { false };
     bool callerSuspendsAtReturn { false };
+    bool callerDelegates { false };
+    bool rejectsOnThrow { false };
     bool returnsWord32 { false };
+    EmitterOfStubCall emitterOfStubCall { nullptr };
 };
 
 struct StubCallResult {
@@ -58,7 +63,7 @@ struct StubCallResult {
 
 class OperationEmitter : public PrimitiveEmitter {
 protected:
-    explicit OperationEmitter(CodeGenerator& generator)
+    ALWAYS_INLINE explicit OperationEmitter(CodeGenerator& generator)
         : OperationEmitter(generator, generator.inputs().program, generator.code().unit())
     {
     }
@@ -91,14 +96,16 @@ protected:
     bool functionSuspends() const { return m_generator.suspends(); }
     bool functionHasHandlers() const { return m_generator.hasHandlers(); }
     bool hasOneInstance() const;
+    bool emittersCheckProofs() const { return AOT::hasFlag(m_generator.build().options().testing, Wire::TestingSwitch::CheckProofsAtRunTime) || AOT::hasFlag(m_generator.build().options().testing, Wire::TestingSwitch::CheckBoundsInEmittersOnly); }
 
     Operand get(ValueID id) const { return m_generator.get(id); }
     template<typename T> T in(ValueID id) const { return m_generator.getIn(id, T::representation).template as<T>(); }
     template<typename T> std::optional<T> inOptional(ValueID id) const { return id ? std::optional<T>(in<T>(id)) : std::nullopt; }
     Boxed boxed(ValueID id) const { return in<Boxed>(id); }
+    Word32 int32InBox(Boxed);
     Integer integerOf(ValueID);
 
-    void define(const ValueContext& value, Operand result) { m_generator.define(value, result); }
+    ALWAYS_INLINE void define(const ValueContext& value, Operand result) { m_generator.define(value, result); }
     void defineNarrowed(const ValueContext&, Operand);
     void defineTest(const ValueContext& value, Condition result) { m_generator.defineTest(value, result); }
     void defineTestByBranching(const ValueContext&, NOESCAPE const Invocable<void(BranchTargets)> auto& branchOnTest);
@@ -137,8 +144,12 @@ protected:
     uint32_t mentionOfName(PropertyKeyID);
     Word32 identifierNumber(PropertyKeyID);
     std::optional<Vector<uint32_t, 12>> modulesAndPositionsOf(const OperationContext&) const;
+    std::optional<Vector<uint32_t, 12>> modulesAndPositionsOf(Origin) const;
     std::optional<Pointer> siteCacheAddress(const OperationContext&, PropertyKeyID, SlotAccess);
     std::optional<NumberedImmediate> answersAtSite(const OperationContext&, PropertyKeyID, SiteUse);
+    std::optional<NumberedImmediate> answersAtSite(Origin, PropertyKeyID, SiteUse);
+    std::optional<NumberedImmediate> presenceTestSiteAnswers(Origin, PropertyKeyID);
+    std::optional<NumberedImmediate> isAnsweredAtUse(Origin, PropertyKeyID, uint32_t use);
 
     COLD void fail(const OperationContext& context, InternalErrorKind kind) { m_generator.fail(context, kind); }
 
@@ -154,7 +165,7 @@ protected:
     const AOT::CompileOptions& m_options;
 
 private:
-    OperationEmitter(CodeGenerator& generator, const CodeGenerationInputs& inputs, CodeUnit unit)
+    ALWAYS_INLINE OperationEmitter(CodeGenerator& generator, const CodeGenerationInputs& inputs, CodeUnit unit)
         : PrimitiveEmitter(generator)
         , m_generator(generator)
         , m_program(inputs.program)

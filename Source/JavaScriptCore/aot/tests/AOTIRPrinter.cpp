@@ -187,6 +187,12 @@ static void printLinesOfProgramList(IRPrinter& printer, ProgramList list)
     case ProgramList::Modules:
         printLinesOfList(printer, list, program.modules);
         return;
+    case ProgramList::ModuleInstances:
+        printLinesOfList(printer, list, program.moduleInstances);
+        return;
+    case ProgramList::ModuleLinks:
+        printLinesOfList(printer, list, program.moduleLinks);
+        return;
     case ProgramList::ModuleFailures:
         printLinesOfList(printer, list, program.moduleFailures);
         return;
@@ -195,6 +201,9 @@ static void printLinesOfProgramList(IRPrinter& printer, ProgramList list)
         return;
     case ProgramList::SourceStamps:
         printLinesOfList(printer, list, program.sourceStamps);
+        return;
+    case ProgramList::DeclaredRecords:
+        printLinesOfList(printer, list, program.declaredRecords);
         return;
     case ProgramList::EvalScopes:
         printLinesOfList(printer, list, program.evalScopes);
@@ -238,7 +247,7 @@ static void printLinesOfProgramList(IRPrinter& printer, ProgramList list)
     case ProgramList::SyntheticExports:
     case ProgramList::RequiredNames:
     case ProgramList::ColumnAdjustments:
-    case ProgramList::QuotedTexts:
+    case ProgramList::QuotedSources:
     case ProgramList::EvalBindings:
     case ProgramList::Code:
     case ProgramList::DataNodes:
@@ -752,6 +761,11 @@ void MemoryLocation::dump(PrintStream& out, const Program& program) const
     case AbstractHeap::AllocatorState:
     case AbstractHeap::RuntimeState:
     case AbstractHeap::CalleesInFrames:
+    case AbstractHeap::ArrayLengths:
+    case AbstractHeap::ArrayCapacity:
+    case AbstractHeap::LoweredArrayLengths:
+    case AbstractHeap::ClassObjects:
+    case AbstractHeap::WrittenTypes:
         RELEASE_ASSERT_NOT_REACHED();
     }
     out.print("]"_s);

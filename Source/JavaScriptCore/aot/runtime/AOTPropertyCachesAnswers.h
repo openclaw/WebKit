@@ -36,6 +36,7 @@ enum class PropertyAnswerKind : uint8_t {
     Field,
     FieldAccessor,
     FieldCreation,
+    FieldOfGetter,
     FieldOrInheritedValue,
     FieldOrInheritedAccessor,
     InheritedField,
@@ -50,17 +51,20 @@ enum class PropertyAnswerKind : uint8_t {
     FieldRemoval,
     NothingToRemove,
     ArrayLength,
+    LastIndexOfRegExp,
     TypedArrayLength,
     StringLength,
     ClosureLength,
     ClosureName,
+    ClosureAddition,
     Constant,
 };
 
 struct PropertyAnswer {
     static PropertyAnswer uncacheable(SlotAccess access, bool didFlatten = false) { return { .access = access, .didFlatten = didFlatten }; }
     static PropertyAnswer handlerOfProxyAnswers(SlotAccess access, JSCell* key) { return { .access = access, .keyForTrap = key }; }
-    static PropertyAnswer uncacheableAfter(SlotAccess access, ChainWalk&& walk) { return { .access = access, .didFlatten = walk.didFlatten, .changeableObjects = WTF::move(walk.changeableObjects) }; }
+    static PropertyAnswer uncacheableAfter(SlotAccess access, ChainWalk&& walk) { return { .access = access, .changeableObjects = WTF::move(walk.changeableObjects) }; }
+    static PropertyAnswer reportedReplacement(PropertyOffset offset) { return { .access = SlotAccess::Store, .isOwn = true, .offset = offset }; }
     static PropertyAnswer own(PropertyAnswerKind kind, SlotAccess access, PropertyOffset offset = invalidOffset) { return { .kind = kind, .access = access, .isOwn = true, .offset = offset }; }
     static PropertyAnswer above(PropertyAnswerKind kind, SlotAccess access, ChainWalk&& walk) { return { .kind = kind, .access = access, .offset = walk.offset, .holder = walk.holder, .changeableObjects = WTF::move(walk.changeableObjects) }; }
 
@@ -73,7 +77,10 @@ struct PropertyAnswer {
     bool absentIsUndefined { false };
     bool emptySlotMayBeUndefined { false };
     bool undefinedNeedsNoStorage { false };
+    bool fieldTakesAnyValue { false };
     bool readsByteOffset { false };
+    bool isInModuleInstance { false };
+    JSCell* foreignInstance { nullptr };
     std::optional<std::pair<uint32_t, uint32_t>> orderWords { };
     bool didFlatten { false };
     PropertyOffset offset { invalidOffset };
@@ -81,6 +88,8 @@ struct PropertyAnswer {
     Structure* newStructure { nullptr };
     uint32_t newStorageCapacity { 0 };
     bool storageHasIndexingHeader { false };
+    bool clearsPristineFlag { false };
+    bool copiesElements { false };
     const FieldData* field { nullptr };
     SlotData variable { };
     uint32_t customAccessor { 0 };
@@ -107,6 +116,7 @@ struct StoreQuery {
     UniquedStringImpl* uid;
     const PutPropertySlot& slot;
     PutMode mode;
+    std::optional<uint32_t> orderWordBefore { };
 };
 
 struct DeletionQuery {
@@ -120,6 +130,7 @@ struct DeletionQuery {
 
 PropertyAnswer classifyRead(const ReadQuery&);
 PropertyAnswer classifyStore(const StoreQuery&);
+PropertyAnswer classifyClosureAddition(JSGlobalObject*, JSObject* closure, UniquedStringImpl*);
 PropertyAnswer classifyDeletion(const DeletionQuery&);
 PropertyAnswer classifyCompiledObjectStore(const StoreQuery&, Object&);
 PropertyAnswer classifyNamespaceRead(const ReadQuery&);
@@ -128,6 +139,9 @@ ChainWalk walkChainThroughGlobalProxy(JSGlobalObject*, const Slot&, UniquedStrin
 bool repeatsPropertyAddition(Structure*, UniquedStringImpl*);
 
 Slot slotFor(const PropertyAnswer&, Structure* receiverStructure);
+
+const FieldData* findFieldReadByGetter(const Object&, JSObject* getter, UniquedStringImpl* name);
+void answerByGetterField(JSValue base, Structure* structureBefore, UniquedStringImpl* name, PropertyAnswer&);
 
 enum class LazyPrototypeReadResult : uint8_t { NotApplicable, Answered, ContinuesAbove };
 
@@ -168,12 +182,14 @@ private:
 
     PropertyCaches* m_caches { nullptr };
     JSCell* m_previous { nullptr };
+    UniquedStringImpl* m_previousSymbol { nullptr };
 };
 std::optional<PropertyOffset> findOffset(VM&, Structure*, UniquedStringImpl*, ChainWalkMode, unsigned& attributes);
 bool structureProvesOwnAbsence(VM&, JSCell* base, Structure*, UniquedStringImpl*, ChainWalkMode);
 bool hasOrdinaryDefineForName(VM&, JSCell* base, Structure*, UniquedStringImpl*);
 bool isHostObjectOverridingPut(Structure*);
 bool isWriteJudgedByWriter(Structure*, UniquedStringImpl*);
+void holdExtraPropertiesToStructureThatIsNamed(JSGlobalObject*, Object&, ASCIILiteral whatIsDoneHere);
 bool flattenOnce(VM&, JSObject*);
 bool flattenForListing(VM&, JSObject*);
 bool isLastAdditionOfRun(Structure* before, Structure* after, UniquedStringImpl*);

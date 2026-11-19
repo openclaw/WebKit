@@ -8,11 +8,13 @@
 
 #if ENABLE(AOT)
 
+#include "AOTCheckedSpan.h"
 #include "AOTInstance.h"
 #include "AOTObject.h"
 #include "AOTObjectModel.h"
 #include "AOTPrimitives.h"
 #include "AOTProgramIdentifiers.h"
+#include "AOTRuntimeReporter.h"
 #include "AOTRuntimeType.h"
 #include "AOTSlotAccess.h"
 #include "AOTState.h"
@@ -35,29 +37,30 @@ ObjectBuilderPlan::ObjectBuilderPlan(State& state, const LayoutData& layout)
 {
 }
 
+static size_t numberOfBodyWords(const LayoutData& layout)
+{
+    return WTF::roundUpToMultipleOf<sizeof(uint64_t)>(layout.size - sizeof(JSCell)) / sizeof(uint64_t);
+}
+
 void ObjectBuilderPlan::createInitialBody(uint32_t orderAndCount)
 {
     m_initialBody.fill(0, m_layout.size - sizeof(JSCell));
-    auto slotAt = [&](uint32_t offsetInCell) {
-        return m_initialBody.mutableSpan().subspan(offsetInCell - sizeof(JSCell)).data();
+    auto slotAt = [&](uint32_t offsetInCell, size_t width) {
+        return checkedSubspan(m_initialBody.mutableSpan(), offsetInCell - sizeof(JSCell), width).data();
     };
     for (const FieldData& field : m_layout.fields()) {
         if (!field.isOutOfLine())
-            clearSlot(field.slot.representation(), slotAt(field.slot.offset));
+            clearSlot(field.slot.representation(), slotAt(field.slot.offset, widthOf(field.slot.representation())));
     }
-    *reinterpret_cast<uint32_t*>(slotAt(offsetOfOrderWord)) = orderAndCount;
-    *reinterpret_cast<uint32_t*>(slotAt(offsetOfShapeWord)) = shapeWordOf(m_layout.shape);
+    *reinterpret_cast<uint32_t*>(slotAt(offsetOfOrderWord, sizeof(uint32_t))) = orderAndCount;
+    *reinterpret_cast<uint32_t*>(slotAt(offsetOfShapeWord, sizeof(uint32_t))) = shapeWordOf(m_layout.shape);
 }
 
 void ObjectBuilderPlan::createFastPath()
 {
-    size_t numberOfWords = WTF::roundUpToMultipleOf<sizeof(uint64_t)>(m_initialBody.size()) / sizeof(uint64_t);
-    if (numberOfWords > maxFastPathWords || m_fields.isEmpty())
-        return;
-    for (const PlannedField& planned : m_fields) {
-        if (planned.field->isOutOfLine())
-            return;
-    }
+    static_assert(sizeof(JSCell) + maxFastPathWords * sizeof(uint64_t) <= std::numeric_limits<decltype(FastField::offset)>::max());
+    size_t numberOfWords = numberOfBodyWords(m_layout);
+    ASSERT(numberOfWords <= maxFastPathWords);
 
     RuntimeLayoutTable& layouts = m_state.objects->layouts;
     BitVector namedFields(m_layout.numberOfFields);
@@ -88,7 +91,15 @@ void ObjectBuilderPlan::createFastPath()
         m_fastFields.append({ static_cast<uint16_t>(field.slot.offset), field.slot.representation(), accepted });
         namedFields.set(m_layout.indexOf(field));
     }
+    m_acceptedByConsecutiveWords = AcceptsInt32 | AcceptsDouble | AcceptsString | AcceptsObject | AcceptsBoolean;
+    for (size_t index = 0; index < m_fastFields.size(); ++index) {
+        const FastField& field = m_fastFields[index];
+        if (field.representation != SlotRepresentation::JSValue || field.offset != m_fastFields[0].offset + index * sizeof(EncodedJSValue))
+            m_acceptedByConsecutiveWords = 0;
+        m_acceptedByConsecutiveWords &= field.acceptedValues;
+    }
     m_acceptedStructureIDs.fill(0, m_fastFields.size());
+    m_numberOfBodyWords = numberOfWords;
     m_namesEveryFieldOfBirth = true;
     for (const FieldData& field : m_layout.fields()) {
         if ((field.isFilledAtBirth || field.holdsRawValueFromBirth) && !namedFields.get(m_layout.indexOf(field)))
@@ -115,6 +126,11 @@ static bool defersClosure(const FieldData& field)
     return traitsOf(field.slot.representation()).valueKind == SlotValueKind::DeferredClosure;
 }
 
+static bool mayStayAbsent(const FieldData& field)
+{
+    return (field.flags & fieldIsOptional) && field.canLeaveSlot() && !defersClosure(field);
+}
+
 bool ObjectBuilder::canBuildWithoutCompilerKnowledge(const LayoutData& layout)
 {
     if (layout.isDerived || !layout.impossibleMutations().isEmpty())
@@ -128,22 +144,39 @@ std::unique_ptr<ObjectBuilderPlan> ObjectBuilder::tryCreatePlan(State& state, co
 {
     if (layout.kind() != LayoutKind::Record || !layout.shape || layout.size < offsetOfFirstField)
         return nullptr;
+    if (names.empty() || numberOfBodyWords(layout) > ObjectBuilderPlan::maxFastPathWords)
+        return nullptr;
+
+    std::span<const FieldData> fields = layout.fields();
+    if (static_cast<size_t>(std::ranges::count_if(fields, &FieldData::isRequired)) > names.size())
+        return nullptr;
 
     VM& vm = *state.instance.vm;
     RuntimeLayoutTable& layouts = state.objects->layouts;
-    std::span<const FieldData> fields = layout.fields();
-    std::unique_ptr<ObjectBuilderPlan> plan { new ObjectBuilderPlan(state, layout) };
     BitVector namedFields(fields.size());
-    Vector<uint16_t> keyOrder;
+    Vector<uint16_t, 16> keyOrder;
     for (UniquedStringImpl* name : names) {
         const FieldData* field = layouts.field(vm, layout, name);
-        if (!field || field->isPrivate() || field->attributes() || defersClosure(*field))
+        if (!field || field->isPrivate() || field->attributes() || defersClosure(*field) || field->isOutOfLine())
             return nullptr;
         uint16_t index = layout.indexOf(*field);
         if (!namedFields.add(index))
             return nullptr;
         keyOrder.append(index);
+    }
+    for (size_t index = 0; index < fields.size(); ++index) {
+        if (!namedFields.get(index) && !mayStayAbsent(fields[index]))
+            return nullptr;
+    }
 
+    std::optional<uint32_t> orderAndCount = state.objects->keyOrders.orderStartingWith(layout, keyOrder.span());
+    if (!orderAndCount)
+        return nullptr;
+
+    countEvent(vm, RuntimeCounterID::RecordPlansTried);
+    std::unique_ptr<ObjectBuilderPlan> plan { new ObjectBuilderPlan(state, layout) };
+    for (uint16_t index : keyOrder) {
+        const FieldData* field = &fields[index];
         const RuntimeType& type = layouts.typeOf(*field);
         OptionSet<PrimitiveSet> primitives = type.primitiveSet();
         auto acceptsEveryIntegerIn = [&](Typed::Range integers) {
@@ -156,45 +189,44 @@ std::unique_ptr<ObjectBuilderPlan> ObjectBuilder::tryCreatePlan(State& state, co
         bool acceptsBooleans = primitives.containsAll({ PrimitiveSet::True, PrimitiveSet::False });
         plan->m_fields.append({ .field = field, .acceptsEveryInt32 = acceptsEveryInt32, .acceptsEveryNumber = acceptsEveryNumber, .acceptsBooleans = acceptsBooleans });
     }
-    for (size_t index = 0; index < fields.size(); ++index) {
-        bool mayStayAbsent = (fields[index].flags & fieldIsOptional) && fields[index].canLeaveSlot() && !defersClosure(fields[index]);
-        if (!namedFields.get(index) && !mayStayAbsent)
-            return nullptr;
-    }
-
-    std::optional<uint32_t> orderAndCount = state.objects->keyOrders.orderStartingWith(layout, keyOrder.span());
-    if (!orderAndCount)
-        return nullptr;
+    plan->m_orderAndCount = *orderAndCount;
     plan->createInitialBody(*orderAndCount);
     plan->createFastPath();
-    if (!plan->hasFastPath())
-        return nullptr;
     return plan;
 }
 
 std::unique_ptr<ObjectBuilderPlan> ObjectBuilder::tryCreatePlanOfSmallestRecord(State& state, std::span<UniquedStringImpl* const> names, bool (*accepts)(const ObjectBuilderPlan&))
 {
     VM& vm = *state.instance.vm;
-    RuntimeLayoutTable& layouts = state.objects->layouts;
-    std::optional<uint32_t> lastName = identifiersOf(state.instance).numberOf(names.back());
-    if (!lastName)
-        return nullptr;
+    countEvent(vm, RuntimeCounterID::RecordPlanChoices);
+    std::span<const Number24> shapesWithRarestName;
+    for (UniquedStringImpl* name : names) {
+        std::optional<uint32_t> number = identifiersOf(state.instance).numberOf(name);
+        if (!number)
+            return nullptr;
+        std::span<const Number24> shapesWithName = state.tables.parsedRecordShapesWithName(*number);
+        if (shapesWithName.empty())
+            return nullptr;
+        if (shapesWithRarestName.empty() || shapesWithName.size() < shapesWithRarestName.size())
+            shapesWithRarestName = shapesWithName;
+    }
 
-    std::unique_ptr<ObjectBuilderPlan> best;
-    for (const ParsedRecordFieldData& row : std::ranges::equal_range(state.tables.parsedRecordFields(), *lastName, { }, &ParsedRecordFieldData::nameNumber)) {
-        const LayoutData& layout = layouts.layoutForShape(row.shape);
-        if (layout.numberOfFields < names.size() || (best && best->layout().numberOfFields <= layout.numberOfFields) || !canBuildWithoutCompilerKnowledge(layout))
-            continue;
-        bool hasEveryName = std::ranges::all_of(names, [&](UniquedStringImpl* name) {
-            return !!layouts.field(vm, layout, name);
-        });
-        if (!hasEveryName)
+    RuntimeLayoutTable& layouts = state.objects->layouts;
+    size_t recordsAsked = 0;
+    std::unique_ptr<ObjectBuilderPlan> chosen;
+    for (Number24 shape : shapesWithRarestName) {
+        ++recordsAsked;
+        const LayoutData& layout = layouts.layoutForShape(shape);
+        if (layout.numberOfFields < names.size() || !canBuildWithoutCompilerKnowledge(layout))
             continue;
         std::unique_ptr<ObjectBuilderPlan> plan = tryCreatePlan(state, layout, names);
-        if (plan && accepts(*plan))
-            best = WTF::move(plan);
+        if (plan && accepts(*plan)) {
+            chosen = WTF::move(plan);
+            break;
+        }
     }
-    return best;
+    countEvent(vm, RuntimeCounterID::RecordPlanCandidates, recordsAsked);
+    return chosen;
 }
 
 bool ObjectBuilder::tryStoreSlow(const ObjectBuilderPlan& plan, uint8_t* cell, size_t index, JSValue value)

@@ -8,6 +8,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
 #include "AOTFamilies.h"
 #include "AOTIRProgram.h"
 #include "AOTLinkTables.h"
@@ -19,7 +20,6 @@
 #include <optional>
 #include <span>
 #include <tuple>
-#include <wtf/BitVector.h>
 #include <wtf/HashMap.h>
 #include <wtf/Int128.h>
 
@@ -85,7 +85,7 @@ private:
         uint32_t mentions { 0 };
     };
 
-    bool hasShape(LayoutID id) const { return m_storage.holdsCompiledObjectsInUse(id); }
+    ALWAYS_INLINE bool hasShape(LayoutID id) const { return m_storage.holdsCompiledObjectsInUse(id); }
 
     std::span<const uint32_t> leavesOf(const MentionedSet& set) const LIFETIME_BOUND
     {
@@ -303,8 +303,10 @@ private:
         ConsecutiveSets consecutiveSets(numberOfLeaves);
         Vector<uint32_t> firstRefusedSetOfLeaf(FillWith { }, numberOfLeaves, inNoRefusedSet);
         uint32_t numberOfRefusedSets = 0;
+        bool allSetsAreNested = true;
         for (MentionedSet& set : m_sets) {
-            set.isKeptTogether = consecutiveSets.tryKeepTogether(leavesOf(set));
+            allSetsAreNested = allSetsAreNested && set.isFamily && consecutiveSets.tryKeepNestedSetTogether(leavesOf(set));
+            set.isKeptTogether = allSetsAreNested || consecutiveSets.tryKeepTogether(leavesOf(set));
             RELEASE_ASSERT(set.isKeptTogether || !set.isFamily);
             if (set.isKeptTogether)
                 continue;

@@ -74,13 +74,17 @@ set(JavaScriptCore_AOT_EXPORTED_HEADERS
     aot/image/AOTImageForward.h
     aot/image/AOTImageLoading.h
     aot/image/AOTImageText.h
+    aot/image/AOTPrefixCode.h
+    aot/image/AOTRegExpMatchPlan.h
     aot/image/AOTRegExpSummary.h
     aot/image/AOTRuntimeDescription.h
+    aot/image/AOTSideTableCodes.h
     aot/image/AOTStoredStrings.h
     aot/image/AOTVarint.h
     aot/image/AOTWasmInterface.h
     aot/ir/AOTID.h
     aot/ir/AOTNameClass.h
+    aot/ir/AOTPrimitives.h
     aot/object/AOTCellFormat.h
     aot/object/AOTClosure.h
     aot/object/AOTClosureWord.h
@@ -94,6 +98,7 @@ set(JavaScriptCore_AOT_EXPORTED_HEADERS
     aot/object/AOTObjectVisiting.h
     aot/object/AOTObjectWords.h
     aot/object/AOTPagedBitSet.h
+    aot/object/AOTPrefetchStep.h
     aot/object/AOTProgramTables.h
     aot/object/AOTPropertyList.h
     aot/object/AOTPropertyWalk.h
@@ -106,6 +111,7 @@ set(JavaScriptCore_AOT_EXPORTED_HEADERS
     aot/runtime/AOTBuiltinCells.h
     aot/runtime/AOTBuiltinModules.h
     aot/runtime/AOTCallSiteCache.h
+    aot/runtime/AOTChainDependents.h
     aot/runtime/AOTCompactStorage.h
     aot/runtime/AOTCompactTable.h
     aot/runtime/AOTCompiledCaller.h
@@ -114,18 +120,24 @@ set(JavaScriptCore_AOT_EXPORTED_HEADERS
     aot/runtime/AOTCoroutineWords.h
     aot/runtime/AOTFunctionDescription.h
     aot/runtime/AOTGenerator.h
+    aot/runtime/AOTGlobalBindings.h
     aot/runtime/AOTHeapCellClasses.h
     aot/runtime/AOTHeapCellVisits.h
     aot/runtime/AOTHost.h
     aot/runtime/AOTInstance.h
     aot/runtime/AOTInstanceLayout.h
     aot/runtime/AOTJSONWords.h
+    aot/runtime/AOTKeyedLookup.h
     aot/runtime/AOTMembersLeftOut.h
     aot/runtime/AOTModuleData.h
     aot/runtime/AOTModuleHost.h
     aot/runtime/AOTModuleRecord.h
+    aot/runtime/AOTModuleTable.h
     aot/runtime/AOTModuleWords.h
+    aot/runtime/AOTModules.h
+    aot/runtime/AOTNarrowCopy.h
     aot/runtime/AOTOperationData.h
+    aot/runtime/AOTOrderRecorder.h
     aot/runtime/AOTPropertyCachesStringKeys.h
     aot/runtime/AOTPropertyCachesWords.h
     aot/runtime/AOTRealmStartup.h
@@ -161,11 +173,15 @@ set(JavaScriptCore_AOT_EXPORTED_HEADERS
     aot/support/AOTCompileOptionWords.h
     aot/support/AOTCompileOptions.h
     aot/support/AOTCurrentWork.h
-    aot/support/AOTHostFunctionTexts.h
+    aot/support/AOTHostFunctionSources.h
     aot/support/AOTLimits.h
     aot/support/AOTSort.h
     aot/support/AOTThreads.h
     aot/support/AOTVector.h
+    aot/tests/AOTBuiltProgramTestSupport.h
+    aot/tests/AOTLoadedProgramTestSupport.h
+    aot/tests/AOTNativeTest.h
+    aot/tests/AOTRealmTestSupport.h
 )
 
 # Written by aot-source-lists.ts: the same of what the schema's generator writes.
@@ -190,12 +206,13 @@ list(APPEND JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS
     ${JavaScriptCore_AOT_BUILTIN_TABLE_EXPORTED_GENERATED_HEADERS}
 )
 
-# Written by aot-source-lists.ts: every .cpp under aot/tests/ but AOTShell.cpp. Linked into testaot only, with JavaScriptCore_AOT_SCHEMA_GENERATED_TEST_SOURCES.
+# Written by aot-source-lists.ts: every .cpp under aot/tests/ that is in no list below. Linked into testaot only, with JavaScriptCore_AOT_SCHEMA_GENERATED_TEST_SOURCES.
 set(JavaScriptCore_AOT_TEST_SOURCES
     aot/tests/AOTArrayTests.cpp
     aot/tests/AOTBodyTests.cpp
     aot/tests/AOTBoxedCallProgramTests.cpp
     aot/tests/AOTBranchesGrowthTests.cpp
+    aot/tests/AOTBuiltProgramTestSupport.cpp
     aot/tests/AOTBuiltinCellsTests.cpp
     aot/tests/AOTBuiltinResultObjectTests.cpp
     aot/tests/AOTBuiltinSubclassTests.cpp
@@ -280,6 +297,9 @@ set(JavaScriptCore_AOT_TEST_SOURCES
     aot/tests/AOTMachineAllocationTests.cpp
     aot/tests/AOTMachineCallsOnWaysTests.cpp
     aot/tests/AOTMachineCheckerTests.cpp
+    aot/tests/AOTMachineExecutionFuzzer.cpp
+    aot/tests/AOTMachineExecutionFuzzerGenerator.cpp
+    aot/tests/AOTMachineExecutionFuzzerTests.cpp
     aot/tests/AOTMachineFoldingTests.cpp
     aot/tests/AOTMachineFrameFormTests.cpp
     aot/tests/AOTMachineFrameTests.cpp
@@ -302,7 +322,6 @@ set(JavaScriptCore_AOT_TEST_SOURCES
     aot/tests/AOTModuleRequestListTests.cpp
     aot/tests/AOTModuleTableTests.cpp
     aot/tests/AOTNakedConstructorTests.cpp
-    aot/tests/AOTNativeModuleExportTests.cpp
     aot/tests/AOTNativeStoreTests.cpp
     aot/tests/AOTNativeTestRunner.cpp
     aot/tests/AOTObjectCreateProgramTests.cpp
@@ -340,7 +359,9 @@ set(JavaScriptCore_AOT_TEST_SOURCES
     aot/tests/AOTRuntimeRecordTests.cpp
     aot/tests/AOTRuntimeTypeTests.cpp
     aot/tests/AOTSavedFrameTests.cpp
+    aot/tests/AOTSharedArrayTests.cpp
     aot/tests/AOTSharingModeAndNamespaceTests.cpp
+    aot/tests/AOTSignedReturnAddressTests.cpp
     aot/tests/AOTSiteAnswersOfGettersTests.cpp
     aot/tests/AOTSlimClosureTests.cpp
     aot/tests/AOTSlotAccessTests.cpp
@@ -352,6 +373,7 @@ set(JavaScriptCore_AOT_TEST_SOURCES
     aot/tests/AOTStaticMembersNamedLikeBuiltinsTests.cpp
     aot/tests/AOTStorageOwnerProgramTests.cpp
     aot/tests/AOTStoreAnswerTests.cpp
+    aot/tests/AOTStoresOfStubsProgramTests.cpp
     aot/tests/AOTStringBuilderStorageTests.cpp
     aot/tests/AOTStringSearchTests.cpp
     aot/tests/AOTStringStraysTests.cpp
@@ -407,6 +429,11 @@ set(JavaScriptCore_AOT_PROGRAM_SOURCES
 # Linked into jsc.
 set(JavaScriptCore_AOT_SHELL_SOURCES
     aot/tests/AOTShell.cpp
+)
+
+# Linked into the testaot of this build, beside the stand-in host's table of built-ins. Bun links its own in their place.
+set(JavaScriptCore_AOT_STAND_IN_HOST_TEST_SOURCES
+    aot/tests/host/AOTNativeTestsOfStandInHost.cpp
 )
 
 # Compiled for size like aot/SourcesCompiledForSize.txt.
@@ -530,11 +557,35 @@ function(AOT_CHECK_READS_THAT_ASSUME)
     file(GLOB_RECURSE sources CONFIGURE_DEPENDS "${JAVASCRIPTCORE_DIR}/aot/*.cpp" "${JAVASCRIPTCORE_DIR}/aot/*.h")
     add_custom_command(
         OUTPUT "${JavaScriptCore_AOT_GENERATED_DIR}/AOTReadsThatAssumeChecked.h"
-        DEPENDS ${sources} "${JAVASCRIPTCORE_DIR}/aot/codegen/generator/reads-that-assume.ts" "${JAVASCRIPTCORE_DIR}/aot/codegen/AOTReadsThatAssume.txt"
+        DEPENDS ${sources} "${JAVASCRIPTCORE_DIR}/aot/codegen/generator/reads-that-assume.ts" "${JAVASCRIPTCORE_DIR}/aot/codegen/AOTReadsThatAssume.txt" "${JAVASCRIPTCORE_DIR}/aot/codegen/generator/stub-registers.ts"
         COMMAND "${NODE_EXECUTABLE}" "${JAVASCRIPTCORE_DIR}/aot/codegen/generator/reads-that-assume.ts" --javascriptcore "${JAVASCRIPTCORE_DIR}" --out "${JavaScriptCore_AOT_GENERATED_DIR}"
         VERBATIM
     )
     set(JavaScriptCore_SOURCES ${JavaScriptCore_SOURCES} "${JavaScriptCore_AOT_GENERATED_DIR}/AOTReadsThatAssumeChecked.h" PARENT_SCOPE)
+endfunction()
+
+# It reads the text of the runtime's sources. What it writes says only that they have passed.
+function(AOT_CHECK_LATE_STORES)
+    file(GLOB_RECURSE sources CONFIGURE_DEPENDS "${JAVASCRIPTCORE_DIR}/aot/*.cpp" "${JAVASCRIPTCORE_DIR}/aot/*.h")
+    add_custom_command(
+        OUTPUT "${JavaScriptCore_AOT_GENERATED_DIR}/AOTLateStoresChecked.h"
+        DEPENDS ${sources} "${JAVASCRIPTCORE_DIR}/aot/runtime/generator/late-stores.ts" "${JAVASCRIPTCORE_DIR}/aot/runtime/AOTLateStores.txt"
+        COMMAND "${NODE_EXECUTABLE}" "${JAVASCRIPTCORE_DIR}/aot/runtime/generator/late-stores.ts" --javascriptcore "${JAVASCRIPTCORE_DIR}" --out "${JavaScriptCore_AOT_GENERATED_DIR}"
+        VERBATIM
+    )
+    set(JavaScriptCore_SOURCES ${JavaScriptCore_SOURCES} "${JavaScriptCore_AOT_GENERATED_DIR}/AOTLateStoresChecked.h" PARENT_SCOPE)
+endfunction()
+
+# It reads the text of the compiler's sources as well, and its own fixtures first. What it writes says only that they have passed.
+function(AOT_CHECK_FORCED_JUMPS)
+    file(GLOB_RECURSE sources CONFIGURE_DEPENDS "${JAVASCRIPTCORE_DIR}/aot/*.cpp" "${JAVASCRIPTCORE_DIR}/aot/*.h" "${JAVASCRIPTCORE_DIR}/aot/runtime/generator/forced-jumps-fixtures/*.txt")
+    add_custom_command(
+        OUTPUT "${JavaScriptCore_AOT_GENERATED_DIR}/AOTForcedJumpsChecked.h"
+        DEPENDS ${sources} "${JAVASCRIPTCORE_DIR}/aot/runtime/generator/forced-jumps.py" "${JAVASCRIPTCORE_DIR}/aot/runtime/AOTForcedJumps.txt"
+        COMMAND "${PYTHON_EXECUTABLE}" "${JAVASCRIPTCORE_DIR}/aot/runtime/generator/forced-jumps.py" --javascriptcore "${JAVASCRIPTCORE_DIR}" --out "${JavaScriptCore_AOT_GENERATED_DIR}"
+        VERBATIM
+    )
+    set(JavaScriptCore_SOURCES ${JavaScriptCore_SOURCES} "${JavaScriptCore_AOT_GENERATED_DIR}/AOTForcedJumpsChecked.h" PARENT_SCOPE)
 endfunction()
 
 function(AOT_READ_LIBRARY_SOURCES result problemsResult)
@@ -564,6 +615,7 @@ function(AOT_CHECK_SOURCE_LISTS)
         ${JavaScriptCore_AOT_TEST_SOURCES}
         ${JavaScriptCore_AOT_PROGRAM_SOURCES}
         ${JavaScriptCore_AOT_SHELL_SOURCES}
+        ${JavaScriptCore_AOT_STAND_IN_HOST_TEST_SOURCES}
     )
     foreach (path IN LISTS found)
         if (NOT path IN_LIST listed)
@@ -639,6 +691,8 @@ AOT_GENERATE_FROM_SCHEMA()
 AOT_GENERATE_BUILTIN_TABLE()
 AOT_GENERATE_RUNTIME_FACTS()
 AOT_CHECK_READS_THAT_ASSUME()
+AOT_CHECK_LATE_STORES()
+AOT_CHECK_FORCED_JUMPS()
 AOT_COMPUTE_SOURCES()
 AOT_CHECK_SOURCE_LISTS()
 AOT_CHECK_EXPORTED_HEADERS()

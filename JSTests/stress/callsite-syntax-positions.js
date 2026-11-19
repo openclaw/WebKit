@@ -157,6 +157,9 @@ return Reflect /* gap */ . construct(record("target", Positioned), [record("a", 
 })(fallbackReflect);
 assertSame(result, fallbackResult);
     }, 156, 28, "shadowed Reflect reconstructs literal arguments", "get,target,a,b,newTarget,extra,fallback"],
+    [function () {
+capture(record("a", 1), ...[record("b", 2)], record("c", 3));
+    }, 161, 1, "mixed spread-call syntax position", "a,b,c"],
 ];
 const events = [];
 function assertSame(actual, expected) {

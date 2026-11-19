@@ -72,7 +72,7 @@ const ExcludedNameList* AssignmentPlanCache::excludedListAt(std::span<UniquedStr
 NEVER_INLINE AssignmentPlan* AssignmentPlanCache::makePlan(VM& vm, JSObject* target, JSObject* extraProperties, const AssignmentSource& source, uint32_t hash)
 {
     if (!m_sets)
-        m_sets.make();
+        m_sets.makeFromZeros();
     unsigned setIndex = hash % numberOfSets;
     Set& set = (*m_sets)[setIndex];
     auto way = std::ranges::find_if(set.ways, [](auto& candidate) {
@@ -95,7 +95,7 @@ NEVER_INLINE AssignmentPlan* AssignmentPlanCache::makePlan(VM& vm, JSObject* tar
     if (!plan.excludedList)
         plan.excludedNames.appendRange(source.excludedNames.begin(), source.excludedNames.end());
     didWritePlan(plan);
-    countEvent(vm, RuntimeCounterID::AssignmentPlansMade);
+    countEvent(vm, RuntimeCounterID::AssignmentPlansCreated);
     fillPlan(vm, plan, setIndex * waysPerSet + static_cast<unsigned>(way - set.ways.begin()), target, extraProperties, source);
     didWritePlan(plan);
     return &plan;
@@ -200,7 +200,7 @@ static std::optional<Vector<AssignedProperty, 16>> listOwnPropertiesOfAssignment
     if (const Object* compiledSource = source.compiledObject) {
         ObjectModel& objects = *compiledSource->state().objects;
         const LayoutData& layout = compiledSource->layout();
-        auto entries = objects.keyOrders.entriesInOrder(layout, orderOf(source.orderWord)).first(countOf(source.orderWord));
+        auto entries = objects.keyOrders.entriesListedBy(layout, source.orderWord);
         properties.reserveInitialCapacity(entries.size());
         for (uint16_t index : entries) {
             if (index >= layout.numberOfFields)
@@ -382,7 +382,7 @@ CopyOfTwoPlan* AssignmentPlanCache::planForCopyOfTwo(VM& vm, JSGlobalObject* rea
     }
     fillPlanForCopyOfTwo(vm, plan, realm, first, second);
     m_writes.recordAll();
-    countEvent(vm, RuntimeCounterID::AssignmentPlansMade);
+    countEvent(vm, RuntimeCounterID::AssignmentPlansCreated);
     return &plan;
 }
 
@@ -534,10 +534,16 @@ static bool slotHoldsIntegersBetween(SlotRepresentation representation, int64_t 
     return least >= -(1ll << (bits - 1)) && greatest < 1ll << (bits - 1);
 }
 
+static bool isReifiedLazilyOnFunctions(VM& vm, UniquedStringImpl* name)
+{
+    const CommonIdentifiers& names = *vm.propertyNames;
+    return name == names.name.impl() || name == names.length.impl() || name == names.prototype.impl();
+}
+
 void AssignmentPlanCache::fillPlan(VM& vm, AssignmentPlan& plan, unsigned index, JSObject* target, JSObject* extraProperties, const AssignmentSource& source)
 {
     Object* record = compiledObjectOrNull(target);
-    ASSERT(record || (source.defines && !extraProperties));
+    ASSERT(record || !extraProperties);
     if (!record)
         extraProperties = target;
     RuntimeLayoutTable& layouts = m_state.objects->layouts;
@@ -549,10 +555,11 @@ void AssignmentPlanCache::fillPlan(VM& vm, AssignmentPlan& plan, unsigned index,
     const LayoutData* layout = record ? &record->layout() : nullptr;
     JSGlobalObject* realm = target->structure()->realm();
     Structure* extraPropertiesBefore = extraProperties ? extraProperties->structure() : Instance::of(realm)->realm.emptyExtraPropertiesStructure;
-    if (extraProperties && (extraProperties->type() != FinalObjectType || extraPropertiesBefore->isDictionary()))
+    bool isClosure = !record && target->type() == CompiledClosureType;
+    if (extraProperties && ((extraProperties->type() != FinalObjectType && !isClosure) || extraPropertiesBefore->isDictionary()))
         return;
     Vector<AssignmentPlan::FieldStore> fieldStores;
-    Vector<AssignmentPlan::ExtraPropertyStore> extraPropertyStores;
+    Vector<AssignmentPlan::ExtraPropertyStore, 16> extraPropertyStores;
     Vector<UniquedStringImpl*, 8> addedNames;
     Vector<size_t, 8> storesOfAddedNames;
     Vector<UniquedStringImpl*, 8> namesOfFields;
@@ -565,7 +572,7 @@ void AssignmentPlanCache::fillPlan(VM& vm, AssignmentPlan& plan, unsigned index,
     }
     bool hasStoredSymbol = false;
     for (auto& property : *properties) {
-        plan.storesNameBehindSymbol |= hasStoredSymbol && !property.name->isSymbol();
+        plan.storesNameAfterSymbol |= hasStoredSymbol && !property.name->isSymbol();
         hasStoredSymbol |= property.name->isSymbol();
         const FieldData* field = record ? layouts.field(vm, *layout, property.name) : nullptr;
         if (!field) {
@@ -577,7 +584,7 @@ void AssignmentPlanCache::fillPlan(VM& vm, AssignmentPlan& plan, unsigned index,
                 if (attributes)
                     return;
             } else {
-                if (parseIndex(PropertyName(property.name)) || property.name == vm.propertyNames->underscoreProto.impl())
+                if (parseIndex(PropertyName(property.name)) || property.name == vm.propertyNames->underscoreProto.impl() || (isClosure && isReifiedLazilyOnFunctions(vm, property.name)))
                     return;
                 ASSERT(!addedNames.contains(property.name));
                 addedNames.append(property.name);
@@ -607,10 +614,10 @@ void AssignmentPlanCache::fillPlan(VM& vm, AssignmentPlan& plan, unsigned index,
             .isDirect = !(field->isOutOfLine() && traits.absentBits && traits.width != extensionGranuleSize),
             .copiesBits = property.field && property.field->slot.representation() == field->slot.representation(),
             .holdsCell = traits.holdsCell,
-            .hasAbsent = traits.hasAbsent,
+            .hasAbsent = mayBeCreatedByStore(field->slot.representation()),
             .leavesUndefinedAndNullToOtherWay = !!field->holdsRawValueFromBirth,
             .width = traits.width,
-            .absentBits = traits.absentBits,
+            .absentBits = bitsBeforeCreation(field->slot.representation()),
         });
         AssignmentPlan::FieldStore& store = fieldStores.last();
         if (const RuntimeType& type = layouts.typeOf(*field); type.primitiveSet().contains(PrimitiveSet::Integer)) {
@@ -661,8 +668,9 @@ void AssignmentPlanCache::fillPlan(VM& vm, AssignmentPlan& plan, unsigned index,
     plan.storesOnlyFieldsThatFit = !fieldStores.isEmpty() && extraPropertyStores.isEmpty() && !extraProperties && std::ranges::all_of(fieldStores, [](const AssignmentPlan::FieldStore& store) {
         return store.sourceAlwaysFits && store.isDirect && store.from->slot.representation() != SlotRepresentation::DeferredClosure;
     });
+    fieldStores.shrinkToFit();
     plan.fieldStores = WTF::move(fieldStores);
-    plan.extraPropertyStores = WTF::move(extraPropertyStores);
+    plan.extraPropertyStores = extraPropertyStores.span();
     plan.storesInSourceOrder = WTF::move(storesInSourceOrder);
     plan.isUsable = true;
 }

@@ -9,6 +9,7 @@
 #if ENABLE(AOT)
 
 #include "AOTAllocationCounts.h"
+#include "AOTClosure.h"
 #include "AOTCompiledCallee.h"
 #include "AOTGenerator.h"
 #include "AOTImage.h"
@@ -22,7 +23,10 @@
 #include "AOTPendingStars.h"
 #include "AOTProgramIdentifiers.h"
 #include "AOTPropertyCaches.h"
+#include "AOTBuiltinOperationSupport.h"
 #include "AOTPropertyCachesKeys.h"
+#include "AOTPropertyCachesStringKeys.h"
+#include "AOTRuntimeReporter.h"
 #include "AOTState.h"
 #include "ArrayStorage.h"
 #include "DeferGCInlines.h"
@@ -33,6 +37,7 @@
 #include "JSGlobalProxy.h"
 #include "SparseArrayValueMap.h"
 #include <algorithm>
+#include <wtf/Atomics.h>
 
 namespace JSC { namespace AOT {
 
@@ -76,6 +81,25 @@ static StructuralRead readGeneric(JSObject* base, UniquedStringImpl* uid)
     return lookUpGeneric(base, uid);
 }
 
+static ALWAYS_INLINE void adoptSharedStructureIfFilled(Instance* instance, JSObject* object)
+{
+    VM& vm = *instance->vm;
+    if (!vm.aotState().hasObjectsBeingFilled || !object->structure()->isDictionary()) [[likely]]
+        return;
+    if (FirstAdditions* additions = instance->state->firstAdditions.get())
+        additions->adoptSharedStructure(vm, object);
+}
+
+static JSValue readAboveByChainWalk(Instance* instance, JSObject* object, UniquedStringImpl* uid)
+{
+    ChainWalk walk = walkChain({ instance->globalObject, object->structure(), object, ChainWalkMode::AllocatesNothing, ChainWalkUse::UsedAtOnce }, uid);
+    if (walk.result == ChainWalkResult::Absent)
+        return jsUndefined();
+    if (walk.result == ChainWalkResult::Unknown || walk.attributes & PropertyAttribute::AccessorOrCustomAccessorOrValue || !isValidOffset(walk.offset))
+        return { };
+    return valueAtOffset(walk.holder, walk.offset);
+}
+
 static JSValue readFieldGeneric(Instance* instance, Object* object, UniquedStringImpl* uid)
 {
     VM& vm = *instance->vm;
@@ -86,12 +110,7 @@ static JSValue readFieldGeneric(Instance* instance, Object* object, UniquedStrin
         return value;
     if (object->hasExtraProperties() && livesInExtraProperties(vm, *object, *field))
         return { };
-    ChainWalk walk = walkChain({ instance->globalObject, object->structure(), object, ChainWalkMode::AllocatesNothing, ChainWalkUse::UsedAtOnce }, uid);
-    if (walk.result == ChainWalkResult::Absent)
-        return jsUndefined();
-    if (walk.result == ChainWalkResult::Unknown || walk.attributes & PropertyAttribute::AccessorOrCustomAccessorOrValue || !isValidOffset(walk.offset))
-        return { };
-    return valueAtOffset(walk.holder, walk.offset);
+    return readAboveByChainWalk(instance, object, uid);
 }
 
 JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTGetGeneric, EncodedJSValue, (Instance* instance, JSCell* base, UniquedStringImpl* uid))
@@ -100,6 +119,70 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTGetGeneric, EncodedJSValue, (Insta
     if (Object* object = compiledObjectOrNull(base))
         return JSValue::encode(readFieldGeneric(instance, object, uid));
     return JSValue::encode(readGeneric(asObject(base), uid).value);
+}
+
+static StructuralRead readAboveCompiledObject(Instance*, Object&, UniquedStringImpl*);
+
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTReadBeforeLoop, EncodedJSValue, (Instance* instance, JSCell* base, uint32_t key))
+{
+    if (Structure* structure = base->structure(); structure->isDictionary() && !instance->state->propertyCaches->mayReadDictionary(structure))
+        return JSValue::encode(JSValue());
+    return operationAOTReadRunningNoCode(instance, base, key);
+}
+
+template<bool isSetter> static ALWAYS_INLINE EncodedJSValue accessorHalfBeforeLoop(Instance* instance, JSCell* base, uint32_t key)
+{
+    EncodedJSValue isNoGetter = JSValue::encode(jsUndefined());
+    if (!base->isObject())
+        return isNoGetter;
+    VM& vm = *instance->vm;
+    LeafOperationScope leaf(vm);
+    UniquedStringImpl* uid = instance->state->propertyCaches->nameOf(key).uid;
+    auto getterOf = [&](JSValue held) {
+        auto* accessor = held && held.isCell() ? dynamicDowncast<GetterSetter>(held.asCell()) : nullptr;
+        if constexpr (isSetter)
+            return accessor && !accessor->isSetterNull() ? JSValue::encode(accessor->setter()) : isNoGetter;
+        return accessor && !accessor->isGetterNull() ? JSValue::encode(accessor->getter()) : isNoGetter;
+    };
+    JSObject* object = asObject(base);
+    Structure* structure = object->structure();
+    if (isSetter && structure->typeInfo().overridesPut() && !compiledObjectOrNull(base))
+        return isNoGetter;
+    if (Object* compiled = compiledObjectOrNull(base)) {
+        if (const FieldData* field = compiled->fieldNamed(compiled->state(), uid)) {
+            if (field->isPrivate() || (!field->isAccessor() && compiled->isInSlot(*field)))
+                return isNoGetter;
+            if (field->isAccessor())
+                return getterOf(compiled->readInline(*field));
+        }
+        if (hasPendingStars(*compiled))
+            return isNoGetter;
+        object = compiled->extraProperties();
+        structure = object ? object->structure() : nullptr;
+    } else if (structure->typeInfo().overridesGetOwnPropertySlot() || TypeInfo::hasStaticPropertyTable(object->inlineTypeFlags()))
+        return isNoGetter;
+    if (structure) {
+        unsigned attributes;
+        auto offset = structure->getWithoutMaterializing(uid, attributes);
+        if (!offset)
+            return isNoGetter;
+        if (isValidOffset(*offset))
+            return attributes & PropertyAttribute::Accessor ? getterOf(object->getDirect(*offset)) : isNoGetter;
+    }
+    ChainWalk walk = walkChain({ instance->globalObject, asObject(base)->structure(), asObject(base), ChainWalkMode::AllocatesNothing, ChainWalkUse::UsedAtOnce }, uid);
+    if (walk.result != ChainWalkResult::Found || !(walk.attributes & PropertyAttribute::Accessor) || !isValidOffset(walk.offset))
+        return isNoGetter;
+    return getterOf(valueAtOffset(walk.holder, walk.offset));
+}
+
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTGetterBeforeLoop, EncodedJSValue, (Instance* instance, JSCell* base, uint32_t key))
+{
+    return accessorHalfBeforeLoop<false>(instance, base, key);
+}
+
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTSetterBeforeLoop, EncodedJSValue, (Instance* instance, JSCell* base, uint32_t key))
+{
+    return accessorHalfBeforeLoop<true>(instance, base, key);
 }
 
 static StructuralRead readByFiledSlot(const JSObject* receiver, const Slot& slot)
@@ -127,14 +210,14 @@ static StructuralRead readEmptyFieldByFiledSlot(const Object& object, UniquedStr
 
 static JSValue readModuleNamespaceExport(Instance* instance, ModuleNamespace* namespaceObject, UniquedStringImpl* uid)
 {
-    if (Instance::owning(namespaceObject) != instance || namespaceObject->isAnsweredByMock())
+    if (Instance::owning(namespaceObject) != instance || namespaceObject->isAnsweredByMock() || namespaceObject->needsModuleInstance())
         return { };
     const Modules& modules = *instance->state->modules;
     ModuleID module = namespaceObject->module();
     if (modules.status(module) != ModuleStatus::Evaluated)
         return { };
     auto index = namespaceObject->find(uid);
-    return index ? modules.readExportIfInitialized(module, *index) : JSValue();
+    return index ? modules.readExportIfInitialized(module, *index, namespaceObject->bindModuleInstance()) : JSValue();
 }
 
 static JSValue getDataProperty(JSObject* holder, PropertyOffset offset, unsigned attributes, PropertySlot& slot)
@@ -147,15 +230,15 @@ static JSValue getDataProperty(JSObject* holder, PropertyOffset offset, unsigned
     return value;
 }
 
-static JSValue getFromPrototypeChain(Instance* instance, JSObject* base, UniquedStringImpl* uid, PropertySlot& slot)
+static JSValue getFromPrototypeChain(Instance* instance, JSObject* base, UniquedStringImpl* uid, PropertySlot& slot, ChainWalkUse use = ChainWalkUse::KeptForReads)
 {
-    ChainWalk walk = walkChain({ instance->globalObject, base->structure(), base, ChainWalkMode::AllocatesNothing }, uid);
+    ChainWalk walk = walkChain({ instance->globalObject, base->structure(), base, ChainWalkMode::AllocatesNothing, use }, uid);
     if (walk.result == ChainWalkResult::Absent)
         return jsUndefined();
     return walk.result == ChainWalkResult::Found ? getDataProperty(walk.holder, walk.offset, walk.attributes, slot) : JSValue();
 }
 
-static JSValue getFromCompiledObject(Instance* instance, Object* object, UniquedStringImpl* uid, PropertySlot& slot, bool& shouldCache)
+static JSValue getFromCompiledObject(Instance* instance, Object* object, UniquedStringImpl* uid, PropertySlot& slot, bool& shouldCache, ChainWalkUse useOfUncachedAnswer = ChainWalkUse::KeptForReads)
 {
     JSValue value;
     if (const FieldData* field = object->fieldNamed(object->state(), uid)) {
@@ -175,7 +258,7 @@ static JSValue getFromCompiledObject(Instance* instance, Object* object, Uniqued
             if (!extraPropertiesStructure->isDictionary())
                 return { };
             shouldCache = false;
-            return getFromPrototypeChain(instance, object, uid, slot);
+            return getFromPrototypeChain(instance, object, uid, slot, useOfUncachedAnswer);
         }
         shouldCache &= !extraPropertiesStructure->isUncacheableDictionary();
         if (!(attributes & PropertyAttribute::AccessorOrCustomAccessorOrValue))
@@ -196,6 +279,85 @@ static JSValue getFromOrdinaryObject(Instance* instance, JSObject* base, Uniqued
     if (!offset)
         return { };
     return isValidOffset(*offset) ? getDataProperty(base, *offset, attributes, slot) : getFromPrototypeChain(instance, base, uid, slot);
+}
+
+static bool hasCompiledStructureAtHand(VM&);
+
+static void nameExtraPropertiesStructure(VM& vm, Object& object)
+{
+    const CompiledStructure& structure = object.compiledStructure();
+    if (!structure.hasExtraProperties() || structure.extraPropertiesStructureID() || !structure.extraPropertiesSlot()) [[likely]]
+        return;
+    Structure& extraPropertiesStructure = *WTF::opaque(object.extraProperties()->structure());
+    if (!extraPropertiesStructure.isDictionary() && (hasCompiledStructureAtHand(vm) || object.state().objects->structures.existingWithExtraProperties(structure, extraPropertiesStructure)))
+        object.ensureStructureForExtraProperties(vm);
+}
+
+static bool isFunctionThatListsNames(Instance* instance, JSObject* object, UniquedStringImpl* uid)
+{
+    bool listsNames = object->type() == SlimClosureWithPropertiesType || (object->type() == CompiledClosureType && !uncheckedDowncast<Closure>(object)->classData());
+    if (!listsNames || object->structure()->realm() != instance->globalObject)
+        return false;
+    const CommonIdentifiers& names = *instance->vm->propertyNames;
+    return uid != names.length && uid != names.name && uid != names.prototype && uid != names.underscoreProto;
+}
+
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTReadRunningNoCode, EncodedJSValue, (Instance* instance, JSCell* base, uint32_t key))
+{
+    if (!base->isObject())
+        return JSValue::encode(JSValue());
+    VM& vm = *instance->vm;
+    LeafOperationScope leaf(vm);
+    UniquedStringImpl* uid = instance->state->propertyCaches->nameOf(key).uid;
+    if (Object* object = compiledObjectOrNull(base)) {
+        nameExtraPropertiesStructure(vm, *object);
+        JSValue value = readFieldGeneric(instance, object, uid);
+        if (value || object->fieldNamed(object->state(), uid))
+            return JSValue::encode(value);
+        if (!object->hasExtraProperties()) {
+            StructuralRead above = readAboveCompiledObject(instance, *object, uid);
+            return JSValue::encode(above.presence == LeafPresence::Inherited ? above.value : JSValue());
+        }
+        PropertySlot slot(object, PropertySlot::InternalMethodType::VMInquiry, &vm);
+        bool shouldCache = false;
+        return JSValue::encode(getFromCompiledObject(instance, object, uid, slot, shouldCache));
+    }
+    JSObject* object = asObject(base);
+    adoptSharedStructureIfFilled(instance, object);
+    if (isFunctionThatListsNames(instance, object, uid)) {
+        unsigned attributes;
+        auto offset = object->structure()->getWithoutMaterializing(uid, attributes);
+        if (!offset)
+            return JSValue::encode(JSValue());
+        if (!isValidOffset(*offset))
+            return JSValue::encode(readAboveByChainWalk(instance, object, uid));
+        return JSValue::encode(attributes & PropertyAttribute::AccessorOrCustomAccessorOrValue ? JSValue() : object->getDirect(*offset));
+    }
+    StructuralRead read = readGeneric(object, uid);
+    PropertyCaches& caches = *instance->state->propertyCaches;
+    if (read.value && read.presence == LeafPresence::Own && object->type() == FinalObjectType && caches.shouldFile(object->structureID(), uid, SlotAccess::Read))
+        caches.fileOwnPlainValueUnlessFiled(object, key);
+    return JSValue::encode(read.value);
+}
+
+static StructuralRead readAboveCompiledObject(Instance* instance, Object& object, UniquedStringImpl* uid)
+{
+    VM& vm = *instance->vm;
+    if (isNeverCachedName(vm, uid) || isPreparedBeforeLookups(vm, uid) || hasPendingStars(object) || object.fieldNamed(object.state(), uid))
+        return { };
+    if (JSObject* extra = object.extraProperties()) {
+        unsigned attributes;
+        auto offset = extra->structure()->getWithoutMaterializing(uid, attributes);
+        if (!offset || isValidOffset(*offset))
+            return { };
+    }
+    ChainWalk walk = walkChain({ instance->globalObject, object.structure(), &object, ChainWalkMode::AllocatesNothing, ChainWalkUse::UsedAtOnce }, uid);
+    if (walk.result == ChainWalkResult::Absent)
+        return { jsUndefined(), LeafPresence::Absent };
+    if (walk.result == ChainWalkResult::Unknown || walk.attributes & PropertyAttribute::AccessorOrCustomAccessorOrValue || !isValidOffset(walk.offset))
+        return { };
+    JSValue value = valueAtOffset(walk.holder, walk.offset);
+    return { value, value ? LeafPresence::Inherited : LeafPresence::TakeSlowPath };
 }
 
 static bool isHeldByCacheableDictionary(Structure* structure, UniquedStringImpl* uid)
@@ -234,9 +396,11 @@ static StructuralRead readAndCache(Instance* instance, JSObject* base, UniquedSt
     if (isOrdinary)
         value = getFromOrdinaryObject(instance, base, uid, slot);
     else if (object) {
-        value = getFromCompiledObject(instance, object, uid, slot, shouldCache);
+        value = getFromCompiledObject(instance, object, uid, slot, shouldCache, ChainWalkUse::UsedAtOnce);
         if (!value && filedSlot)
             return readEmptyFieldByFiledSlot(*object, uid, *filedSlot);
+        if (!value && !isDueForFiling)
+            return readAboveCompiledObject(instance, *object, uid);
     } else {
         value = readModuleNamespaceExport(instance, uncheckedDowncast<ModuleNamespace>(base), uid);
         if (value)
@@ -273,6 +437,7 @@ static GetterSetter* findAndFileAccessorAboveCompiledObject(Instance* instance, 
         slot.setCacheableGetterSlot(walk.holder, walk.attributes, accessor, walk.offset);
         ReadQuery query { instance->globalObject, &object, structure, uid, slot, ChainWalkMode::AllocatesNothing };
         PropertyAnswer answer = classifyRead(query);
+        answerByGetterField(&object, structure, uid, answer);
         if (answer.isCacheable())
             caches.cache({ structure, name, SlotAccess::Read }, answer);
     }
@@ -308,9 +473,15 @@ static KeyName nameOfKeyForLeaf(Instance* instance, JSCell* key, KeyAtomization 
 {
     bool wasAtom = atomOfKey(key);
     StringImpl* textBefore = key->isString() ? asString(key)->tryGetValueImpl() : nullptr;
+    bool isWide = !wasAtom && key->isString() && !asString(key)->is8Bit();
     KeyName name = nameOfKeyWithoutAllocating(instance->globalObject, key, atomization);
-    if (!wasAtom && key->isString() && name.kind == KeyNameKind::Name && name.uid != textBefore)
-        instance->state->propertyCaches->tables().rememberNameOfText(name.uid);
+    if (!wasAtom && key->isString() && name.kind == KeyNameKind::Name && name.uid != textBefore) {
+        VMPropertyCaches& tables = instance->state->propertyCaches->tables();
+        if (isWide)
+            tables.rememberNameOfWideText(name.uid);
+        else
+            tables.rememberNameOfText(name.uid);
+    }
     return name;
 }
 
@@ -352,13 +523,35 @@ static LeafPresence findPresenceWithoutValue(Instance* instance, JSObject* base,
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-enum class LeafQuestion : bool { Value, Presence };
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTHasBeforeLoop, EncodedJSValue, (Instance* instance, JSCell* base, uint32_t key))
+{
+    if (!base->isObject())
+        return JSValue::encode(JSValue());
+    LeafOperationScope leaf(*instance->vm);
+    UniquedStringImpl* uid = instance->state->propertyCaches->nameOf(key).uid;
+    JSObject* object = asObject(base);
+    LeafPresence presence = compiledObjectOrNull(base) ? LeafPresence::TakeSlowPath : readGeneric(object, uid).presence;
+    if (presence == LeafPresence::TakeSlowPath)
+        presence = findPresenceWithoutValue(instance, object, uid);
+    return JSValue::encode(presence == LeafPresence::TakeSlowPath ? JSValue() : jsBoolean(presence != LeafPresence::Absent));
+}
+
+enum class LeafQuestion : uint8_t { Value, NamedValue, Presence };
+
+static ALWAYS_INLINE bool isExpensiveToAtomize(const JSString& key)
+{
+    if (const StringImpl* text = key.tryGetValueImpl())
+        return !text->is8Bit() && !text->isAtom();
+    return !key.is8Bit() || !static_cast<const JSRopeString&>(key).isSubstring();
+}
 
 static StructuralRead readByKey(Instance* instance, JSCell* base, JSCell* key, LeafQuestion question)
 {
-    if (!base->isObject())
+    if (!base->isObject() || (question == LeafQuestion::NamedValue && key->isObject()))
         return { };
     JSObject* object = asObject(base);
+    if (key->isString() && !object->structure()->isDictionary() && isExpensiveToAtomize(*asString(key)) && !instance->state->propertyCaches->tables().mayHaveNameEqualTo(instance->globalObject, object, *asString(key)))
+        return { jsUndefined(), LeafPresence::Absent };
     const JSCell*& lastKeyWithoutAtom = instance->state->propertyCaches->tables().lastKeyWithoutAtomLike(key);
     KeyName name = nameOfKeyForLeaf(instance, key, lastKeyWithoutAtom == key ? KeyAtomization::Atomize : KeyAtomization::OnlyExisting);
     switch (name.kind) {
@@ -368,6 +561,8 @@ static StructuralRead readByKey(Instance* instance, JSCell* base, JSCell* key, L
         lastKeyWithoutAtom = key;
         return hasOnlyOrdinaryLookupsOnChain(object) ? StructuralRead { jsUndefined(), LeafPresence::Absent } : StructuralRead { };
     case KeyNameKind::Index: {
+        if (question == LeafQuestion::NamedValue)
+            return { };
         JSValue value = object->tryGetIndexQuickly(name.index);
         if (!value)
             value = readSparseElement(object, name.index);
@@ -396,6 +591,12 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTGetByValGeneric, EncodedJSValue, (
     return JSValue::encode(readByKey(instance, base, key, LeafQuestion::Value).value);
 }
 
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTGetNamedByValGeneric, EncodedJSValue, (Instance* instance, JSCell* base, JSCell* key))
+{
+    LeafOperationScope leaf(*instance->vm);
+    return JSValue::encode(readByKey(instance, base, key, LeafQuestion::NamedValue).value);
+}
+
 JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTInByValGeneric, size_t, (Instance* instance, JSCell* base, JSCell* key))
 {
     LeafOperationScope leaf(*instance->vm);
@@ -422,6 +623,17 @@ static LeafAnswer createFieldOfCompiledObject(Instance* instance, Object& object
     return tryCreateField(vm, object.state(), object, field, value) ? LeafAnswer::Yes : LeafAnswer::TakeSlowPath;
 }
 
+static bool beginsDictionaryOfExtraProperties(Instance* instance, JSObject* extra, UniquedStringImpl* uid)
+{
+    VM& vm = *instance->vm;
+    Structure* structure = extra ? extra->structure() : instance->realm.emptyExtraPropertiesStructure;
+    unsigned attributes;
+    auto offset = structure->getWithoutMaterializing(uid, attributes);
+    if (uid->isSymbol() || !offset || isValidOffset(*offset) || repeatsPropertyAddition(structure, uid))
+        return false;
+    return hasStructureAtHand(vm) && hasCompiledStructureAtHand(vm) && !firstAdditionsOf(*instance->state).recordAddition(structure, uid);
+}
+
 static LeafAnswer putToCompiledObject(Instance* instance, Object* object, UniquedStringImpl* uid, JSValue value)
 {
     VM& vm = *instance->vm;
@@ -440,9 +652,13 @@ static LeafAnswer putToCompiledObject(Instance* instance, Object* object, Unique
             canHaveSlot = offset && isValidOffset(*offset);
             isKnownToBeAbsent = offset && !isValidOffset(*offset);
         }
-        if (canHaveSlot && !caches.findByKey(structure, uid, SlotAccess::Store))
-            return LeafAnswer::TakeSlowPath;
         OptionSet<Flag> flags { Flag::IsKnownNotToBeField };
+        if (canHaveSlot && !caches.findByKey(structure, uid, SlotAccess::Store)) {
+            if (isSpelledByProgram || !beginsDictionaryOfExtraProperties(instance, extra, uid))
+                return LeafAnswer::TakeSlowPath;
+            countEvent(vm, RuntimeCounterID::ExtraPropertyDictionaries);
+            flags.add({ Flag::BeginsDictionary, Flag::IsKnownToBeAbsent });
+        }
         if (isKnownToBeAbsent)
             flags.add(Flag::IsKnownToBeAbsent);
         if (!isSpelledByProgram)
@@ -570,11 +786,15 @@ static JSString* functionSourceForKey(VM& vm, JSCell* key)
     auto* function = dynamicDowncast<JSFunction>(toString);
     if (!function || !function->isHostFunction() || function->nativeFunction() != toTagged(NativeFunction(functionProtoFuncToString)))
         return nullptr;
-    return CompiledCallee::sourceStringIfCreated(vm, asObject(key));
+    return CompiledCallee::functionStringIfCreated(vm, asObject(key));
 }
 
 static bool mayBeginWithDigit(const JSString* string)
 {
+    if (string->isSubstring()) {
+        auto* part = static_cast<const JSRopeString*>(string);
+        return isASCIIDigit(part->substringBase()->tryGetValueImpl()->at(part->substringOffset()));
+    }
     JSRopeString::LeafIterator pieces(string);
     while (!pieces.isAtEnd()) {
         StringView piece = pieces.next();
@@ -582,6 +802,21 @@ static bool mayBeginWithDigit(const JSString* string)
             return isASCIIDigit(piece[0]);
     }
     return true;
+}
+
+static std::optional<StringImpl*> tryFindAtomOfShortWidePart(const JSString& string)
+{
+    if (!string.isSubstring())
+        return std::nullopt;
+    auto& part = static_cast<const JSRopeString&>(string);
+    std::array<Latin1Character, SharedPart::maxLength> buffer;
+    std::optional characters = latin1CharactersOf(StringView { *part.substringBase()->tryGetValueImpl() }.substring(part.substringOffset(), part.length()), buffer);
+    if (!characters)
+        return std::nullopt;
+    RefPtr<AtomStringImpl> atom = AtomStringImpl::lookUp(*characters);
+    if (atom)
+        part.resolveBySharing(*atom);
+    return atom.get();
 }
 
 KeyName nameOfKeyWithoutAllocating(JSGlobalObject* globalObject, JSCell* key, KeyAtomization atomization)
@@ -605,7 +840,10 @@ KeyName nameOfKeyWithoutAllocating(JSGlobalObject* globalObject, JSCell* key, Ke
         bool isIndex = text && parseIndex(*text);
         if (!isIndex) {
             bool atomizes = atomization == KeyAtomization::Atomize || (text && Image::isBackedByStaticData(*text));
-            text = atomizes ? string->toAtomString(globalObject).data : string->toExistingAtomString(globalObject).data;
+            if (std::optional<StringImpl*> atom = atomizes || !isRope || string->is8Bit() ? std::nullopt : tryFindAtomOfShortWidePart(*string))
+                text = *atom;
+            else
+                text = atomizes ? string->toAtomString(globalObject).data : string->toExistingAtomString(globalObject).data;
         }
         if (!text)
             return { isRope && string->length() <= maxIndexLength && mayBeginWithDigit(string) ? KeyNameKind::NotAName : KeyNameKind::HasNoAtom };
@@ -638,6 +876,47 @@ std::optional<Identifier> nameForKeyedCache(JSGlobalObject* globalObject, JSValu
     if (!existingAtomString || parseIndex(*existingAtomString.data))
         return std::nullopt;
     return Identifier::fromUid(globalObject->vm(), existingAtomString.data);
+}
+
+std::optional<Identifier> nameOfShortArray(Instance* instance, JSValue key)
+{
+    if (!key.isCell() || key.asCell()->type() != ArrayType)
+        return std::nullopt;
+    JSArray* array = uncheckedDowncast<JSArray>(key.asCell());
+    unsigned length = array->length();
+    if (!hasInt32(array->indexingType()) || length < 2 || length > ShortArrayName::mostElements || !array->isToPrimitiveFastAndNonObservable())
+        return std::nullopt;
+    static constexpr unsigned bitsOfElement = 16;
+    static_assert(ShortArrayName::mostElements * bitsOfElement == 64);
+    std::span<const WriteBarrier<Unknown>> elements { array->butterfly()->contiguousInt32().data(), length };
+    uint64_t packed = 0;
+    for (const WriteBarrier<Unknown>& element : elements) {
+        uint64_t number = JSValue::encode(element.get()) - JSValue::NumberTag;
+        if (number >= (1u << bitsOfElement) - 1)
+            return std::nullopt;
+        packed = packed << bitsOfElement | (number + 1);
+    }
+    ShortArrayName& place = instance->state->propertyCaches->placeOfShortArray(packed);
+    if (place.elements != packed) {
+        StringBuilder string;
+        for (const WriteBarrier<Unknown>& element : elements)
+            string.append(string.isEmpty() ? ""_s : ","_s, element.get().asInt32());
+        place.name = string.toAtomString().impl();
+        place.elements = packed;
+    }
+    return Identifier::fromUid(*instance->vm, place.name.get());
+}
+
+Identifier toPropertyKey(Instance* instance, JSValue key)
+{
+    if (std::optional<Identifier> name = nameOfShortArray(instance, key))
+        return WTF::move(*name);
+    auto scope = DECLARE_THROW_SCOPE(*instance->vm);
+    if (compiledObjectOrNull(key)) [[unlikely]] {
+        key = primitiveKeyIfKnown(instance, key);
+        RETURN_IF_EXCEPTION(scope, { });
+    }
+    RELEASE_AND_RETURN(scope, key.toPropertyKey(instance->globalObject));
 }
 
 UniquedStringImpl* atomOfKey(JSValue key)
@@ -749,11 +1028,22 @@ std::optional<UniquedStringImpl*> findNameEqualToLongString(JSValue base, JSValu
     }
     if (atom || !nameWithSameLength)
         return nullptr;
+    countEvent(vm, RuntimeCounterID::LongKeysComparedWithNames);
     if (!isEqualToName(string, *nameWithSameLength))
         return nullptr;
-    static thread_local const JSString* lastKeyCompared;
-    if (std::exchange(lastKeyCompared, string) == string && string->tryGetValueImpl())
+    if (string->isRope()) {
+        if (string->is8Bit() == nameWithSameLength->is8Bit())
+            static_cast<const JSRopeString*>(string)->resolveBySharing(*nameWithSameLength);
+        return nameWithSameLength;
+    }
+    VMState::KeysComparedLastWithLongNames& comparedLast = vm.aotState().keysComparedLastWithLongNames;
+    if (uint64_t version = vm.heap.mutatorExecutionVersion(); std::exchange(comparedLast.versionOfHeap, version) != version)
+        comparedLast.byName.clear();
+    auto added = comparedLast.byName.add(nameWithSameLength, string);
+    if (!added.isNewEntry && std::exchange(added.iterator->value, string) == string) {
+        comparedLast.byName.remove(added.iterator);
         string->toExistingAtomString(globalObject);
+    }
     return nameWithSameLength;
 }
 

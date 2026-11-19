@@ -25,6 +25,8 @@ struct RandomTestCase {
     RandomProcedureOptions options { };
     bool savesFrameOnSuspend { false };
     bool usesFeaturesOfHost { false };
+    std::optional<uint32_t> branchReach { };
+    bool notesRangesOfOrigins { false };
 };
 
 static constexpr unsigned numberOfSeedsInRandomTest = 300;
@@ -38,6 +40,7 @@ static ProcedureTraits traitsOfRandomTest(const RandomTestCase& testCase)
     ProcedureTraits traits;
     traits.savesFrameOnSuspend = testCase.savesFrameOnSuspend;
     traits.hasHandlers = testCase.options.withLandingPads;
+    traits.notesRangesOfOrigins = testCase.notesRangesOfOrigins;
     if (testCase.usesFeaturesOfHost)
         traits.features = CPUFeatureSet::host();
     return traits;
@@ -83,6 +86,7 @@ struct RandomTestCensus {
     unsigned withNumbers { 0 };
     unsigned withSeveralAnswers { 0 };
     unsigned withScaledSumsInOneInstruction { 0 };
+    unsigned withCombinedOperands { 0 };
     unsigned withSelectsThatTestTheirArm { 0 };
 };
 
@@ -91,11 +95,13 @@ static void countScaledSumsOfRandomTest(const Procedure& procedure, RandomTestCe
     const Liveness& liveness = procedure.liveness();
     bool addsInOneInstruction = false;
     bool testsArm = false;
+    bool combinesOperands = false;
     for (uint32_t index = 0; index < procedure.numberOfOperations(); ++index) {
         const Operation* operation = procedure.operationAt(index);
         if (operation->hasNoPosition() || liveness.of(operation).has(ValueFlag::IsDropped))
             continue;
         addsInOneInstruction |= addsScaledIndex(liveness, operation);
+        combinesOperands |= liveness.isFused(operation) && (operation->opcode() == Mul || operation->opcode() == ZShr || operation->opcode() == SShr || operation->opcode() == SExt32);
         if (operation->opcode() != Select || liveness.isFused(operation))
             continue;
         forEachLeaf(liveness, operation, [&](const Operation* user, unsigned childIndex, const Operation* leaf) {
@@ -104,23 +110,28 @@ static void countScaledSumsOfRandomTest(const Procedure& procedure, RandomTestCe
     }
     census.withScaledSumsInOneInstruction += addsInOneInstruction;
     census.withSelectsThatTestTheirArm += testsArm;
+    census.withCombinedOperands += combinesOperands;
 }
 
 static void placePinnedConstantsForRandomTest(const Procedure& procedure, TestInstance& instance)
 {
-    for (uint32_t index = 0; index < procedure.numberOfOperations(); ++index) {
-        const Operation* operation = procedure.operationAt(index);
-        if (!operation->isConstant())
-            continue;
-        uint64_t bits = static_cast<uint64_t>(operation->constantBits());
+    auto place = [&](uint64_t bits) {
         std::optional<PinnedConstant> pinned = findPinnedConstant(bits);
         if (!pinned || !pinned->offset)
-            continue;
+            return;
         int32_t offset = *pinned->offset;
         AOT_TEST_CHECK(pinned->reg == instanceGPR);
         AOT_TEST_CHECK(offset >= -static_cast<int32_t>(sizeof(instance.wordsBelow)));
         AOT_TEST_CHECK(offset + static_cast<int32_t>(sizeof(bits)) <= static_cast<int32_t>(sizeof(instance.words)));
         std::memcpy(static_cast<uint8_t*>(instance.pointer()) + offset, &bits, sizeof(bits));
+    };
+    constexpr uint64_t signBit = std::bit_cast<uint64_t>(-0.0);
+    for (uint32_t index = 0; index < procedure.numberOfOperations(); ++index) {
+        const Operation* operation = procedure.operationAt(index);
+        if (operation->isConstant())
+            place(static_cast<uint64_t>(operation->constantBits()));
+        else if (operation->opcode() == Neg || operation->opcode() == Abs)
+            place(operation->opcode() == Neg ? signBit : ~signBit);
     }
 }
 
@@ -133,7 +144,7 @@ static void runRandomTestCase(const RandomTestCase& testCase, RandomTestCensus& 
     TestInstance instance;
     AOT_RANDOM_TEST_CHECK(testCase, test, test.procedure().traits().checksAllocation);
     AOT_RANDOM_TEST_CHECK(testCase, test, test.prepare());
-    AOT_RANDOM_TEST_CHECK(testCase, test, test.compile(instance.pointer()));
+    AOT_RANDOM_TEST_CHECK(testCase, test, test.compile(instance.pointer(), testCase.branchReach));
     placePinnedConstantsForRandomTest(test.procedure(), instance);
     countScaledSumsOfRandomTest(test.procedure(), census);
 
@@ -171,6 +182,7 @@ static void runRandomTestCases(RandomTestCase testCase)
     AOT_TEST_CHECK(census.withRareEdges || !(options.withRareRegions || options.withLandingPads));
     AOT_TEST_CHECK(!!census.withNumbers == options.withNumbers);
     AOT_TEST_CHECK(2 * census.withSeveralAnswers > numberOfSeedsInRandomTest);
+    AOT_TEST_CHECK(!isARM64() || !options.withCombinedOperands || 2 * census.withCombinedOperands > numberOfSeedsInRandomTest);
     if (options.withScaledSums) {
         AOT_TEST_CHECK(4 * census.withScaledSumsInOneInstruction > numberOfSeedsInRandomTest);
         AOT_TEST_CHECK(10 * census.withSelectsThatTestTheirArm > numberOfSeedsInRandomTest);
@@ -227,11 +239,23 @@ static void testRandomProceduresWithFeaturesOfHost()
     runRandomTestCases({ .options = { .seed = 9001 }, .usesFeaturesOfHost = true });
 }
 
+static void testRandomProceduresWithShortBranchReach()
+{
+    runRandomTestCases({ .options = { .seed = 14000 }, .branchReach = 256 });
+}
+
 static void testRandomProceduresWithScaledSums()
 {
     runRandomTestCases({ .options = { .seed = 12001, .withScaledSums = true } });
     runRandomTestCases({ .options = { .seed = 13001, .withCalls = false, .withLandingPads = false, .withNumbers = false, .withScaledSums = true } });
     runRandomTestCases({ .options = { .seed = 14001, .withScaledSums = true }, .savesFrameOnSuspend = true });
+}
+
+static void testRandomProceduresWithCombinedOperands()
+{
+    runRandomTestCases({ .options = { .seed = 15001, .withCombinedOperands = true } });
+    runRandomTestCases({ .options = { .seed = 16001, .withCalls = false, .withLandingPads = false, .withNumbers = false, .withScaledSums = true, .withCombinedOperands = true } });
+    runRandomTestCases({ .options = { .seed = 17001, .withCombinedOperands = true }, .savesFrameOnSuspend = true });
 }
 
 static constexpr ASCIILiteral stepsOfRandomTestBuild[] = { "operations"_s, "order"_s, "liveness"_s, "allocation"_s, "frame"_s };
@@ -248,7 +272,7 @@ static RandomTestBuild buildForRandomTest(const RandomTestCase& testCase, size_t
     auto program = buildRandomProcedure(test, testCase.options);
     AOT_RANDOM_TEST_CHECK(testCase, test, test.prepare());
 
-    CCallHelpers jit;
+    ImageAssembler jit;
     RelocationRecorder recorder(jit, AssemblerPolicy::forImage(test.procedure().traits().features));
     readTagsFromInstance(jit);
     generate(test.procedure(), jit, recorder);
@@ -265,7 +289,7 @@ static void testRandomProceduresAreBuiltTheSameWayTwice()
     RandomTestCase testCase { .options = { .seed = 10001 } };
     for (unsigned count = 0; count < numberOfSeedsInRandomDeterminismTest; ++count, ++testCase.options.seed) {
         RandomTestBuild first = buildForRandomTest(testCase, 0);
-        RandomTestBuild second = buildForRandomTest(testCase, bytesAheadOfSecondBuild);
+        RandomTestBuild second = buildForRandomTest({ .options = testCase.options, .notesRangesOfOrigins = true }, bytesAheadOfSecondBuild);
         auto expectSame = [&](bool isSame, ASCIILiteral what) {
             if (!isSame)
                 dataLogLn("two builds of seed ", testCase.options.seed, " differ in the ", what);
@@ -353,6 +377,8 @@ std::span<const NativeTest> machineRandomTests()
         { "machine/random/functions-that-save-their-frame"_s, Machine::testRandomProceduresThatSaveTheirFrame },
         { "machine/random/features-of-the-host"_s, Machine::testRandomProceduresWithFeaturesOfHost },
         { "machine/random/scaled-sums"_s, Machine::testRandomProceduresWithScaledSums },
+        { "machine/random/combined-operands"_s, Machine::testRandomProceduresWithCombinedOperands },
+        { "machine/random/short-branch-reach"_s, Machine::testRandomProceduresWithShortBranchReach },
         { "machine/random/same-seed-same-bytes"_s, Machine::testRandomProceduresAreBuiltTheSameWayTwice },
         { "machine/random/twice-the-operations-cost-twice-the-arena"_s, Machine::testRandomProceduresCostArenaBytesByTheOperation },
     };

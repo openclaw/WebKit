@@ -20,6 +20,7 @@
 #include "JSGenerator.h"
 #include "JSIteratorHelper.h"
 #include "JSIteratorHelperPrototype.h"
+#include "JSRegExpStringIterator.h"
 
 namespace JSC { namespace AOT {
 
@@ -32,7 +33,8 @@ JSC_DEFINE_JIT_OPERATION(operationAOTArraySpeciesCreate, EncodedJSValue, (Instan
 {
     AOT_OPERATION_BEGIN(instance, Entry::operationAOTArraySpeciesCreate);
     uint64_t length = truncateDoubleToUint64(JSValue::decode(encodedLength).asNumber());
-    std::pair<SpeciesConstructResult, JSObject*> speciesResult = speciesConstructArray(globalObject, cellArgument<JSObject>(array, Entry::operationAOTArraySpeciesCreate), length);
+    JSObject* source = cellArgument<JSObject>(array, Entry::operationAOTArraySpeciesCreate);
+    std::pair<SpeciesConstructResult, JSObject*> speciesResult = speciesConstructArray(globalObject, source, length);
     OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
     if (speciesResult.first == SpeciesConstructResult::CreatedObject)
         OPERATION_RETURN(scope, JSValue::encode(speciesResult.second));
@@ -42,7 +44,8 @@ JSC_DEFINE_JIT_OPERATION(operationAOTArraySpeciesCreate, EncodedJSValue, (Instan
     }
     if (length >= MIN_ARRAY_STORAGE_CONSTRUCTION_LENGTH) [[unlikely]]
         OPERATION_RETURN(scope, JSValue::encode(constructEmptyArray(globalObject, nullptr, static_cast<unsigned>(length))));
-    JSArray* list = JSArray::tryCreate(vm, globalObject->arrayStructureForIndexingTypeDuringAllocation(ArrayWithContiguous), static_cast<unsigned>(length));
+    IndexingType kind = !length ? ArrayWithContiguous : hasDouble(source->indexingType()) ? ArrayWithDouble : ArrayWithInt32;
+    JSArray* list = JSArray::tryCreate(vm, globalObject->arrayStructureForIndexingTypeDuringAllocation(kind), static_cast<unsigned>(length));
     if (!list) [[unlikely]] {
         throwOutOfMemoryError(globalObject, scope);
         OPERATION_RETURN(scope, encodedJSValue());
@@ -100,8 +103,9 @@ static JSValue resumeBytecodeGenerator(JSGlobalObject* globalObject, VM& vm, JSG
     arguments.append(field(JSGenerator::Field::Frame).get());
     ASSERT(!arguments.hasOverflowed());
     JSValue result = call(globalObject, body, JSC::getCallData(body), field(JSGenerator::Field::This).get(), arguments);
-    if (scope.exception()) [[unlikely]] {
-        setState(JSGenerator::State::Completed);
+    if (Exception* exception = scope.exception()) [[unlikely]] {
+        if (!vm.isTerminationException(exception))
+            setState(JSGenerator::State::Completed);
         return { };
     }
     bool isDone = field(JSGenerator::Field::State).get().asInt32() == static_cast<int32_t>(JSGenerator::State::Executing);
@@ -122,6 +126,17 @@ JSC_DEFINE_JIT_OPERATION(operationAOTResumeGenerator, EncodedJSValue, (Instance*
         OPERATION_RETURN(scope, JSValue::encode(resumeBytecodeGenerator(globalObject, vm, bytecodeGenerator, engineResumeModeOf(mode), value)));
     throwException(globalObject, scope, createNotAGeneratorError(globalObject));
     OPERATION_RETURN(scope, encodedJSValue());
+}
+
+JSC_DEFINE_JIT_OPERATION(operationAOTStepMatchIterator, EncodedJSValue, (Instance* instance, EncodedJSValue encodedIterator))
+{
+    AOT_OPERATION_BEGIN(instance, Entry::operationAOTStepMatchIterator);
+    auto* iterator = uncheckedDowncast<JSRegExpStringIterator>(JSValue::decode(encodedIterator).asCell());
+    if (iterator->isDone())
+        OPERATION_RETURN(scope, JSValue::encode(jsNull()));
+    JSValue match = iterator->nextImpl(globalObject);
+    OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
+    OPERATION_RETURN(scope, JSValue::encode(match));
 }
 
 template<ResumeMode mode>

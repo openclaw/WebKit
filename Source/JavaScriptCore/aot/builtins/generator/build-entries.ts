@@ -298,6 +298,7 @@ function declareClasses({ builder, sorted }: EntryContext): void {
       isNeverPristine: columns.isNeverPristine ?? false,
       pristineTest: pristineTestOf(builder, declaration, source),
       hasClosureInstances: columns.hasClosureInstances ?? false,
+      isFollowedBesideUnseenObject: columns.isFollowedBesideUnseenObject ?? false,
       instancesAreEntries: columns.instancesAreEntries ?? false,
       keepsStructuresOfClassesBelow: columns.keepsStructuresOfClassesBelow ?? false,
       definesCharactersOnNewInstances: columns.definesCharactersOnNewInstances ?? false,
@@ -652,8 +653,8 @@ function mergeMembers(
       ...(modesHeld.has(written.mode) ? { resultIsHeld: true, throws: true, onlyPropagatesErrors: false } : {}),
     };
     const result = resultsByConstruction.get(signature.mode);
-    const saysNothing = signature.result.type === "Anything" && signature.result.freshness === undefined;
-    return result === undefined || !saysNothing || signature.isUndeclared ? signature : { ...signature, result };
+    const hasUninformativeResult = signature.result.type === "Anything" && signature.result.freshness === undefined;
+    return result === undefined || !hasUninformativeResult || signature.isUndeclared ? signature : { ...signature, result };
   };
   for (const { declaration, source } of handWrittenFirst) {
     if (declaration.isOwnPropertyOfInstances) addFlag(builtin, "IsOwnPropertyOfInstances");
@@ -1045,6 +1046,9 @@ function finishEntries(context: EntryContext): void {
     builtin.isAddedAtFirstRead =
       columnOf(builder, builtin, "addedAtFirstRead") === true && holder !== null && !holder.flags.includes("IsGlobalObject");
     builtin.isAddedAsEnumerable = builtin.isAddedAtFirstRead && columnOf(builder, builtin, "addedAsEnumerable") === true;
+    const isConstructorOfClass = builtin.kind === "Constructor" && holder?.kind === "Prototype";
+    const laidWith = (isConstructorOfClass ? builtin.sameObjectAs : null) ?? builtin;
+    builtin.canBeListed = columnOf(builder, builtin, "canBeListed") ?? laidWith.origin !== "Engine";
     const writtenColumns = builder.columnsOf(builtin);
     builtin.marks = builtinMarks.filter(mark => writtenColumns.some(({ columns }) => columns.marks?.includes(mark)));
     const loader = writtenColumns.find(({ columns }) => columns.loadsMachineCodeAs !== undefined);
@@ -1213,8 +1217,9 @@ function buildSlots(context: SlotContext, builtinClass: MutableClass, descendant
       indexInType: spec.contentsSlot === null ? null : slots.filter(other => other.contentsSlot !== null).length,
       holds: null,
       internalField: spec.internalField ?? null,
-      holdsWhatStepsHandOut: spec.holdsWhatStepsHandOut ?? false,
+      holdsStepValues: spec.holdsStepValues ?? false,
       holdsWhatIsThrown: spec.holdsWhatIsThrown ?? false,
+      wordOfCell: spec.wordOfCell ?? "None",
     };
     slots.push(slot);
     if (spec.holds !== undefined) slotTypes.push({ slot, spec: spec.holds, source });

@@ -29,6 +29,7 @@
 
 #include "ArrayPrototypeInlines.h"
 #include "ArrayConstructor.h"
+#include "AssemblyHelpers.h"
 #include "ButterflyInlines.h"
 #include "CacheableIdentifierInlines.h"
 #include "ClonedArguments.h"
@@ -180,16 +181,6 @@ static ALWAYS_INLINE void putWithThis(JSGlobalObject* globalObject, EncodedJSVal
     JSValue putValue = JSValue::decode(encodedValue);
     PutPropertySlot slot(thisVal, strict);
     baseValue.putInline(globalObject, ident, putValue, slot);
-}
-
-ALWAYS_INLINE static JSValue getByValObject(JSGlobalObject* globalObject, VM& vm, JSObject* base, PropertyName propertyName)
-{
-    Structure& structure = *base->structure();
-    if (JSCell::canUseFastGetOwnProperty(structure)) {
-        if (JSValue result = base->fastGetOwnProperty(vm, structure, propertyName))
-            return result;
-    }
-    return base->get(globalObject, propertyName);
 }
 
 JSC_DEFINE_JIT_OPERATION(operationToThis, EncodedJSValue, (JSGlobalObject* globalObject, EncodedJSValue encodedOp))
@@ -946,7 +937,7 @@ JSC_DEFINE_JIT_OPERATION(operationGetByValObjectString, EncodedJSValue, (JSGloba
     auto propertyName = asString(string)->toAtomString(globalObject);
     OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
 
-    OPERATION_RETURN(scope, JSValue::encode(getByValObject(globalObject, vm, asObject(base), propertyName.data)));
+    OPERATION_RETURN(scope, JSValue::encode(CommonSlowPaths::getByValObject(globalObject, vm, asObject(base), propertyName.data)));
 }
 
 JSC_DEFINE_JIT_OPERATION(operationGetByValObjectSymbol, EncodedJSValue, (JSGlobalObject* globalObject, JSCell* base, JSCell* symbol))
@@ -957,7 +948,7 @@ JSC_DEFINE_JIT_OPERATION(operationGetByValObjectSymbol, EncodedJSValue, (JSGloba
     auto scope = DECLARE_THROW_SCOPE(vm);
 
     auto propertyName = asSymbol(symbol)->privateName();
-    OPERATION_RETURN(scope, JSValue::encode(getByValObject(globalObject, vm, asObject(base), propertyName.data)));
+    OPERATION_RETURN(scope, JSValue::encode(CommonSlowPaths::getByValObject(globalObject, vm, asObject(base), propertyName.data)));
 }
 
 JSC_DEFINE_JIT_OPERATION(operationPutByValCellStringStrict, void, (JSGlobalObject* globalObject, JSCell* cell, JSCell* string, EncodedJSValue encodedValue))
@@ -1259,7 +1250,7 @@ JSC_DEFINE_JIT_OPERATION(operationArrayPushDoubleMultiple, EncodedJSValue, (JSGl
     // If it can cause any JS interactions, we can call the caller JS function of this function and overwrite the
     // content of ScratchBuffer. If the IndexingType is now ArrayWithDouble, we can ensure
     // that there is no indexed accessors in this object and its prototype chain.
-    ASSERT(array->indexingMode() == ArrayWithDouble);
+    ASSERT(array->indexingType() == ArrayWithDouble);
 
     for (int32_t i = 0; i < elementCount; ++i) {
         array->pushInline(globalObject, JSValue(JSValue::EncodeAsDouble, buffer[i]));
@@ -4010,8 +4001,26 @@ JSC_DEFINE_JIT_OPERATION(operationStringLocaleCompare, UCPUStrictInt32, (JSGloba
     OPERATION_RETURN(scope, toUCPUStrictInt32(collator->compareStrings(globalObject, string, that)));
 }
 
+static ALWAYS_INLINE std::optional<UCPUStrictInt32> tryStringIndexOfOneCharWithoutGC(JSString* base, JSString* argument, int32_t position)
+{
+    if (argument->isRope())
+        return std::nullopt;
+
+    auto* argumentImpl = argument->getValueImpl();
+    if (argumentImpl->length() != 1 || base->isRope())
+        return std::nullopt;
+
+    size_t result = base->getValueImpl()->find((*argumentImpl)[0], static_cast<unsigned>(std::max(position, 0)));
+    if (result == notFound)
+        return toUCPUStrictInt32(-1);
+    return toUCPUStrictInt32(static_cast<int32_t>(result));
+}
+
 JSC_DEFINE_JIT_OPERATION(operationStringIndexOf, UCPUStrictInt32, (JSGlobalObject* globalObject, JSString* base, JSString* argument))
 {
+    if (auto result = tryStringIndexOfOneCharWithoutGC(base, argument, /* position */ 0))
+        return { *result, nullptr };
+
     VM& vm = globalObject->vm();
     CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
     JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
@@ -4074,6 +4083,9 @@ JSC_DEFINE_JIT_OPERATION(operationStringIndexOfWithOneChar, UCPUStrictInt32, (JS
 
 JSC_DEFINE_JIT_OPERATION(operationStringIndexOfWithIndex, UCPUStrictInt32, (JSGlobalObject* globalObject, JSString* base, JSString* argument, int32_t position))
 {
+    if (auto result = tryStringIndexOfOneCharWithoutGC(base, argument, position))
+        return { *result, nullptr };
+
     VM& vm = globalObject->vm();
     CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
     JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
@@ -4556,7 +4568,7 @@ JSC_DEFINE_JIT_OPERATION(operationStringProtoFuncReplaceAllGeneric, JSCell*, (JS
 
     JSValue decodedSearchValue = JSValue::decode(searchValue);
     if (decodedSearchValue.inherits<RegExpObject>()) [[unlikely]] {
-        if (!uncheckedDowncast<RegExpObject>(decodedSearchValue)->regExp()->global()) {
+        if (!uncheckedDowncast<RegExpObject>(decodedSearchValue)->regExp()->global() && checkObjectCoercible(JSValue::decode(thisValue))) {
             throwTypeError(globalObject, scope, "String.prototype.replaceAll argument must not be a non-global regular expression"_s);
             OPERATION_RETURN(scope, nullptr);
         }
@@ -5125,7 +5137,10 @@ JSC_DEFINE_JIT_OPERATION(operationCompareStringLess, uintptr_t, (JSGlobalObject*
     JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
     auto scope = DECLARE_THROW_SCOPE(vm);
 
-    OPERATION_RETURN(scope, codePointCompareLessThan(asString(a)->view(globalObject), asString(b)->view(globalObject)));
+    auto aView = asString(a)->view(globalObject);
+    if (aView->isNull()) [[unlikely]]
+        OPERATION_RETURN(scope, false);
+    OPERATION_RETURN(scope, codePointCompareLessThan(aView, asString(b)->view(globalObject)));
 }
 
 JSC_DEFINE_JIT_OPERATION(operationCompareStringLessEq, uintptr_t, (JSGlobalObject* globalObject, JSString* a, JSString* b))
@@ -5135,7 +5150,10 @@ JSC_DEFINE_JIT_OPERATION(operationCompareStringLessEq, uintptr_t, (JSGlobalObjec
     JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
     auto scope = DECLARE_THROW_SCOPE(vm);
 
-    OPERATION_RETURN(scope, !codePointCompareLessThan(asString(b)->view(globalObject), asString(a)->view(globalObject)));
+    auto bView = asString(b)->view(globalObject);
+    if (bView->isNull()) [[unlikely]]
+        OPERATION_RETURN(scope, false);
+    OPERATION_RETURN(scope, !codePointCompareLessThan(bView, asString(a)->view(globalObject)));
 }
 
 JSC_DEFINE_JIT_OPERATION(operationCompareStringGreater, uintptr_t, (JSGlobalObject* globalObject, JSString* a, JSString* b))
@@ -5145,7 +5163,10 @@ JSC_DEFINE_JIT_OPERATION(operationCompareStringGreater, uintptr_t, (JSGlobalObje
     JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
     auto scope = DECLARE_THROW_SCOPE(vm);
 
-    OPERATION_RETURN(scope, codePointCompareLessThan(asString(b)->view(globalObject), asString(a)->view(globalObject)));
+    auto bView = asString(b)->view(globalObject);
+    if (bView->isNull()) [[unlikely]]
+        OPERATION_RETURN(scope, false);
+    OPERATION_RETURN(scope, codePointCompareLessThan(bView, asString(a)->view(globalObject)));
 }
 
 JSC_DEFINE_JIT_OPERATION(operationCompareStringGreaterEq, uintptr_t, (JSGlobalObject* globalObject, JSString* a, JSString* b))
@@ -5155,7 +5176,10 @@ JSC_DEFINE_JIT_OPERATION(operationCompareStringGreaterEq, uintptr_t, (JSGlobalOb
     JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
     auto scope = DECLARE_THROW_SCOPE(vm);
 
-    OPERATION_RETURN(scope, !codePointCompareLessThan(asString(a)->view(globalObject), asString(b)->view(globalObject)));
+    auto aView = asString(a)->view(globalObject);
+    if (aView->isNull()) [[unlikely]]
+        OPERATION_RETURN(scope, false);
+    OPERATION_RETURN(scope, !codePointCompareLessThan(aView, asString(b)->view(globalObject)));
 }
 
 JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationNotifyWrite, void, (VM* vmPointer, InlineWatchpointSet* set))
@@ -5665,6 +5689,100 @@ JSC_DEFINE_JIT_OPERATION(operationLoadVarargs, void, (JSGlobalObject* globalObje
         callFrame->r(firstElement + i) = jsUndefined();
     OPERATION_RETURN(scope);
 }
+
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+static ALWAYS_INLINE unsigned forwardedRestLengthForDescriptor(CallFrame* callFrame, const VarargsSpreadForwardDescriptor& descriptor)
+{
+    InlineCallFrame* inlineCallFrame = descriptor.inlineCallFrame;
+    unsigned lengthIncludingThis;
+    if (inlineCallFrame && inlineCallFrame->argumentCountRegister.isValid())
+        lengthIncludingThis = callFrame->r(inlineCallFrame->argumentCountRegister).unboxedInt32();
+    else if (inlineCallFrame)
+        lengthIncludingThis = inlineCallFrame->argumentCountIncludingThis;
+    else
+        lengthIncludingThis = callFrame->argumentCountIncludingThis();
+
+    unsigned length = lengthIncludingThis > 1 ? lengthIncludingThis - 1 : 0;
+    unsigned skip = descriptor.numberOfArgumentsToSkip;
+    return length > skip ? length - skip : 0;
+}
+
+// Copies `count` forwarded rest arguments (past numberOfArgumentsToSkip) from the caller frame into dest. The
+// source values live on the caller frame; the callee varargs frame we write into sits below it, so source and
+// destination never overlap regardless of copy order. AssemblyHelpers::argumentsStart is where the frame's
+// (contiguous) arguments begin, which is correct for both fixed-argument-count and varargs frames, unlike
+// m_argumentsWithFixup, which only covers declared parameters.
+static ALWAYS_INLINE void copyForwardedRestForDescriptor(CallFrame* callFrame, const VarargsSpreadForwardDescriptor& descriptor, JSValue* dest, unsigned count)
+{
+    VirtualRegister start = AssemblyHelpers::argumentsStart(descriptor.inlineCallFrame) + descriptor.numberOfArgumentsToSkip;
+    JSValue* source = std::bit_cast<JSValue*>(&callFrame->r(start));
+    for (unsigned i = 0; i < count; ++i)
+        dest[i] = source[i];
+}
+
+JSC_DEFINE_JIT_OPERATION(operationSizeFrameForVarargsWithSpreadForwardBuffer, size_t, (JSGlobalObject* globalObject, EncodedJSValue* buffer, int32_t argc, const VarargsSpreadForwardDescriptor* descriptors, int32_t numUsedStackSlots))
+{
+    VM& vm = globalObject->vm();
+    CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
+    JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    ActiveScratchBufferScope activeScratchBufferScope(ScratchBuffer::fromData(buffer), argc);
+
+    CheckedUint32 checkedLength = 0;
+    for (int32_t i = 0; i < argc; ++i) {
+        JSValue value = JSValue::decode(buffer[i]);
+        if (!value)
+            checkedLength += forwardedRestLengthForDescriptor(callFrame, descriptors[i]);
+        else if (JSCellButterfly* array = dynamicDowncast<JSCellButterfly>(value))
+            checkedLength += array->publicLength();
+        else
+            checkedLength += 1U;
+    }
+
+    if (checkedLength.hasOverflowed() || checkedLength > maxArguments) [[unlikely]] {
+        throwStackOverflowError(globalObject, scope);
+        OPERATION_RETURN(scope, 0);
+    }
+
+    unsigned length = checkedLength;
+    CallFrame* calleeFrame = calleeFrameForVarargs(callFrame, numUsedStackSlots, length + 1);
+    if (!vm.ensureJSStackCapacityFor(calleeFrame->registers())) [[unlikely]] {
+        throwStackOverflowError(globalObject, scope);
+        OPERATION_RETURN(scope, 0);
+    }
+
+    OPERATION_RETURN(scope, length);
+}
+
+JSC_DEFINE_JIT_OPERATION(operationSetupVarargsFrameWithSpreadForwardBuffer, CallFrame*, (JSGlobalObject* globalObject, CallFrame* newCallFrame, EncodedJSValue* buffer, int32_t argc, const VarargsSpreadForwardDescriptor* descriptors, int32_t length))
+{
+    VM& vm = globalObject->vm();
+    CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
+    JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    ActiveScratchBufferScope activeScratchBufferScope(ScratchBuffer::fromData(buffer), argc);
+
+    auto calleeFrameOffset = VirtualRegister(newCallFrame - callFrame);
+    JSValue* dest = std::bit_cast<JSValue*>(&callFrame->r(calleeFrameOffset + CallFrame::argumentOffset(0)));
+
+    for (int32_t i = 0; i < argc; ++i) {
+        JSValue value = JSValue::decode(buffer[i]);
+        if (!value) {
+            unsigned n = forwardedRestLengthForDescriptor(callFrame, descriptors[i]);
+            copyForwardedRestForDescriptor(callFrame, descriptors[i], dest, n);
+            dest += n;
+        } else if (JSCellButterfly* array = dynamicDowncast<JSCellButterfly>(value)) {
+            unsigned n = array->publicLength();
+            array->copyToArguments(globalObject, dest, 0, n);
+            dest += n;
+        } else
+            *dest++ = value;
+    }
+
+    newCallFrame->setArgumentCountIncludingThis(length + 1);
+    OPERATION_RETURN(scope, newCallFrame);
+}
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 
 JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationFModOnInts, double, (int32_t a, int32_t b))
 {
@@ -6312,6 +6430,15 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationNewWeakSet, JSWeakSet*, (VM* vmPointe
     CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
     JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
     return JSWeakSet::create(vm, structure);
+}
+
+JSC_DEFINE_JIT_OPERATION(operationNewProxyObject, JSCell*, (JSGlobalObject* globalObject, JSObject* target, JSObject* handler))
+{
+    VM& vm = globalObject->vm();
+    CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
+    JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    OPERATION_RETURN(scope, ProxyObject::create(globalObject, target, handler));
 }
 
 JSC_DEFINE_JIT_OPERATION(operationWeakSetAdd, void, (JSGlobalObject* globalObject, JSCell* set, JSCell* key, int32_t hash))

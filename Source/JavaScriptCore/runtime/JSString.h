@@ -255,7 +255,7 @@ public:
     StringImpl* tryGetValueImpl() const;
     ALWAYS_INLINE unsigned length() const;
 
-    JSValue LEGACY_NODELETE toPrimitive(JSGlobalObject*, PreferredPrimitiveType) const;
+    NODELETE JSValue toPrimitive(JSGlobalObject*, PreferredPrimitiveType) const;
     bool toBoolean() const { return !!length(); }
     JSObject* toObject(JSGlobalObject*) const;
     double toNumber(JSGlobalObject*) const;
@@ -677,6 +677,13 @@ public:
     JS_EXPORT_PRIVATE const String& resolveRopeWithoutGC() const;
 
     JSString* substringBase() const { return fiber1(); }
+
+#if CPU(ADDRESS64)
+    // A substring has no first fiber. This word caches the hash of its characters. It is zero until the hash is computed.
+    static constexpr unsigned substringHashShift = 32;
+    unsigned hashOfSubstring() const { return static_cast<unsigned>(m_fiber >> substringHashShift); }
+    void setHashOfSubstring(unsigned hash) const { m_fiber |= static_cast<uintptr_t>(hash) << substringHashShift; }
+#endif
 
     unsigned substringOffset() const
     {

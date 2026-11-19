@@ -54,8 +54,8 @@ bool hasEmitter(InlineBuiltin builtin)
 static_assert(0 FOR_EACH_AOT_INLINE_BUILTIN_IN_FUNCTION_BUILTIN(AOT_COUNT_INLINE_BUILTIN_WITH_GENERATOR) == 4, "chooseFormOfFunctionBuiltin names each member of the family that has code in line");
 static_assert(0 FOR_EACH_AOT_INLINE_BUILTIN_IN_PROMISE_BUILTIN(AOT_COUNT_INLINE_BUILTIN_WITH_GENERATOR) == 3, "chooseFormOfPromiseBuiltin names each member of the family that has code in line");
 static_assert(0 FOR_EACH_AOT_INLINE_BUILTIN_IN_DATE_BUILTIN(AOT_COUNT_INLINE_BUILTIN_WITH_GENERATOR) == 6, "chooseFormOfDateBuiltin names each member of the family that has code in line");
-static_assert(0 FOR_EACH_AOT_INLINE_BUILTIN_IN_BUFFER_BUILTIN(AOT_COUNT_INLINE_BUILTIN_WITH_GENERATOR) == 7, "chooseFormOfBufferBuiltin names each member of the family that has code in line");
-static_assert(0 FOR_EACH_AOT_INLINE_BUILTIN_IN_ERROR_BUILTIN(AOT_COUNT_INLINE_BUILTIN_WITH_GENERATOR) == 1, "chooseFormOfErrorBuiltin names each member of the family that has code in line");
+static_assert(0 FOR_EACH_AOT_INLINE_BUILTIN_IN_BUFFER_BUILTIN(AOT_COUNT_INLINE_BUILTIN_WITH_GENERATOR) == 8, "chooseFormOfBufferBuiltin names each member of the family that has code in line");
+static_assert(0 FOR_EACH_AOT_INLINE_BUILTIN_IN_ERROR_BUILTIN(AOT_COUNT_INLINE_BUILTIN_WITH_GENERATOR) == 2, "chooseFormOfErrorBuiltin names each member of the family that has code in line");
 static_assert(0 FOR_EACH_AOT_INLINE_BUILTIN_IN_INTL_BUILTIN(AOT_COUNT_INLINE_BUILTIN_WITH_GENERATOR) == 2, "chooseFormOfIntlBuiltin names each member of the family that has code in line");
 #undef AOT_COUNT_INLINE_BUILTIN_WITH_GENERATOR
 
@@ -102,9 +102,13 @@ static bool takesOperandsAsWritten(const InlineBuiltinQuery& query)
     case InlineBuiltin::OwnPropertyKeys:
     case InlineBuiltin::ObjectValues:
     case InlineBuiltin::ObjectEntries:
+    case InlineBuiltin::ObjectDefineProperty:
+    case InlineBuiltin::ReflectSet:
         return true;
     case InlineBuiltin::ObjectCreate:
         return true;
+    case InlineBuiltin::CallNumberConstructor:
+        return query.standsInLoop;
     default:
         return false;
     }
@@ -135,8 +139,8 @@ static InlineForm chooseFormOfFunctionBind(const InlineBuiltinQuery& query)
 
 static bool standsInFunctionBehindCallOfInlineBuiltin(const InlineBuiltinQuery& query)
 {
-    RuntimeFunctionID behindCall = query.overload.slowPathFunction();
-    const RuntimeFunctionEntry* entry = behindCall ? findRuntimeFunction(query.context.program, behindCall) : nullptr;
+    RuntimeFunctionID slowPath = query.overload.slowPathFunction();
+    const RuntimeFunctionEntry* entry = slowPath ? findRuntimeFunction(query.context.program, slowPath) : nullptr;
     return entry && entry->function == query.context.writtenIn;
 }
 
@@ -168,7 +172,7 @@ static InlineForm chooseFormOfReflectApply(const InlineBuiltinQuery& query)
 static InlineForm chooseFormOfReflectConstruct(const InlineBuiltinQuery& query)
 {
     bool takesOperands = (query.numberOfArguments() == 2 || query.numberOfArguments() == 3) && everyArgumentButThisMayBeObjectForReflect(query, std::nullopt);
-    return query.hasSlowPath && query.isDoneInPlace && takesOperands ? InlineForm::TwoWay : InlineForm::Call;
+    return query.hasSlowPath && takesOperands ? InlineForm::TwoWay : InlineForm::Call;
 }
 
 InlineForm chooseFormOfFunctionBuiltin(const InlineBuiltinQuery& query)
@@ -318,6 +322,8 @@ InlineForm chooseFormOfBufferBuiltin(const InlineBuiltinQuery& query)
     switch (query.builtin) {
     case InlineBuiltin::DataViewByteLength:
         return twoWayIf(isInstanceForBufferBuiltin(query, query.receiver(), BuiltinClasses::DataView));
+    case InlineBuiltin::ArrayBufferIsView:
+        return query.argument(0) ? InlineForm::Whole : InlineForm::Call;
     case InlineBuiltin::ArrayBufferByteLength:
         return isInstanceForBufferBuiltin(query, query.receiver(), BuiltinClasses::ArrayBuffer) ? InlineForm::Whole : InlineForm::Call;
     case InlineBuiltin::DataViewGet:
@@ -338,6 +344,8 @@ InlineForm chooseFormOfBufferBuiltin(const InlineBuiltinQuery& query)
 
 InlineForm chooseFormOfErrorBuiltin(const InlineBuiltinQuery& query)
 {
+    if (query.builtin == InlineBuiltin::ErrorIsError)
+        return query.argument(0) ? InlineForm::Whole : InlineForm::Call;
     RELEASE_ASSERT(query.builtin == InlineBuiltin::NewError);
     constexpr unsigned mostArgumentsOfNewError = 2;
     if (query.form != BuiltinCallForm::Whole || query.isHiddenInStackTraces || query.numberOfArguments() > mostArgumentsOfNewError)

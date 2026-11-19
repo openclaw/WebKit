@@ -10,6 +10,7 @@
 
 #include "AOTConstantEmitter.h"
 #include "AOTConversionEmitter.h"
+#include "AOTElementAccessEmitter.h"
 #include "AOTStringBuilderStorage.h"
 #include "AOTStringEmitter.h"
 #include "AOTStubsStrings.h"
@@ -132,6 +133,7 @@ void StringBuilderPartEmitter::generateStringBuilderAppendConstant(const ValueCo
 
     Vector<Latin1Character, maxLengthOfTextWrittenByStores> characters;
     characters.append(text.span8());
+    strings.recordInlined(value->string());
     for (ValueID behind : value.operationsBehind()) {
         const Operation& next = operationAt(behind);
         if (next.opcode != Opcode::StringBuilderAppendConstant || next.builderOperand() != value->builderOperand())
@@ -140,6 +142,7 @@ void StringBuilderPartEmitter::generateStringBuilderAppendConstant(const ValueCo
         if (!nextText.is8Bit() || characters.size() + nextText.length() > maxLengthOfTextWrittenByStores)
             break;
         characters.append(nextText.span8());
+        strings.recordInlined(next.string());
         ++m_numberOfConstantsWrittenAhead;
     }
 
@@ -147,11 +150,18 @@ void StringBuilderPartEmitter::generateStringBuilderAppendConstant(const ValueCo
     builders().commit(builder, builders().writeBytes(cursor, characters.span()));
 }
 
+void StringBuilderPartEmitter::holdIntegerToldToHaveFewDigits(const ValueContext& value, Integer appended)
+{
+    if (ElementAccessEmitter& elements = emitter<ElementAccessEmitter>(); elements.checksBounds())
+        elements.stopUnlessInside(value, below(appended, StringBuilderEmitter::firstIntegerWrittenByCall));
+}
+
 void StringBuilderPartEmitter::generateStringBuilderAppendInteger(const ValueContext& value)
 {
     CellPointer builder = in<CellPointer>(value->builderOperand());
     Integer appended = integerOf(value->valueOperand());
     if (isProvenToHaveFewDigits(value->valueOperand())) {
+        holdIntegerToldToHaveFewDigits(value, appended);
         appendDigits(value, builder, low32(appended));
         return;
     }
@@ -176,7 +186,7 @@ void StringBuilderPartEmitter::generateStringBuilderAppendNumber(const ValueCont
         return;
     }
     Number appended = in<Number>(value->valueOperand());
-    Integer truncated = emitter<ConversionEmitter>().toInteger(appended);
+    Integer truncated = emitter<ConversionEmitter>().truncateUnchecked(appended);
     Condition isWhole = equal(toNumber(truncated), appended);
     Condition hasFewDigits = logicalAnd(isWhole, below(truncated, StringBuilderEmitter::firstIntegerWrittenByCall));
     emitArmsOfStringBuilderPart(m_out, hasFewDigits, Machine::EdgeClass::Normal, [&] {
@@ -201,6 +211,7 @@ void StringBuilderPartEmitter::generateStringBuilderAppendStringRange(const Valu
     Word32 end = strings.word32Of(value->endOperand());
     Word32 length = sub(end, start);
     CharacterView view = strings.viewOf(value, value->stringOperand());
+    strings.holdRangeInside(value, start, end);
     LBasicBlock byCall = newBlock();
     LBasicBlock done = newBlock();
 
@@ -233,6 +244,26 @@ void StringBuilderPartEmitter::generateStringBuilderAppendBoolean(const ValueCon
     }, [&] {
         return boxBoolean(isTrue);
     });
+}
+
+void StringBuilderPartEmitter::generateStringBuilderAppendCodeUnit(const ValueContext& value)
+{
+    CellPointer builder = in<CellPointer>(value->builderOperand());
+    Word32 codeUnit = emitter<StringEmitter>().word32Of(value->valueOperand());
+    LBasicBlock byCall = newBlock();
+    LBasicBlock done = newBlock();
+
+    branchUnless(belowOrEqual(codeUnit, word32(maxSingleCharacterString)), byCall);
+    Pointer cursor = builders().tryReserve(builder, word32(1), byCall);
+    m_out.store32As8(codeUnit.value(), builders().bytesAt(cursor));
+    builders().commit(builder, offsetBy(cursor, 1));
+    m_out.jump(done);
+
+    m_out.appendTo(byCall);
+    appendString(value, builder, emitter<StringEmitter>().stringFromCodeUnit(value, codeUnit));
+    m_out.jump(done);
+
+    m_out.appendTo(done);
 }
 
 void StringBuilderPartEmitter::generateStringBuilderAppendStringOrNullish(const ValueContext& value)
@@ -313,6 +344,7 @@ void StringBuilderPartEmitter::generateStackStringBuilderAppendConstant(const Va
 
     Vector<Latin1Character, maxLengthOfTextWrittenByStores> characters;
     characters.append(text.span8());
+    strings.recordInlined(value->string());
     ValueID cursorInFront = value.id();
     for (ValueID behind : value.operationsBehind()) {
         const Operation& next = operationAt(behind);
@@ -322,6 +354,7 @@ void StringBuilderPartEmitter::generateStackStringBuilderAppendConstant(const Va
         if (!nextText.is8Bit() || characters.size() + nextText.length() > maxLengthOfTextWrittenByStores)
             break;
         characters.append(nextText.span8());
+        strings.recordInlined(next.string());
         cursorInFront = behind;
         ++m_numberOfConstantsWrittenAhead;
     }
@@ -333,6 +366,7 @@ void StringBuilderPartEmitter::generateStackStringBuilderAppendInteger(const Val
     PlaceInFrame place = placeInFrameOf(value);
     Integer appended = integerOf(value->valueOperand());
     if (isProvenToHaveFewDigits(value->valueOperand())) {
+        holdIntegerToldToHaveFewDigits(value, appended);
         builders().defineCursorBehindPart(value, place.record, appendDigits(value, place, low32(appended)));
         return;
     }
@@ -357,7 +391,7 @@ void StringBuilderPartEmitter::generateStackStringBuilderAppendNumber(const Valu
         return;
     }
     Number appended = in<Number>(value->valueOperand());
-    Integer truncated = emitter<ConversionEmitter>().toInteger(appended);
+    Integer truncated = emitter<ConversionEmitter>().truncateUnchecked(appended);
     Condition isWhole = equal(toNumber(truncated), appended);
     Condition hasFewDigits = logicalAnd(isWhole, below(truncated, StringBuilderEmitter::firstIntegerWrittenByCall));
     builders().defineCursorBehindPart(value, place.record, emitArmsOfStackStringBuilderPart(m_out, hasFewDigits, Machine::EdgeClass::Normal, [&] {
@@ -370,7 +404,11 @@ void StringBuilderPartEmitter::generateStackStringBuilderAppendNumber(const Valu
 void StringBuilderPartEmitter::generateStackStringBuilderAppendString(const ValueContext& value)
 {
     PlaceInFrame place = placeInFrameOf(value);
-    builders().defineCursorBehindPart(value, place.record, appendString(value, place, in<CellPointer>(value->valueOperand())));
+    auto append = [&](CellPointer string) {
+        return appendString(value, place, string);
+    };
+    std::optional<Pointer> behind = builders().tryAppendFinishedBuilder(value, place.record, place.cursor, append);
+    builders().defineCursorBehindPart(value, place.record, behind ? *behind : append(in<CellPointer>(value->valueOperand())));
 }
 
 void StringBuilderPartEmitter::generateStackStringBuilderAppendStringRange(const ValueContext& value)
@@ -382,6 +420,7 @@ void StringBuilderPartEmitter::generateStackStringBuilderAppendStringRange(const
     Word32 end = strings.word32Of(value->endOperand());
     Word32 length = sub(end, start);
     CharacterView view = strings.viewOf(value, value->stringOperand());
+    strings.holdRangeInside(value, start, end);
     LBasicBlock byCall = newBlock();
     Join<Pointer> cursor(m_out);
 
@@ -407,6 +446,18 @@ void StringBuilderPartEmitter::generateStackStringBuilderAppendBoolean(const Val
     m_out.store32As8(lastByteOfFalse, builders().bytesAt(place.cursor, 4));
     Pointer endOfFalse = offsetBy(place.cursor, 5);
     builders().defineCursorBehindPart(value, place.record, builders().advance(value, place.record, Pointer(m_out.sub(endOfFalse.value(), zeroExtended(isTrue).value()))));
+}
+
+void StringBuilderPartEmitter::generateStackStringBuilderAppendCodeUnit(const ValueContext& value)
+{
+    PlaceInFrame place = placeInFrameOf(value);
+    Word32 codeUnit = emitter<StringEmitter>().word32Of(value->valueOperand());
+    builders().defineCursorBehindPart(value, place.record, emitArmsOfStackStringBuilderPart(m_out, belowOrEqual(codeUnit, word32(maxSingleCharacterString)), Machine::EdgeClass::Unlikely, [&] {
+        m_out.store32As8(codeUnit.value(), builders().bytesAt(place.cursor));
+        return builders().advance(value, place.record, offsetBy(place.cursor, 1));
+    }, [&] {
+        return callOperation<Pointer>(value, RuntimeOperation::StackStringBuilderAppendCodeUnit, { place.record, place.cursor, codeUnit }, { .isOnRarePath = true });
+    }));
 }
 
 void StringBuilderPartEmitter::generateStackStringBuilderAppendStringOrNullish(const ValueContext& value)

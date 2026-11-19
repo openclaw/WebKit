@@ -109,10 +109,12 @@ function entryInfoDeclarations(schema: Schema): string[] {
   const externals = ["None", ...schema.externals.map(external => external.name)];
   return `JS_EXPORT_PRIVATE std::span<const uint32_t> defaultPayloadOf(TerminatorKind);
 // By the number of the opcode: the words that a fresh draft has, and how many named operands.
+inline constexpr unsigned numberOfFreshPayloadWordsAtHand = 12;
 struct FreshWordsOfOperation {
     const uint32_t* payload { nullptr };
     uint16_t numberOfPayloadWords { 0 };
     uint16_t numberOfNamedOperands { 0 };
+    std::array<uint32_t, numberOfFreshPayloadWordsAtHand> firstPayloadWords { };
 };
 JS_EXPORT_PRIVATE extern const std::array<FreshWordsOfOperation, numberOfEnumerators<Opcode>> freshWordsByOpcode;
 ALWAYS_INLINE const FreshWordsOfOperation& freshWordsOf(Opcode opcode) { return freshWordsByOpcode[static_cast<unsigned>(opcode)]; }
@@ -150,7 +152,7 @@ ALWAYS_INLINE const OperandInfo& operandInfoIn(const OperandInfosOfEntry& infos,
 ALWAYS_INLINE const OperandInfo& operandInfoOf(Opcode opcode, uint32_t operandIndex) { return operandInfoIn(operandInfosByOpcode[static_cast<unsigned>(opcode)], operandIndex); }
 ALWAYS_INLINE const OperandInfo& operandInfoOf(TerminatorKind kind, uint32_t operandIndex) { return operandInfoIn(operandInfosByTerminatorKind[static_cast<unsigned>(kind)], operandIndex); }
 
-inline OperandKind operandKindOf(Opcode opcode, uint32_t operandIndex) { return operandInfoOf(opcode, operandIndex).kind; }
+ALWAYS_INLINE OperandKind operandKindOf(Opcode opcode, uint32_t operandIndex) { return operandInfoOf(opcode, operandIndex).kind; }
 inline OperandKind operandKindOf(TerminatorKind kind, uint32_t operandIndex) { return operandInfoOf(kind, operandIndex).kind; }
 inline OperandUses operandUsesOf(Opcode opcode, uint32_t operandIndex) { return operandInfoOf(opcode, operandIndex).uses; }
 inline OperandUses operandUsesOf(TerminatorKind kind, uint32_t operandIndex) { return operandInfoOf(kind, operandIndex).uses; }
@@ -238,22 +240,20 @@ struct PositionTable {
 // Which case of a switch each member takes, in one table that every copy of the switch reads.
 template<typename E, uint8_t (*find)(E)>
 struct CaseTable {
-    static constexpr std::array<uint8_t, numberOfEnumerators<E>> tabulate()
+    static constexpr size_t numberOfPlaces = std::bit_ceil<size_t>(numberOfEnumerators<E>);
+
+    static constexpr std::array<uint8_t, numberOfPlaces> tabulate()
     {
-        std::array<uint8_t, numberOfEnumerators<E>> cases { };
+        std::array<uint8_t, numberOfPlaces> cases { };
+        cases.fill(std::numeric_limits<uint8_t>::max());
         for (E member : allMembersOf<E>)
             cases[static_cast<size_t>(member)] = find(member);
         return cases;
     }
 
-    static constexpr std::array<uint8_t, numberOfEnumerators<E>> cases = tabulate();
+    static constexpr std::array<uint8_t, numberOfPlaces> cases = tabulate();
 
-    static uint8_t at(E member)
-    {
-        size_t index = static_cast<size_t>(member);
-        RELEASE_ASSERT(index < cases.size());
-        return cases[index];
-    }
+    static uint8_t at(E member) { return cases[static_cast<size_t>(member) % numberOfPlaces]; }
 };`.split("\n");
 
 const positionIncludes = `#include "AOTSchemaFlagMasks.h"
@@ -299,7 +299,7 @@ function lookup(
     const sizesOfGroups = [...Map.groupBy(cases, ({ value }) => value).values()].map(group => group.length);
     if (cases.length - Math.max(...sizesOfGroups) < leastLabelsOfColumnTable) {
       const signature = `${type} ${name}(${enumName} ${parameter})`;
-      return constexprSwitch({ signature, subject: parameter, enumName, cases, defaultValue });
+      return constexprSwitch({ signature, subject: parameter, enumName, cases, defaultValue, qualifier: "ALWAYS_INLINE constexpr" });
     }
     const inSchema = nameOfSwitchBehindTable(name);
     const signature = `${type} ${inSchema}(${enumName} ${parameter})`;
@@ -432,6 +432,8 @@ function operationsHeader(schema: Schema): string[] {
     '"AOTSchemaOperandIndexes.h"',
     "<algorithm>",
     "<array>",
+    "<bit>",
+    "<limits>",
     "<optional>",
     "<span>",
     "<wtf/StdLibExtras.h>",
@@ -775,7 +777,9 @@ function operationsSource(schema: Schema): string[] {
       "    std::array<FreshWordsOfOperation, numberOfEnumerators<Opcode>> table;",
       "    for (unsigned index = 0; index < table.size(); ++index) {",
       "        std::span<const uint32_t> payload = defaultPayloadInSchemaOf(static_cast<Opcode>(index));",
-      "        table[index] = { payload.data(), static_cast<uint16_t>(payload.size()), static_cast<uint16_t>(numberOfNamedOperandsOf(static_cast<Opcode>(index))) };",
+      "        table[index] = { payload.data(), static_cast<uint16_t>(payload.size()), static_cast<uint16_t>(numberOfNamedOperandsOf(static_cast<Opcode>(index))), { } };",
+      "        for (size_t word = 0; word < payload.size() && word < numberOfFreshPayloadWordsAtHand; ++word)",
+      "            table[index].firstPayloadWords[word] = payload[word];",
       "    }",
       "    return table;",
       "}();",

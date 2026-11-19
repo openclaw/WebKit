@@ -25,10 +25,34 @@ namespace JSC { namespace AOT { namespace Typed {
 
 static constexpr unsigned mostValuesFollowedBehindTextInStringKeys = 4;
 
-static PrimitiveKnownToFolding keyKnownWhereverAskedInStringKeys(const Walker& walker, ValueID written)
+static StringID textOfConstantField(const Walker& walker, const BodyValue& read)
+{
+    if (read.isFreeName())
+        return { };
+    const BodyIndex& index = walker.currentBodyIndex();
+    ValueID holder = index.stripCasts(read.objectOperand());
+    if (holder && !index.isParameter(holder) && index.opcodeOf(holder) == Opcode::CheckInitialized)
+        holder = index.stripCasts(index.value(holder).operand(0));
+    if (!holder || index.isParameter(holder) || index.opcodeOf(holder) != Opcode::GetModuleVariable)
+        return { };
+    VariableID variable = index.value(holder).variable();
+    TypeID held = walker.program().at(variable).flags.contains(VariableFlags::IsImmutable) ? walker.positions().variable(TypeLevel::Proven, variable) : TypeID();
+    if (!held || holdsOnlyPrimitives(held))
+        return { };
+    TypeArena& types = walker.types();
+    LayoutID layout = singleLayoutOf(types, types.at(types.withOnlyObjects(held)));
+    std::optional<FieldReference> field = layout ? findField(walker.program(), layout, read.key()) : std::nullopt;
+    const LinkedCell* cell = field ? &walker.facts().linked().field(*field) : nullptr;
+    if (!cell || !cell->isFilledAtEveryRead || cell->isWrittenAfterConstruction || !cell->proven)
+        return { };
+    Type type = types.at(cell->proven);
+    return type.hasOnlyPrimitives(Primitive::LiteralString) ? singleStringLiteralOf(type) : StringID();
+}
+
+static PrimitiveKnownToFolding keyKnownWhereverAskedInStringKeys(const Walker& walker, ValueID written, ValueID access)
 {
     const BodyIndex& index = walker.currentBodyIndex();
-    ValueID definition = written ? index.valueBehindCasts(written) : ValueID();
+    ValueID definition = written ? index.stripCasts(written) : ValueID();
     if (!definition)
         return { };
     if (!index.isParameter(definition)) {
@@ -40,19 +64,27 @@ static PrimitiveKnownToFolding keyKnownWhereverAskedInStringKeys(const Walker& w
             return PrimitiveKnownToFolding::undefined();
         case Opcode::Null:
             return PrimitiveKnownToFolding::null();
+        case Opcode::PropGet:
+            if (StringID text = textOfConstantField(walker, operation))
+                return PrimitiveKnownToFolding::text(text);
+            break;
         case Opcode::Boolean:
             return PrimitiveKnownToFolding::boolean(operation.as<Opcode::Boolean>().boolean());
         default:
             break;
         }
     }
-    if (index.loopOf(index.blockOf(definition)))
-        return { };
+    if (BlockID blockOfKey = index.hasLoops() ? index.blockOf(definition) : BlockID()) {
+        bool wayHoldsKeyOfAccess = index.isParameter(definition) && index.isInBlock(access, blockOfKey) && walker.isWalkingForThisWay(blockOfKey);
+        LoopID loopOfKey = index.loopOf(blockOfKey);
+        if (loopOfKey && !wayHoldsKeyOfAccess && !walker.armHoldsKeyOf(access) && !walker.turnWrittenOutHoldsKeyOf(access, loopOfKey))
+            return { };
+    }
     Reference bound = walker.referenceBoundTo(definition);
     return bound && bound.isRecord() ? primitiveKnownForStrings(walker, bound) : PrimitiveKnownToFolding();
 }
 
-static PropertyKeyID nameOfKnownKeyInStringKeys(const Walker& walker, PrimitiveKnownToFolding key)
+static ALWAYS_INLINE PropertyKeyID nameOfKnownKeyInStringKeys(const Walker& walker, PrimitiveKnownToFolding key)
 {
     const Program& program = walker.program();
     StringID text;
@@ -106,12 +138,22 @@ static bool nameFindsOnlyFunctionsThatUnitLeadsToInStringKeys(const Walker& walk
     return !named || findsOnlySuch(findMemberOfNamedObject(program, linked, types.objects().at(named), name));
 }
 
-static PropertyKeyID nameThatAccessGoesByInStringKeys(const Walker& walker, ValueID key, ValueID lookedAt)
+static PropertyKeyID nameThatAccessGoesByInStringKeys(const Walker& walker, ValueID access, ValueID key, ValueID lookedAt)
 {
-    PropertyKeyID name = nameOfKnownKeyInStringKeys(walker, keyKnownWhereverAskedInStringKeys(walker, key));
+    PropertyKeyID name = nameOfKnownKeyInStringKeys(walker, keyKnownWhereverAskedInStringKeys(walker, key, access));
     if (!name)
         return { };
     Reference start = lookedAt ? walker.referenceBoundTo(lookedAt) : Reference();
+    TypeID type = start && start.isRecord() ? walker.typeOf(start) : TypeID();
+    return type && nameFindsOnlyFunctionsThatUnitLeadsToInStringKeys(walker, type, name) ? name : PropertyKeyID();
+}
+
+PropertyKeyID nameOfTextThatAccessMayGoBy(const Walker& walker, const BodyValue& access, StringID text)
+{
+    PropertyKeyID name = nameOfKnownKeyInStringKeys(walker, PrimitiveKnownToFolding::text(text));
+    if (!name || !access.objectOperand())
+        return { };
+    Reference start = walker.referenceBoundTo(access.objectOperand());
     TypeID type = start && start.isRecord() ? walker.typeOf(start) : TypeID();
     return type && nameFindsOnlyFunctionsThatUnitLeadsToInStringKeys(walker, type, name) ? name : PropertyKeyID();
 }
@@ -120,8 +162,10 @@ PropertyKeyID keyOfKnownTextThatAccessGoesBy(const Walker& walker, const BodyVal
 {
     if (!accessesUnderComputedKeys.contains(access.opcode()))
         return { };
-    return nameThatAccessGoesByInStringKeys(walker, access.propertyOperand(), access.objectOperand());
+    return nameThatAccessGoesByInStringKeys(walker, access.id(), access.propertyOperand(), access.objectOperand());
 }
+
+bool isJoinFailureMovable(const Walker&, ValueID join);
 
 static ValueID findReadThatAloneTakesTextAsKeyInStringKeys(const BodyIndex& index, ValueID text)
 {
@@ -145,8 +189,9 @@ bool buildReadByPartsOfKey(Walker& walker, const BodyValue& read, const InputsOf
     if (read.opcode() != Opcode::ElemGet || inputs.areOnlyTypes())
         return false;
     const BodyIndex& index = walker.currentBodyIndex();
-    ValueID text = index.valueBehindCasts(read.propertyOperand());
-    if (!text || index.isParameter(text) || !operationsThatJoinTexts.contains(index.opcodeOf(text)) || findReadThatAloneTakesTextAsKeyInStringKeys(index, text) != read.id())
+    ValueID text = index.stripCasts(read.propertyOperand());
+    static constexpr OpcodeSet callsThatMayStandCopied { Opcode::Call, Opcode::CallDirect };
+    if (!text || index.isParameter(text) || !(operationsThatJoinTexts | callsThatMayStandCopied).contains(index.opcodeOf(text)) || findReadThatAloneTakesTextAsKeyInStringKeys(index, text) != read.id())
         return false;
 
     Reference object = walker.referenceOf(read.objectOperand());
@@ -156,6 +201,9 @@ bool buildReadByPartsOfKey(Walker& walker, const BodyValue& read, const InputsOf
         return false;
     const Code& code = walker.code();
     const Operation& joined = code.at(root.id());
+    bool isGivenByCopy = !operationsThatJoinTexts.contains(index.opcodeOf(text));
+    if (std::optional<uint32_t> loop = isGivenByCopy ? walker.innermostOpenLoop() : std::nullopt; loop && walker.standsInFrontOfOpenLoop(*loop, root))
+        return false;
     if (joined.opcode != Opcode::Strcat || joined.numberOfVariadicOperands() != 2)
         return false;
     std::array<Reference, 2> parts;
@@ -166,6 +214,7 @@ bool buildReadByPartsOfKey(Walker& walker, const BodyValue& read, const InputsOf
             return false;
     }
 
+    bool failsWhereJoinDoes = joined.traits().mayThrowByRule() && joined.traits().withoutThrowByRule().isRemovableWhenUnused() && isJoinFailureMovable(walker, root.id());
     Draft written = walker.draftOf(read);
     Draft byParts(Opcode::ElemGetByKeyParts, written.origin());
     walker.chooseConservativeFields(byParts);
@@ -175,8 +224,13 @@ bool buildReadByPartsOfKey(Walker& walker, const BodyValue& read, const InputsOf
     byParts.expected = written.expected;
     byParts.resultIsReturnedAtOnce = written.resultIsReturnedAtOnce;
     byParts.inputValueGiven = read.id();
-    if (Reference found = walker.build(WTF::move(byParts)))
+    if (Reference found = walker.build(WTF::move(byParts))) {
         walker.bind(read.id(), found);
+        if (failsWhereJoinDoes) {
+            walker.code().letJoinFailWhereItsReaderFails(root.id());
+            walker.count(StatisticID::KeyJoinsLeftToReads);
+        }
+    }
     return true;
 }
 
@@ -217,13 +271,17 @@ bool buildLookupUnderAnyKeyOnPlainRecords(Walker& walker, const BodyValue& acces
         return false;
     if (access.opcode() == Opcode::ElemGet && !lockedObjectPrototypeInStringKeys(walker.program()))
         return false;
+    bool mayMakeClosureOfField = false;
     for (LayoutID layout : membersOf(types, object)) {
         const LinkedLayout* known = isRecordBelowObjectPrototypeInStringKeys(walker.program(), layout) ? layoutThatStaysInSightInStringKeys(walker, layout) : nullptr;
         if (!known || known->possibleChanges.containsAny({ LayoutChange::GetsAccessor, LayoutChange::ChangesPrototype }))
             return false;
+        mayMakeClosureOfField |= access.opcode() == Opcode::ElemGet && walker.plan().layout(layout).environmentOfDeferredClosures;
     }
 
     Effects effects = Effects::ofReadByNameThatRunsNoCode();
+    if (mayMakeClosureOfField)
+        effects.writes.add(AbstractHeap::ObjectFields);
     if (object.mayBeUndefinedOrNull())
         effects.mayThrow = ThrowEffect(true);
 
@@ -292,16 +350,20 @@ static bool memberRunsNoCodeOfProgramInStringKeys(const BuiltinTable& table, Bui
     return hasRowOfCalls;
 }
 
+bool recordFindsNothingAbove(const Walker& walker, LayoutID layout, PropertyKeyID key)
+{
+    const Program& program = walker.program();
+    BuiltinID objectPrototype = lockedObjectPrototypeInStringKeys(program);
+    return isRecordBelowObjectPrototypeInStringKeys(program, layout) && objectPrototype && !findOwnMember(program, objectPrototype, key) && listsEveryMemberUnder(program, objectPrototype, key);
+}
+
 static bool nameIsFoundNowhereFromObjectsOfInStringKeys(const Walker& walker, LayoutID id, const LinkedLayout& known, PropertyKeyID key)
 {
     const Program& program = walker.program();
     const LinkTables& linked = walker.facts().linked();
-    if (known.possibleChanges.containsAny({ LayoutChange::GainsProperty, LayoutChange::GetsAccessor, LayoutChange::ChangesPrototype }))
+    if (known.possibleChanges.contains(LayoutChange::ChangesPrototype) || !linked.findsNothing(program, id, ClassSide::Prototype, key, Of::ObjectItself))
         return false;
-    std::span<const PropertyKeyID> appended = linked.appendedKeysOf(id);
-    if (findField(program, id, key) || std::ranges::find(appended, key) != appended.end())
-        return false;
-    if (!isRecordBelowObjectPrototypeInStringKeys(program, id) && findMemberAboveObjectsOf(program, linked, id, key).kind != MemberFound::Kind::Nothing)
+    if (!isRecordBelowObjectPrototypeInStringKeys(program, id) && !findsNothingAboveObjectsOf(program, linked, id, key))
         return false;
     BuiltinID objectPrototype = lockedObjectPrototypeInStringKeys(program);
     return objectPrototype && !findOwnMember(program, objectPrototype, key) && listsEveryMemberUnder(program, objectPrototype, key);

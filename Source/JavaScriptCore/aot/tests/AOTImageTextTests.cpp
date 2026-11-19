@@ -7,6 +7,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTCodedTexts.h"
 #include "AOTIRProgram.h"
 #include "AOTIdentifierNumbering.h"
 #include "AOTImageTestBodies.h"
@@ -23,6 +24,7 @@
 #include <span>
 #include <wtf/ASCIICType.h>
 #include <wtf/HexNumber.h>
+#include <wtf/JSONValues.h>
 #include <wtf/MathExtras.h>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/Threading.h>
@@ -80,7 +82,15 @@ struct TextImage {
     CompiledCode bodyOfReader();
     const ImageText& text() const { return image.image->text(); }
     const ImageNumbers& numbers() const { return *image.built.numbers; }
-    ImageStringWord wordOf(StringID id) const { return image.image->section<ImageStringWord>(ImageSection::Strings)[id.index()]; }
+    StringID numberOf(StringID id) const { return StringID(numbers().stringNumbers().requiredNumberOf(id)); }
+    ImageStringWord wordOf(StringID id) const
+    {
+        if (numbers().stringNumbers().numberOf(id))
+            return text().wordOf(numberOf(id));
+        std::optional<uint32_t> constant = numbers().stringConstants().numberOf(id);
+        AOT_TEST_CHECK(constant);
+        return text().stringConstant(*constant);
+    }
 
     TestBuild build;
     TestImage image;
@@ -253,18 +263,19 @@ static void testIdentifiers()
     AOT_TEST_CHECK(number);
     AOT_TEST_CHECK(number == numbering.numberOf(image.keyOf(nameOfFreeVariable)));
     AOT_TEST_CHECK(image.wordOf(name).hasIdentifierNumber() && image.wordOf(name).number() == *number);
-    AOT_TEST_CHECK(text.isAtom(name));
+    AOT_TEST_CHECK(text.isAtom(image.numberOf(name)));
     const ImageIdentifierWord& identifier = text.identifier(*number);
-    AOT_TEST_CHECK(identifier.text() == name);
+    AOT_TEST_CHECK(identifier.text() == image.numberOf(name));
     AOT_TEST_CHECK(identifier.kind() == PropertyKeyKind::Text);
     AOT_TEST_CHECK(identifier.nameClass() == NameClass::Ordinary);
-    AOT_TEST_CHECK(text.hash(name) == String(nameOfFreeVariable).impl()->hash());
-    AOT_TEST_CHECK(text.view(name) == nameOfFreeVariable);
+    AOT_TEST_CHECK(text.hash(image.wordOf(name)) == String(nameOfFreeVariable).impl()->hash());
+    AOT_TEST_CHECK(text.view(image.wordOf(name)) == nameOfFreeVariable);
 
     AOT_TEST_CHECK(!image.wordOf(image.idOf("plain text"_s)).hasIdentifierNumber());
     for (uint32_t other = 1; other < text.numberOfIdentifiers(); ++other) {
         const NumberedIdentifier& expected = numbering.at(other);
-        AOT_TEST_CHECK(text.identifier(other).text() == expected.text);
+        AOT_TEST_CHECK(text.identifier(other).text() == (expected.text ? image.numberOf(expected.text) : StringID()));
+        AOT_TEST_CHECK(text.identifier(other).kind() != PropertyKeyKind::Text || text.identifier(other).text() == StringID(other));
         if (expected.key)
             AOT_TEST_CHECK(text.identifier(other).kind() == image.build.program().at(expected.key).kind);
     }
@@ -289,27 +300,32 @@ static void testStringOnlyShownHasNoHeader()
 
     const ImageText& text = image.text();
     unsigned hash = String(pathOfModule).impl()->hash();
-    AOT_TEST_CHECK(text.hasText(path) && text.view(path) == pathOfModule && text.hash(path) == hash);
-    String created = text.createString(path);
+    ImageStringWord wordOfPath = image.wordOf(path);
+    AOT_TEST_CHECK(text.hasText(image.numberOf(path)) && text.view(image.numberOf(path)) == pathOfModule && text.hash(wordOfPath) == hash);
+    String created = text.createString(wordOfPath);
     AOT_TEST_CHECK(created == pathOfModule && created.impl()->hash() == hash);
-    AOT_TEST_CHECK(text.createString(path).impl() != created.impl());
+    AOT_TEST_CHECK(text.createString(wordOfPath).impl() != created.impl());
     StringID name = image.idOf(nameOfFreeVariable);
-    AOT_TEST_CHECK(text.createString(name).impl() == text.createString(name).impl());
-    AOT_TEST_CHECK(text.createString(readByCode) == textReadThroughHeader && text.createString(readByCode).impl() == text.createString(readByCode).impl());
-    AOT_TEST_CHECK(text.hasListedHash(constant) && !text.hasListedHash(path) && !text.hasListedHash(name) && !text.hasListedHash(readByCode));
-    AOT_TEST_CHECK(text.view(constant) == textOfConstant && text.hash(constant) == String(textOfConstant).impl()->hash());
-    AOT_TEST_CHECK(text.createString(constant) == textOfConstant && text.createString(constant).impl() != text.createString(constant).impl());
-    StringID publicPath = image.idOf("main.js"_s);
-    AOT_TEST_CHECK(text.createString(publicPath) == "main.js"_s && text.createString(publicPath).impl() != text.createString(publicPath).impl());
+    ImageStringWord wordOfName = image.wordOf(name);
+    AOT_TEST_CHECK(text.createString(wordOfName).impl() == text.createString(wordOfName).impl());
+    ImageStringWord headerWord = image.wordOf(readByCode);
+    AOT_TEST_CHECK(text.createString(headerWord) == textReadThroughHeader && text.createString(headerWord).impl() == text.createString(headerWord).impl());
+    ImageStringWord wordOfConstant = image.wordOf(constant);
+    AOT_TEST_CHECK(!numbers.stringNumbers().numberOf(constant));
+    AOT_TEST_CHECK(wordOfConstant.hasListedHash() && !wordOfPath.hasListedHash() && !wordOfName.hasListedHash() && !headerWord.hasListedHash());
+    AOT_TEST_CHECK(text.view(wordOfConstant) == textOfConstant && text.hash(wordOfConstant) == String(textOfConstant).impl()->hash());
+    AOT_TEST_CHECK(text.createString(wordOfConstant) == textOfConstant && text.createString(wordOfConstant).impl() != text.createString(wordOfConstant).impl());
+    ImageStringWord wordOfPublicPath = image.wordOf(image.idOf("main.js"_s));
+    AOT_TEST_CHECK(text.createString(wordOfPublicPath) == "main.js"_s && text.createString(wordOfPublicPath).impl() != text.createString(wordOfPublicPath).impl());
     AOT_TEST_CHECK(image.image.image->containsCharactersOf(*created.impl()));
-    String atom = text.createAtom(path);
+    String atom = text.createAtom(wordOfPath);
     AOT_TEST_CHECK(atom == pathOfModule && atom.impl()->isAtom());
 }
 
 static std::span<const uint8_t> bytesOfTextInImage(StringView text)
 {
     TextImage& image = textImage();
-    StringView view = image.text().view(image.idOf(text));
+    StringView view = image.text().view(image.wordOf(image.idOf(text)));
     AOT_TEST_CHECK(view == text);
     return view.is8Bit() ? asBytes(view.span8()) : asBytes(view.span16());
 }
@@ -359,12 +375,27 @@ static Vector<uint8_t> stringsByReaderOfRuntime()
 {
     const ImageText& text = textImage().text();
     Vector<uint8_t> strings;
-    for (uint32_t index = 0; index < text.numberOfStrings(); ++index) {
-        StringID string(index);
-        if (!text.hasText(string) || text.view(string).isEmpty())
-            continue;
-        strings.append(byteCast<uint8_t>(text.view(string).utf8().span()));
+    HashSet<uint32_t> bitsOfWords;
+    auto append = [&](ImageStringWord word) {
+        if (!bitsOfWords.add(word.bits).isNewEntry || text.view(word).isEmpty())
+            return;
+        strings.append(byteCast<uint8_t>(text.view(word).utf8().span()));
         strings.append(0);
+    };
+    uint32_t numberOfWords = text.endOfStringsWithWords();
+    for (uint32_t number = 0; number < numberOfWords; ++number) {
+        ImageStringWord word = text.wordOf(StringID(number));
+        AOT_TEST_CHECK(!word.isCoded() && (word.hasText() || number < text.numberOfIdentifiers()));
+        if (word.hasText())
+            append(word);
+    }
+    for (uint32_t number = 0; number < text.numberOfStringConstants(); ++number) {
+        if (text.stringConstant(number).hasText())
+            append(text.stringConstant(number));
+    }
+    for (uint32_t number = numberOfWords; number < text.numberOfStrings(); ++number) {
+        AOT_TEST_CHECK(text.hasText(StringID(number)) && text.wordOf(StringID(number)).isCoded());
+        append(text.wordOf(StringID(number)));
     }
     return strings;
 }
@@ -429,15 +460,97 @@ static void testByteBesideStoredStringsThatIsNotZeroIsFound()
 
 static void testStoredStringsOfAnotherFormatAreRefusedByName()
 {
-    Vector<uint8_t> file = fileThatHoldsTextImage(1);
-    uint32_t other = imageFormatVersion + 1;
-    memcpy(file.mutableSpan().data() + sizeOfOtherBytesInFile + offsetof(ImageHeader, formatVersion), &other, sizeof(other));
-    StoredStrings stored = readStoredStrings(file.span());
-    AOT_TEST_CHECK(stored.verdict == VerdictOnStoredStrings::CannotBeRead && stored.strings.isEmpty());
-    AOT_TEST_CHECK(reportOf(stored) == makeString("image 0 | this Bun reads format "_s, imageFormatVersion, "; the image says "_s, other, '\n'));
+    static constexpr uint32_t lastFormatWithCompressedSources = 4;
+    for (uint32_t other : { lastFormatWithCompressedSources, imageFormatVersion + 1 }) {
+        Vector<uint8_t> file = fileThatHoldsTextImage(1);
+        memcpy(file.mutableSpan().data() + sizeOfOtherBytesInFile + offsetof(ImageHeader, formatVersion), &other, sizeof(other));
+        StoredStrings stored = readStoredStrings(file.span());
+        AOT_TEST_CHECK(stored.verdict == VerdictOnStoredStrings::CannotBeRead && stored.strings.isEmpty());
+        AOT_TEST_CHECK(reportOf(stored) == makeString("image 0 | this Bun reads format "_s, imageFormatVersion, "; the image says "_s, other, '\n'));
+    }
 
     StoredStrings ofNoImage = readStoredStrings(otherBytes(4 * sizeOfOtherBytesInFile).span());
     AOT_TEST_CHECK(ofNoImage.verdict == VerdictOnStoredStrings::CannotBeRead && reportOf(ofNoImage) == "the file holds no image\n"_s);
+}
+
+static void testStoredStringsAsJSONLines()
+{
+    Vector<uint8_t> file = fileThatHoldsTextImage(1);
+    StoredStrings stored = readStoredStrings(file.span(), StoredStringsForm::JSONLines);
+    AOT_TEST_CHECK(stored.verdict == VerdictOnStoredStrings::NothingLiesBesideStrings);
+
+    enum class Coverage : uint8_t { None, Strings, UncoveredRun };
+    Vector<Coverage> coverage(FillWith { }, file.size(), Coverage::None);
+    Vector<uint8_t> strings;
+    size_t sizeOfSections = 0;
+    for (String line : String::fromUTF8(byteCast<char8_t>(stored.strings.span())).split('\n')) {
+        RefPtr object = JSON::Value::parseJSON(line)->asObject();
+        size_t offset = *object->getInteger("offset"_s);
+        size_t length = *object->getInteger("length"_s);
+        String type = object->getString("type"_s);
+        if (type == "section"_s)
+            sizeOfSections += length;
+        std::span bytes = file.span().subspan(offset, length);
+        if (type == "string"_s) {
+            String text = object->getString("text"_s);
+            String encoding = object->getString("encoding"_s);
+            strings.append(byteCast<uint8_t>(text.utf8().span()));
+            strings.append(0);
+            if (encoding == "latin1"_s)
+                AOT_TEST_CHECK(text == StringView(byteCast<Latin1Character>(bytes)));
+            else if (encoding == "utf16le"_s) {
+                Vector<char16_t> units(length / sizeof(char16_t));
+                memcpySpan(asMutableByteSpan(units.mutableSpan()), bytes);
+                AOT_TEST_CHECK(text == StringView(units.span()));
+            } else
+                AOT_TEST_CHECK(encoding == "coded"_s && object->getString("section"_s) == "coded text"_s);
+        }
+        if (type != "string"_s && type != "uncovered"_s)
+            continue;
+        Coverage wanted = type == "string"_s ? Coverage::Strings : Coverage::UncoveredRun;
+        for (Coverage& covered : coverage.mutableSpan().subspan(offset, length)) {
+            AOT_TEST_CHECK(covered == Coverage::None || (covered == Coverage::Strings && wanted == Coverage::Strings));
+            covered = wanted;
+        }
+    }
+    AOT_TEST_CHECK(equalSpans(strings.span(), stringsByReaderOfRuntime().span()));
+    AOT_TEST_CHECK(sizeOfSections == static_cast<size_t>(std::ranges::count_if(coverage, [](Coverage covered) { return covered != Coverage::None; })));
+}
+
+static void checkCodedTexts(Vector<String>&& texts)
+{
+    std::ranges::sort(texts, [](const String& a, const String& b) {
+        return std::ranges::lexicographical_compare(a.span8(), b.span8());
+    });
+    Vector<std::span<const uint8_t>> bytes = texts.map([](const String& text) {
+        return byteCast<uint8_t>(text.span8());
+    });
+    Vector<uint8_t> encoded = CodedTexts::encode(bytes.span(), textImage().build.context().parallelLoops());
+    AOT_TEST_CHECK(!(encoded.size() % sizeof(uint32_t)));
+    CodedTexts coded(encoded.span(), static_cast<uint32_t>(texts.size()));
+    AOT_TEST_CHECK(coded.count() == texts.size());
+    for (uint32_t number = texts.size(); number--;)
+        AOT_TEST_CHECK(equalSpans(std::span<const uint8_t>(coded.at(number).span()), bytes[number]));
+    for (unsigned step : { 1u, 2u, 3u, 7u, 9u }) {
+        CodedTexts::Cursor cursor(coded);
+        for (uint32_t number = 0; number < texts.size(); number += step) {
+            AOT_TEST_CHECK(equalSpans(cursor.at(number), bytes[number]));
+            AOT_TEST_CHECK(equalSpans(cursor.at(number), bytes[number]));
+            AOT_TEST_CHECK(equalSpans(cursor.at(number / 2), bytes[number / 2]));
+        }
+    }
+}
+
+static void testCodedTexts()
+{
+    checkCodedTexts({ });
+    checkCodedTexts({ "a"_s });
+    checkCodedTexts({ "options.first"_s, "options.second"_s, "options"_s, "options.first.name"_s });
+    for (unsigned count : { 15u, 16u, 17u, 100u }) {
+        checkCodedTexts(Vector<String>(count, [](size_t index) { return makeString("this.member"_s, index, "(value)"_s); }));
+        checkCodedTexts(Vector<String>(count, [](size_t index) { return repeatedText('x', index + 250); }));
+        checkCodedTexts(Vector<String>(count, [](size_t index) { return String(std::span<const Latin1Character>(std::array<Latin1Character, 2> { static_cast<Latin1Character>(1 + index), '~' })); }));
+    }
 }
 
 static void testTextsThatAddToOneAnotherLieAtFrontOfLongest()
@@ -450,7 +563,7 @@ static void testTextsThatAddToOneAnotherLieAtFrontOfLongest()
     TextImage& image = textImage();
     for (const String& text : { first, second, third }) {
         AOT_TEST_CHECK(image.numbers().stringConstants().numberOf(image.idOf(text)));
-        AOT_TEST_CHECK(image.text().hash(image.idOf(text)) == freshCopyOf(text).impl()->hash());
+        AOT_TEST_CHECK(image.text().hash(image.wordOf(image.idOf(text))) == freshCopyOf(text).impl()->hash());
     }
 }
 
@@ -565,9 +678,9 @@ static void testImageHoldsNoAddress()
     AOT_TEST_CHECK(bytesOfCopy.data() != bytes.data());
     std::unique_ptr<Image> imageOfCopy = Image::create(bytesOfCopy, bytesOfCopy.data() + image.image.image->header().codeOffset);
     for (const ExpectedText& expected : expectedTexts()) {
-        StringID id = image.idOf(expected.text);
-        String created = imageOfCopy->text().createString(id);
-        AOT_TEST_CHECK(created == expected.text && imageOfCopy->text().view(id) == expected.text && imageOfCopy->text().hash(id) == image.text().hash(id));
+        ImageStringWord word = image.wordOf(image.idOf(expected.text));
+        String created = imageOfCopy->text().createString(word);
+        AOT_TEST_CHECK(created == expected.text && imageOfCopy->text().view(word) == expected.text && imageOfCopy->text().hash(word) == image.text().hash(word));
         if (!expected.text.isEmpty())
             AOT_TEST_CHECK(imageOfCopy->containsCharactersOf(*created.impl()) && !image.image.image->containsCharactersOf(*created.impl()));
     }
@@ -579,6 +692,7 @@ std::span<const NativeTest> imageTextTests()
 {
     static constexpr NativeTest tests[] = {
         { "image/text/identifiers"_s, testIdentifiers },
+        { "image/text/coded-texts"_s, testCodedTexts },
 #if ENABLE(AOT_POSITION_INDEPENDENT_IMAGE)
         { "image/text/headers-are-created-at-first-use"_s, testHeadersAreCreatedAtFirstUse },
         { "image/text/image-holds-no-address"_s, testImageHoldsNoAddress },
@@ -587,6 +701,7 @@ std::span<const NativeTest> imageTextTests()
         { "image/text/stored-strings-are-read-out-of-a-file"_s, testStoredStringsAreReadOutOfFile },
         { "image/text/stored-strings-of-another-format-are-refused-by-name"_s, testStoredStringsOfAnotherFormatAreRefusedByName },
         { "image/text/stored-strings-of-each-image-in-a-file"_s, testStoredStringsOfEachImageInFile },
+        { "image/text/stored-strings-as-json-lines"_s, testStoredStringsAsJSONLines },
         { "image/text/string-only-shown-has-no-header"_s, testStringOnlyShownHasNoHeader },
         { "image/text/texts-that-add-to-one-another-lie-at-the-front-of-the-longest"_s, testTextsThatAddToOneAnotherLieAtFrontOfLongest },
     };

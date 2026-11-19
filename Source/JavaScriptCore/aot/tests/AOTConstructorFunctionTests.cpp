@@ -72,6 +72,37 @@ function f2 flags=[HasThis] thisType={type=anything} results=[{type=anything}] {
 entry module=m0
 )IR"_s;
 
+static constexpr ASCIILiteral functionExpressionWithoutMethods = R"IR(layout L0 kind=Instance constructor=f1 fields=[{key="px" declared={type=1 flags=[IsExpected]}}] flags=[IsConstructorFunction]
+module m0 path="main.js" displayPath="main.js" body=f0
+function f0 kind=Module thisType={type=anything} results=[{type=anything}] {
+    v0 = NewClosure function=f1
+    v1 = Builtin builtin=GlobalThis
+    v2 = PropGet v1 key="print" [isFreeName]
+    v3 = Construct v0
+    v4 = PropGet v3 key="px"
+    v5 = Call v2, -, v4
+    v6 = Construct v0
+    v7 = InstanceOf v6, v0
+    v8 = Call v2, -, v7
+    v9 = PropGet v1 key="Object" [isFreeName]
+    v10 = PropGet v9 key="getPrototypeOf"
+    v11 = Construct v0
+    v12 = Call v10, v9, v11
+    v13 = PropGet v0 key="prototype"
+    v14 = StrictEq v12, v13
+    v15 = Call v2, -, v14
+    v16 = Undefined
+    Return v16
+}
+function f1 name="Point" flags=[HasThis] thisType={type=L0 flags=[IsExpected]} results=[{type=anything}] {
+    v1 = Integer integer=1
+    PropSet v0, v1 key="px"
+    v3 = Undefined
+    Return v3
+}
+entry module=m0
+)IR"_s;
+
 static constexpr ASCIILiteral bodiesWithoutThis = R"IR(layout L0 kind=Instance name="Declared" constructor=f1 flags=[IsConstructorFunction]
 module m0 path="main.js" displayPath="main.js" body=f0
 function f0 kind=Module thisType={type=anything} results=[{type=anything}] {
@@ -1981,7 +2012,7 @@ static void testCommonJSModule()
 static Vector<uint32_t> allocationsOfInstances(LoadedProgram& program, EvaluationState evaluation)
 {
     const ProgramTables& tables = program.state().tables;
-    std::span<const AllocationData> allocations = tables.allocations();
+    const AllocationTable allocations = tables.allocations();
     Vector<uint32_t> numbers;
     for (uint32_t number = 0; number < allocations.size(); ++number) {
         if (allocations[number].isConstructed && tables.layoutForShape(allocations[number].shape).evaluation() == evaluation)
@@ -2528,7 +2559,7 @@ static void checkOneWordCountsGuardsOfSeveralClasses(LoadedProgram& program)
     counted.checkEveryCountIsExact();
     AOT_TEST_CHECK(counted.valueOf(*count) == guardsOfAbove + guardsOfBelow);
 
-    didEvaluateClassAgain(state, *old);
+    state.objects->classes.disarmMemberGuards(*old);
     counted.checkEveryCountIsExact();
     AOT_TEST_CHECK(counted.valueOf(*count) == guardsOfAbove + guardsOfBelow + guardsOfOld);
 }
@@ -2553,6 +2584,134 @@ static void checkGuardThatEndsAheadOfFirstObjectIsCountedFromThere(LoadedProgram
         counted.beginGuardsOf(vm, *old);
         AOT_TEST_CHECK(counted.valueOf(*count) == guardsOfOld);
     }
+}
+
+static constexpr ASCIILiteral classBelowConstructorFunctionAskedInOneTest = R"IR(layout L0 kind=Instance name="Old" module=m0 constructor=f1 fields=[{key="note" declared={type=undefined|null|L0}}] flags=[IsConstructorFunction] ownFieldCount=1
+layout L1 kind=Instance name="Below" module=m0 base=L0 constructor=f2 supertypes=[L0] flags=[HasHeritage]
+module m0 path="main.ts" displayPath="main.ts" body=f0 namespaceLayout=L(m0)
+entry module=m0
+typesite w0 module=m0 position=80 kind=Parameter
+typesite w1 module=m0 position=160 kind=Parameter
+function f0 module=m0 kind=Module thisType={type=anything} results=[{type=anything}] {
+  b0():
+    v0 = NewClosure function=f1
+    v1 = ResolveHeritage v0
+    v2 = NewClosure function=f2
+    v3 = NewClass v2, v0, v1 layout=L1
+    v4 = FinishClass v3 layout=L1
+    v5 = Construct v0
+    v6 = Construct v4
+    v7 = NewClosure function=f3
+    v8 = NewClosure function=f4
+    v9 = Builtin builtin=Function
+    v10 = String string="return globalThis.register"
+    v11 = Construct v9, -, v10
+    v12 = Call v11
+    v13 = Call v12, -, v7, v8, v5, v6
+    v14 = Undefined
+    Return v14
+}
+function f1 name="Old" module=m0 flags=[HasThis, HasExplicitName] thisType={type=L0 flags=[IsExpected]} results=[{type=anything}] constructedClass=L0 {
+  b0(v0: L0):
+    v1 = Undefined
+    Return v1
+}
+function f2 name="Below" module=m0 kind=DerivedConstructor flags=[HasNewTarget, TakesCallee, HasExplicitName] thisType={type=anything} results=[{type=object flags=[IsFromCompiler]}] constructedClass=L1 {
+  b0(v0: function, v1: anything):
+    v2 = GetSuperBase v0
+    v3 = SuperConstruct v2, v1 layout=L1
+    Return v3
+}
+function f3 name="noteOf" module=m0 flags=[HasExplicitName] length=1 thisType={type=anything} parameters=[{type=L0 site=w0}] results=[{type=anything}] {
+  b0(v0: L0):
+    v1 = PropGet v0 key="note"
+    Return v1
+}
+function f4 name="forget" module=m0 flags=[HasExplicitName] length=1 thisType={type=anything} parameters=[{type=L0 site=w1}] results=[{type=anything}] {
+  b0(v0: L0):
+    v1 = Undefined
+    PropSet v0, v1 key="note"
+    Return v1
+}
+)IR"_s;
+
+static void checkGuardsOfClassAboveBeginWithThoseOfClassBelow(LoadedProgram& program, const LayoutData& above, const LayoutData& below)
+{
+    VM& vm = program.vm();
+    State& state = program.state();
+    ClassTable& classes = state.objects->classes;
+    AOT_TEST_CHECK(classes.assumedBaseOf(below) == &above);
+    AOT_TEST_CHECK(!classes.guardsHaveBegun(above) && !classes.guardsHaveBegun(below));
+
+    CountedClassGuards counted(state);
+    AOT_TEST_CHECK(counted.findCountWithGuardOfEach({ &above, &below }));
+    counted.checkEveryCountIsExact();
+
+    {
+        DeferGCForAWhile deferGC(vm);
+        classes.armMemberGuards(vm, below, ClassSide::Prototype, constructEmptyObject(program.realm()));
+    }
+    AOT_TEST_CHECK(classes.guardsHaveBegun(below));
+    AOT_TEST_CHECK(classes.guardsHaveBegun(above));
+    counted.classesWhoseGuardsHaveBegun.append(&above);
+    counted.classesWhoseGuardsHaveBegun.append(&below);
+    counted.checkEveryCountIsExact();
+}
+
+static void checkGuardsOfClassWrittenAboveBeginWithThoseOfClassBelow(LoadedProgram& program)
+{
+    ThreeClassesAskedInOneTest asked(program);
+    checkGuardsOfClassAboveBeginWithThoseOfClassBelow(program, *asked.above, *asked.below);
+}
+
+static void checkEveryReportDropsCheckedHolder(LoadedProgram& program)
+{
+    VM& vm = program.vm();
+    State& state = program.state();
+    ClassTable& classes = state.objects->classes;
+    const LayoutData* above = nullptr;
+    for (uint32_t index = 0; index < state.tables.numberOfLayoutIndices; ++index) {
+        if (const LayoutData* candidate = classes.classWithIndex(index); candidate && !classes.isDefinedByClass(*candidate))
+            above = candidate;
+    }
+    AOT_TEST_CHECK(above);
+    DeferGCForAWhile deferGC(vm);
+    Identifier note = Identifier::fromString(vm, "note"_s);
+    for (ClassSide side : { ClassSide::Prototype, ClassSide::Static }) {
+        JSObject* holder = constructEmptyObject(program.realm());
+        auto isDroppedBy = [&](const Invocable<void()> auto& report) {
+            classes.addCheckedHolder(*above, side, { holder, holder->structureID(), { }, { }, false, false });
+            bool wasKept = classes.findCheckedHolder(*above, side, holder);
+            report();
+            return wasKept && !classes.findCheckedHolder(*above, side, holder);
+        };
+        AOT_TEST_CHECK(!isDroppedBy([] { }));
+        AOT_TEST_CHECK(isDroppedBy([&] { holder->putDirect(vm, Identifier::fromString(vm, side == ClassSide::Static ? "first"_s : "second"_s), jsNumber(1)); }));
+        AOT_TEST_CHECK(isDroppedBy([&] { classes.didChangeMember(*above, side, note.impl()); }));
+        AOT_TEST_CHECK(isDroppedBy([&] { classes.didFreezeHolder(vm, *above, side, holder); }));
+        AOT_TEST_CHECK(isDroppedBy([&] { classes.didChangeEveryMember(*above, side); }));
+        AOT_TEST_CHECK(isDroppedBy([&] { classes.didDefineMember(vm, *above, side, 0, holder, note.impl(), holder); }));
+        AOT_TEST_CHECK(isDroppedBy([&] { classes.armMemberGuards(vm, *above, side, holder); }));
+    }
+}
+
+static void checkNamesOfConstructorFunctionAboveAreCountedFromFirstObjectOfClassBelow(LoadedProgram& program)
+{
+    State& state = program.state();
+    ClassTable& classes = state.objects->classes;
+    const LayoutData* above = nullptr;
+    const LayoutData* below = nullptr;
+    for (uint32_t index = 0; index < state.tables.numberOfLayoutIndices; ++index) {
+        if (const LayoutData* candidate = classes.classWithIndex(index))
+            (classes.isDefinedByClass(*candidate) ? below : above) = candidate;
+    }
+    AOT_TEST_CHECK(above && below && above->classData().guardsOfNamesAwaitBeginning);
+    std::optional<uint32_t> note = identifiersOf(state.instance).numberOf(Identifier::fromString(program.vm(), "note"_s).impl());
+    AOT_TEST_CHECK(note);
+
+    endClassGuardsOfName(state, *above, ClassSide::Prototype, *note);
+    checkGuardsOfClassAboveBeginWithThoseOfClassBelow(program, *above, *below);
+    AOT_TEST_CHECK(classes.classPrototypeIfExists(*above));
 }
 
 static constexpr ASCIILiteral birthBehindLookAtTwoNames = R"IR(layout L0 kind=Instance name="Point" module=m0 constructor=f1 fields=[{key="x" declared={type=anything} flags=[IsRequired]}, {key="y" declared={type=anything} flags=[IsRequired]}] flags=[IsConstructorFunction] ownFieldCount=2
@@ -2590,7 +2749,7 @@ function f2 name="one" module=m0 flags=[HasExplicitName] length=1 thisType={type
 }
 )IR"_s;
 
-static void checkWordOfWholeSideAndTwoNamesFailsUntilGuardsBegin(LoadedProgram& program)
+static void checkGuardsOfTwoNamesAreCounted(LoadedProgram& program)
 {
     VM& vm = program.vm();
     State& state = program.state();
@@ -2609,14 +2768,14 @@ static void checkWordOfWholeSideAndTwoNamesFailsUntilGuardsBegin(LoadedProgram& 
     };
     std::optional<uint32_t> count;
     for (const ClassGuardCountData& row : state.tables.classGuardCounts()) {
-        if (numberOfGuardsOfPointIn(row.offsetOfCount, true) == 2 && numberOfGuardsOfPointIn(row.offsetOfCount, false) == 1)
+        if (numberOfGuardsOfPointIn(row.offsetOfCount, true) == 2 && !numberOfGuardsOfPointIn(row.offsetOfCount, false))
             count = row.offsetOfCount;
     }
     AOT_TEST_CHECK(count);
 
     counted.checkEveryCountIsExact();
-    AOT_TEST_CHECK(counted.valueOf(*count) == 1);
     counted.beginGuardsOf(vm, *point);
+    counted.checkEveryCountIsExact();
     AOT_TEST_CHECK(!counted.valueOf(*count));
 }
 
@@ -2647,12 +2806,15 @@ std::span<const NativeTest> constructorFunctionTests()
         { "constructor-functions/name-set-at-run-time"_s, testNameSetAtRunTime },
         { "constructor-functions/commonjs-module"_s, testCommonJSModule },
         { "constructor-functions/site-predicts-the-first-prototype"_s, runNativeTestWithLoadedProgram<constructorFunctionTests, factoryWithoutCaptures, checkSitePredictsTheFirstPrototype> },
-        { "constructor-functions/site-of-a-function-evaluated-once-keeps-its-prototype"_s, runNativeTestWithLoadedProgram<constructorFunctionTests, functionExpression, checkSiteOfFunctionEvaluatedOnceKeepsItsPrototype> },
+        { "constructor-functions/site-of-a-function-evaluated-once-keeps-its-prototype"_s, runNativeTestWithLoadedProgram<constructorFunctionTests, functionExpressionWithoutMethods, checkSiteOfFunctionEvaluatedOnceKeepsItsPrototype> },
         { "constructor-functions/holder-of-a-class-that-no-code-asks-about-is-not-looked-at"_s, runNativeTestWithLoadedProgram<constructorFunctionTests, functionExpression, checkHolderOfClassThatNoCodeAsksAboutIsNotLookedAt> },
         { "constructor-functions/compiled-prototype-object-is-assigned-a-name-found-above-it"_s, runNativeTestWithLoadedProgram<constructorFunctionTests, methodAbovePrototypeObjectThatIsAnInstance, checkCompiledPrototypeObjectGetsNameFoundAboveIt<WayToGetName::Assign>> },
         { "constructor-functions/one-word-counts-guards-of-several-classes"_s, runNativeTestWithLoadedProgram<constructorFunctionTests, threeClassesAskedInOneTest, checkOneWordCountsGuardsOfSeveralClasses> },
         { "constructor-functions/guard-that-ends-ahead-of-the-first-object-is-counted-from-there"_s, runNativeTestWithLoadedProgram<constructorFunctionTests, threeClassesAskedInOneTest, checkGuardThatEndsAheadOfFirstObjectIsCountedFromThere> },
-        { "constructor-functions/word-of-the-whole-side-and-two-names-fails-until-the-guards-begin"_s, runNativeTestWithLoadedProgram<constructorFunctionTests, birthBehindLookAtTwoNames, checkWordOfWholeSideAndTwoNamesFailsUntilGuardsBegin> },
+        { "constructor-functions/guards-of-a-class-above-begin-with-those-of-the-class-below"_s, runNativeTestWithLoadedProgram<constructorFunctionTests, threeClassesAskedInOneTest, checkGuardsOfClassWrittenAboveBeginWithThoseOfClassBelow> },
+        { "constructor-functions/every-report-drops-a-checked-holder"_s, runNativeTestWithLoadedProgram<constructorFunctionTests, classBelowConstructorFunctionAskedInOneTest, checkEveryReportDropsCheckedHolder> },
+        { "constructor-functions/names-of-a-constructor-function-above-are-counted-from-the-first-object-of-the-class-below"_s, runNativeTestWithLoadedProgram<constructorFunctionTests, classBelowConstructorFunctionAskedInOneTest, checkNamesOfConstructorFunctionAboveAreCountedFromFirstObjectOfClassBelow> },
+        { "constructor-functions/guards-of-two-names-are-counted-in-one-row"_s, runNativeTestWithLoadedProgram<constructorFunctionTests, birthBehindLookAtTwoNames, checkGuardsOfTwoNamesAreCounted> },
         { "constructor-functions/compiled-prototype-object-gets-the-name-of-a-field-below"_s, runNativeTestWithLoadedProgram<constructorFunctionTests, methodAbovePrototypeObjectThatIsAnInstance, checkCompiledPrototypeObjectGetsTheNameOfAFieldBelow> },
     };
     return tests;

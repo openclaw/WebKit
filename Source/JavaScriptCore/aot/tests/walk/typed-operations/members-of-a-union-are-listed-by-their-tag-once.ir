@@ -31,6 +31,29 @@
 # RUN(SHELL): run-in-shell globalThis.sink = (...told) => { if (told.length) print(told.join()); };
 # SHELL: 2,3,4,5,2,3,4,5,2,3,4,5
 # SHELL-NEXT: exited with 0
+# testing=CheckProofsAtRunTime builds the same forms and holds what the shape answers against what the tag answers: behind a test the comparison as written,
+# on the edge of each case that case, on the last edge every case. A list of members that is wrong stops the run by name; it used to be silent as built and never built under the word.
+# RUN(SWITCHCHECKED): walk f1 mechanisms=none+TypedOperations+DirectCalls+Arrivals+Folding testing=CheckProofsAtRunTime
+# SWITCHCHECKED-LABEL: code f1:Body
+# SWITCHCHECKED: [[tag]]: {{*}} = GetSlot {{*}}key="kind"
+# SWITCHCHECKED: SwitchOnShape
+# SWITCHCHECKED: = StrictEq [[tag]], {{*}}form=Generic
+# SWITCHCHECKED: [[led]]: boolean @Boolean = StrictEq {{*}}form=Generic
+# SWITCHCHECKED: CheckProof [[led]] checkedType=true {{*}}source=Field
+# RUN(ROWCHECKED): walk f2 mechanisms=none+TypedOperations+DirectCalls+Arrivals+Folding testing=CheckProofsAtRunTime
+# ROWCHECKED-LABEL: code f2:Body
+# ROWCHECKED: [[tag]]: {{*}} = GetSlot {{*}}key="kind"
+# ROWCHECKED: [[byShape]]: boolean @Boolean = ShapeTest {{*}}layouts=[L0]
+# ROWCHECKED: = StrictEq [[tag]], {{*}}form=Generic
+# ROWCHECKED: [[agree]]: boolean @Boolean = StrictEq {{*}}form=Generic
+# ROWCHECKED: CheckProof [[agree]] checkedType=true {{*}}source=Field
+# ROWCHECKED: Branch [[byShape]]
+# RUN(NEVERASWRITTEN): walk f1 f2 f3 mechanisms=none+TypedOperations+DirectCalls+Arrivals+Folding testing=CheckProofsAtRunTime
+# NEVERASWRITTEN-NOT: SwitchString
+# NEVERASWRITTEN-NOT: narrowsHolderOfOperand
+# RUN(SHELLCHECKED): run-in-shell testing=CheckProofsAtRunTime globalThis.sink = (...told) => { if (told.length) print(told.join()); };
+# SHELLCHECKED: 2,3,4,5,2,3,4,5,2,3,4,5
+# SHELLCHECKED-NEXT: exited with 0
 
 layout L0 name="Circle" module=m0 fields=[{key="kind" declared={type=undefined|null|"circle" flags=[IsExpected, OmitsNull, OmitsUndefined]} flags=[IsRequired]}, {key="r" declared={type=number} flags=[IsRequired]}]
 layout L1 name="Square" module=m0 fields=[{key="kind" declared={type=undefined|null|"square" flags=[IsExpected, OmitsNull, OmitsUndefined]} flags=[IsRequired]}, {key="s" declared={type=number} flags=[IsRequired]}]
@@ -74,6 +97,14 @@ function f0 module=m0 kind=Module thisType={type=anything} results=[{type=anythi
     v31 = Builtin builtin=GlobalThis
     v32 = PropGet v31 key="sink" [isFreeName]
     v33 = Call v32, -, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30
+    v34 = NewObject -, v3, v8 layout=L0 fields=[0, 1]
+    v35 = FinishObject v34
+    v36 = NewObject -, v7, v4 layout=L1 fields=[0, 1]
+    v37 = FinishObject v36
+    v38 = NewObject -, v11, v4 layout=L2 fields=[0, 1]
+    v39 = FinishObject v38
+    v40 = NewObject -, v15, v4 layout=L3 fields=[0, 1]
+    v41 = FinishObject v40
     Return v33
 }
 function f1 name="cases" module=m0 flags=[IsChecked] length=1 thisType={type=anything} parameters=[{type=undefined|null|L0|L1|L2|L3 flags=[OmitsNull, OmitsUndefined]}] results=[{type=anything}] {

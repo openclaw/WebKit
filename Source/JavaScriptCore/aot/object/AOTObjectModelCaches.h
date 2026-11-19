@@ -52,6 +52,11 @@ struct AccessorDefinitionPlan {
     Vector<FilledSlot> slots;
 };
 
+struct UnfinishedBirth {
+    uint32_t structureID { 0 };
+    uint32_t orderWord { 0 };
+};
+
 struct DescriptorFields {
     const LayoutData* layout { nullptr };
     std::array<const FieldData*, 6> fields { };
@@ -72,7 +77,11 @@ struct GetterSourceList {
     uint32_t orderWord { 0 };
     StructureID extraPropertiesStructure;
     Structure* structureOfCopy { nullptr };
+    bool hasGetter { false };
     Vector<Property, 8> properties;
+    uint32_t excludedRunNumberPlusOne { 0 };
+    Structure* structureOfRest { nullptr };
+    Vector<PropertyOffset, 8> offsetsInRest;
 };
 
 class GetterSourceLists {
@@ -88,6 +97,8 @@ public:
         for (GetterSourceList& list : m_lists) {
             list.structure = StructureID();
             list.structureOfCopy = nullptr;
+            list.structureOfRest = nullptr;
+            list.excludedRunNumberPlusOne = 0;
         }
     }
 
@@ -103,7 +114,11 @@ struct ObjectModelCaches {
     ~ObjectModelCaches();
 
     static constexpr unsigned numberOfDescriptorFields = 16;
+    static constexpr unsigned numberOfUnfinishedBirths = 64;
 
+    UnfinishedBirth& unfinishedBirthAt(StructureID structure, uint32_t orderWord) { return unfinishedBirths[(structure.bits() >> 4 ^ orderWord >> 15 ^ orderWord) % numberOfUnfinishedBirths]; }
+
+    std::array<UnfinishedBirth, numberOfUnfinishedBirths> unfinishedBirths;
     FieldMovePlanCache movePlans;
     std::array<DescriptorFields, numberOfDescriptorFields> descriptorFields;
     AssignmentPlanCache assignmentPlans;

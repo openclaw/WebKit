@@ -177,7 +177,7 @@ bool JSCell::isObjectSlow() const
 bool JSCell::validateIsNotSweeping() const
 {
 #if ENABLE(AOT) && ASSERT_ENABLED
-    // A cell that compiled code keeps in a frame lies in no block.
+    // A cell that compiled code keeps in a stack frame is not in any MarkedBlock.
     if (Thread::currentSingleton().stack().contains(const_cast<JSCell*>(this)))
         return true;
 #endif
@@ -201,7 +201,7 @@ JSObject* JSCell::toObjectSlow(JSGlobalObject* globalObject) const
     return downcast<Symbol>(this)->toObject(globalObject);
 }
 
-void LEGACY_NODELETE slowValidateCell(JSCell* cell)
+NODELETE void slowValidateCell(JSCell* cell)
 {
     ASSERT_GC_OBJECT_LOOKS_VALID(cell);
 }

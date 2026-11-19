@@ -88,7 +88,7 @@ export default b.declarations(
         answersWhetherInstance: { value: b.instance("Error") },
         capability: "heap",
         uses: { value: b.inspected },
-        implementation: b.hostCall,
+        implementation: b.inline("ErrorIsError", { otherwise: b.hostCall }),
       },
       stackTraceLimit: b.property(b.f64),
     },
@@ -134,4 +134,5 @@ export default b.declarations(
   ),
 
   b.name("error", "suppressed"),
+  b.extend("Error.stackTraceLimit", { canBeListed: true }),
 );

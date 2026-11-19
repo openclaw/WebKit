@@ -301,10 +301,11 @@ private:
         static constexpr bool safeToCompareToEmptyOrDeleted = true;
     };
 
-    void finalize(Handle<Unknown> handle, void* context) final
+    FinalizeResult finalize(Handle<Unknown> handle, void* context) final
     {
         auto& executable = *static_cast<NativeExecutable*>(handle.get().asCell());
         m_executables.remove(keyFor(executable.function(), executable.constructor(), executable.implementationVisibility(), static_cast<Intrinsic>(reinterpret_cast<uintptr_t>(context)), executable.length(), executable.name()));
+        return FinalizeResult::KeepImpl;
     }
 
     UncheckedKeyHashMap<Key, Weak<NativeExecutable>, KeyHash> m_executables;
@@ -417,8 +418,10 @@ VM::VM(VMType vmType, HeapType heapType, WTF::RunLoop* runLoop, bool* success)
 #if ENABLE(AOT)
     if (AOT::Image::current())
         m_aotState.attachImage(*this);
-    else if (AOT::Image::usesNoneOnThisThread() && Options::aotCountsPath()) [[unlikely]]
+    else if (AOT::Image::isDisabledOnThisThread() && Options::aotCountsPath()) [[unlikely]]
         m_aotState.countWithoutImage(*this);
+    if (AOT::areBuiltinsLockedWithoutImage()) [[unlikely]]
+        m_aotState.mayLockBuiltins = true;
 #endif
     structureRareDataStructure.setWithoutWriteBarrier(StructureRareData::createStructure(*this, nullptr, jsNull()));
     stringStructure.setWithoutWriteBarrier(JSString::createStructure(*this, nullptr, jsNull()));
@@ -960,7 +963,7 @@ Exception* VM::ensureTerminationException()
 }
 
 #if ENABLE(JIT)
-static ThunkGenerator LEGACY_NODELETE thunkGeneratorForIntrinsic(Intrinsic intrinsic)
+NODELETE static ThunkGenerator thunkGeneratorForIntrinsic(Intrinsic intrinsic)
 {
     switch (intrinsic) {
     case CharCodeAtIntrinsic:
@@ -1065,7 +1068,7 @@ NativeExecutable* VM::getHostFunction(NativeFunction function, ImplementationVis
 }
 
 #if ENABLE(AOT) && !ENABLE(C_LOOP)
-// What a call from bytecode enters in place of llint_native_call_trampoline in a process without a JIT: llint/LowLevelInterpreterAOT.asm.
+// The entry point that a call from bytecode uses instead of llint_native_call_trampoline in a process without a JIT. See llint/LowLevelInterpreterAOT.asm.
 static void (*thunkBesideCompiledCode(Intrinsic intrinsic))()
 {
     switch (intrinsic) {
@@ -1086,6 +1089,48 @@ static void (*thunkBesideCompiledCode(Intrinsic intrinsic))()
         return llint_aot_is_integer_thunk;
     case ArrayIsArrayIntrinsic:
         return llint_aot_is_array_thunk;
+    case ArrayPushIntrinsic:
+        return llint_aot_array_push_thunk;
+    case JSMapGetIntrinsic:
+        return llint_aot_map_get_thunk;
+    case JSMapHasIntrinsic:
+        return llint_aot_map_has_thunk;
+    case JSSetHasIntrinsic:
+        return llint_aot_set_has_thunk;
+    case JSMapDeleteIntrinsic:
+        return llint_aot_map_delete_thunk;
+    case JSSetDeleteIntrinsic:
+        return llint_aot_set_delete_thunk;
+    case CharAtIntrinsic:
+        return llint_aot_char_at_thunk;
+    case JSMapSetIntrinsic:
+        return llint_aot_map_set_thunk;
+    case JSSetAddIntrinsic:
+        return llint_aot_set_add_thunk;
+    case FromCharCodeIntrinsic:
+        return llint_aot_from_char_code_thunk;
+    case HasOwnPropertyIntrinsic:
+        return llint_aot_has_own_property_thunk;
+    case FloorIntrinsic:
+        return llint_aot_math_floor_thunk;
+    case IMulIntrinsic:
+        return llint_aot_math_imul_thunk;
+    case MaxIntrinsic:
+        return llint_aot_math_max_thunk;
+    case MinIntrinsic:
+        return llint_aot_math_min_thunk;
+    case Clz32Intrinsic:
+        return llint_aot_math_clz32_thunk;
+    case AbsIntrinsic:
+        return llint_aot_math_abs_thunk;
+    case SqrtIntrinsic:
+        return llint_aot_math_sqrt_thunk;
+    case CeilIntrinsic:
+        return llint_aot_math_ceil_thunk;
+    case TruncIntrinsic:
+        return llint_aot_math_trunc_thunk;
+    case RoundIntrinsic:
+        return llint_aot_math_round_thunk;
     default:
         return nullptr;
     }
@@ -1389,6 +1434,9 @@ SourceProviderCache* VM::addSourceProviderCache(SourceProvider* sourceProvider)
 
 void VM::pruneUnusedSourceProviderCaches()
 {
+#if ENABLE(AOT)
+    aotState().identifiersOfLastSource = nullptr;
+#endif
     sourceProviderCacheMap.removeIf([](auto& entry) {
         return !entry.value->takeUsedSinceLastPrune();
     });
@@ -1523,10 +1571,12 @@ NEVER_INLINE static Exception* createExceptionWithCompiledCode(VM& vm, JSGlobalO
     using Action = Exception::StackCaptureAction;
     if (globalObject->debugger())
         return Exception::create(vm, thrownValue, Action::CaptureStack);
+    if (vm.topCallFrame && vm.interpreter.isCaughtByInterpretedTopFrame())
+        return Exception::create(vm, thrownValue, Action::DoNotCaptureStack);
     std::optional<HandlerType> nearest;
     if (globalObject->aotInstance() && vm.topCallFrame)
         nearest = AOT::findNearestHandler(vm, vm.topCallFrame);
-    // Nobody lists the frames of what a `catch` takes.
+    // Nothing lists the frames of an exception that a `catch` handles.
     if (nearest == HandlerType::SynthesizedCatch || nearest == HandlerType::Catch)
         return Exception::create(vm, thrownValue, Action::DoNotCaptureStack);
     if (Exception* exception = Exception::tryCreateWithStackOfErrorMadeHere(vm, thrownValue))
@@ -1927,8 +1977,8 @@ void VM::drainMicrotasks()
 #if ENABLE(AOT)
     if (m_aotState.hasObjectsBeingFilled) [[unlikely]]
         AOT::RuntimeHooks::finishFillingObjects(*this);
-    if (m_aotState.modulesWhoseFilesRunAheadOfLoader) [[unlikely]]
-        AOT::RuntimeHooks::runFilesThatWaitInLoader(*this);
+    if (m_aotState.modulesWithEagerLoads) [[unlikely]]
+        AOT::RuntimeHooks::transferEagerLoadsToLoader(*this);
 #endif
 
     if (executionForbidden()) [[unlikely]]
@@ -2596,12 +2646,17 @@ void VM::performOpportunisticallyScheduledTasks(ApproximateTime deadline, Option
     heap.sweeper().doWorkUntil(*this, deadline);
 }
 
-void VM::invalidateStructureChainIntegrity(StructureChainIntegrityEvent, JSObject* changed, UniquedStringImpl* uid)
+void VM::invalidateStructureChainIntegrity(StructureChainIntegrityEvent event, JSObject* changed, UniquedStringImpl* uid)
 {
 #if ENABLE(AOT)
-    if (hasCompiledCode())
-        AOT::RuntimeHooks::didChangePrototypeChain(*this, changed, uid);
+    if (hasCompiledCode()) {
+        if (event == StructureChainIntegrityEvent::Prototype)
+            AOT::RuntimeHooks::didSetPrototypeOfPrototype(*this, changed);
+        else
+            AOT::RuntimeHooks::didChangePrototypeChain(*this, changed, uid);
+    }
 #else
+    UNUSED_PARAM(event);
     UNUSED_PARAM(changed);
     UNUSED_PARAM(uid);
 #endif

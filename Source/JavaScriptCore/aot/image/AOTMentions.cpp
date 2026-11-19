@@ -49,7 +49,8 @@ static ALWAYS_INLINE bool mentionKeyHasNoThreadLocalIDs(NumberSpace space, std::
     case NumberSpace::StringCell:
     case NumberSpace::ShownString:
     case NumberSpace::AtomOfString:
-    case NumberSpace::AtomOfComparedText:
+    case NumberSpace::NameHeader:
+    case NumberSpace::StringCharacters:
         return key.size() == 1 && !!StringID::fromBits(key[0]);
     case NumberSpace::Name:
     case NumberSpace::NameOfText:
@@ -64,6 +65,7 @@ static ALWAYS_INLINE bool mentionKeyHasNoThreadLocalIDs(NumberSpace space, std::
     case NumberSpace::DataElements:
     case NumberSpace::EnvironmentHandedBack:
     case NumberSpace::ClassRank:
+    case NumberSpace::HeirLookedAt:
     case NumberSpace::ClosureFunction:
     case NumberSpace::ClosureCell:
     case NumberSpace::Type:
@@ -75,6 +77,8 @@ static ALWAYS_INLINE bool mentionKeyHasNoThreadLocalIDs(NumberSpace space, std::
         return key.size() >= fewestWordsOfSiteCacheKey && !(key.size() % 2) && mentionWordIsNotThreadLocalID(key[key.size() - 2]);
     case NumberSpace::PropertyRun:
         return std::ranges::all_of(key, mentionWordIsNotThreadLocalID);
+    case NumberSpace::ReadGroupCache:
+        return key.size() == 3 && mentionWordIsNotThreadLocalID(key[0]);
     case NumberSpace::CardOfWord:
         return keyOfCardOfWordHasNoThreadLocalIDs(key);
     case NumberSpace::RequireEdge:
@@ -109,6 +113,9 @@ static bool requestMentionHasExpectedWordCount(RequestKind kind, size_t numberOf
         return numberOfWords == 2;
     case RequestKind::FormatPattern:
         return !!numberOfWords;
+    case RequestKind::ImportChecks:
+    case RequestKind::Prefetch:
+        return numberOfWords && !(numberOfWords % 2);
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
@@ -158,6 +165,8 @@ ALWAYS_INLINE uint32_t MentionList::addKey(NumberSpace space, std::span<const ui
     auto hasKey = [&](const Mention& mention) ALWAYS_INLINE_LAMBDA {
         if (mention.space != space || mention.numberOfWords != numberOfWords || mention.addend != addend)
             return false;
+        if (numberOfWords == 1)
+            return mention.firstWord == key[0];
         size_t firstWord = mention.firstWord;
         if (numberOfWords == Mention::longKey && words[firstWord++] != key.size())
             return false;
@@ -178,10 +187,11 @@ ALWAYS_INLINE uint32_t MentionList::addKey(NumberSpace space, std::span<const ui
     }
 
     RELEASE_ASSERT(mentionKeyHasNoThreadLocalIDs(space, key));
-    Mention mention { .space = space, .numberOfWords = numberOfWords, .firstWord = static_cast<uint32_t>(words.size()), .addend = addend };
+    Mention mention { .space = space, .numberOfWords = numberOfWords, .firstWord = numberOfWords == 1 ? key[0] : static_cast<uint32_t>(words.size()), .addend = addend };
     if (numberOfWords == Mention::longKey)
         m_words.append(static_cast<uint32_t>(key.size()));
-    m_words.append(key);
+    if (numberOfWords != 1)
+        m_words.append(key);
     m_mentions.append(mention);
     m_table[place] = static_cast<uint32_t>(m_mentions.size());
     return static_cast<uint32_t>(m_mentions.size()) - 1;
@@ -266,6 +276,30 @@ uint32_t MentionList::classGuardCount(std::span<const ClassGuardKey> guards)
     return add(NumberSpace::ClassGuard, key.span());
 }
 
+uint32_t MentionList::rowOfClassGuardCounts(std::span<const Vector<ClassGuardKey, 4>> slots)
+{
+    RELEASE_ASSERT(!slots.empty());
+    Vector<uint32_t, 256> key { firstWordOfRowOfClassGuardCountsKey };
+    for (const Vector<ClassGuardKey, 4>& guards : slots) {
+        Vector<std::span<const uint32_t>, 16> ascending(guards.size(), [&](size_t index) {
+            return guards[index].span();
+        });
+        AOT::sort(ascending, [](std::span<const uint32_t> first, std::span<const uint32_t> second) {
+            return std::ranges::lexicographical_compare(first, second);
+        });
+        size_t placeOfSize = key.size();
+        key.append(0);
+        for (size_t index = 0; index < ascending.size(); ++index) {
+            if (index && std::ranges::equal(ascending[index - 1], ascending[index]))
+                continue;
+            key.append(static_cast<uint32_t>(ascending[index].size()));
+            key.append(ascending[index]);
+        }
+        key[placeOfSize] = static_cast<uint32_t>(key.size() - placeOfSize - 1);
+    }
+    return add(NumberSpace::ClassGuard, key.span());
+}
+
 void MentionList::moveTo(CodeBody& body)
 {
     m_table.shrink(0);
@@ -280,7 +314,8 @@ static constexpr bool mentionKeyBeginsWithText(NumberSpace space)
     case NumberSpace::StringCell:
     case NumberSpace::ShownString:
     case NumberSpace::AtomOfString:
-    case NumberSpace::AtomOfComparedText:
+    case NumberSpace::NameHeader:
+    case NumberSpace::StringCharacters:
     case NumberSpace::RegExp:
         return true;
     default:
@@ -309,7 +344,7 @@ static std::optional<size_t> placeOfTextInMentionKey(NumberSpace space, std::spa
 static void forEachMadeTextAmongMentions(CodeBody& body, NOESCAPE const Invocable<void(uint32_t&)> auto& functor)
 {
     std::span<uint32_t> words = body.mentionWords.mutableSpan();
-    for (const Mention& mention : body.mentions) {
+    for (Mention& mention : body.mentions) {
         size_t place = 0;
         if (!mentionKeyBeginsWithText(mention.space)) {
             if (mention.space != NumberSpace::RegExpLiteralCell && mention.space != NumberSpace::CardOfWord)
@@ -320,7 +355,7 @@ static void forEachMadeTextAmongMentions(CodeBody& body, NOESCAPE const Invocabl
             place = *placeInKey;
         }
         size_t firstWordOfKey = mention.numberOfWords == Mention::longKey ? mention.firstWord + 1 : mention.firstWord;
-        uint32_t& word = words[firstWordOfKey + place];
+        uint32_t& word = mention.numberOfWords == 1 ? mention.firstWord : words[firstWordOfKey + place];
         if (Typed::liesInThread(StringID::fromBits(word)))
             functor(word);
     }
@@ -390,9 +425,9 @@ void internTextsMadeByFunctions(Typed::Program& program, LinkedFunctions& functi
 
     const ParallelLoops& loops = context.parallelLoops();
     parallelSort(loops, texts.mutableSpan(), [](const MadeText& first, const MadeText& second) {
-        if (first.bytes.data() == second.bytes.data())
+        if (first.bytes.size() != second.bytes.size())
             return first.bytes.size() < second.bytes.size();
-        return std::ranges::lexicographical_compare(first.bytes, second.bytes);
+        return first.bytes.data() != second.bytes.data() && std::ranges::lexicographical_compare(first.bytes, second.bytes);
     });
     Vector<StringID> strings(texts.size());
     Typed::StringTable::FrontsOfKeptTexts fronts;
@@ -612,6 +647,8 @@ static LayoutID classOfRequestMention(std::span<const uint32_t> key)
     case RequestKind::Data:
     case RequestKind::CollectionData:
     case RequestKind::FormatPattern:
+    case RequestKind::ImportChecks:
+    case RequestKind::Prefetch:
         return { };
     }
     RELEASE_ASSERT_NOT_REACHED();
@@ -638,6 +675,10 @@ void forEachUnitBehindSlowCase(const Mention& mention, std::span<const uint32_t>
         return;
     case NumberSpace::Request:
         units.addClass(classOfRequestMention(key));
+        if (static_cast<RequestKind>(key[0]) == RequestKind::ImportChecks) {
+            for (size_t index = 1; index < key.size(); index += 2)
+                units.addClosureIfPlanned(plan.variable(VariableID(key[index])).function);
+        }
         return;
     case NumberSpace::ModuleValue:
         units.addModule(ModuleID(key[0]));
@@ -682,12 +723,15 @@ void forEachUnitBehindSlowCase(const Mention& mention, std::span<const uint32_t>
     case NumberSpace::RegExpLiteralCell:
     case NumberSpace::TemplateObjectCell:
     case NumberSpace::ArrayProfile:
+    case NumberSpace::ReadGroupCache:
     case NumberSpace::EnvironmentHandedBack:
     case NumberSpace::ClassGuard:
+    case NumberSpace::HeirLookedAt:
     case NumberSpace::PropertyRun:
-    case NumberSpace::AtomOfComparedText:
     case NumberSpace::ShownString:
     case NumberSpace::AtomOfString:
+    case NumberSpace::NameHeader:
+    case NumberSpace::StringCharacters:
     case NumberSpace::Type:
     case NumberSpace::RegExp:
         return;

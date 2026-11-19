@@ -63,13 +63,19 @@ public:
     State& state() const;
     const LayoutData* classData() const;
     bool isLazyClassObject() const;
+    bool mayHoldOwnProperties(VM&, std::span<UniquedStringImpl* const> names) const;
+    bool isLazyClassObjectOf(const LayoutData&) const;
     bool hasStructureOfNewClosure(VM&) const;
     bool hasOrdinaryDefineOwnProperty(VM&, PropertyName) const;
     static bool isNameThatBuiltinFunctionsRefuse(VM&, UniquedStringImpl*);
     bool refusesOwnProperty(VM&, PropertyName) const;
     bool holdsStaticFieldUnder(UniquedStringImpl*) const;
+    bool valueUnderIsHeardByNobody(UniquedStringImpl*) const;
     bool isBuiltinFunction() const;
+    bool hasStaticFieldsLeft() const;
+    bool canHoldStaticFieldInVariable(UniquedStringImpl*) const;
     void ensureClassObject(VM&);
+    void ensureStaticMethods(VM&);
     void initializeClassObject(VM&, JSObject* parent, JSObject* prototype);
     JSValue prototypeProperty(VM&);
     void setPrototypeProperty(VM&, JSObject* prototype, unsigned attributes);
@@ -83,6 +89,7 @@ private:
     }
 
     bool ensurePrototypeProperty(VM&);
+    bool tryCreatePrototypeProperty(VM&, JSValue);
 
     uint64_t m_entry;
 };
@@ -94,6 +101,7 @@ ALWAYS_INLINE bool isCompiledClosure(const JSCell* cell) { return cell->type() =
 JSValue findOnChainAbove(VM&, const JSObject*, UniquedStringImpl*, unsigned& attributes);
 bool holdsWhatIsFoundAbove(VM&, const JSObject*, UniquedStringImpl*, JSValue, unsigned attributes);
 void holdClosureToLackingNameSlowCase(VM&, const JSCell* closure, UniquedStringImpl*);
+bool closureAdmitsName(VM&, const JSCell* closure, UniquedStringImpl*);
 ALWAYS_INLINE void holdClosureToLackingName(VM& vm, const JSCell* cell, UniquedStringImpl* uid)
 {
     if (isCompiledCalleeType(cell->type())) [[unlikely]]
@@ -108,9 +116,11 @@ bool hasScopeInHeapSnapshots(JSCell*);
 template<typename Visitor>
 ALWAYS_INLINE void Closure::visitFields(Closure* closure, Visitor& visitor)
 {
-    if (!closure->m_entry)
+    uint64_t entry = closure->m_entry;
+    if (!entry)
         return;
-    for (uint64_t reference : closure->captures().first(closure->numberOfReferences()))
+    unsigned numberOfReferences = captureCountsOfClosureNumber(ClosureWord::closureNumberOf(entry)).references;
+    for (uint64_t reference : std::span { reinterpret_cast<const uint64_t*>(closure + 1), numberOfReferences })
         visitor.appendUnbarriered(JSValue::decode(reference));
 }
 

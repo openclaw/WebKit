@@ -28,7 +28,7 @@ Representation closureCaptureRepresentationOf(const Program& program, const Call
     return conventions.parameterRepresentation(program, { function, CodeRole::Body }, capture);
 }
 
-static Vector<Representation, 8> formsOfClosureCaptureWords(const Program& program, const CallingConventions& conventions, FunctionID function)
+static ALWAYS_INLINE Vector<Representation, 8> formsOfClosureCaptureWords(const Program& program, const CallingConventions& conventions, FunctionID function)
 {
     return Vector<Representation, 8>(program.at(function).captures.size(), [&](size_t capture) {
         return closureCaptureRepresentationOf(program, conventions, function, static_cast<unsigned>(capture));
@@ -125,7 +125,7 @@ static FunctionKindData functionKindDataOfWrittenKind(FunctionKind functionKind)
     return kind;
 }
 
-static bool functionObjectsLieInRuntimeModule(const Program& program, const Function& function)
+bool functionObjectsLieInRuntimeModule(const Program& program, const Function& function)
 {
     if (function.module && isBundlerHelperModule(program, program.at(function.module)))
         return false;
@@ -206,7 +206,7 @@ BitVector findFunctionsWhosePrototypePropertyStaysAsMade(const Program& program,
 
 bool isAsyncFunctionWithoutAwait(const Program&, const Function& source)
 {
-    return coroutineKindWrittenFor(source) == CoroutineKind::AsyncFunction && !source.syntax.contains(FunctionSyntax::HasWrittenAwait);
+    return coroutineKindWrittenFor(source) == CoroutineKind::AsyncFunction && !source.syntax.contains(FunctionSyntax::HasLiveAwait);
 }
 
 static CodeUnit entryNamedByClosureWordsFor(CodeUnit unit)
@@ -317,7 +317,7 @@ static bool frameOfUnitIsNamedByOwner(const Function& function, CodeRole role)
     bool hasExplicitName = function.has(FunctionFlags::HasExplicitName);
     switch (*kind) {
     case CoroutineKind::AsyncFunction:
-        return !hasExplicitName && function.syntax.contains(FunctionSyntax::HasWrittenAwait);
+        return !hasExplicitName && function.syntax.contains(FunctionSyntax::HasLiveAwait);
     case CoroutineKind::Generator:
     case CoroutineKind::AsyncGenerator:
         return hasExplicitName;
@@ -383,11 +383,11 @@ static bool tracedBuiltinIsCalledByPrograms(const BuiltinTable& builtins, const 
 static StackTraceBuiltinKind stackTraceBuiltinKindOf(const BuiltinTable& builtins, const Function& function, std::optional<BuiltinID> builtin)
 {
     static_assert(FunctionTraceData::kindBitsInsideHelperOfCompiler == static_cast<uint16_t>(StackTraceBuiltinKind::JSBuiltinConstructor) && !static_cast<uint16_t>(StackTraceBuiltinKind::None));
-    if (!builtin && function.syntax.contains(FunctionSyntax::IsShownInModuleOfHelpers))
+    if (!builtin && function.syntax.contains(FunctionSyntax::IsShownInHelperModule))
         return StackTraceBuiltinKind::JSBuiltinConstructor;
     if (!builtin)
         return isTracedInsideBuiltinFunction(builtins, function) ? StackTraceBuiltinKind::JSBuiltin : StackTraceBuiltinKind::None;
-    if (function.syntax.contains(FunctionSyntax::IsShownInModuleOfHelpers))
+    if (function.syntax.contains(FunctionSyntax::IsShownInHelperModule))
         return StackTraceBuiltinKind::None;
     if (std::ranges::any_of(builtins.overloadsOf(*builtin), overloadOfTracedBuiltinCallsHostFunction))
         return StackTraceBuiltinKind::HostFunction;

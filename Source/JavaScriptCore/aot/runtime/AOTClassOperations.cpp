@@ -25,6 +25,7 @@
 #include "AOTPendingStars.h"
 #include "AOTPropertyWalk.h"
 #include "AOTPropertyCachesAnswers.h"
+#include "AOTRuntimeReporter.h"
 #include "AOTRuntimeTable.h"
 #include "AOTState.h"
 #include "AOTThisAllocationInlines.h"
@@ -62,8 +63,7 @@ JSC_DEFINE_JIT_OPERATION(operationAOTNewClass, JSCell*, (Instance* instance, uin
     Closure* closure = cellArgument<Closure>(objectArgument(constructor, entry), entry);
     const LayoutData& classLayout = classLayoutAt(classes, requestAt<NewClassRequest>(instance, request).classIndex);
     RELEASE_ASSERT(closure->function() == FunctionID(classLayout.classData().classConstructor));
-    closure = classes.classObjectForEvaluation(closure, classLayout);
-    classes.defineClass(globalObject, closure, classLayout, JSValue::decode(heritage), JSValue::decode(prototypeParent));
+    closure = classes.defineClassWhereItIsEvaluated(globalObject, closure, classLayout, JSValue::decode(heritage), JSValue::decode(prototypeParent));
     OPERATION_RETURN_IF_EXCEPTION(scope, nullptr);
     OPERATION_RETURN(scope, closure);
 }
@@ -78,11 +78,28 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTGetClassPrototype, JSCell*, (Insta
     OPERATION_RETURN(scope, result);
 }
 
-JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTBeginMemberGuards, void, (Instance* instance, uint32_t classIndex))
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTBeginMemberGuards, void, (Instance* instance, uint32_t classIndex, uint32_t endsTopLevelOfModule))
 {
     AOT_OPERATION_BEGIN_WITHOUT_COLLECTION(instance, Entry::operationAOTBeginMemberGuards);
     ClassTable& classes = instance->state->objects->classes;
-    classes.classPrototypeOfInstances(vm, classLayoutAt(classes, classIndex));
+    const LayoutData& classLayout = classLayoutAt(classes, classIndex);
+    if (endsTopLevelOfModule)
+        classes.beginGuardsAtEndOfModule(vm, classLayout);
+    else
+        classes.beginGuardsAheadOfFirstObject(vm, classLayout);
+}
+
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTRememberStructureOfClass, size_t, (Instance* instance, JSCell* cell, uint32_t classIndex, uint32_t offsetOfStructures))
+{
+    VM& vm = *instance->vm;
+    ClassTable& classes = instance->state->objects->classes;
+    bool asksElements = offsetOfStructures & StructuresOfHeir::asksElements;
+    offsetOfStructures &= ~StructuresOfHeir::asksElements;
+    bool isRemembered = classes.rememberStructureOfInstances(vm, cell, classLayoutAt(classes, classIndex), offsetOfStructures);
+    if (asksElements)
+        isRemembered = isRemembered && classes.rememberPrototypeWithoutElements(vm, cell, offsetOfStructures);
+    countEvent(vm, isRemembered ? RuntimeCounterID::BuiltinSubclassStructuresAccepted : RuntimeCounterID::BuiltinSubclassStructuresRejected);
+    return isRemembered;
 }
 
 static NEVER_INLINE OperationReturnType<JSCell*> JIT_OPERATION_ATTRIBUTES getConstructPrototypeByLookup(Instance*, EncodedJSValue newTarget);
@@ -100,6 +117,7 @@ static OperationReturnType<JSCell*> JIT_OPERATION_ATTRIBUTES getConstructPrototy
 {
     constexpr Entry entry = Entry::operationAOTGetConstructPrototype;
     AOT_OPERATION_BEGIN(instance, entry);
+    countEvent(vm, RuntimeCounterID::ConstructPrototypeLookups);
     JSObject* target = objectArgument(newTarget, entry);
     if (auto* closure = dynamicDowncast<Closure>(target); closure && Instance::owning(closure) == instance && FunctionTables::hasPrototypePropertyAtCreation(closure->kind())) {
         ClassTable& classes = instance->state->objects->classes;
@@ -132,7 +150,7 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTSetConstructPrototype, JSCell*, (I
     JSObject* result = objects.classes.instanceWithPrototype(vm, allocated, cellArgument<JSObject>(prototype, entry), !!holdsNoField);
     if (result == allocated)
         objects.structures.predictStructure(vm, allocation, uncheckedDowncast<CompiledStructure>(result->structure()));
-    if (Object* made = !object && holdsNoField ? compiledObjectOrNull(result) : nullptr; made && objects.structures.structureIDOf(allocation) != made->structureID() && objects.structures.numberOfStructuresMade() == numberOfStructuresBefore)
+    if (Object* made = !object && holdsNoField ? compiledObjectOrNull(result) : nullptr; made && !made->compiledStructure().hasSpareWord() && objects.structures.structureIDOf(allocation) != made->structureID() && objects.structures.numberOfStructuresMade() == numberOfStructuresBefore)
         objects.classes.rememberInstanceBelow(vm, allocation, cellArgument<JSObject>(prototype, entry), *made, result == allocated ? instance->state->tables.allocations()[allocation].size() : made->layout().size);
     vm.writeBarrier(result);
     OPERATION_RETURN(scope, newCellForCompiledCode(vm, result));
@@ -141,13 +159,25 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTSetConstructPrototype, JSCell*, (I
 static NEVER_INLINE OperationReturnType<JSCell*> JIT_OPERATION_ATTRIBUTES createThisSlow(Instance*, JSCell* constructor, JSCell* newTarget);
 static NEVER_INLINE OperationReturnType<JSCell*> JIT_OPERATION_ATTRIBUTES createThisOfOtherNewTarget(Instance*, JSCell* constructor, JSCell* newTarget);
 
+static ALWAYS_INLINE JSObject* tryCreateThisInline(VM& vm, Structure* structure)
+{
+    const CompiledStructure* compiled = compiledObjectStructureOrNull(structure);
+    if (!compiled)
+        return tryCreateFinalObjectInline(vm, structure);
+    const uint64_t* words = compiled->wordsOfObjectWithoutFields();
+    return words ? tryCreateObjectWithoutFieldsInline(vm, structure, compiled->layout().size, words) : nullptr;
+}
+
 JSC_DEFINE_JIT_OPERATION(operationAOTCreateThis, JSCell*, (Instance* instance, JSCell* constructor, JSCell* newTarget))
 {
     if (constructor != newTarget) [[unlikely]]
         [[clang::musttail]] return createThisOfOtherNewTarget(instance, constructor, newTarget);
     VM& vm = *instance->vm;
-    if (Structure* structure = rememberedStructureOfThis(vm, newTarget, newTarget); structure && !compiledLayoutOrNull(structure)) {
-        if (JSObject* object = tryCreateFinalObjectInline(vm, structure)) [[likely]]
+    Structure* structure = rememberedStructureOfThis(vm, newTarget, newTarget);
+    if (!structure)
+        structure = instance->state->objects->classes.structureOfThisRememberedBesideCallee(newTarget);
+    if (structure) {
+        if (JSObject* object = tryCreateThisInline(vm, structure)) [[likely]]
             return { object, nullptr };
     }
     [[clang::musttail]] return createThisSlow(instance, constructor, newTarget);
@@ -156,8 +186,8 @@ JSC_DEFINE_JIT_OPERATION(operationAOTCreateThis, JSCell*, (Instance* instance, J
 static OperationReturnType<JSCell*> JIT_OPERATION_ATTRIBUTES createThisOfOtherNewTarget(Instance* instance, JSCell* constructor, JSCell* newTarget)
 {
     VM& vm = *instance->vm;
-    if (Structure* structure = rememberedStructureOfThis(vm, constructor, newTarget); structure && !compiledLayoutOrNull(structure)) {
-        if (JSObject* object = tryCreateFinalObjectInline(vm, structure)) [[likely]]
+    if (Structure* structure = rememberedStructureOfThis(vm, constructor, newTarget)) {
+        if (JSObject* object = tryCreateThisInline(vm, structure)) [[likely]]
             return { object, nullptr };
     }
     [[clang::musttail]] return createThisSlow(instance, constructor, newTarget);
@@ -166,6 +196,7 @@ static OperationReturnType<JSCell*> JIT_OPERATION_ATTRIBUTES createThisOfOtherNe
 static OperationReturnType<JSCell*> JIT_OPERATION_ATTRIBUTES createThisSlow(Instance* instance, JSCell* constructor, JSCell* newTarget)
 {
     AOT_OPERATION_BEGIN(instance, Entry::operationAOTCreateThis);
+    countEvent(vm, RuntimeCounterID::CreateThisSlowPaths);
     JSObject* constructorObject = cellArgument<JSObject>(constructor, Entry::operationAOTCreateThis);
     JSObject* newTargetObject = cellArgument<JSObject>(newTarget, Entry::operationAOTCreateThis);
     OPERATION_RETURN(scope, instance->state->objects->classes.createThis(globalObject, constructorObject, newTargetObject));
@@ -196,7 +227,7 @@ static PropertyOffset offsetAt(int32_t location)
 static JSObject* holderOfNamesWithoutField(JSObject* object)
 {
     Object* compiledObject = compiledObjectOrNull(object);
-    return compiledObject ? extraPropertiesIfMade(*compiledObject) : object;
+    return compiledObject ? extraPropertiesIfCreated(*compiledObject) : object;
 }
 
 static std::optional<PropertyOffset> findInKnownStructure(JSCellButterfly* token, uint32_t field, JSObject* object)
@@ -243,9 +274,11 @@ static void rememberDefinition(VM& vm, JSCellButterfly* token, uint32_t field, S
         return;
     PropertyOffset offset = after->transitionOffset();
     std::optional<uint32_t> newCapacity = capacityOfStorageGrownByStub(vm, before, after, offset);
-    if (!newCapacity)
+    bool isStoredWithElements = !newCapacity && before->typeInfo().type() == ArrayType && offset == firstOutOfLineOffset && !before->outOfLineCapacity() && after->outOfLineCapacity() == initialOutOfLineCapacity
+        && !before->hasElementsStartOffset() && !before->mayBePrototype() && !before->mayHaveImmutableProperties() && after->propertyAccessesAreCacheable();
+    if (!newCapacity && !isStoredWithElements)
         return;
-    int32_t placeOfValue = *newCapacity ? static_cast<int32_t>(*newCapacity << 1 | 1) : locationOf(offset);
+    int32_t placeOfValue = isStoredWithElements ? 1 : *newCapacity ? static_cast<int32_t>(*newCapacity << 1 | 1) : locationOf(offset);
     int32_t placeOfBrand = brand ? locationOf(*brand) : 0;
     if (placeOfValue != static_cast<int16_t>(placeOfValue) || placeOfBrand != static_cast<int16_t>(placeOfBrand))
         return;
@@ -268,7 +301,7 @@ static void rememberDefinition(VM& vm, JSCellButterfly* token, uint32_t field, S
 
 static void rememberDefinitionAmongExtraProperties(VM& vm, JSCellButterfly* token, uint32_t field, Object& object, const CompiledStructure& before, JSObject* extraBefore, Structure* extraStructureBefore, std::optional<PropertyOffset> brand)
 {
-    JSObject* extra = extraPropertiesIfMade(object);
+    JSObject* extra = extraPropertiesIfCreated(object);
     if (!extra || (extraBefore && extra != extraBefore) || before.mayBePrototype() || object.isNotExtensible())
         return;
     if (extraBefore && before.extraPropertiesStructureID() != extraStructureBefore->id())
@@ -283,11 +316,9 @@ static void rememberDefinitionAmongExtraProperties(VM& vm, JSCellButterfly* toke
     const_cast<CompiledStructure&>(before).setSuccessorByPrivateName(vm, const_cast<CompiledStructure*>(&after));
 }
 
-static constexpr unsigned numberOfStructuresWithoutNames = 8;
-
 static unsigned placeOfStructureWithoutName(StructureID structure, uint32_t field)
 {
-    return ((structure.bits() >> 4) + field) % numberOfStructuresWithoutNames * 2;
+    return ((structure.bits() >> ClassToken::shiftOfStructureWithoutName) + field) % ClassToken::numberOfStructuresWithoutNames * 2;
 }
 
 static bool isKnownToLackName(JSCellButterfly* token, uint32_t field, JSObject* object)
@@ -302,7 +333,7 @@ static bool isKnownToLackName(JSCellButterfly* token, uint32_t field, JSObject* 
 static void rememberStructureWithoutName(VM& vm, JSCellButterfly* token, uint32_t field, Structure* structure)
 {
     if (!token->get(ClassToken::structuresWithoutNamesSlot))
-        token->setIndex(vm, ClassToken::structuresWithoutNamesSlot, JSCellButterfly::create(vm, CopyOnWriteArrayWithContiguous, numberOfStructuresWithoutNames * 2));
+        token->setIndex(vm, ClassToken::structuresWithoutNamesSlot, JSCellButterfly::create(vm, CopyOnWriteArrayWithContiguous, ClassToken::numberOfStructuresWithoutNames * 2));
     JSCellButterfly* places = uncheckedDowncast<JSCellButterfly>(token->get(ClassToken::structuresWithoutNamesSlot).asCell());
     unsigned place = placeOfStructureWithoutName(structure->id(), field);
     places->setIndex(vm, place, structure);
@@ -515,13 +546,34 @@ static const FieldData* fieldOfEvaluation(VM& vm, State& state, const Object& ob
     return field;
 }
 
+static void rememberLayoutWithoutPlace(State& state, const Object& object, JSCellButterfly* token, uint32_t fieldIndex)
+{
+    if (!isOfRealmOf(state, object) || (fieldIndex & layoutHasNoPlaceForPrivateField))
+        return;
+    uint32_t layoutOfObject = object.layout().index;
+    uint32_t declaringClass = token->get(ClassToken::classIndexSlot).asUInt32();
+    state.instance.classes.privateFieldPlaces[indexOfPrivateFieldPlace(layoutOfObject, declaringClass, fieldIndex)] = { static_cast<uint64_t>(layoutOfObject) << 32 | declaringClass, fieldIndex | layoutHasNoPlaceForPrivateField, 0, nullptr, 0 };
+}
+
+static bool hasNoPlaceForName(VM& vm, State& state, JSObject* holder, JSCellButterfly* token, uint32_t fieldIndex)
+{
+    Object* object = compiledObjectOrNull(holder);
+    if (!object || object->hasExtraProperties())
+        return false;
+    const LayoutData& declaringLayout = declaringLayoutOf(state, *object, token);
+    if (fieldUnderDeclaredName(vm, state, *object, declaringLayout, declaredFieldOf(declaringLayout, fieldIndex)))
+        return false;
+    rememberLayoutWithoutPlace(state, *object, token, fieldIndex);
+    return true;
+}
+
 static void rememberFieldOfOtherLayout(State& state, const Object& object, JSCellButterfly* token, uint32_t fieldIndex, const FieldData& field)
 {
     uint32_t layoutOfObject = object.layout().index;
     uint32_t declaringClass = token->get(ClassToken::classIndexSlot).asUInt32();
     if (layoutOfObject == declaringClass || declaringLayoutOf(state, token).evaluation() != EvaluationState::ProvenOnce)
         return;
-    state.instance.classes.privateFieldPlaces[indexOfPrivateFieldPlace(layoutOfObject, fieldIndex)] = { static_cast<uint64_t>(layoutOfObject) << 32 | declaringClass, fieldIndex, 0, &field, 0 };
+    state.instance.classes.privateFieldPlaces[indexOfPrivateFieldPlace(layoutOfObject, declaringClass, fieldIndex)] = { static_cast<uint64_t>(layoutOfObject) << 32 | declaringClass, fieldIndex, 0, &field, 0 };
 }
 
 static JSValue tryReadFromSlot(VM& vm, State& state, JSObject* base, JSCellButterfly* token, uint32_t fieldIndex)
@@ -624,10 +676,12 @@ JSC_DEFINE_JIT_OPERATION(operationAOTPrivateHas, EncodedJSValue, (Instance* inst
         OPERATION_RETURN(scope, encodedJSValue());
     }
     JSObject* holder = asObject(base);
+    if (hasNoPlaceForName(vm, *instance->state, holder, classToken, field))
+        OPERATION_RETURN(scope, JSValue::encode(jsBoolean(false)));
     JSObject* holderWithoutField = holderOfNamesWithoutField(holder);
     if ((holderWithoutField && findInKnownStructure(classToken, field, holderWithoutField)) || tryReadFromSlot(vm, *instance->state, holder, classToken, field))
         OPERATION_RETURN(scope, JSValue::encode(jsBoolean(true)));
-    if (isKnownToLackName(classToken, field, holder))
+    if (isKnownToLackName(classToken, field, holder) || hasNoPlaceForName(vm, *instance->state, holder, classToken, field))
         OPERATION_RETURN(scope, JSValue::encode(jsBoolean(false)));
     PrivateLocation location = locatePrivateName(vm, *instance->state, holder, classToken, field);
     rememberLocation(vm, holder, classToken, field, location);
@@ -711,7 +765,7 @@ JSC_DEFINE_JIT_OPERATION(operationAOTPrivateDefine, void, (Instance* instance, E
                 validateMutation(vm, *compiledObject, *own, ObjectMutation::StoreOfOtherType);
             const CompiledStructure& before = compiledObject->compiledStructure();
             bool hadExtraProperties = compiledObject->hasExtraProperties();
-            JSObject* extraBefore = extraPropertiesIfMade(*compiledObject);
+            JSObject* extraBefore = extraPropertiesIfCreated(*compiledObject);
             Structure* extraStructureBefore = extraBefore ? extraBefore->structure() : instance->realm.emptyExtraPropertiesStructure;
             vm.aotState().somePrivateNameLiesBesideFields = true;
             compiledObject->putDirectFromNativeCode(vm, uid, defined, attributesOfNameWithoutField);
@@ -791,7 +845,7 @@ UniquedStringImpl* ClassToken::declaredNameUnder(VM& vm, Object& holder, Uniqued
         if (field.isBrand())
             findNameAmongThoseOf(state, findFieldProperty(vm, holder, field).valueOrAccessor, nameOfEvaluation, found);
     }
-    JSObject* extra = !found.token && vm.aotState().somePrivateNameLiesBesideFields ? extraPropertiesIfMade(holder) : nullptr;
+    JSObject* extra = !found.token && vm.aotState().somePrivateNameLiesBesideFields ? extraPropertiesIfCreated(holder) : nullptr;
     if (extra && !extra->structure()->isQuickPropertyAccessAllowedForEnumeration()) {
         extra->structure()->forEachProperty(vm, [&](const PropertyTableEntry& entry) {
             if (PropertyName(entry.key()).isPrivateName())
@@ -884,8 +938,10 @@ static JSValue findPrivateFieldAmong(VM& vm, State& state, const MarkedArgumentB
     return { };
 }
 
+enum class ObjectsWithPrivateFields : bool { LowestAlone, WholeChain };
+
 template<typename Functor>
-static void forEachWrittenPrivateFieldOn(JSGlobalObject* globalObject, JSObject* lowest, const Functor& functor)
+static void forEachWrittenPrivateFieldOn(JSGlobalObject* globalObject, JSObject* lowest, const Functor& functor, ObjectsWithPrivateFields objectsAsked = ObjectsWithPrivateFields::WholeChain)
 {
     VM& vm = globalObject->vm();
     if (!vm.aotState().someClassHasPrivateNames)
@@ -898,8 +954,13 @@ static void forEachWrittenPrivateFieldOn(JSGlobalObject* globalObject, JSObject*
         return;
     State& state = *instance->state;
     MarkedArgumentBuffer objects;
-    size_t numberBelowProxies = collectObjectsThatLookupComesTo(globalObject, lowest, AboveProxies::IsLookedAt, objects);
-    RETURN_IF_EXCEPTION(scope, void());
+    size_t numberBelowProxies = 1;
+    if (objectsAsked == ObjectsWithPrivateFields::LowestAlone)
+        objects.append(lowest);
+    else {
+        numberBelowProxies = collectObjectsThatLookupComesTo(globalObject, lowest, AboveProxies::IsLookedAt, objects);
+        RETURN_IF_EXCEPTION(scope, void());
+    }
     MarkedArgumentBuffer tokens;
     collectClassTokens(vm, state, objects, tokens);
     if (objects.hasOverflowed() || tokens.hasOverflowed()) [[unlikely]] {
@@ -926,6 +987,27 @@ unsigned PropertyWalk::countPrivateFieldsOfCompiledClasses(JSGlobalObject* globa
         return IterationStatus::Continue;
     });
     return count;
+}
+
+bool PropertyWalk::hasOwnPrivateField(JSGlobalObject* globalObject, JSObject* object)
+{
+    bool hasField = false;
+    forEachWrittenPrivateFieldOn(globalObject, object, [&](State&, JSCellButterfly*, uint32_t, const FieldData&, JSValue) {
+        hasField = true;
+        return IterationStatus::Done;
+    }, ObjectsWithPrivateFields::LowestAlone);
+    return hasField;
+}
+
+bool PropertyWalk::isRuntimeProperty(VM& vm, UniquedStringImpl* name, JSValue value)
+{
+    if (!PropertyName(name).isPrivateName())
+        return false;
+    for (Instance* instance : vm.aotState().instances) {
+        if (instance->state->objects->classes.namesClassObject(name) || classTokenOrNull(*instance->state, value))
+            return true;
+    }
+    return false;
 }
 
 bool PropertyWalk::matchPrivateFieldsOfCompiledClasses(JSGlobalObject* globalObject, JSObject* object, JSObject* pattern, const ScopedLambda<bool(JSValue ofObject, JSValue ofPattern)>& matches)

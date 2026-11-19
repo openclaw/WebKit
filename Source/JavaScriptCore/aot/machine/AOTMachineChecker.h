@@ -15,9 +15,11 @@ namespace JSC { namespace AOT { namespace Machine {
 
 bool validate(Procedure&);
 bool validateBehindBlockPasses(Procedure&);
+bool checkVectorsAcrossCalls(Procedure&);
 JS_EXPORT_PRIVATE bool checkThatDefinitionsDominateUses(Procedure&);
 
 bool checkAllocation(Procedure&);
+bool checkSavesAtHeads(Procedure&);
 
 bool checkFrame(Procedure&);
 

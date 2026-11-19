@@ -47,12 +47,6 @@ static std::span<const uint8_t> allocateClosureCells(State& state)
     return { static_cast<const uint8_t*>(instance.closureCells), numberOfCells * sizeof(uint32_t) };
 }
 
-static uint32_t cellNumberOf(const ProgramTables& tables, FunctionID function)
-{
-    ClosureFunctionRangeData range = tables.closureFunctions;
-    return function.index() >= range.first && function.index() < range.end ? tables.closureCellNumbers()[function.index() - range.first] : 0;
-}
-
 static RememberedSlot<uint32_t>* narrowClosureCells(const Instance& instance)
 {
     ASSERT(!instance.options().useWideReferences());
@@ -230,16 +224,18 @@ JSObject* ClosureTable::calleeOfModuleBodies(VM& vm, FunctionID body)
 
 JSCell* ClosureTable::closureIfCreated(FunctionID function) const
 {
-    uint32_t number = cellNumberOf(m_tables, function);
-    if (m_state.instance.options().useWideReferences())
-        return static_cast<JSCell**>(m_state.instance.closureCells)[number];
+    uint32_t number = m_tables.cellOfClosureFunction(function.index());
+    if (m_state.instance.options().useWideReferences()) {
+        JSCell* cell = static_cast<JSCell**>(m_state.instance.closureCells)[number];
+        return cell ? cell : m_state.objects->classes.classObjectHeldWhileReached(function);
+    }
     uint32_t entry = narrowClosureCells(m_state.instance)[number].get();
-    return entry ? MarkedBlockCage::decode(m_state.instance.cellCageBase, entry + 1) : nullptr;
+    return entry ? MarkedBlockCage::decode(m_state.instance.cellCageBase, entry + 1) : m_state.objects->classes.classObjectHeldWhileReached(function);
 }
 
 bool ClosureTable::hasCellFor(FunctionID function) const
 {
-    return cellNumberOf(m_tables, function);
+    return m_tables.cellOfClosureFunction(function.index());
 }
 
 bool ClosureTable::hasSingletonClosure(FunctionID function) const
@@ -250,9 +246,10 @@ bool ClosureTable::hasSingletonClosure(FunctionID function) const
 
 void ClosureTable::didCreateClosureFor(FunctionID function, JSCell* cell)
 {
+    m_state.objects->classes.didRegisterClosure(function);
     if (!m_tables.kindOfFunction(function.index()).isInRuntimeModule)
         m_state.instance.closureTable.cards = m_writtenRegions.cards();
-    uint32_t number = cellNumberOf(m_tables, function);
+    uint32_t number = m_tables.cellOfClosureFunction(function.index());
     RELEASE_ASSERT(number);
     if (m_state.instance.options().useWideReferences()) {
         static_cast<JSCell**>(m_state.instance.closureCells)[number] = cell;
@@ -266,14 +263,25 @@ void ClosureTable::didCreateClosureFor(FunctionID function, JSCell* cell)
 void ClosureTable::registerClassObject(Closure* closure)
 {
     FunctionID function = m_state.objects->classes.functionOfOwnClosure(*closure);
-    if (!closureIfCreated(function))
+    m_state.objects->classes.didRegisterClosure(function);
+    if (!closureIfCreated(function) && !m_state.objects->classes.tryHoldClassObjectWhileReached(function, closure))
         didCreateClosureFor(function, closure);
+}
+
+void ClosureTable::registerFirstClassObject(Closure* closure, FunctionID constructor, const LayoutData& classLayout)
+{
+    ASSERT(constructor == m_state.objects->classes.functionOfOwnClosure(*closure) && !closureIfCreated(constructor));
+    m_state.objects->classes.didRegisterClosure(constructor);
+    if (!m_state.objects->classes.tryHoldClassObjectWhileReached(classLayout, constructor, closure))
+        didCreateClosureFor(constructor, closure);
 }
 
 void ClosureTable::registerClosureOfMember(FunctionID function, JSCell* closure)
 {
+    m_state.objects->classes.didRegisterClosure(function);
     ASSERT(hasCellFor(function) && !closureIfCreated(function));
-    didCreateClosureFor(function, closure);
+    if (!m_state.objects->classes.tryHoldClassObjectWhileReached(function, closure))
+        didCreateClosureFor(function, closure);
 }
 
 void ClosureTable::forgetClosures(uint32_t firstCell, uint32_t numberOfCells)
@@ -296,8 +304,10 @@ void ClosureTable::forgetClosures(uint32_t firstCell, uint32_t numberOfCells)
 
 JSCell* ClosureTable::closure(VM& vm, FunctionID function)
 {
-    if (JSCell* cell = closureIfCreated(function))
+    if (JSCell* cell = closureIfCreated(function)) {
+        RELEASE_ASSERT(!m_state.objects->classes.isMarkOfEvaluationThatDied(cell));
         return cell;
+    }
     ASSERT(!m_tables.captureCountsOf(function.index()).captures);
     FunctionKindData kind = m_tables.kindOfFunction(function.index());
     if (kind.isSlim) {

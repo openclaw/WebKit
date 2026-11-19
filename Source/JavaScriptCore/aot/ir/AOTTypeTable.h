@@ -160,7 +160,31 @@ public:
     static constexpr TypeID cellOrMarker = idAt<TypeID>(IDHome::Program, 5);
     static constexpr TypeID int16 = idAt<TypeID>(IDHome::Program, 6);
     static constexpr TypeID uint16 = idAt<TypeID>(IDHome::Program, 7);
-    static constexpr uint32_t numberOfTypesInternedAtStart = 8;
+    static constexpr TypeID anythingButUndefined = idAt<TypeID>(IDHome::Program, 8);
+    static constexpr TypeID anythingButNull = idAt<TypeID>(IDHome::Program, 9);
+    static constexpr TypeID anythingButNullish = idAt<TypeID>(IDHome::Program, 10);
+    static constexpr TypeID anythingButString = idAt<TypeID>(IDHome::Program, 11);
+    static constexpr TypeID anythingButNumber = idAt<TypeID>(IDHome::Program, 12);
+    static constexpr TypeID anythingButBoolean = idAt<TypeID>(IDHome::Program, 13);
+    static constexpr uint32_t numberOfTypesInternedAtStart = 14;
+    static constexpr bool passesEveryObject(TypeID id) { return id == anything || (id.bits() >= anythingButUndefined.bits() && id.bits() <= anythingButBoolean.bits()); }
+    static constexpr bool isNonNullishTop(TypeID id) { return id == anythingButUndefined || id == anythingButNull || id == anythingButNullish; }
+    static constexpr TypeID anythingBut(TypeID primitives)
+    {
+        if (primitives == undefined)
+            return anythingButUndefined;
+        if (primitives == null)
+            return anythingButNull;
+        if (primitives == nullish)
+            return anythingButNullish;
+        if (primitives == string)
+            return anythingButString;
+        if (primitives == number)
+            return anythingButNumber;
+        if (primitives == boolean)
+            return anythingButBoolean;
+        return { };
+    }
     static constexpr TypeID valuesOf(TypeID held) { return held == anythingOrAbsent ? anything : held; }
 
     const BuiltinTable& builtins() const { return m_builtins; }
@@ -173,6 +197,7 @@ public:
 
     Type at(TypeID) const;
     const Type& typeKeptAt(TypeID) const;
+    JS_EXPORT_PRIVATE const Type& typeKeptBeforeFreezeAt(TypeID) const;
     static Type typeInID(TypeID);
     static constexpr uint32_t positionInProgramOf(TypeID id) { return id.bits() - (static_cast<uint32_t>(IDHome::Program) << idHomeShift); }
     TypeID typeOfLiteralString(StringID string) const { return string.index() < m_typesOfLiteralStrings.size() ? m_typesOfLiteralStrings[string.index()] : TypeID(); }
@@ -188,6 +213,8 @@ public:
     SetView<PropertyKeyID, KeySetID> at(KeySetID set) const { return SetView<PropertyKeyID, KeySetID>(m_keySets.viewOf(set.bits())); }
     std::span<const ClassPart> at(ClassPartsID) const;
     const PropertyKey& at(PropertyKeyID) const;
+    JS_EXPORT_PRIVATE void keepAddressesOfPropertyKeys();
+    JS_EXPORT_PRIVATE void keepAddressesOfTypes();
 
     TypeID typeOfWireIndex(uint32_t index) const { return m_typeOfWireIndex[index]; }
     std::span<const TypeID> typesOfWireIndexes() const LIFETIME_BOUND { return m_typeOfWireIndex.span(); }
@@ -200,6 +227,7 @@ public:
     void endStableNumbersOfPropertyKeys(const ParallelLoops&);
     void addKeysOfTexts(uint32_t numberOfStrings, const ParallelLoops&);
     bool hasStableNumber(PropertyKeyID key) const { return key.index() < m_numberOfKeysWithStableNumbers; }
+    bool isLookedUpByName(PropertyKeyID key) const { return key.index() < m_keysLookedUpByName.size() && m_keysLookedUpByName[key.index()]; }
     std::optional<uint8_t> locationBitOf(PropertyKeyID key) const
     {
         if (key.index() >= m_locationBitsOfKeys.size())
@@ -216,7 +244,13 @@ public:
     }
     std::optional<PropertyKeyID> find(const PropertyKey&) const;
 
-    ProvenInEveryVersion provenTypeOf(const DeclaredType&) const;
+    ALWAYS_INLINE ProvenInEveryVersion provenTypeOf(const DeclaredType& declared) const
+    {
+        if (std::optional<ProvenInEveryVersion> established = declared.established())
+            return *established;
+        return provenTypeOfWhatIsOnlyExpected(declared);
+    }
+    ProvenInEveryVersion provenTypeOfWhatIsOnlyExpected(const DeclaredType&) const;
 
     void beginKeepingMemosAtRest();
     void invalidateMemosAtRest();
@@ -254,7 +288,7 @@ private:
 
     std::span<const ClassPart> classPartsKeptAt(ClassPartsID) const;
     const PropertyKey& propertyKeyKeptAt(PropertyKeyID) const;
-    const PropertyKey& propertyKeyOnceFrozenAt(uint32_t position) const;
+    const PropertyKey& propertyKeyFoundByAddressAt(uint32_t position) const;
 
     struct MemosOfArena {
         IDPairMemo types;
@@ -277,6 +311,8 @@ private:
     std::unique_ptr<SharedAnswers> m_sharedAnswers;
     InternedRecords<Type> m_types;
     Vector<const Type*> m_typesOnceFrozen;
+    uint32_t m_numberOfTypesFoundByAddress { 0 };
+    std::array<uintptr_t, numberOfInternedSegments> m_addressesOfPositionZeroInTypeSegments { };
     std::atomic<unsigned> m_numberOfRoundsWithoutAdditions { 0 };
     IDSetTable m_layoutSets { IDSetForm::ChunksWithLazyList, 0 };
     IDSetTable m_objectSets { IDSetForm::ListsAndChunks, wordsOfObjectSetSummary };
@@ -284,22 +320,28 @@ private:
     IDSetTable m_keySets { IDSetForm::ListsAndChunks, 0 };
     InternedWordLists m_classParts;
     InternedRecords<PropertyKey> m_propertyKeys;
-    uint32_t m_numberOfPropertyKeysOnceFrozen { 0 };
+    uint32_t m_numberOfPropertyKeysFoundByAddress { 0 };
     std::array<uintptr_t, numberOfInternedSegments> m_addressesOfPositionZeroInKeySegments { };
     uint32_t m_numberOfKeysWithStableNumbers { UINT32_MAX };
     Vector<uint8_t> m_locationBitsOfKeys;
+    Vector<uint8_t> m_keysLookedUpByName;
     Vector<TypeID> m_typeOfWireIndex;
     Vector<TypeID> m_typesOfLiteralStrings;
 };
+
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
 ALWAYS_INLINE const Type& TypeTable::typeKeptAt(TypeID id) const
 {
     uint32_t position = positionInProgramOf(id);
     if (position < m_typesOnceFrozen.size()) [[likely]]
         return *m_typesOnceFrozen[position];
-    RELEASE_ASSERT(liesInProgram(id));
-    return m_types.at(position);
+    if (position < m_numberOfTypesFoundByAddress) [[likely]]
+        return *reinterpret_cast<const Type*>(m_addressesOfPositionZeroInTypeSegments.data()[internedSegmentOf(position)] + static_cast<uintptr_t>(position) * sizeof(Type));
+    return typeKeptBeforeFreezeAt(id);
 }
+
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 
 ALWAYS_INLINE Type TypeTable::typeInID(TypeID id)
 {
@@ -325,7 +367,7 @@ inline std::span<const ClassPart> TypeTable::at(ClassPartsID id) const
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
-ALWAYS_INLINE const PropertyKey& TypeTable::propertyKeyOnceFrozenAt(uint32_t position) const
+ALWAYS_INLINE const PropertyKey& TypeTable::propertyKeyFoundByAddressAt(uint32_t position) const
 {
     return *reinterpret_cast<const PropertyKey*>(m_addressesOfPositionZeroInKeySegments.data()[internedSegmentOf(position)] + static_cast<uintptr_t>(position) * sizeof(PropertyKey));
 }
@@ -334,8 +376,8 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 
 ALWAYS_INLINE const PropertyKey& TypeTable::at(PropertyKeyID key) const
 {
-    if (key.bits() < m_numberOfPropertyKeysOnceFrozen) [[likely]]
-        return propertyKeyOnceFrozenAt(key.bits());
+    if (key.bits() < m_numberOfPropertyKeysFoundByAddress) [[likely]]
+        return propertyKeyFoundByAddressAt(key.bits());
     return propertyKeyKeptAt(key);
 }
 

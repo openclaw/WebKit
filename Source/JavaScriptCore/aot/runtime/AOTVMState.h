@@ -7,8 +7,10 @@
 
 #if ENABLE(AOT)
 
+#include "AOTNarrowCopy.h"
 #include "AOTVector.h"
 #include <JavaScriptCore/CollectionScope.h>
+#include <JavaScriptCore/Weak.h>
 #include <JavaScriptCore/WriteBarrier.h>
 #include <memory>
 #include <wtf/BitVector.h>
@@ -22,8 +24,10 @@
 namespace JSC {
 
 class CallFrame;
+class IdentifierArena;
 class JSGlobalObject;
 class JSObject;
+class JSString;
 class Structure;
 class VM;
 
@@ -34,6 +38,7 @@ class CallSiteCache;
 class Image;
 class Modules;
 class PagesOfVM;
+class PoisonedCellSites;
 class ProgramIdentifiers;
 class RegExpLiterals;
 class RuntimeCounts;
@@ -42,7 +47,44 @@ class VMPropertyCaches;
 struct CyclesOfImports;
 struct FormatPatternState;
 struct FunctionTables;
+struct ImportersOfModules;
+struct StatementImporters;
 struct Instance;
+struct ReexportedNames;
+
+class PlacesSeenByPlans {
+public:
+    uint32_t takeMark(size_t numberOfModules)
+    {
+        if (m_numberOfModules != numberOfModules || m_nextMark > std::numeric_limits<uint32_t>::max() - 3 - numberOfModules) {
+            m_numberOfModules = numberOfModules;
+            m_groups.clear();
+            m_groups.grow((numberOfModules + modulesInGroup - 1) / modulesInGroup);
+            m_nextMark = 1;
+        }
+        return m_nextMark++;
+    }
+
+    void setNextMark(uint32_t mark) { m_nextMark = mark; }
+
+    uint32_t& operator[](size_t module)
+    {
+        std::unique_ptr<Group>& group = m_groups[module / modulesInGroup];
+        if (!group)
+            group = makeUnique<Group>();
+        return group->places[module % modulesInGroup];
+    }
+
+private:
+    static constexpr size_t modulesInGroup = 64;
+    struct Group {
+        WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED(Group);
+        std::array<uint32_t, modulesInGroup> places { };
+    };
+    Vector<std::unique_ptr<Group>> m_groups;
+    size_t m_numberOfModules { 0 };
+    uint32_t m_nextMark { 1 };
+};
 
 class StructuresWithFastIndexing {
 public:
@@ -77,16 +119,16 @@ public:
     void releaseImage(VM&);
     template<typename Visitor> void visitAggregate(Visitor&);
 
-    void didChangeInstances()
-    {
-        onlyInstance = instances.size() == 1 ? instances.first() : nullptr;
-        instanceOfRecentRun = { };
-    }
+    void didChangeInstances();
+    Instance* findInstanceThatLendsTables() const;
+    void lendTablesOfLivingInstances();
 
     static constexpr ptrdiff_t offsetOfStructureIDBase() { return OBJECT_OFFSETOF(VMState, structureIDBase); }
     static constexpr ptrdiff_t offsetOfOnlyInstance() { return OBJECT_OFFSETOF(VMState, onlyInstance); }
     static constexpr ptrdiff_t offsetOfEntriesWithSeveralInstances() { return OBJECT_OFFSETOF(VMState, entriesWithSeveralInstances); }
     static constexpr ptrdiff_t offsetOfRegExpMatchOutput() { return OBJECT_OFFSETOF(VMState, regExpMatchOutput); }
+    static constexpr ptrdiff_t offsetOfParentOfSuperCall() { return OBJECT_OFFSETOF(VMState, parentOfSuperCall); }
+    static constexpr ptrdiff_t offsetOfNewTargetOfSuperCall() { return OBJECT_OFFSETOF(VMState, newTargetOfSuperCall); }
     static constexpr unsigned maxGroupsInRegExpMatchOutput = 15;
 
     struct PolledInstances {
@@ -103,14 +145,28 @@ public:
     std::unique_ptr<CallSiteCache> callSiteCache;
     std::unique_ptr<FunctionTables> functionTables;
     std::unique_ptr<CyclesOfImports> cyclesOfImports;
+    std::unique_ptr<ImportersOfModules> importersOfModules;
+    std::unique_ptr<StatementImporters> statementImporters;
+    std::unique_ptr<StatementImporters> importersOfEveryImport;
+    std::optional<Vector<uint32_t>> modulesWithQuery;
+    std::unique_ptr<ReexportedNames> reexportedNames;
+    PlacesSeenByPlans placesSeenByPlans;
     std::unique_ptr<RegExpLiterals> regExpLiterals;
     std::unique_ptr<FormatPatternState, FormatPatternStateDeleter> formatPatternState;
     BitVector filesWithKnownFirstLoad;
     BitVector filesFirstLoadedSynchronously;
     BitVector filesWhoseTextHostKeeps;
+    BitVector filesWhoseKeptTextWasCompiled;
+    BitVector filesWhoseKeptTextWasReadBelowVitest;
+    BitVector filesStartedByHost;
+    BitVector filesReportedAsKept;
+    BitVector modulesWithHostCachedSource;
     BitVector builtinMembersWrittenInSomeRealm;
     BitVector builtinHoldersWithNamesAddedInSomeRealm;
+    JSCell* parentOfSuperCall { nullptr };
+    JSCell* newTargetOfSuperCall { nullptr };
     bool hasCompiledCode { false };
+    bool mayLockBuiltins { false };
     bool nativeTestChangesObjectsUnseen { false };
     bool didFinishCollection { false };
     bool hasObjectsBeingFilled { false };
@@ -119,11 +175,13 @@ public:
     bool somePrivateNameLiesBesideFields { false };
     bool someTextKnowsPrivateNames { false };
     JSObject* classPrototypeBeingDefined { nullptr };
+    JSObject* unobservedClassHolder { nullptr };
     JSGlobalObject* realmWhoseDatesAreWrittenInPlace { nullptr };
-    Modules* modulesWhoseFilesRunAheadOfLoader { nullptr };
+    Modules* modulesWithEagerLoads { nullptr };
     uintptr_t structureIDBase { 0 };
     Instance* onlyInstance { nullptr };
     uint64_t entriesWithSeveralInstances { 0 };
+    uint64_t movesOfEntriesInCollections { 0 };
     struct InstanceOfRun {
         uint64_t entries { 0 };
         void* entryFrame { nullptr };
@@ -133,22 +191,44 @@ public:
     };
     InstanceOfRun instanceOfRecentRun;
     CallFrame* classCalledWithoutNew { nullptr };
-    void* stackPointerOfExceptionTaker { nullptr };
+    void* exceptionCatcherStackPointer { nullptr };
     const void* returnAddressOfCallThatCollected { nullptr };
     void* stackPointerOfImport { nullptr };
-    CallFrame* frameOfImportThatAsksLoader { nullptr };
-    bool askerLoadsCompiledFilesAlone { false };
+    CallFrame* importFrameInLoader { nullptr };
+    bool requesterRejectsUncompiledCode { false };
     bool isResolvingImportCall { false };
+    bool isResolvingImportCallWithoutAttributes { false };
     bool requireRunsMocks { false };
     std::unique_ptr<ProgramIdentifiers> identifiers;
+    std::unique_ptr<IdentifierArena> identifiersOfLastSource;
+    size_t lengthOfSourcesSincePrune { 0 };
+    void didParseSource(VM&, size_t length, std::unique_ptr<IdentifierArena>&&);
     CountedFiles countedFiles;
+    struct ComputedFunctionName {
+        Weak<JSString> name;
+        unsigned hash { 0 };
+        unsigned length { 0 };
+        bool isOneOfSeveral { false };
+    };
+    UncheckedKeyHashMap<uint32_t, ComputedFunctionName, WTF::IntHash<uint32_t>, WTF::UnsignedWithZeroKeyHashTraits<uint32_t>> computedFunctionNames;
+    struct KeysComparedLastWithLongNames {
+        UncheckedKeyHashMap<const UniquedStringImpl*, const JSString*> byName;
+        uint64_t versionOfHeap { 0 };
+    };
+    KeysComparedLastWithLongNames keysComparedLastWithLongNames;
     UniqueArray<int> regExpMatchOutput;
+    size_t sizeOfRegExpMatchOutput { 0 };
+    static constexpr size_t sizeOfWordAroundSubject = 16;
+    std::span<Latin1Character> narrowSubject() LIFETIME_BOUND { return std::span { narrowSubjectWithWordsAround }.subspan<sizeOfWordAroundSubject, maxLengthCopiedAsLatin1>(); }
+    std::array<Latin1Character, sizeOfWordAroundSubject + maxLengthCopiedAsLatin1 + sizeOfWordAroundSubject> narrowSubjectWithWordsAround { };
     WriteBarrier<Structure> moduleRecordStructure;
     WriteBarrier<Structure> stringBuilderStorageStructure;
     WriteBarrier<Structure> poisonedCellStructure;
+    std::unique_ptr<PoisonedCellSites> poisonedCellSites;
     Lock instancesLock;
     Vector<Instance*, 1> instances;
     Vector<Instance*> instancesToDestroy;
+    Vector<JSGlobalObject*> realmsWithBorrowedTables;
     StructuresWithFastIndexing structuresWithFastIndexing;
     PolledInstances polledInstances;
     uint32_t momentOfLoads { 0 };

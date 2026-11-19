@@ -65,6 +65,15 @@ static Reference compareCharCodeForStringComparisons(Walker& walker, Opcode opco
     return compareInOrderForStringComparisons(walker, isEquality ? Opcode::StrictEq : opcode, codeUnit, other, numberIsOnLeft, origin);
 }
 
+static std::optional<int64_t> onlyPairOfTextForStringComparisons(Walker& walker, StringID text)
+{
+    Vector<char16_t> buffer;
+    StringView view = walker.types().viewOf(text, buffer);
+    if (view.length() != 2 || !U16_IS_LEAD(view[0]) || !U16_IS_TRAIL(view[1]))
+        return std::nullopt;
+    return static_cast<int64_t>(U16_GET_SUPPLEMENTARY(view[0], view[1]));
+}
+
 static Reference compareCharacterWithTextForStringComparisons(Walker& walker, Opcode opcode, Reference character, Reference codeUnit, StringID text, bool characterIsOnLeft, Origin origin)
 {
     bool mayBeUndefined = walker.types().at(walker.typeOf(rootForStrings(walker, character))).primitives & Primitive::Undefined;
@@ -72,11 +81,15 @@ static Reference compareCharacterWithTextForStringComparisons(Walker& walker, Op
     if (allEqualities.contains(opcode)) {
         if (unit)
             return buildOperatorForStrings(walker, Opcode::StrictEq, codeUnit, integerForStrings(walker, *unit), origin);
+        if (std::optional<int64_t> pair = onlyPairOfTextForStringComparisons(walker, text))
+            return buildOperatorForStrings(walker, Opcode::StrictEq, codeUnit, integerForStrings(walker, *pair), origin);
         if (!lengthOfTextForStrings(walker, text) && !mayBeUndefined)
             return buildOperatorForStrings(walker, Opcode::StrictEq, codeUnit, integerForStrings(walker, -1), origin);
         return booleanForStringComparisons(walker, false);
     }
     if (!unit)
+        return { };
+    if (*unit >= 0xD800 && walker.types().at(walker.typeOf(codeUnit)).integers.maximum > 0xFFFF)
         return { };
     bool holdsOfMinusOne = asksForGreaterOnLeftForStringComparisons(opcode) != characterIsOnLeft;
     if (holdsOfMinusOne && mayBeUndefined)
@@ -84,7 +97,7 @@ static Reference compareCharacterWithTextForStringComparisons(Walker& walker, Op
     return compareInOrderForStringComparisons(walker, opcode, codeUnit, integerForStrings(walker, *unit), characterIsOnLeft, origin);
 }
 
-static Reference compareByCodeUnitForStringComparisons(Walker& walker, Opcode opcode, Reference left, Reference right, Origin origin)
+static ALWAYS_INLINE Reference compareByCodeUnitForStringComparisons(Walker& walker, Opcode opcode, Reference left, Reference right, Origin origin)
 {
     for (uint32_t side = 0; side < 2; ++side) {
         Reference subject = side ? right : left;
@@ -94,7 +107,7 @@ static Reference compareByCodeUnitForStringComparisons(Walker& walker, Opcode op
                 return answer;
             continue;
         }
-        Reference codeUnit = codeUnitOfCharacterInSight(walker, subject);
+        Reference codeUnit = codePointOfCharacterInSight(walker, subject);
         if (!codeUnit)
             continue;
         PrimitiveKnownToFolding known = primitiveKnownForStrings(walker, other);
@@ -108,8 +121,8 @@ static Reference compareByCodeUnitForStringComparisons(Walker& walker, Opcode op
 
 static Reference compareCharactersForStringComparisons(Walker& walker, Reference left, Reference right, Origin origin)
 {
-    Reference leftUnit = codeUnitOfCharacterInSight(walker, left);
-    Reference rightUnit = leftUnit ? codeUnitOfCharacterInSight(walker, right) : Reference();
+    Reference leftUnit = codePointOfCharacterInSight(walker, left);
+    Reference rightUnit = leftUnit ? codePointOfCharacterInSight(walker, right) : Reference();
     if (!rightUnit)
         return { };
     TypeArena& types = walker.types();
@@ -144,7 +157,7 @@ static Reference buildTestForEmptyStringForStringComparisons(Walker& walker, Ref
     return passesForEmptyString && isNotEmpty ? buildNegationForStrings(walker, isNotEmpty, origin) : isNotEmpty;
 }
 
-static std::optional<int64_t> integerKnownForStringComparisons(const Walker& walker, Reference reference)
+static ALWAYS_INLINE std::optional<int64_t> integerKnownForStringComparisons(const Walker& walker, Reference reference)
 {
     Type type = walker.types().at(walker.typeOf(reference));
     if (!type.isInteger() || !type.integers.isSingleValue())
@@ -240,6 +253,85 @@ static Reference lengthSharedByComparisonsForStringComparisons(Walker& walker, c
     return isBuilt ? length[0] : Reference();
 }
 
+namespace {
+
+struct SubjectForStringComparisons {
+    ValueID value;
+    PropertyKeyID key;
+
+    explicit operator bool() const { return !!value; }
+    friend bool operator==(const SubjectForStringComparisons&, const SubjectForStringComparisons&) = default;
+};
+
+} // anonymous namespace
+
+static ValueID valueBeforeNarrowings(const BodyIndex& index, ValueID value)
+{
+    for (value = index.stripCasts(value); value && index.isParameter(value);) {
+        ValueID narrowed = index.valueNarrowedInto(value);
+        if (!narrowed)
+            break;
+        value = index.stripCasts(narrowed);
+    }
+    return value;
+}
+
+static SubjectForStringComparisons findSubjectComparedWithText(const BodyIndex& index, ValueID test)
+{
+    if (!test || index.isParameter(test) || (index.opcodeOf(test) != Opcode::StrictEq && index.opcodeOf(test) != Opcode::Eq))
+        return { };
+    BodyValue comparison = index.value(test);
+    for (uint32_t side = 0; side < 2; ++side) {
+        ValueID written = index.stripCasts(comparison.operand(1 - side));
+        if (!written || index.isParameter(written) || index.opcodeOf(written) != Opcode::String)
+            continue;
+        ValueID subject = valueBeforeNarrowings(index, comparison.operand(side));
+        if (subject && !index.isParameter(subject) && index.opcodeOf(subject) == Opcode::PropGet && !index.value(subject).isFreeName())
+            return { valueBeforeNarrowings(index, index.value(subject).objectOperand()), index.value(subject).key() };
+        return { subject, { } };
+    }
+    return { };
+}
+
+static ValueID branchConditionTest(const BodyIndex& index, BlockID block)
+{
+    BodyTerminator terminator = index.terminator(block);
+    if (terminator.kind() != TerminatorKind::Branch)
+        return { };
+    ValueID test = terminator.operand(0);
+    while (test && !index.isParameter(test) && (index.opcodeOf(test) == Opcode::LogicalNot || index.opcodeOf(test) == Opcode::ToBoolean))
+        test = index.value(test).operand(0);
+    return test;
+}
+
+static bool isInComparisonChain(const BodyIndex& index, ValueID comparison)
+{
+    static constexpr unsigned minComparisons = 3;
+    BlockID block = index.blockOf(comparison);
+    SubjectForStringComparisons subject = findSubjectComparedWithText(index, comparison);
+    if (!subject || branchConditionTest(index, block) != comparison)
+        return false;
+    unsigned comparisons = 1;
+    for (BlockID behind = block; comparisons < minComparisons;) {
+        std::optional<BodyIncomingEdge> edge = index.onlyIncomingEdge(behind);
+        if (!edge || !(findSubjectComparedWithText(index, branchConditionTest(index, edge->from)) == subject))
+            break;
+        behind = edge->from;
+        ++comparisons;
+    }
+    for (BlockID inFront = block; inFront && comparisons < minComparisons;) {
+        BlockID next;
+        for (BodyTarget target : index.terminator(inFront).targets()) {
+            std::optional<BodyIncomingEdge> edge = index.onlyIncomingEdge(target.block());
+            if (edge && edge->from == inFront && findSubjectComparedWithText(index, branchConditionTest(index, target.block())) == subject)
+                next = target.block();
+        }
+        comparisons += !!next;
+        inFront = next;
+    }
+    return comparisons >= minComparisons;
+}
+
 static bool compareSubjectWithTextForStringComparisons(Walker& walker, const BodyValue& value, uint32_t placeOfSubject, StringID text, std::optional<uint32_t> narrowed, Origin origin)
 {
     TypeArena& types = walker.types();
@@ -247,8 +339,12 @@ static bool compareSubjectWithTextForStringComparisons(Walker& walker, const Bod
     Type type = types.at(walker.typeOf(subject));
     bool narrowsNothing = narrowed && !*narrowed;
 
-    if (narrowsNothing && isProvenString(walker, walker.typeOf(subject))) {
-        if (std::optional<PieceOfString> piece = pieceInSight(walker, subject)) {
+    bool subjectIsString = isProvenString(walker, walker.typeOf(subject));
+    if (narrowsNothing && (subjectIsString || (value.opcode() == Opcode::StrictEq && lengthOfTextForStrings(walker, text)))) {
+        std::optional<PieceOfString> piece = pieceReadInLoop(walker, subject, origin);
+        if (!piece)
+            piece = pieceInSight(walker, subject, !subjectIsString);
+        if (piece) {
             if (Reference answer = comparePieceWithTextForStringComparisons(walker, *piece, text, origin)) {
                 walker.bind(value.id(), answer);
                 return true;
@@ -269,11 +365,12 @@ static bool compareSubjectWithTextForStringComparisons(Walker& walker, const Bod
         return false;
 
     Reference flat = isString ? flatStringInSight(walker, subject) : Reference();
-    Reference length = walker.isInLoop() ? lengthSharedByComparisonsForStringComparisons(walker, value, subject, text, origin) : Reference();
+    std::optional<uint32_t> loop = walker.innermostOpenLoop();
+    bool isAllocatedInIteration = loop && !walker.standsInFrontOfOpenLoop(*loop, subject);
+    bool sharesLength = walker.isInLoop() && !(isAllocatedInIteration && isInComparisonChain(walker.currentBodyIndex(), value.id()));
+    Reference length = sharesLength ? lengthSharedByComparisonsForStringComparisons(walker, value, subject, text, origin) : Reference();
     if (walker.isUnreachable())
         return true;
-    if (!flat && !length)
-        return false;
     if (length && !types.at(walker.typeOf(length)).integers.contains(lengthOfTextForStrings(walker, text))) {
         walker.bind(value.id(), booleanForStringComparisons(walker, false));
         return true;
@@ -287,6 +384,12 @@ static bool compareSubjectWithTextForStringComparisons(Walker& walker, const Bod
     if (flat)
         comparison.setFlatOperand(flat);
     comparison.setLiteral(text);
+    if (!flat && !length) {
+        if (!(walker.comparisonWithTextLeavesLoop(comparison)))
+            return false;
+        walker.count(StatisticID::StringLiteralComparisonsHoisted);
+        comparison.setHasLeftLoop(true);
+    }
     if (Reference answer = walker.build(WTF::move(comparison)))
         walker.bind(value.id(), answer);
     return true;
@@ -351,8 +454,8 @@ static bool secondRelationStandsBehindBranchForStringComparisons(Walker& walker,
     std::optional<BodyUser> user = index.onlyUser(value.id());
     if (!user || user->kind != BodyUseKind::TerminatorOperand || index.terminator(user->block).kind() != TerminatorKind::Branch)
         return false;
-    ValueID left = index.valueBehindCasts(value.operand(0));
-    ValueID right = index.valueBehindCasts(value.operand(1));
+    ValueID left = index.stripCasts(value.operand(0));
+    ValueID right = index.stripCasts(value.operand(1));
     for (BodyTarget target : index.terminator(user->block).targets()) {
         if (index.numberOfIncomingEdges(target.block()) != 1)
             continue;
@@ -361,8 +464,8 @@ static bool secondRelationStandsBehindBranchForStringComparisons(Walker& walker,
             ValueID id(place);
             if (index.isParameter(id) || !allRelations.contains(index.opcodeOf(id)))
                 continue;
-            ValueID first = index.valueBehindCasts(index.value(id).operand(0));
-            ValueID second = index.valueBehindCasts(index.value(id).operand(1));
+            ValueID first = index.stripCasts(index.value(id).operand(0));
+            ValueID second = index.stripCasts(index.value(id).operand(1));
             if ((first == left && second == right) || (first == right && second == left))
                 return true;
         }
@@ -404,7 +507,7 @@ bool buildRelationOnStrings(Walker& walker, const BodyValue& value, const Inputs
         order.setStringOperand(placeOfText ? left : right);
         order.setCodeUnit(*unit);
         if (Reference built = walker.build(WTF::move(order)))
-            walker.bind(value.id(), buildOperatorForStrings(walker, placeOfText ? opcode : relationWithSidesSwappedForStrings(opcode), built, zero, origin));
+            walker.bind(value.id(), buildOperatorForStrings(walker, placeOfText ? opcode : relationWithOperandsSwappedForStrings(opcode), built, zero, origin));
         return true;
     }
 
@@ -420,7 +523,7 @@ bool buildRelationOnStrings(Walker& walker, const BodyValue& value, const Inputs
         if (!order)
             return true;
     }
-    walker.bind(value.id(), buildOperatorForStrings(walker, isSwapped ? relationWithSidesSwappedForStrings(opcode) : opcode, order, zero, origin));
+    walker.bind(value.id(), buildOperatorForStrings(walker, isSwapped ? relationWithOperandsSwappedForStrings(opcode) : opcode, order, zero, origin));
     return true;
 }
 

@@ -29,7 +29,7 @@ enum class TraceVisibility : uint8_t { Visible, VisibleOnlyOnTop, Hidden };
 enum class StackTraceBuiltinKind : uint8_t { None, JSBuiltin, JSBuiltinConstructor, HostFunction };
 
 inline constexpr LineColumn startOfBuiltinFunction { 1, 11 };
-inline constexpr ASCIILiteral moduleOfCompilerHelpers = "bun:wrap"_s;
+inline constexpr ASCIILiteral compilerHelpersModule = "bun:wrap"_s;
 static_assert(sizeof("function (") == startOfBuiltinFunction.column, "JSC reports every frame of a built-in written in JavaScript at the start of its parameters");
 
 struct FunctionTraceData;
@@ -44,8 +44,8 @@ public:
 
     FunctionID function() const { return m_function; }
     JS_EXPORT_PRIVATE String name(VM&) const;
-    JS_EXPORT_PRIVATE String nameInFrames(VM&, JSCell* callee = nullptr, bool calleeLiesInFrame = false) const;
-    String calculatedDisplayName(VM&, JSCell* callee, bool calleeLiesInFrame) const;
+    JS_EXPORT_PRIVATE String stackTraceName(VM&) const;
+    String calculatedDisplayName(VM&) const;
     JS_EXPORT_PRIVATE CodeType codeType() const;
     JS_EXPORT_PRIVATE bool isStrict() const;
     JS_EXPORT_PRIVATE bool isConstructor() const;
@@ -54,6 +54,7 @@ public:
     JS_EXPORT_PRIVATE bool isAsync() const;
     JS_EXPORT_PRIVATE bool isNamedByOwner() const;
     JS_EXPORT_PRIVATE bool isInRuntimeModule() const;
+    JS_EXPORT_PRIVATE bool isOfProgram() const;
     JS_EXPORT_PRIVATE TraceVisibility visibility() const;
     JS_EXPORT_PRIVATE FunctionID sourceFunction() const;
     JS_EXPORT_PRIVATE bool rejectsOnThrow() const;
@@ -64,6 +65,7 @@ public:
 
 private:
     bool isOfCalledBuiltin() const;
+    bool hasHiddenName() const;
 
     FunctionID m_function;
     const FunctionTraceData* m_record;

@@ -60,14 +60,14 @@ const Image** Image::addressOfCurrentOfThread()
     return &t_currentImage;
 }
 
-void Image::useNoneOnThisThread()
+void Image::disableOnThisThread()
 {
     t_currentImage = nullptr;
     t_usesNoImage = true;
     s_current.store(differsByThread(), std::memory_order_release);
 }
 
-bool Image::usesNoneOnThisThread()
+bool Image::isDisabledOnThisThread()
 {
     return t_usesNoImage;
 }
@@ -165,13 +165,15 @@ static bool hasWellFormedTables(const ImageHeader& header, std::span<const uint8
     }
 
     uint64_t numberOfFunctions = header.counts.functions;
-    if (numberOfElements(ImageSection::Functions) != numberOfFunctions
-        || numberOfElements(ImageSection::FunctionStarts) != numberOfFunctions + 1)
+    std::span functions { reinterpret_cast<const uint32_t*>(bytes.data() + rangeOf(ImageSection::Functions).offset), static_cast<size_t>(numberOfElements(ImageSection::Functions)) };
+    if (rangeOf(ImageSection::SideTables).size < (numberOfFunctions ? SideTableCodes::sizeOfPlaces : 0)
+        || !ImageFunctions::hasSize(functions, numberOfFunctions)
+        || numberOfElements(ImageSection::FunctionStarts) < FunctionStarts::numberOfWordsWithoutLists(numberOfFunctions))
         return false;
     if (code.functionsEnd > header.codeSize || code.codeGranuleShift >= 32)
         return false;
     uint64_t granuleSize = 1ull << code.codeGranuleShift;
-    if (numberOfElements(ImageSection::CodeGranules) < (code.functionsEnd + granuleSize - 1) >> code.codeGranuleShift)
+    if (numberOfElements(ImageSection::CodeGranules) < ((code.functionsEnd + granuleSize - 1) >> code.codeGranuleShift) + 1)
         return false;
 
     std::span copies { reinterpret_cast<const uint32_t*>(bytes.data() + rangeOf(ImageSection::SharedCodeCopies).offset), static_cast<size_t>(numberOfElements(ImageSection::SharedCodeCopies)) };
@@ -182,12 +184,15 @@ static bool hasWellFormedTables(const ImageHeader& header, std::span<const uint8
         endOfPreviousCopy = static_cast<uint64_t>(copy) + code.sharedCodeSize;
     }
 
+    uint64_t endOfConstants = endOfCodePart(code.constantsOffset, code.constantsSize);
+    bool hasValidConstants = header.executableSize <= code.constantsOffset
+        || (!code.ffiCodeSize && code.ffiCodeOffset <= code.constantsOffset && endOfConstants <= header.executableSize && code.regExpCodeOffset == header.executableSize);
     bool hasValidCodeParts = code.functionsEnd <= code.webAssemblyCodeOffset
         && endOfCodePart(code.webAssemblyCodeOffset, code.webAssemblyCodeSize) <= code.ffiCodeOffset
         && endOfCodePart(code.ffiCodeOffset, code.ffiCodeSize) <= code.regExpCodeOffset
         && code.regExpCodeOffset <= header.executableSize
-        && header.executableSize <= code.constantsOffset
-        && endOfCodePart(code.constantsOffset, code.constantsSize) <= header.codeSize
+        && hasValidConstants
+        && endOfConstants <= header.codeSize
         && (!code.ffiCodeSize || !(code.ffiCodeOffset % imagePageSize));
     if (!hasValidCodeParts || rangeOf(ImageSection::ProgramTables).size < sizeof(ProgramTables))
         return false;
@@ -205,13 +210,15 @@ static bool hasWellFormedTables(const ImageHeader& header, std::span<const uint8
         && closures.omittedWordCount <= closures.first
         && closures.first <= closures.end
         && numberOfElements(ImageSection::ClosureWords) == closures.end - closures.omittedWordCount
-        && numberOfElements(ImageSection::StringConstants) == 2 * static_cast<uint64_t>(tables.instanceSizes.numberOfStringCells)
+        && header.numbers.numberOfPlacedConstants <= tables.instanceSizes.numberOfStringCells
+        && numberOfElements(ImageSection::StringConstants) == tables.instanceSizes.numberOfStringCells + header.numbers.numberOfPlacedConstants
         && numberOfElements(ImageSection::NamesOfSites) == tables.instanceSizes.numberOfSiteCaches
         && tables.globalBindings().size() == tables.instanceSizes.numberOfGlobalBindings
         && tables.instanceSizes.sizeOfMethodTable <= rangeOf(ImageSection::MethodTable).size
         && (!tables.instanceSizes.sizeOfMethodTable || !(rangeOf(ImageSection::MethodTable).offset % imagePageSize))
         && header.numbers.endOfIdentifiers <= header.numbers.endOfStringHeaders
-        && numberOfElements(ImageSection::Identifiers) == header.numbers.endOfIdentifiers
+        && ImageOtherIdentifier::isSizeOfSection(numberOfElements(ImageSection::Identifiers), header.numbers.endOfIdentifiers)
+        && numberOfElements(ImageSection::Strings) >= header.numbers.numberOfStringWords
         && numberOfElements(ImageSection::StringHeaders) >= header.numbers.endOfStringHeaders;
 }
 
@@ -284,8 +291,8 @@ std::optional<OptionSet<ImageFlag>> Image::flags(std::span<const uint8_t> bytes)
 Image::Image(std::span<const uint8_t> bytes, const uint8_t* code)
     : m_bytes(bytes)
     , m_code(code)
-    , m_functions(section<ImageFunction>(ImageSection::Functions).data())
-    , m_functionStarts(section<uint32_t>(ImageSection::FunctionStarts).data())
+    , m_functions(section<uint32_t>(ImageSection::Functions).data(), header().counts.functions)
+    , m_functionStarts(section<uint32_t>(ImageSection::FunctionStarts).data(), header().counts.functions)
     , m_codeGranules(section<uint32_t>(ImageSection::CodeGranules).data())
     , m_text(*this)
 {
@@ -320,6 +327,8 @@ void Image::publish(std::unique_ptr<Image>&& unpublishedImage)
 std::span<const uint8_t> Image::ffiDirectory() const
 {
     const ImageCodeRanges& ranges = header().code;
+    if (!ranges.ffiCodeSize)
+        return { };
     uint64_t offset = WTF::roundUpToMultipleOf<imageFFIDirectoryAlignment>(endOfCodePart(ranges.constantsOffset, ranges.constantsSize));
     if (offset > header().codeSize)
         return { };
@@ -362,12 +371,11 @@ CodeLocation Image::locate(const void* pc) const
             return { CodeKind::Stub, isReturnSite ? site->kind : StubFrameKind::Plain, 0, inSharedCode };
         }
     }
-    const uint32_t* starts = m_functionStarts;
-    uint32_t index = m_codeGranules[offset >> header.code.codeGranuleShift];
-    if (offset < starts[index])
+    const FunctionStarts& starts = m_functionStarts;
+    if (offset < starts[0])
         return { };
-    while (starts[index + 1] <= offset)
-        ++index;
+    const uint32_t* granule = m_codeGranules + (offset >> header.code.codeGranuleShift);
+    uint32_t index = starts.find(offset, granule[0], granule[1]);
     return { CodeKind::Function, StubFrameKind::Plain, index, offset - starts[index] };
 }
 
@@ -404,17 +412,60 @@ bool Image::usesCallConvention(uint32_t offsetInSharedCode) const
     });
 }
 
+SideTableReader Image::sideTable(uint32_t function) const
+{
+    RELEASE_ASSERT(function < header().counts.functions);
+    std::span<const uint8_t> sideTables = section<uint8_t>(ImageSection::SideTables);
+    return SideTableReader(sideTables, sideTables.data() + m_functions.sideTableOf(function));
+}
+
+ImageFunction Image::function(uint32_t function) const
+{
+    return { m_functions.sideTableOf(function), sideTable(function).next(SideTableByte::Flags) };
+}
+
+const ImageFrame& Image::frameOf(uint32_t function) const
+{
+    static constexpr ImageFrame noFrame { 0, 0, 0 };
+    SideTableReader reader = sideTable(function);
+    reader.next(SideTableByte::Flags);
+    SideTableFrame frame = SideTableFrame::read(reader, 0);
+    return frame.hasFrame ? section<ImageFrame>(ImageSection::Frames)[frame.number] : noFrame;
+}
+
 bool Image::hasFrameAt(uint32_t function, uint32_t offset) const
 {
-    return SideTableParts::read(this->function(function), section<uint8_t>(ImageSection::SideTables).data()).hasFrameAt(offset);
+    SideTableReader reader = sideTable(function);
+    reader.next(SideTableByte::Flags);
+    return SideTableFrame::read(reader, offset).coversOffset;
+}
+
+static uint32_t offsetBeforeReturn(uint32_t returnOffset)
+{
+    return returnOffset ? returnOffset - 1 : 0;
 }
 
 bool Image::hasFrameAtReturnOffset(uint32_t function, uint32_t returnOffset) const
 {
-    return hasFrameAtReturnOffset(function, SideTableParts::read(this->function(function), section<uint8_t>(ImageSection::SideTables).data()), returnOffset);
+    SideTableReader reader = sideTable(function);
+    reader.next(SideTableByte::Flags);
+    return hasFrameAtReturnOffset(function, SideTableFrame::read(reader, offsetBeforeReturn(returnOffset)), returnOffset);
 }
 
-bool Image::hasFrameAtReturnOffset(uint32_t function, const SideTableParts& parts, uint32_t returnOffset) const
+ImageFrame Image::frameAtReturnOffset(uint32_t function, uint32_t returnOffset) const
+{
+    ImageFrame frame { };
+    SideTableReader reader = sideTable(function);
+    auto flags = OptionSet<ImageFunctionFlag>::fromRaw(reader.next(SideTableByte::Flags));
+    SideTableFrame frameInTable = SideTableFrame::read(reader, offsetBeforeReturn(returnOffset));
+    if (hasFrameAtReturnOffset(function, frameInTable, returnOffset) && frameInTable.hasFrame)
+        frame = section<ImageFrame>(ImageSection::Frames)[frameInTable.number];
+    if (flags.contains(ImageFunctionFlag::SpillsArgumentRegisters))
+        frame.calleeSavesStart |= ImageFrame::liesBelowSpilledArgumentsBit;
+    return frame;
+}
+
+bool Image::hasFrameAtReturnOffset(uint32_t function, const SideTableFrame& frame, uint32_t returnOffset) const
 {
     if (!returnOffset)
         return false;
@@ -426,7 +477,7 @@ bool Image::hasFrameAtReturnOffset(uint32_t function, const SideTableParts& part
                 return fault->hasFrame;
         }
     }
-    return parts.hasFrameAt(returnOffset - 1);
+    return frame.coversOffset;
 }
 
 static std::span<const uint8_t> characterBytesOf(const StringImpl& string) { return string.is8Bit() ? asBytes(string.span8()) : asBytes(string.span16()); }
@@ -461,7 +512,7 @@ std::optional<uint32_t> imageCodeOffset(const void* address)
     return static_cast<uint32_t>(offset);
 }
 
-bool isInStubOfImage(const void* address)
+bool isInImageStub(const void* address)
 {
     const Image* image = imageWithCodeAt(address);
     return image && image->locate(address).kind == CodeKind::Stub;

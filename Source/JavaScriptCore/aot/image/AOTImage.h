@@ -22,6 +22,7 @@
 #include "AOTVector.h"
 #include "AOTWire.h"
 #include "JSExportMacros.h"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
@@ -73,8 +74,9 @@ struct CodeLocation {
 
 struct ReturnSiteInfo {
     std::optional<CallSiteRecord> site;
-    std::optional<HandlerRecord> handler;
     ImageFrame frame { };
+    bool mayHaveHandler { false };
+    bool hasConstructedCallees { false };
 };
 
 class Image {
@@ -96,8 +98,8 @@ public:
     static bool isRegistered() { return !!s_current.load(std::memory_order_acquire); }
     JS_EXPORT_PRIVATE static void setCurrentOfThread(const Image*);
     static const Image** addressOfCurrentOfThread();
-    JS_EXPORT_PRIVATE static void useNoneOnThisThread();
-    static bool usesNoneOnThisThread();
+    JS_EXPORT_PRIVATE static void disableOnThisThread();
+    static bool isDisabledOnThisThread();
     JS_EXPORT_PRIVATE static const Image* find(std::span<const uint8_t> bytes);
     static const Image* findByCodeAddress(const void*);
     static void forEachPublishedImage(const ScopedLambda<IterationStatus(const Image&)>&);
@@ -119,6 +121,7 @@ public:
     };
     const std::optional<PlaceInExecutable>& placeInExecutable() const { return m_placeInExecutable; }
     void setPlaceInExecutable(const PlaceInExecutable& place) { m_placeInExecutable = place; }
+
     const std::optional<PositionInFile>& positionOfCodeInFile() const { return m_positionOfCodeInFile; }
     void setPositionOfCodeInFile(const std::optional<PositionInFile>& position) { m_positionOfCodeInFile = position; }
     unsigned number() const { return m_number; }
@@ -127,7 +130,7 @@ public:
     std::span<const uint8_t> bytes() const { return m_bytes; }
     template<typename T> std::span<const T> section(ImageSection) const;
     std::span<const uint8_t> code() const { return { m_code, static_cast<size_t>(header().codeSize) }; }
-    std::span<const uint8_t> regExpCode() const { return code().subspan(header().code.regExpCodeOffset, header().code.constantsOffset - header().code.regExpCodeOffset); }
+    std::span<const uint8_t> regExpCode() const { return code().subspan(header().code.regExpCodeOffset, std::max(header().code.constantsOffset, header().code.regExpCodeOffset) - header().code.regExpCodeOffset); }
     std::span<const uint8_t> webAssemblyCode() const { return code().subspan(header().code.webAssemblyCodeOffset, header().code.webAssemblyCodeSize); }
     std::span<const uint8_t> ffiCode() const { return code().subspan(header().code.ffiCodeOffset, header().code.ffiCodeSize); }
     std::span<const uint8_t> ffiDirectory() const;
@@ -135,28 +138,33 @@ public:
     const ImageText& text() const { return m_text; }
     ImageText& text() { return m_text; }
     bool isObfuscated() const { return header().has(ImageFlag::IsObfuscated); }
+    bool recordsOrder() const { return header().has(ImageFlag::RecordsOrder); }
     bool admitsUnknownJavaScript() const { return header().has(ImageFlag::AdmitsUnknownJavaScript); }
     bool loadsModulesByName() const { return header().has(ImageFlag::LoadsModulesByName); }
-    bool admitsLibraryText() const { return header().has(ImageFlag::AdmitsLibraryText); }
+    bool allowsLibrarySource() const { return header().has(ImageFlag::AllowsLibrarySource); }
     bool isBuiltWithLibrary() const { return header().has(ImageFlag::IsBuiltWithLibrary); }
     bool refusesOriginalsBesideMocks() const { return header().has(ImageFlag::RefusesOriginalsBesideMocks); }
-    bool loadsCodeOutsideImage() const { return !runsOnlyCodeOfImage && header().has(ImageFlag::LoadsCodeOutsideImage); }
+    bool loadsCodeOutsideImage() const { return !isHardenedBuild && header().has(ImageFlag::LoadsCodeOutsideImage); }
     bool showsWaysBetweenModuleObjects() const { return header().has(ImageFlag::ShowsWaysBetweenModuleObjects); }
-    bool storesPathOfMainModule() const { return header().has(ImageFlag::StoresPathOfMainModule); }
+    bool setsMainModulePath() const { return header().has(ImageFlag::SetsMainModulePath); }
     bool runsEntryPointsAgain() const { return header().has(ImageFlag::RunsEntryPointsAgain); }
+    bool hasReloadableModules() const { return header().has(ImageFlag::HasReloadableModules); }
+    bool letsGlobalObjectGo() const { return header().has(ImageFlag::LetsGlobalObjectGo); }
     bool showsEntriesOfRequireCache() const { return header().has(ImageFlag::ShowsEntriesOfRequireCache); }
 
     JS_EXPORT_PRIVATE CodeLocation locate(const void* pc) const;
 
-    const ImageFunction& function(uint32_t function) const;
+    ImageFunction function(uint32_t function) const;
+    const FunctionStarts& functionStarts() const LIFETIME_BOUND { return m_functionStarts; }
     const uint8_t* codeOf(uint32_t function) const;
     size_t sizeOfCodeOf(uint32_t function) const;
     const ImageFrame& frameOf(uint32_t function) const;
+    SideTableReader sideTable(uint32_t function) const;
     FunctionID rootFunctionOf(uint32_t function) const;
     uint64_t closureWord(FunctionID) const;
 
     JS_EXPORT_PRIVATE const void* stubAddress(StubKey) const;
-    enum class FrequentStub : uint8_t { EnterClosure, EnterSlimClosure, EnterModuleBody, EnterClosureForConstruct, EnterHandlerOfJob, EnterSavedFrame, RejectInFrame, RejectInFrameBelowSpilledArguments };
+    enum class FrequentStub : uint8_t { EnterClosure, EnterSlimClosure, EnterModuleBody, EnterClosureForConstruct, EnterHandlerOfJob, EnterSavedFrame, RejectInFrame, RejectInFrameBelowSpilledArguments, RejectAwaitedCall };
     template<typename Functor> void* frequentStub(FrequentStub, const Functor&) const;
     JS_EXPORT_PRIVATE std::span<const StubAddressInImage> stubAddressesOf(StubFamily) const;
     std::span<const StubAddressInImage> stubAddressesSortedWith(StubFamily) const;
@@ -174,13 +182,15 @@ public:
     std::optional<uint32_t> imageFunctionFromClosureWord(FunctionID) const;
     std::optional<uint32_t> imageFunctionOf(FunctionID) const;
     std::span<const uint32_t> frameMapWords(uint32_t function) const;
+    std::span<const uint32_t> frameMapWordsAt(const void* returnAddress) const;
     bool hasFrameAt(uint32_t function, uint32_t offset) const;
     bool hasFrameAtReturnOffset(uint32_t function, uint32_t returnOffset) const;
-    bool hasFrameAtReturnOffset(uint32_t function, const SideTableParts&, uint32_t returnOffset) const;
+    bool hasFrameAtReturnOffset(uint32_t function, const SideTableFrame&, uint32_t returnOffset) const;
     ImageFrame frameAtReturnOffset(uint32_t function, uint32_t returnOffset) const;
     ReturnSiteInfo returnSiteInfoAt(uint32_t function, uint32_t returnOffset) const;
 
     std::optional<CallSiteRecord> callSiteAt(uint32_t function, uint32_t returnOffset) const;
+    JS_EXPORT_PRIVATE std::optional<HandlerRecord> handlerAt(uint32_t function, CallSiteIndex) const;
     std::optional<FunctionID> constructedCalleeAt(uint32_t function, CallSiteIndex) const;
     std::optional<PrologueCheck> prologueCheckAt(const void* returnAddress) const;
 
@@ -188,7 +198,7 @@ public:
 
     std::optional<SourcePosition> positionOf(uint32_t function, CallSiteIndex) const;
 
-    bool mayHoldModulePathStartingWith(StringView start) const;
+    bool mayContainModulePathWithPrefix(StringView start) const;
 
 private:
     Image(std::span<const uint8_t> bytes, const uint8_t* code);
@@ -199,17 +209,19 @@ private:
     JS_EXPORT_PRIVATE static std::atomic<const Image*> s_current;
     static std::atomic<const Image*> s_lastPublished;
 
-    mutable std::array<std::atomic<void*>, 8> m_frequentStubs { };
+    mutable std::array<std::atomic<void*>, 9> m_frequentStubs { };
     unsigned m_number { 0 };
     const Image* m_publishedBefore { nullptr };
     std::optional<PlaceInExecutable> m_placeInExecutable;
     std::optional<PositionInFile> m_positionOfCodeInFile;
     std::span<const uint8_t> m_bytes;
     const uint8_t* m_code;
-    const ImageFunction* m_functions;
-    const uint32_t* m_functionStarts;
+    ImageFunctions m_functions;
+    FunctionStarts m_functionStarts;
     const uint32_t* m_codeGranules;
     ImageText m_text;
+    static constexpr unsigned frameMapCacheBits = 8;
+    mutable std::array<std::atomic<uint64_t>, 1u << frameMapCacheBits> m_frameMapCache { };
     mutable std::once_flag m_didSortFunctionsByID;
     mutable Vector<uint32_t> m_functionsByID;
 };
@@ -221,12 +233,6 @@ std::span<const T> Image::section(ImageSection section) const
     return { reinterpret_cast<const T*>(m_bytes.data() + range.offset), range.size / sizeof(T) };
 }
 
-inline const ImageFunction& Image::function(uint32_t function) const
-{
-    RELEASE_ASSERT(function < header().counts.functions);
-    return m_functions[function];
-}
-
 inline const uint8_t* Image::codeOf(uint32_t function) const
 {
     RELEASE_ASSERT(function < header().counts.functions);
@@ -236,32 +242,14 @@ inline const uint8_t* Image::codeOf(uint32_t function) const
 inline size_t Image::sizeOfCodeOf(uint32_t function) const
 {
     RELEASE_ASSERT(function < header().counts.functions);
-    const uint32_t* starts = m_functionStarts;
+    const FunctionStarts& starts = m_functionStarts;
     return (function + 1 < header().counts.functions ? starts[function + 1] : header().code.functionsEnd) - starts[function];
-}
-
-inline const ImageFrame& Image::frameOf(uint32_t function) const
-{
-    static constexpr ImageFrame noFrame { 0, 0, 0 };
-    SideTableParts parts = SideTableParts::read(this->function(function), section<uint8_t>(ImageSection::SideTables).data());
-    if (parts.frameRanges.empty())
-        return noFrame;
-    return section<ImageFrame>(ImageSection::Frames)[parts.frame];
-}
-
-inline ImageFrame Image::frameAtReturnOffset(uint32_t function, uint32_t returnOffset) const
-{
-    ImageFrame frame { };
-    if (hasFrameAtReturnOffset(function, returnOffset))
-        frame = frameOf(function);
-    if (this->function(function).has(ImageFunctionFlag::SpillsArgumentRegisters))
-        frame.calleeSavesStart |= ImageFrame::liesBelowSpilledArgumentsBit;
-    return frame;
 }
 
 inline FunctionID Image::rootFunctionOf(uint32_t function) const
 {
-    return FunctionID(this->function(function).function());
+    RELEASE_ASSERT(function < header().counts.functions);
+    return FunctionID(m_functions.numberOf(function));
 }
 
 inline uint64_t Image::closureWord(FunctionID function) const
@@ -313,7 +301,7 @@ JS_EXPORT_PRIVATE bool isCompiledCodePC(const void*);
 JS_EXPORT_PRIVATE std::optional<uint32_t> imageCodeOffset(const void* address);
 JS_EXPORT_PRIVATE uintptr_t imageCodeStart();
 JS_EXPORT_PRIVATE std::optional<ImageFrame> imageFrameAtReturnAddress(const void* returnAddress);
-JS_EXPORT_PRIVATE bool isInStubOfImage(const void* address);
+JS_EXPORT_PRIVATE bool isInImageStub(const void* address);
 
 } } // namespace JSC::AOT
 

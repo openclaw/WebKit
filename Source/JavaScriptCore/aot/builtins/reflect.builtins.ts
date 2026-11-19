@@ -145,7 +145,7 @@ export default b.declarations(
       ownKeys: {
         ...operandCodeEffects,
         args: { target: b.object },
-        returns: b.instance("Array").holding({ element: b.union(b.string, b.symbol) }).fresh.dense,
+        returns: b.instance("Array").exactly.holding({ element: b.union(b.string, b.symbol) }).fresh.dense,
         uses: { target: [b.runs("OwnKeys")] },
         reads: ownProperties,
         writes: ["ShapeWords", "NamedProperties", ...memberGuards],
@@ -170,7 +170,7 @@ export default b.declarations(
           uses: { target: [b.storedByKey(key, b.operand("value"))], value: b.inspected },
           reads: inheritedProperties,
           writes: memberGuards,
-          implementation: b.hostCall,
+          implementation: b.inline("ReflectSet", { otherwise: b.hostCall }),
         },
         {
           ...operandCodeEffects,
@@ -194,7 +194,7 @@ export default b.declarations(
             value: [b.everything],
             receiver: [b.everything, b.definesName(key, b.operand("value"))],
           },
-          implementation: b.hostCall,
+          implementation: b.inline("ReflectSet", { otherwise: b.hostCall }),
         },
       ],
       setPrototypeOf: {

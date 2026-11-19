@@ -5,6 +5,7 @@
 
 #include "config.h"
 #include "AOTMachineAllocation.h"
+#include "AOTInliningAcrossFiles.h"
 
 #if ENABLE(AOT)
 
@@ -204,7 +205,7 @@ ALWAYS_INLINE void ParallelMoveResolver::groupMovesOfSmallSetBySource()
     uint32_t numberOfMovesIntoRegisters = 0;
     for (uint32_t index = 0; index < numberOfMoves; ++index) {
         const PendingMove& move = moves[index];
-        ASSERT(move.width == Width32 || move.width == Width64);
+        ASSERT(move.width >= Width32);
         ASSERT(!move.destination.isRegister() || bankOf(move.destination.reg()) == bankOf(move.value->type()));
         ASSERT(!move.source.isRegister() || bankOf(move.source.reg()) == bankOf(move.value->type()));
         ASSERT(!move.source.isImmediate() || move.value->hasNoPosition());
@@ -284,7 +285,7 @@ NEVER_INLINE void ParallelMoveResolver::groupMovesBySource()
     std::span<Reader> readers = m_arena.createSpan<Reader>(numberOfMoves);
     for (uint32_t index = 0; index < numberOfMoves; ++index) {
         const PendingMove& move = m_moves[index];
-        ASSERT(move.width == Width32 || move.width == Width64);
+        ASSERT(move.width == Width32 || move.width == Width64 || move.width == Width128);
         ASSERT(!move.destination.isRegister() || bankOf(move.destination.reg()) == bankOf(move.value->type()));
         ASSERT(!move.source.isRegister() || bankOf(move.source.reg()) == bankOf(move.value->type()));
         ASSERT(!move.source.isImmediate() || move.value->hasNoPosition());
@@ -370,7 +371,7 @@ ALWAYS_INLINE void ParallelMoveResolver::perform(uint32_t moveIndex)
         release(source);
 }
 
-ALWAYS_INLINE void ParallelMoveResolver::release(Source& source)
+ALWAYS_INLINE_INTO_OTHER_FILES void ParallelMoveResolver::release(Source& source)
 {
     if (source.isReleased)
         return;
@@ -400,6 +401,7 @@ ALWAYS_INLINE void ParallelMoveResolver::breakCycle(uint32_t first)
 {
     uint32_t last = first;
     uint32_t memoryToMemoryMove = none;
+    uint32_t numberOfMoves = 1;
     bool passesThroughMemory = false;
     for (;;) {
         const PendingMove& move = moveAt(last);
@@ -413,9 +415,12 @@ ALWAYS_INLINE void ParallelMoveResolver::breakCycle(uint32_t first)
         if (source.writer == first)
             break;
         last = source.writer;
+        ++numberOfMoves;
     }
 
-    if (!passesThroughMemory) {
+    bool swapsInOneInstruction = isX86_64() && !passesThroughMemory && bankOf(moveAt(first).destination.reg()) == Bank::GP;
+    bool rotatesThroughScratch = !swapsInOneInstruction && numberOfMoves > 2;
+    if (!passesThroughMemory && !rotatesThroughScratch) {
         const PendingMove& lastMove = moveAt(last);
         for (uint32_t index = first; index != last; index = sourceOf(index).writer) {
             const PendingMove& move = moveAt(index);
@@ -442,7 +447,7 @@ ALWAYS_INLINE void ParallelMoveResolver::breakCycle(uint32_t first)
     ASSERT(m_states[first].isDone && m_states[last].isDone);
 }
 
-ALWAYS_INLINE Step& ParallelMoveResolver::append(StepKind kind, const PendingMove& move, Location destination, Location source)
+ALWAYS_INLINE_INTO_OTHER_FILES Step& ParallelMoveResolver::append(StepKind kind, const PendingMove& move, Location destination, Location source)
 {
     RegisterMask written = destination.isRegister() ? maskOf(destination.reg()) : 0;
     switch (kind) {
@@ -457,7 +462,6 @@ ALWAYS_INLINE Step& ParallelMoveResolver::append(StepKind kind, const PendingMov
         written |= maskOf(Reg(scratchGPR)) | maskOf(Reg(scratchFPR));
         break;
     case StepKind::Execute:
-    case StepKind::ClearSpill:
     case StepKind::KeepPointer:
         RELEASE_ASSERT_NOT_REACHED();
     }
@@ -479,7 +483,7 @@ static NEVER_INLINE std::span<PendingMove> removeTrivialParallelMoves(std::span<
         if (!move.source) {
             Block* owner = move.value->owner();
             RELEASE_ASSERT(owner);
-            owner->procedure().fail(FailureKind::RegisterLacksItsValue, move.value);
+            owner->procedure().fail(FailureKind::WrongValueInRegister, move.value);
             continue;
         }
         if (move.source != move.destination)
@@ -646,8 +650,7 @@ static NEVER_INLINE void resolveTwoParallelMoves(Arena& arena, std::span<Pending
         return;
     }
 
-    ASSERT(first.width == Width32 || first.width == Width64);
-    ASSERT(second.width == Width32 || second.width == Width64);
+    ASSERT(first.width >= Width32 && second.width >= Width32);
     ASSERT(bankOf(first.destination.reg()) == bankOf(first.value->type()) && bankOf(first.source.reg()) == bankOf(first.value->type()));
     ASSERT(bankOf(second.destination.reg()) == bankOf(second.value->type()) && bankOf(second.source.reg()) == bankOf(second.value->type()));
     const PendingMove& lower = destinationOfSecond < destinationOfFirst ? second : first;

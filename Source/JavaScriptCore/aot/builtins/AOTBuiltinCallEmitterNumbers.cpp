@@ -10,7 +10,9 @@
 
 #include "AOTConstantEmitter.h"
 #include "AOTConversionEmitter.h"
+#include "AOTOperatorEmitter.h"
 #include "AOTIRProgram.h"
+#include "AOTThrowEmitter.h"
 #include "AOTTypeTable.h"
 #include "B3ComputeDivisionMagic.h"
 #include <algorithm>
@@ -76,10 +78,14 @@ Integer BuiltinCallEmitter::divide(Integer dividend, Range dividends, Integer di
             quotient = Integer(m_out.aShr(quotient.value(), m_out.constInt32(magic.shift)));
         if (dividends.minimum >= 0 && divisors.minimum > 0)
             return quotient;
+        if (divisors.minimum > 0)
+            return sub(quotient, Integer(m_out.aShr(dividend.value(), m_out.constInt32(63))));
         return add(quotient, Integer(m_out.lShr(quotient.value(), 63)));
     }
     return Integer(m_out.div(dividend.value(), divisor.value()));
 }
+
+static constexpr Range dividendsWithSignFolded { -(1ll << 55), 1ll << 55 };
 
 Integer BuiltinCallEmitter::roundedQuotient(QuotientRounding rounding, Integer dividend, Range dividends, Integer divisor, Range divisors)
 {
@@ -98,6 +104,15 @@ Integer BuiltinCallEmitter::roundedQuotient(QuotientRounding rounding, Integer d
         if (roundsUp)
             dividend = add(dividend, integer(divisors.minimum - 1));
         return Integer(m_out.aShr(dividend.value(), m_out.constInt32(WTF::fastLog2(static_cast<uint64_t>(divisors.minimum)))));
+    }
+    if (isDivisorConstant && divisors.minimum > 1 && !isNeverNegative && rounding != QuotientRounding::Truncate && dividends.isSubsetOf(dividendsWithSignFolded)) {
+        if (roundsUp) {
+            dividend = add(dividend, integer(divisors.minimum - 1));
+            dividends = { dividends.minimum + divisors.minimum - 1, dividends.maximum + divisors.minimum - 1 };
+        }
+        Integer sign(m_out.aShr(dividend.value(), m_out.constInt32(63)));
+        Range magnitudes { 0, std::max(dividends.maximum, -(dividends.minimum + 1)) };
+        return bitXor(divide(bitXor(dividend, sign), magnitudes, divisor, divisors), sign);
     }
     if (roundsUp && isNeverNegative) {
         if (isDivisorConstant)
@@ -119,13 +134,114 @@ Integer BuiltinCallEmitter::roundedQuotient(QuotientRounding rounding, Integer d
     return sub(truncated, zeroExtended(logicalAnd(isInexact, isNegative)));
 }
 
+void BuiltinCallEmitter::holdOperandsOfDivisionToToldRanges(const ValueContext& value, Integer dividend, Range dividends, Integer divisor, Range divisors)
+{
+    if (!emittersCheckProofs())
+        return;
+    auto liesIn = [&](Integer operand, Range told) {
+        return belowOrEqual(sub(operand, integer(told.minimum)), integer(told.maximum - told.minimum));
+    };
+    emitter<ThrowEmitter>().requireOrCrash(value, logicalAnd(liesIn(dividend, dividends), liesIn(divisor, divisors)), std::nullopt, ProofSource::OtherOperation);
+}
+
+static ValueID integerBehindForms(const Code& code, ValueID id)
+{
+    static constexpr OpcodeSet formsOfInteger { Opcode::Narrowed, Opcode::WidenInteger, Opcode::NarrowInteger };
+    while (!code.isConstant(id) && formsOfInteger.contains(code.at(id).opcode))
+        id = code.at(id).operand(0);
+    return id;
+}
+
+BuiltinCallEmitter::OperandsOfDivision BuiltinCallEmitter::operandsOfDivision(ValueID dividend, ValueID divisor)
+{
+    const Code& code = generator().code();
+    divisor = integerBehindForms(code, divisor);
+    bool isConstant = code.at(divisor).opcode == Opcode::Integer;
+    uint32_t first = (integerBehindForms(code, dividend).index() + 1) << 1 | isConstant;
+    return { first, isConstant ? static_cast<uint64_t>(code.at(divisor).integer()) : divisor.index() };
+}
+
+void BuiltinCallEmitter::findDivisions()
+{
+    m_hasFoundDivisions = true;
+    const Code& code = generator().code();
+    for (uint32_t block = 0; block < code.numberOfBlocks(); ++block) {
+        if (!code.isReached(BlockID(block)))
+            continue;
+        uint32_t place = 0;
+        for (ValueID id : code.valuesOf(BlockID(block))) {
+            ++place;
+            const Operation& operation = code.at(id);
+            if (operation.opcode == Opcode::Mod)
+                m_placesOfRemainders.add(id.index(), place);
+            if (operation.opcode != Opcode::DivideIntegers)
+                continue;
+            ValueID dividend = operation.dividendOperand();
+            ValueID divisor = operation.divisorOperand();
+            bool truncates = operation.rounding() == QuotientRounding::ToInt32 || operation.rounding() == QuotientRounding::Truncate
+                || (operation.rounding() == QuotientRounding::Floor && typeOf(dividend).integers.minimum >= 0 && typeOf(divisor).integers.minimum > 0);
+            if (truncates)
+                m_divisionsByOperands.add(operandsOfDivision(dividend, divisor), Vector<PlacedDivision, 1>()).iterator->value.append({ id, block, place });
+        }
+    }
+}
+
+bool BuiltinCallEmitter::isEmittedWithBlock(BlockID block, BlockID later)
+{
+    const Code& code = generator().code();
+    const Block& first = code.at(block);
+    const Block& second = code.at(later);
+    if (first.frequency != second.frequency || first.isInLoop != second.isInLoop || !generator().blockDominates(block, later))
+        return false;
+    if (!first.isInLoop)
+        return true;
+    BlockID head = second.terminator.kind == TerminatorKind::Jump ? code.at(second.terminator.next()).to : BlockID();
+    if (!head || !code.at(head).isLoopHead)
+        return false;
+    static constexpr unsigned maxBlocksAfterHead = 8;
+    BlockID above = block;
+    for (unsigned step = 0; above && step < maxBlocksAfterHead; ++step, above = generator().nearestDominatorOf(above)) {
+        if (code.at(above).isLoopHead)
+            return above == head && above != block;
+    }
+    return false;
+}
+
+std::optional<BuiltinCallEmitter::DivisionOfSameOperands> BuiltinCallEmitter::findDivisionOfSameOperands(const ValueContext& remainder)
+{
+    if (!m_hasFoundDivisions)
+        findDivisions();
+    if (m_divisionsByOperands.isEmpty() || generator().keepsValuesInHeapFrame())
+        return std::nullopt;
+    auto found = m_divisionsByOperands.find(operandsOfDivision(remainder->leftOperand(), remainder->rightOperand()));
+    if (found == m_divisionsByOperands.end())
+        return std::nullopt;
+    std::span<const PlacedDivision> divisions = found->value.span();
+    uint32_t block = remainder.block().index();
+    uint32_t place = m_placesOfRemainders.get(remainder.id().index());
+    auto next = std::ranges::upper_bound(divisions, std::pair { block, place }, { }, [](const PlacedDivision& division) {
+        return std::pair { division.block, division.place };
+    });
+    if (next != divisions.begin() && std::prev(next)->block == block) {
+        ValueID ahead = std::prev(next)->division;
+        const Operation& division = generator().code().at(ahead);
+        bool isWholeQuotient = (division.representation == Representation::Int32 || division.representation == Representation::Int64) && (division.rounding() != QuotientRounding::ToInt32 || typeOf(remainder->leftOperand()).isInt32());
+        if (isWholeQuotient && generator().isGenerated(ahead))
+            return DivisionOfSameOperands { ahead, true };
+    }
+    if (next != divisions.end() && (next->block == block || isEmittedWithBlock(remainder.block(), BlockID(next->block))))
+        return DivisionOfSameOperands { next->division, false };
+    return std::nullopt;
+}
+
 void BuiltinCallEmitter::generateDivideIntegers(const ValueContext& value)
 {
     Range dividends = typeOf(value->dividendOperand()).integers;
     Range divisors = typeOf(value->divisorOperand()).integers;
     QuotientRounding rounding = value->rounding();
     bool convertsToInt32 = rounding == QuotientRounding::ToInt32;
-    bool hasExactOperands = dividends.isSubsetOf(Range::exact()) && divisors.isSubsetOf(Range::exact());
+    bool isShift = rounding == QuotientRounding::Floor && divisors.isSingleValue() && hasOneBitSet(divisors.minimum);
+    bool hasExactOperands = (isShift || dividends.isSubsetOf(Range::exact())) && divisors.isSubsetOf(Range::exact());
     if (!hasExactOperands || (divisors.contains(0) && !convertsToInt32)) {
         fail(value, InternalErrorKind::OpcodeWithoutCode);
         define(value, emitter<ConstantEmitter>().zeroOf(value.representation()));
@@ -134,9 +250,24 @@ void BuiltinCallEmitter::generateDivideIntegers(const ValueContext& value)
 
     Integer dividend = integerOperand(value->dividendOperand());
     Integer divisor = integerOperand(value->divisorOperand());
+    holdOperandsOfDivisionToToldRanges(value, dividend, dividends, divisor, divisors);
     const Type& type = typeOf(value.id());
+    if (LValue quotient = m_quotientsOfDivisions.take(value.id().index())) {
+        if (convertsToInt32)
+            defineAs(value, low32(Integer(quotient)), type);
+        else
+            defineAs(value, Integer(quotient), type);
+        return;
+    }
     if (!convertsToInt32) {
-        defineAs(value, roundedQuotient(rounding, dividend, dividends, divisor, divisors), type);
+        Integer quotient = roundedQuotient(rounding, dividend, dividends, divisor, divisors);
+        if (value.representation() == Representation::Int32 && type.integers.isSubsetOf(Range::int32())) {
+            Word32 word = low32(quotient);
+            emitter<ConversionEmitter>().noteSignExtended(word, quotient);
+            defineAs(value, word, type);
+            return;
+        }
+        defineAs(value, quotient, type);
         return;
     }
     if (!divisors.contains(0)) {
@@ -175,6 +306,45 @@ Integer BuiltinCallEmitter::remainderByConstant(Integer dividend, Range dividend
     return sub(dividend, mul(divide(dividend, dividends, divisor, Range::one(magnitudeOfDivisor)), divisor));
 }
 
+void BuiltinCallEmitter::generateReciprocalOfDivisor(const ValueContext& value)
+{
+    Integer divisor = integerOperand(value->divisorOperand());
+    if (AOT::hasFlag(build().options().testing, Wire::TestingSwitch::CheckProofsAtRunTime))
+        emitter<ThrowEmitter>().requireOrCrash(value, logicalAnd(isNotZero(divisor), belowOrEqual(divisor, integer(INT32_MAX))), std::nullopt, ProofSource::OtherOperation);
+    define(value, Pointer(m_out.add(m_out.uDiv(m_out.constInt64(-1), divisor.value()), m_out.constInt64(1))));
+}
+
+LValue BuiltinCallEmitter::lowHalfOfProductWithReciprocal(LValue reciprocal, LValue dividend)
+{
+    bool isSum = dividend->opcode() == Machine::Add && dividend->child(1)->hasInt64();
+    LValue base = isSum ? dividend->child(0) : dividend;
+    uint64_t offset = isSum ? dividend->child(1)->asInt64() : 0;
+    if (base->opcode() == Machine::ZExt32)
+        base = base->child(0);
+
+    LowHalfOfRemainder& last = m_lowHalfOfLastRemainder;
+    LValue lowHalf = last.lowHalf && last.reciprocal == reciprocal && last.base == base && m_out.findsAgain(last.lowHalf)
+        ? m_out.add(last.lowHalf, m_out.mul(reciprocal, m_out.constInt64(offset - last.offset)))
+        : m_out.mul(reciprocal, dividend);
+    last = { reciprocal, base, offset, lowHalf };
+    return lowHalf;
+}
+
+void BuiltinCallEmitter::generateRemainderByReciprocal(const ValueContext& value)
+{
+    ValueID dividendOperand = value->dividendOperand();
+    Integer dividend = representationOf(dividendOperand) == Representation::Int32 ? emitter<ConversionEmitter>().widen(in<Word32>(dividendOperand), typeOf(dividendOperand).integers) : integerOperand(dividendOperand);
+    Integer divisor = integerOperand(value->divisorOperand());
+    bool checksProofs = AOT::hasFlag(build().options().testing, Wire::TestingSwitch::CheckProofsAtRunTime);
+    if (checksProofs)
+        emitter<ThrowEmitter>().requireOrCrash(value, logicalAnd(belowOrEqual(dividend, integer(UINT32_MAX)), logicalAnd(isNotZero(divisor), belowOrEqual(divisor, integer(INT32_MAX)))), std::nullopt, ProofSource::OtherOperation);
+    LValue lowHalf = lowHalfOfProductWithReciprocal(in<Pointer>(value->reciprocalOperand()).value(), dividend.value());
+    Integer remainder(m_out.uMulHigh(lowHalf, divisor.value()));
+    if (checksProofs)
+        emitter<ThrowEmitter>().requireOrCrash(value, equal(remainder, Integer(m_out.mod(dividend.value(), divisor.value()))), std::nullopt, ProofSource::OtherOperation);
+    defineAs(value, remainder, typeOf(value.id()));
+}
+
 void BuiltinCallEmitter::generateRemainderOfIntegers(const ValueContext& value)
 {
     Range dividends = typeOf(value->dividendOperand()).integers;
@@ -187,6 +357,7 @@ void BuiltinCallEmitter::generateRemainderOfIntegers(const ValueContext& value)
 
     Integer dividend = integerOperand(value->dividendOperand());
     Integer divisor = integerOperand(value->divisorOperand());
+    holdOperandsOfDivisionToToldRanges(value, dividend, dividends, divisor, divisors);
     const Type& type = typeOf(value.id());
 
     std::optional<int64_t> constantDivisor;
@@ -231,6 +402,55 @@ void BuiltinCallEmitter::generateRemainderOfIntegers(const ValueContext& value)
     }), type);
 }
 
+void BuiltinCallEmitter::generateMultiplyAddIntegers(const ValueContext& value)
+{
+    const Type& type = typeOf(value.id());
+    if (!type.isInteger() || type.integers == Range::full()) {
+        fail(value, InternalErrorKind::OpcodeWithoutCode);
+        define(value, emitter<ConstantEmitter>().zeroOf(value.representation()));
+        return;
+    }
+    bool checksProofs = emittersCheckProofs();
+    auto term = [&](ValueID operand) {
+        Range told = typeOf(operand).integers;
+        Integer integer = representationOf(operand) == Representation::Int32 ? emitter<ConversionEmitter>().widen(in<Word32>(operand), told) : integerOperand(operand);
+        if (checksProofs)
+            emitter<ThrowEmitter>().requireOrCrash(value, belowOrEqual(sub(integer, this->integer(told.minimum)), this->integer(told.maximum - told.minimum)), std::nullopt, ProofSource::OtherOperation);
+        return integer;
+    };
+    Integer sum = mul(term(value->multiplicandOperand()), term(value->multiplierOperand()));
+    sum = add(sum, term(value->addendOperand()));
+    if (ValueID carry = value->carryOperand())
+        sum = add(sum, term(carry));
+    defineAs(value, sum, type);
+}
+
+void BuiltinCallEmitter::generateMultiplyIntegers(const ValueContext& value)
+{
+    const Type& type = typeOf(value.id());
+    if (!type.isInteger() || !type.integers.isSubsetOf(Range::exact())) {
+        fail(value, InternalErrorKind::OpcodeWithoutCode);
+        define(value, emitter<ConstantEmitter>().zeroOf(value.representation()));
+        return;
+    }
+    Integer multiplicand = integerOperand(value->multiplicandOperand());
+    Integer multiplier = integerOperand(value->multiplierOperand());
+    bool checksProofs = AOT::hasFlag(build().options().testing, Wire::TestingSwitch::CheckProofsAtRunTime);
+    auto checkProduct = [&](Integer product) {
+        if (checksProofs)
+            emitter<ThrowEmitter>().requireOrCrash(value, equal(mul(toNumber(multiplicand), toNumber(multiplier)), toNumber(product)), std::nullopt, ProofSource::OtherOperation);
+    };
+    if (type.isInt32()) {
+        Word32 product = mul(low32(multiplicand), low32(multiplier));
+        checkProduct(emitter<ConversionEmitter>().widen(product, Range::int32()));
+        defineAs(value, product, type);
+        return;
+    }
+    Integer product = mul(multiplicand, multiplier);
+    checkProduct(product);
+    defineAs(value, product, type);
+}
+
 Word32 BuiltinCallEmitter::int32BitsOf(ValueID operand, bool givesOnlyLowestBits)
 {
     if (typeOf(operand).isInteger())
@@ -245,6 +465,21 @@ Word32 BuiltinCallEmitter::int32BitsOf(ValueID operand, bool givesOnlyLowestBits
 void BuiltinCallEmitter::generateToInt32(const ValueContext& value)
 {
     defineAs(value, int32BitsOf(value->valueOperand(), value->givesOnlyLowestBits()), m_program.at(TypeTable::int32));
+}
+
+void BuiltinCallEmitter::generateWholeDivisor(const ValueContext& value)
+{
+    Number divisor = numberOperand(value->divisorOperand());
+    ConversionEmitter& conversions = emitter<ConversionEmitter>();
+    Integer whole = conversions.truncateUnchecked(divisor);
+    Integer wholeOrZero = select(equal(conversions.bitsOf(toNumber(whole)), conversions.bitsOf(divisor)), whole, integer(0));
+    defineAs(value, select(below(wholeOrZero, integer(maxExactInteger + 1)), wholeOrZero, integer(0)), typeOf(value.id()));
+}
+
+void BuiltinCallEmitter::generateRemainderByWholeDivisor(const ValueContext& value)
+{
+    Number remainder = emitter<OperatorEmitter>().remainderByWholeDivisor(value, numberOperand(value->dividendOperand()), numberOperand(value->divisorOperand()), integerOperand(value->wholeDivisorOperand()));
+    defineAs(value, remainder, typeOf(value.id()));
 }
 
 void BuiltinCallEmitter::generateToUint32(const ValueContext& value)

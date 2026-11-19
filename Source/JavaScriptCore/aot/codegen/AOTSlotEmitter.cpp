@@ -12,6 +12,7 @@
 #include "AOTCellFormat.h"
 #include "AOTConversionEmitter.h"
 #include "AOTFaultTable.h"
+#include "AOTInliningAcrossFiles.h"
 #include "AOTPureOperations.h"
 #include "AOTRepresentation.h"
 #include "AOTRuntimeCallEmitter.h"
@@ -19,6 +20,7 @@
 #include "AOTStubCatalog.h"
 #include "AOTStubsAllocation.h"
 #include "AOTStubsPropertyKeys.h"
+#include "AOTThrowEmitter.h"
 #include "AOTTypeArena.h"
 #include <bit>
 #include <optional>
@@ -57,7 +59,7 @@ LValue SlotEmitter::constantWithBits(LType type, uint64_t bits)
     return m_out.constDouble(std::bit_cast<double>(bits));
 }
 
-LValue SlotEmitter::loadBits(TypedPointer pointer, SlotRepresentation slot)
+ALWAYS_INLINE_INTO_OTHER_FILES LValue SlotEmitter::loadBits(TypedPointer pointer, SlotRepresentation slot)
 {
     switch (widthOf(slot)) {
     case 1:
@@ -172,10 +174,30 @@ OptionalInteger SlotEmitter::widenOptionalInt32(Word32 word, AbsentReadsAs absen
     }
     Condition isNull = equal(word, nullInt32);
     join.add(select(isNull, marker(nullInteger), undefinedOrAbsent));
-    return join.finishBehind(fork);
+    OptionalInteger widened = join.finishBehind(fork);
+    if (absentReadsAs == AbsentReadsAs::Absent)
+        noteNarrowWord(widened, word);
+    return widened;
 }
 
-Word32 SlotEmitter::narrowOptionalInt32(OptionalInteger value)
+bool SlotEmitter::isNarrowIntegerOrOneMarker(const Type& type)
+{
+    static constexpr Range narrowIntegers { minInlineInt32, std::numeric_limits<int32_t>::max() };
+    uint16_t markers = type.primitives & Primitive::UndefinedOrNull;
+    return (markers == Primitive::Undefined || markers == Primitive::Null) && type.primitives & Primitive::Integer && type.hasOnlyPrimitives(Primitive::Integer | markers) && type.integers.isSubsetOf(narrowIntegers);
+}
+
+OptionalInteger SlotEmitter::widenBySelect(Word32 word, const Type& type)
+{
+    ASSERT(isNarrowIntegerOrOneMarker(type));
+    OptionalInteger marker(m_out.constInt64(type.primitives & Primitive::Null ? nullInteger : undefinedInteger));
+    OptionalInteger widened = select(lessThan(word, word32(minInlineInt32)), marker, OptionalInteger(signExtended(word).value()));
+    if (widened.value()->opcode() == Machine::Select)
+        noteNarrowWord(widened, word);
+    return widened;
+}
+
+Word32 SlotEmitter::narrowOptionalInt32(OptionalInteger value, uint16_t primitives)
 {
     if (value.value()->opcode() == Machine::SExt32)
         return Word32(value.value()->child(0));
@@ -188,9 +210,11 @@ Word32 SlotEmitter::narrowOptionalInt32(OptionalInteger value)
     };
     Condition isAbsent = is(absentInteger);
     Word32 absent = word32(absentInt32);
-    Word32 marker = select(isAbsent, absent, select<Word32>(is(undefinedInteger), undefinedInt32, nullInt32));
+    constexpr uint16_t otherMarkers = Primitive::Absent | Primitive::Unspecified;
+    bool isOneMarker = !(primitives & otherMarkers) && (primitives & Primitive::UndefinedOrNull) != Primitive::UndefinedOrNull;
+    Word32 marker = isOneMarker ? word32(primitives & Primitive::Undefined ? undefinedInt32 : nullInt32) : select(isAbsent, absent, select<Word32>(is(undefinedInteger), undefinedInt32, nullInt32));
     Condition isMarker = greaterThan(bits, maxSlotInteger);
-    return select(isMarker, marker, low32(bits));
+    return select(isMarker, marker, emitter<ConversionEmitter>().lowHalfOfOptionalInteger(value));
 }
 
 void SlotEmitter::store(TypedPointer pointer, SlotRepresentation slot, Operand operand)
@@ -207,7 +231,7 @@ void SlotEmitter::store(TypedPointer pointer, SlotRepresentation slot, Operand o
         return;
     }
     if (slot == SlotRepresentation::OptionalInt32)
-        bits = narrowOptionalInt32(operand.as<OptionalInteger>()).value();
+        bits = narrowOptionalInt32(operand.as<OptionalInteger>(), Primitive::UndefinedOrNull | Primitive::Absent).value();
     else if (traits.width < sizeof(uint64_t) && bits->type() == Machine::Int64)
         bits = m_out.castToInt32(bits);
     storeBits(pointer, slot, bits);
@@ -215,17 +239,15 @@ void SlotEmitter::store(TypedPointer pointer, SlotRepresentation slot, Operand o
 
 void SlotEmitter::storeAbsent(TypedPointer pointer, SlotRepresentation slot)
 {
-    SlotTraits traits = traitsOf(slot);
-    RELEASE_ASSERT(traits.hasAbsent);
-    storeBits(pointer, slot, constantWithBits(traits.width == sizeof(uint64_t) ? Machine::Int64 : Machine::Int32, traits.absentBits));
+    RELEASE_ASSERT(mayBeCreatedByStore(slot));
+    storeBits(pointer, slot, constantWithBits(widthOf(slot) == sizeof(uint64_t) ? Machine::Int64 : Machine::Int32, bitsBeforeCreation(slot)));
 }
 
 Condition SlotEmitter::holdsAbsent(TypedPointer pointer, SlotRepresentation slot)
 {
-    SlotTraits traits = traitsOf(slot);
-    RELEASE_ASSERT(traits.hasAbsent);
+    RELEASE_ASSERT(mayBeCreatedByStore(slot));
     LValue bits = loadBits(pointer, slot);
-    return Condition(m_out.equal(bits, constantWithBits(bits->type(), traits.absentBits)));
+    return Condition(m_out.equal(bits, constantWithBits(bits->type(), bitsBeforeCreation(slot))));
 }
 
 Condition SlotEmitter::isAbsent(Operand loaded, SlotRepresentation slot)
@@ -386,6 +408,8 @@ static constexpr bool namesFormsOfGetSlotForFieldsOutOfLine(Opcode read)
             if (named.form != namedForGetSlot.form || named.place != namedForGetSlot.place)
                 return false;
         }
+        if (namedFormOf(read, state, Place::RareBlock) != namedFormOf(Opcode::GetSlot, state, Place::RareBlock))
+            return false;
     }
     return true;
 }
@@ -406,6 +430,9 @@ bool SlotEmitter::readsExtensionByCall(const PlacedSlot& slot, const MemoryLocat
     static constexpr OpcodeSet readsOfSlots { Opcode::GetSlot, Opcode::GetSlotOrUndefined, Opcode::IsSlotFilled, Opcode::GetSlotGetter, Opcode::GetSlotSetter };
     StateOfKnowledge state = slot.isLeftOutByMakers ? StateOfKnowledge::FieldLeftOutByMakers : StateOfKnowledge::FieldInExtension;
     FormAtPlace named = formByLoopAlone(Opcode::GetSlot, state, m_generator.paysForCodeInLine(block));
+    static_assert(namedFormOf(Opcode::GetSlot, StateOfKnowledge::FieldInExtension, Place::Anywhere) == Form::Open && namedFormOf(Opcode::GetSlot, StateOfKnowledge::FieldInExtension, Place::RareBlock) == Form::Closed);
+    if (named.place == Place::Anywhere && state == StateOfKnowledge::FieldInExtension && m_generator.code().at(block).frequency == BlockFrequency::Rare)
+        named = { Form::Closed, Place::RareBlock };
     m_generator.out().noteFormOf(readsOfSlots, named.form, state, named.place);
     return named.form != Form::Open;
 }
@@ -427,20 +454,97 @@ LValue SlotEmitter::readFieldInExtension(CellPointer cell, const PlacedSlot& slo
 Operand SlotEmitter::loadOutOfLine(CellPointer cell, const PlacedSlot& slot, const MemoryLocation& location, const PlacedSlot& extensionWord, bool absentReadsAsUndefined)
 {
     RELEASE_ASSERT(representsAbsentAsZero(slot.representation));
-    if (readsExtensionByCall(slot, location, extensionWord)) {
-        Operand read = operandOfBits(readFieldInExtension(cell, slot, location), slot.representation);
-        return absentReadsAsUndefined ? absentAsUndefined(read, slot.representation) : read;
-    }
+    Operand word = readsExtensionByCall(slot, location, extensionWord) ? operandOfBits(readFieldInExtension(cell, slot, location), slot.representation) : wordOutOfLine(cell, slot, location, extensionWord);
+    if (!absentReadsAsUndefined)
+        return word;
+    Operand read = absentAsUndefined(word, slot.representation);
+    if (word.is<Boxed>() && read.value != word.value)
+        m_wordsOfSlots.set(read.value, word.value);
+    return read;
+}
+
+Machine::PureFunction SlotEmitter::readInLineOf(const FieldInExtension& field)
+{
+    static_assert(maxExtensionSize <= 1u << 10 && 10 + 8 * sizeof(Machine::HeapIndex) <= 32);
+    return functionOfMemory(PureOperation::ReadFieldInExtensionInLine, field.slot.offset | static_cast<uint32_t>(m_heaps.at(m_program, field.location).index()) << 10);
+}
+
+LValue SlotEmitter::findFieldInExtension(CellPointer cell, const FieldInExtension& field)
+{
+    LValue owner = cell.value();
+    return m_out.findPurePatch(readInLineOf(field), machineTypeOf(Typed::representationOf(field.slot.representation)), singleElementSpan(owner));
+}
+
+Operand SlotEmitter::loadFromExtension(CellPointer cell, const FieldInExtension& field, const PlacedSlot& extensionWord)
+{
+    const PlacedSlot& slot = field.slot;
     Representation representation = Typed::representationOf(slot.representation);
     LBasicBlock hasNoStorage = newBlock();
     OperandJoin join(m_out, representation);
     auto [extension, fork] = branchUnlessExtensionHolds(cell, extensionWord, granuleBitOf(slot.offset), normalEdge(hasNoStorage), slot.isLeftOutByMakers);
-    Operand loaded = load(addressInExtension(m_heaps.at(m_program, location), extension, slot.offset), slot.representation);
+    Operand loaded = load(addressInExtension(m_heaps.at(m_program, field.location), extension, slot.offset), slot.representation);
     keepOwnerOfExtensionAlive(cell);
-    join.add(absentReadsAsUndefined ? absentAsUndefined(loaded, slot.representation) : loaded);
+    join.add(loaded);
     m_out.appendToJoin(hasNoStorage, fork);
-    join.add(Operand(representation, constantWithBits(machineTypeOf(representation), absentReadsAsUndefined ? traitsOfLoaded(slot.representation).undefinedBits : traitsOf(slot.representation).absentBits)));
+    join.add(Operand(representation, constantWithBits(machineTypeOf(representation), traitsOf(slot.representation).absentBits)));
     return join.finishBehind(fork);
+}
+
+Operand SlotEmitter::wordOutOfLine(CellPointer cell, const PlacedSlot& slot, const MemoryLocation& location, const PlacedSlot& extensionWord)
+{
+    Representation representation = Typed::representationOf(slot.representation);
+    FieldInExtension field { slot, location };
+    if (LValue known = findFieldInExtension(cell, field)) {
+        const OperationContext* context = generator().contextBeingGenerated();
+        if (emittersCheckProofs() && context)
+            emitter<ThrowEmitter>().requireOrCrash(*context, Condition(m_out.equal(known, loadFromExtension(cell, field, extensionWord).value)), std::nullopt, ProofSource::OtherOperation);
+        return Operand(representation, known);
+    }
+
+    Operand word = loadFromExtension(cell, field, extensionWord);
+    if (word.value->opcode() == Machine::Phi)
+        m_out.recordInPlaceOfReadOfMemory(readInLineOf(field), word.value, cell.value(), m_heaps.at(m_program, location));
+    return word;
+}
+
+bool SlotEmitter::readsExtensionInLine(const PlacedSlot& slot, const MemoryLocation& location, const PlacedSlot& extensionWord) const
+{
+    return slot.isOutOfLine() && representsAbsentAsZero(slot.representation) && !readsExtensionByCall(slot, location, extensionWord);
+}
+
+void SlotEmitter::loadFieldsInExtension(CellPointer cell, const PlacedSlot& extensionWord, std::span<const FieldInExtension> fields)
+{
+    uint32_t lastGranule = granuleOf(std::ranges::max_element(fields, { }, [](const FieldInExtension& field) { return field.slot.offset; })->slot.offset);
+    uint64_t granulesUpToLast = ~0ull >> (63 - lastGranule);
+    bool asksForExtensionFirst = std::ranges::any_of(fields, [](const FieldInExtension& field) { return field.slot.isLeftOutByMakers; });
+    LBasicBlock lacksSome = newBlock();
+    LBasicBlock done = newBlock();
+    Vector<Vector<ValueFromBlock, 2>, 8> words(fields.size());
+    Vector<LValue, 8> loaded;
+    auto leaveArm = [&] {
+        for (size_t place = 0; place < fields.size(); ++place)
+            words[place].append(m_out.anchor(loaded[place]));
+        m_out.jump(done);
+        loaded.shrink(0);
+    };
+    auto [extension, fork] = branchUnlessExtensionHolds(cell, extensionWord, granulesUpToLast, normalEdge(lacksSome), asksForExtensionFirst);
+    for (const FieldInExtension& field : fields)
+        loaded.append(load(m_out.address(m_heaps.at(m_program, field.location), extension.value(), field.slot.offset), field.slot.representation).value);
+    keepOwnerOfExtensionAlive(cell);
+    leaveArm();
+
+    m_out.appendToJoin(lacksSome, fork);
+    for (const FieldInExtension& field : fields)
+        loaded.append(loadFromExtension(cell, field, extensionWord).value);
+    leaveArm();
+
+    m_out.appendToJoin(done, fork);
+    for (size_t place = 0; place < fields.size(); ++place) {
+        const FieldInExtension& field = fields[place];
+        LValue word = m_out.phi(machineTypeOf(Typed::representationOf(field.slot.representation)), words[place]);
+        if (word->opcode() == Machine::Phi)
+            m_out.recordInPlaceOfReadOfMemory(readInLineOf(field), word, cell.value(), m_heaps.at(m_program, field.location));
+    }
 }
 
 Operand SlotEmitter::loadSlot(CellPointer cell, const PlacedSlot& slot, const MemoryLocation& location, const PlacedSlot* extensionWord)
@@ -463,12 +567,32 @@ Operand SlotEmitter::loadSlotThatHoldsValue(CellPointer cell, const PlacedSlot& 
     return loaded;
 }
 
+Operand SlotEmitter::loadSlotOrLeaveIfEmpty(CellPointer cell, const PlacedSlot& slot, const MemoryLocation& location, const PlacedSlot* extensionWord, BlockEdge isEmpty)
+{
+    RELEASE_ASSERT(!slot.isOutOfLine() || extensionWord);
+    LBasicBlock holds = newBlock();
+    if (!slot.isOutOfLine() || !traitsOf(slot.representation).hasAbsent || readsExtensionByCall(slot, location, *extensionWord)) {
+        branch(holdsValue(cell, slot, location, extensionWord), { normalEdge(holds), isEmpty });
+        m_out.appendToContinuation(holds);
+        return loadSlotThatHoldsValue(cell, slot, location, extensionWord);
+    }
+    RELEASE_ASSERT(representsAbsentAsZero(slot.representation));
+    Pointer extension = branchUnlessExtensionHolds(cell, *extensionWord, granuleBitOf(slot.offset), isEmpty, slot.isLeftOutByMakers).extension;
+    Operand loaded = load(addressInExtension(m_heaps.at(m_program, location), extension, slot.offset), slot.representation);
+    keepOwnerOfExtensionAlive(cell);
+    branch(isAbsent(loaded, slot.representation), { isEmpty, normalEdge(holds) });
+    m_out.appendToContinuation(holds);
+    return loaded;
+}
+
 Operand SlotEmitter::loadSlot(CellPointer cell, const PlacedSlot& slot, const MemoryLocation& location, const PlacedSlot* extensionWord, const Type& loadedType)
 {
     bool holdsNoMarker = loadedRepresentationOf(slot.representation, loadedType) != Typed::representationOf(slot.representation);
     if (holdsNoMarker && !slot.isOutOfLine())
         return loadWithoutMarkers(addressOf(cell, slot, location), slot.representation);
-    if (slot.isOutOfLine() && !slot.mayExistWithoutStorage) {
+    if (slot.representation == SlotRepresentation::OptionalInt32 && !slot.isOutOfLine() && !emittersCheckProofs() && isNarrowIntegerOrOneMarker(loadedType))
+        return widenBySelect(Word32(m_out.load32(addressOf(cell, slot, location))), loadedType);
+    if (slot.isOutOfLine() && (!slot.mayExistWithoutStorage || !(loadedType.primitives & Primitive::Undefined))) {
         RELEASE_ASSERT(extensionWord);
         return loadOutOfLine(cell, slot, location, *extensionWord);
     }
@@ -490,27 +614,39 @@ Operand SlotEmitter::loadSlotOrUndefined(CellPointer cell, const PlacedSlot& slo
     Operand loaded = load(pointer, representation);
     if (representsAbsentAsZero(representation)) {
         Condition holdsAbsent = isAbsent(loaded, representation);
-        return Operand(loaded.representation, m_out.select(holdsAbsent.value(), constantWithBits(loaded.value->type(), traits.undefinedBits), loaded.value));
+        LValue loadedOrUndefined = m_out.select(holdsAbsent.value(), constantWithBits(loaded.value->type(), traits.undefinedBits), loaded.value);
+        if (loaded.is<Boxed>() && loadedOrUndefined != loaded.value)
+            m_wordsOfSlots.set(loadedOrUndefined, loaded.value);
+        return Operand(loaded.representation, loadedOrUndefined);
     }
 
     LBasicBlock isValue = newBlock();
     LBasicBlock mayBeAbsent = newBlock();
     OperandJoin join(m_out, loaded.representation);
+    LValue number = representation == SlotRepresentation::OptionalDouble ? m_out.phiIn(join.continuation(), Machine::Double) : nullptr;
     Condition holdsNoMarker = isNoMarker(loaded, representation);
     ScopeFork fork = m_out.forkScope();
     branch(holdsNoMarker, { normalEdge(isValue), unlikelyEdge(mayBeAbsent) });
 
     m_out.appendToArm(isValue, fork);
+    if (number)
+        m_out.upsilon(loaded.value, number);
     join.add(loaded);
 
     m_out.appendToArm(mayBeAbsent, fork);
-    join.add(absentAsUndefined(loaded, representation));
-    return join.finishBehind(fork);
+    Operand optional = absentAsUndefined(loaded, representation);
+    if (number)
+        m_out.upsilon(emitter<ConversionEmitter>().quietNaN(Number(optional.value)).value(), number);
+    join.add(optional);
+    Operand read = join.finishBehind(fork);
+    if (number)
+        emitter<ConversionEmitter>().noteNumberWithoutPayload(read, Number(number));
+    return read;
 }
 
 Condition SlotEmitter::holdsValue(CellPointer cell, const PlacedSlot& slot, const MemoryLocation& location, const PlacedSlot* extensionWord)
 {
-    if (!traitsOf(slot.representation).hasAbsent)
+    if (!mayBeCreatedByStore(slot.representation))
         return boolean(true);
     if (!slot.isOutOfLine())
         return logicalNot(holdsAbsent(addressOf(cell, slot, location), slot.representation));
@@ -522,16 +658,16 @@ Condition SlotEmitter::holdsValue(CellPointer cell, const PlacedSlot& slot, cons
     return logicalNot(isAbsent(loadOutOfLine(cell, slot, location, *extensionWord), slot.representation));
 }
 
-Condition SlotEmitter::isFilled(CellPointer cell, const PlacedSlot& slot, const MemoryLocation& location, const PlacedSlot* extensionWord)
+Condition SlotEmitter::isFilled(CellPointer object, CellPointer baseOfSlot, const PlacedSlot& slot, const MemoryLocation& location, const PlacedSlot* extensionWord)
 {
-    Condition slotHoldsValue = holdsValue(cell, slot, location, extensionWord);
-    if (!slot.isOutOfLine() || !slot.mayExistWithoutStorage)
+    Condition slotHoldsValue = holdsValue(baseOfSlot, slot, location, extensionWord);
+    if (!isListedOnlyByKeyOrder(slot.representation) && (!slot.isOutOfLine() || !slot.mayExistWithoutStorage))
         return slotHoldsValue;
     RELEASE_ASSERT(!location.isEntireHeap());
     return either<Condition>(slotHoldsValue, [&] {
         return boolean(true);
     }, [&] {
-        return callWithoutSite<Condition>(RuntimeOperation::HasExtraProperty, { cell, identifierNumber(location.key()) }, { .isOnRarePath = true });
+        return callWithoutSite<Condition>(RuntimeOperation::HasExtraProperty, { object, identifierNumber(location.key()) }, { .isOnRarePath = true });
     });
 }
 
@@ -576,6 +712,8 @@ Condition SlotEmitter::holdsDeclaredType(CellPointer cell, const PlacedSlot& slo
         Condition isUncreated = equal(word, uncreatedDeferredClosure);
         return logicalOr(isUncreated, above(word, undefinedCell32));
     }
+    if (isListedOnlyByKeyOrder(slot.representation))
+        return boolean(true);
     if (!traitsOf(slot.representation).hasUndefined)
         return holdsValue(cell, slot, location, extensionWord);
     if (slot.isOutOfLine()) {
@@ -634,7 +772,12 @@ void SlotEmitter::markCellIfMarkerIsStored(CellPointer cell, ValueID stored, Lay
         return;
     }
     Operand operand = get(stored);
-    Condition isMarker = operand.is<Boxed>() ? isUndefinedOrNull(operand.as<Boxed>(), type.primitives) : emitter<ConversionEmitter>().isMarker(operand);
+    auto conditionOfMarker = [&] {
+        if (operand.is<Boxed>())
+            return isUndefinedOrNull(operand.as<Boxed>(), type.primitives);
+        return operand.is<NarrowReference>() ? logicalNot(isCellReference(operand.as<NarrowReference>())) : emitter<ConversionEmitter>().isMarker(operand);
+    };
+    Condition isMarker = conditionOfMarker();
     LBasicBlock storesMarker = newBlock();
     LBasicBlock done = newBlock();
     ScopeFork fork = m_out.forkScope();
@@ -655,7 +798,11 @@ void SlotEmitter::storeSlot(CellPointer cell, const PlacedSlot& slot, const Memo
 void SlotEmitter::store(TypedPointer pointer, SlotRepresentation slot, Operand operand, const Type& storedType)
 {
     if (storeLooksAtType(slot) && storedType.isInteger()) {
-        m_out.store32(m_out.castToInt32(operand.as<OptionalInteger>().value()), pointer);
+        m_out.store32(emitter<ConversionEmitter>().lowHalfOfIntegerToldInsideInt32(Integer(operand.as<OptionalInteger>().value())).value(), pointer);
+        return;
+    }
+    if (storeLooksAtType(slot) && operand.is<OptionalInteger>()) {
+        m_out.store32(narrowOptionalInt32(operand.as<OptionalInteger>(), storedType.primitives).value(), pointer);
         return;
     }
     store(pointer, slot, operand);
@@ -672,6 +819,19 @@ void SlotEmitter::storeInExtension(Pointer extension, const PlacedSlot& slot, co
 {
     RELEASE_ASSERT(slot.isOutOfLine());
     store(addressInExtension(m_heaps.at(m_program, location), extension, slot.offset), slot.representation, operand);
+}
+
+ScopeFork SlotEmitter::storeIntoFilledSlot(CellPointer cell, const PlacedSlot& slot, const MemoryLocation& location, Operand operand, const Type& storedType, const PlacedSlot& extensionWord, BlockEdge lacksGranule, BlockEdge isEmpty)
+{
+    RELEASE_ASSERT(slot.isOutOfLine());
+    auto [extension, fork] = branchUnlessExtensionHolds(cell, extensionWord, granuleBitOf(slot.offset), lacksGranule);
+    TypedPointer address = addressInExtension(m_heaps.at(m_program, location), extension, slot.offset);
+    LBasicBlock isFilled = newBlock();
+    branch(holdsAbsent(address, slot.representation), { isEmpty, normalEdge(isFilled) });
+    m_out.appendToContinuation(isFilled);
+    store(address, slot.representation, operand, storedType);
+    keepOwnerOfExtensionAlive(cell);
+    return fork;
 }
 
 void SlotEmitter::storeIfExtensionHolds(CellPointer cell, const PlacedSlot& slot, const MemoryLocation& location, Operand operand, const PlacedSlot& extensionWord)

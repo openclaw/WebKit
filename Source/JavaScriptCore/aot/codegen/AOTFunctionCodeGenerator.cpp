@@ -9,6 +9,7 @@
 #if ENABLE(AOT)
 
 #include "AOTCodeDescription.h"
+#include "AOTCompileUnit.h"
 #include "AOTCurrentWork.h"
 #include "AOTEntryEmitter.h"
 #include "AOTFunctionKinds.h"
@@ -48,6 +49,8 @@ Machine::ProcedureTraits machineTraitsOf(const BuildContext& build, const CodeGe
     const CallingConventions& conventions = inputs.plan.conventions();
     bool isBodyThatMaySuspend = isBodyOfCoroutine(unit.role, conventions.isCoroutine(unit.function)) && !conventions.of(unit.function).coroutineNeverSuspends;
     bool savesFrameOnSuspend = code.hasSuspensions() || isBodyThatMaySuspend;
+    const Function& function = inputs.program.at(unit.function);
+    bool isBodyOfAsyncFunction = unit.role == CodeRole::CoroutineBody && function.has(FunctionFlags::IsAsync) && !function.has(FunctionFlags::IsGenerator);
     RELEASE_ASSERT(!savesFrameOnSuspend || !conventions.spillsArgumentRegisters(unit));
     RELEASE_ASSERT(!savesFrameOnSuspend || !conventions.savesRegistersOfCallers(unit));
     return {
@@ -59,9 +62,15 @@ Machine::ProcedureTraits machineTraitsOf(const BuildContext& build, const CodeGe
         .fallsIntoWhatLiesBehind = unit.role == CodeRole::ParameterGuard,
         .chargesForCalleeSaves = isX86_64(),
         .mayOmitFrameRecord = isX86_64(),
+        .mayJumpOverUnlikelySides = isBodyOfAsyncFunction || function.isModuleBody(),
         .checksAllocation = runsMachineChecks(build),
-        .ordersBlocksAsWhenOrderedAgain = hasFlag(build.options().testing, Wire::TestingSwitch::OrderBlocksAgain),
+        .shouldUseFallbackBlockOrder = hasFlag(build.options().testing, Wire::TestingSwitch::ForceFallbackBlockOrder),
+        .shouldDropPatchOnlySaves = hasFlag(build.options().testing, Wire::TestingSwitch::DropPatchOnlySaves),
+        .shouldAssumeSpillSlotsDead = hasFlag(build.options().testing, Wire::TestingSwitch::AssumeSpillSlotsDead),
+        .shouldAssumeClearUpperHalves = hasFlag(build.options().injectedFaults, Wire::FaultInjection::AssumeClearUpperHalves),
+        .shouldIgnoreCollectorSpillReads = hasFlag(build.options().injectedFaults, Wire::FaultInjection::IgnoreCollectorSpillReads),
         .notesRangesOfOrigins = hasFlag(build.options().reports, ReportSet::Flow) || !build.options().logging.mapFilePath.isNull(),
+        .checksProofs = !!sourcesOfProofsCheckedUnder(build.options().testing),
         .features = build.targetFeatures(),
     };
 }
@@ -71,35 +80,21 @@ static void enterStepOfCodeGeneration(ASCIILiteral step)
     currentWorkOfThread().step.store(step.characters(), std::memory_order_relaxed);
 }
 
-namespace {
-
-struct OperationsGivenToEmitters {
-    uint64_t count { 0 };
-    bool prologueMayCollect { false };
-};
-
-} // anonymous namespace
-
-static OperationsGivenToEmitters lookAtOperationsGivenToEmitters(const Facts& facts, const Code& code)
+static bool someOperationGivenToEmittersMayCollect(const Facts& facts, const Code& code)
 {
-    OperationsGivenToEmitters operations;
     FunctionID function = code.function();
-    bool looksForCollection = facts.effectsOnReturn(function).mayCollect || facts.effectsOnThrow(function).mayCollect;
+    if (!facts.effectsOnReturn(function).mayCollect && !facts.effectsOnThrow(function).mayCollect)
+        return false;
     uint32_t numberOfBlocks = code.numberOfBlocks();
     for (uint32_t index = 0; index < numberOfBlocks; ++index) {
-        std::span<const ValueID> values = code.valuesOf(BlockID(index));
-        operations.count += values.size();
-        if (!looksForCollection)
+        if (!code.isReached(BlockID(index)))
             continue;
-        for (ValueID value : values) {
-            if (!code.at(value).traits().mayCollect())
-                continue;
-            operations.prologueMayCollect = true;
-            looksForCollection = false;
-            break;
+        for (ValueID value : code.valuesOf(BlockID(index))) {
+            if (code.at(value).traits().mayCollect())
+                return true;
         }
     }
-    return operations;
+    return false;
 }
 
 static uint64_t countMachineOperationsInOrder(const Machine::Order& order)
@@ -119,18 +114,20 @@ static InternalErrorKind internalErrorKindOfMachineFailure(Machine::FailureKind 
         return InternalErrorKind::OutOfRegisters;
     case Machine::FailureKind::AccessOutsideDeclaredEffects:
         return InternalErrorKind::StoreOutsideDeclaredEffects;
-    case Machine::FailureKind::RegisterLacksItsValue:
-        return InternalErrorKind::RegisterLacksItsValue;
-    case Machine::FailureKind::SpillSlotLacksItsValue:
-        return InternalErrorKind::SpillSlotLacksItsValue;
+    case Machine::FailureKind::WrongValueInRegister:
+        return InternalErrorKind::WrongValueInRegister;
+    case Machine::FailureKind::WrongValueInSpillSlot:
+        return InternalErrorKind::WrongValueInSpillSlot;
     case Machine::FailureKind::FrameAddressAcrossSuspension:
         return InternalErrorKind::FrameAddressAcrossSuspension;
     case Machine::FailureKind::NarrowReferenceWithoutPointer:
         return InternalErrorKind::NarrowReferenceWithoutPointer;
     case Machine::FailureKind::InnerPointerWithoutOwner:
         return InternalErrorKind::InnerPointerWithoutOwner;
-    case Machine::FailureKind::NeedsFrameWhereNoneIsSetUp:
-        return InternalErrorKind::FrameNeededWhereNoneIsSetUp;
+    case Machine::FailureKind::MissingFrameSetup:
+        return InternalErrorKind::MissingFrameSetup;
+    case Machine::FailureKind::UpperHalfIsNotClear:
+        return InternalErrorKind::UpperHalfNotClear;
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
@@ -140,11 +137,7 @@ static void reportFailureOfMachineProcedure(BuildContext& build, const Program& 
     const Machine::Failure& failure = *procedure.failure();
 
     StringPrintStream text;
-    text.print(failure.kind);
-    if (failure.operation < procedure.numberOfOperations()) {
-        text.print(": ");
-        Machine::printOperation(text, procedure, procedure.operationAt(failure.operation));
-    }
+    Machine::printFailure(text, procedure);
 
     InternalError error {
         .kind = internalErrorKindOfMachineFailure(failure.kind),
@@ -167,16 +160,17 @@ static void reportFailureOfMachineProcedure(BuildContext& build, const Program& 
     build.diagnostics().add(error);
 }
 
-FunctionCodeGenerator::FunctionCodeGenerator(const CodeGenerationWorker& worker, const CodeGenerationInputs& inputs, const Code& code, CodeGenerationTotals& totals, FramesOfGenerators framesOfGenerators)
+FunctionCodeGenerator::FunctionCodeGenerator(const CodeGenerationWorker& worker, const CodeGenerationInputs& inputs, const Code& code, CodeGenerationTotals& totals)
     : m_worker(worker)
     , m_inputs(inputs)
     , m_code(code)
     , m_statistics(worker.build.statistics().countersOfCurrentThread())
     , m_relocations(m_jit, worker.build.assemblerPolicy())
     , m_records(inputs.stubCatalog, m_relocations, totals, &worker.arena.objectKeptAcrossResets<RememberedStubKeys>())
-    , m_framesOfGenerators(framesOfGenerators)
     , m_procedure(worker.arena, inputs.heaps.tree(), machineTraitsOf(worker.build, inputs, code))
 {
+    if (hasFlag(worker.build.options().reports, ReportSet::InlinedStrings))
+        m_records.inlinedStrings.beginRecording();
 }
 
 CompiledCode FunctionCodeGenerator::run()
@@ -192,31 +186,22 @@ bool FunctionCodeGenerator::appendOperations()
 
     StackCheck stackCheck = m_code.holdsCallThatPlanHasNotCounted() ? StackCheck::Required : m_inputs.plan.conventions().stackCheckOf(m_code.unit());
     setStackCheckGenerator(m_procedure, stackCheck, m_records.frame, m_stackChecks);
-    OperationsGivenToEmitters operations = lookAtOperationsGivenToEmitters(m_inputs.facts, m_code);
-    m_stackChecks.functionMayCollect = operations.prologueMayCollect;
+    m_stackChecks.functionMayCollect = someOperationGivenToEmittersMayCollect(m_inputs.facts, m_code);
 
     bool unitReadsCallerFrame = readsCallerFrame(m_inputs, m_code);
     m_records.frame.readsCallerFrame = unitReadsCallerFrame;
 
     CodeGenerator generator(FunctionInputs { build, m_worker.types, m_inputs, m_code }, m_procedure, m_records);
-    if (m_framesOfGenerators == FramesOfGenerators::AreSaved)
-        generator.saveFramesOfGenerators();
-    else if (!runsMachineChecks(build))
-        generator.leaveFailuresWithHeapFrameUnsaid();
-    GenerationResult result = generator.run();
-    m_keepsValuesInHeapFrame = generator.keepsValuesInHeapFrame();
-    if (result == GenerationResult::Failed) {
-        m_isToBeGeneratedAgain = m_keepsValuesInHeapFrame && !runsMachineChecks(build);
+    if (generator.run() == GenerationResult::Failed)
         return false;
-    }
-    if (m_procedure.failure() || (m_keepsValuesInHeapFrame && !runsMachineChecks(build) && !Machine::checkThatDefinitionsDominateUses(m_procedure))) {
-        reportFailureOfProcedure();
+    if (m_procedure.failure() || (generator.keepsValuesInHeapFrame() && !runsMachineChecks(build) && !Machine::checkThatDefinitionsDominateUses(m_procedure))) {
+        reportFailureOfMachineProcedure(m_worker.build, m_inputs.program, m_code, m_procedure);
         return false;
     }
     RELEASE_ASSERT(m_records.frame.savesFrameOnSuspend <= m_procedure.traits().savesFrameOnSuspend);
     RELEASE_ASSERT(m_records.frame.readsCallerFrame == unitReadsCallerFrame);
 
-    m_statistics.count(StatisticID::OperationsEmitted, operations.count);
+    m_statistics.count(StatisticID::OperationsEmitted, m_code.numberOfOperationsInOrder());
     return true;
 }
 
@@ -264,10 +249,24 @@ std::optional<CompiledCode> FunctionCodeGenerator::runStraight(const BodyIndex& 
     CompiledCode code = emitCode();
     if (emitter.hasFailed())
         return std::nullopt;
+    if (uint32_t reads = emitter.numberOfRawSlotsOfScopesRead())
+        m_worker.build.statistics().count(StatisticID::StraightUnboxedSlotReads, reads);
+    if (uint32_t told = emitter.numberOfNumbersToldByTheirWord())
+        m_worker.build.statistics().count(StatisticID::StraightNumberTagChecks, told);
+    if (uint32_t reads = emitter.numberOfReadsThatAskTheirSite())
+        m_worker.build.statistics().count(StatisticID::StraightSiteCachedReads, reads);
     return code;
 }
 
-CompiledCode FunctionCodeGenerator::runEntryWrittenByHand(std::span<const QuestionOfEntry> questions)
+bool FunctionCodeGenerator::canEmitStraight(const BodyIndex& index)
+{
+    StraightEmitter emitter(m_worker.build, m_worker.types, m_inputs, m_code.unit(), index, m_records, m_worker.arena);
+    ArgumentLocations locations = m_inputs.plan.conventions().locationsOf(m_inputs.program, m_code.unit());
+    emitter.generate(m_jit, locations, 0);
+    return !emitter.hasFailed();
+}
+
+CompiledCode FunctionCodeGenerator::runEntryWrittenByHand(std::span<const QuestionOfEntry> questions, bool nobodyEnters)
 {
     CodeUnit unit = m_code.unit();
     setStackCheckGenerator(m_procedure, StackCheck::CoveredByCallers, m_records.frame, m_stackChecks);
@@ -291,8 +290,8 @@ CompiledCode FunctionCodeGenerator::runEntryWrittenByHand(std::span<const Questi
     RegisterSet clobbered = registersClobberedByCompiledCalls();
     clobbered.merge(RegisterSet::macroClobberedGPRs());
     patch->clobberLate(clobbered);
-    patch->setGenerator([this, unit, questions](CCallHelpers& jit, const Machine::PatchParameters& params) {
-        emitEntryWrittenByHand(jit, m_inputs, m_records, unit, questions, params.frameIsSetUp());
+    patch->setGenerator([this, unit, questions, nobodyEnters](CCallHelpers& jit, const Machine::PatchParameters& params) {
+        emitEntryWrittenByHand(jit, m_inputs, m_records, unit, questions, params.frameIsSetUp(), nobodyEnters);
     });
     RELEASE_ASSERT(!m_procedure.failure());
     return emitCode();
@@ -307,7 +306,7 @@ CompiledCode FunctionCodeGenerator::emitCode()
         m_procedure.setLargestFrameSetUpWithoutStackCheck(maxFrameSizeWithoutStackCheck);
     Machine::prepareForGeneration(m_procedure);
     if (m_procedure.failure()) {
-        reportFailureOfProcedure();
+        reportFailureOfMachineProcedure(m_worker.build, m_inputs.program, m_code, m_procedure);
         return { };
     }
     if (!frameFitsImage())
@@ -317,8 +316,12 @@ CompiledCode FunctionCodeGenerator::emitCode()
     m_statistics.count(StatisticID::MachineOperationsAppended, m_procedure.numberOfOperations());
     m_statistics.count(StatisticID::MachineOperationsScanned, countMachineOperationsInOrder(m_procedure.order()));
     m_statistics.count(StatisticID::LoopsRotated, m_procedure.order().numberOfLoopsRotated());
+    m_statistics.count(StatisticID::NumbersChosenWithoutBranches, m_procedure.numberOfNumbersChosen());
     m_statistics.count(StatisticID::MachineOperationsAllocated, allocation.numberOfOperationsAllocated());
     m_statistics.count(StatisticID::ValuesSpilled, allocation.spills().size());
+    m_statistics.count(StatisticID::SpilledFirstOperandsRead, allocation.numberOfSpilledFirstOperands());
+    m_statistics.count(StatisticID::LaterUsesScannedForLiveness, allocation.laterUsesScanned());
+    m_statistics.count(StatisticID::BlocksVisitedByLivenessSearches, allocation.livenessSearchBlocksVisited());
     m_statistics.count(StatisticID::InnerPointersAcrossSafepoints, m_procedure.numberOfInnerPointersAcrossSafepoints());
 
     enterStepOfCodeGeneration("encode"_s);
@@ -327,10 +330,11 @@ CompiledCode FunctionCodeGenerator::emitCode()
     CCallHelpers::Label bodyStart = m_jit.label();
     m_relocations.reserveRoomFor(allocation.numberOfOperationsAllocated());
     Machine::generate(m_procedure, m_jit, m_relocations);
+    m_statistics.count(StatisticID::LoopsEnteredByTest, m_procedure.numberOfLoopsEnteredByTest());
     if (m_straightEmitter && m_straightEmitter->hasFailed())
         return { };
     if (m_procedure.failure()) {
-        reportFailureOfProcedure();
+        reportFailureOfMachineProcedure(m_worker.build, m_inputs.program, m_code, m_procedure);
         return { };
     }
     const CallingConventions& conventions = m_inputs.plan.conventions();
@@ -343,10 +347,12 @@ CompiledCode FunctionCodeGenerator::emitCode()
     else if (holdsFusedCallEntry && isGuard)
         m_records.entries.append(RecordedEntry { fusedCallEntry, m_procedure.entrypointLabel(0) });
     m_statistics.count(StatisticID::MachineOperationsEncoded, m_procedure.numberOfOperationsEncoded());
+    m_statistics.count(StatisticID::SwitchBitTestsEmitted, m_procedure.switchBitTestCount());
     m_statistics.count(StatisticID::NullChecksFoldedIntoAccesses, m_procedure.numberOfTrapsTakenOver());
 
     if (!m_stackChecks.pending.isEmpty())
         emitStackOverflowPaths(m_jit, m_records, m_stackChecks);
+    m_records.stubCalls.routeTransfersThroughEnd();
     emitPadding(m_jit);
     m_jit.padBeforePatch();
 
@@ -367,15 +373,6 @@ CompiledCode FunctionCodeGenerator::emitCode()
     if (m_worker.types.hasMadeTexts())
         copyMadeTextsMentionedBy(compiled.body, m_worker.types);
     return compiled;
-}
-
-void FunctionCodeGenerator::reportFailureOfProcedure()
-{
-    if (m_keepsValuesInHeapFrame && !runsMachineChecks(m_worker.build)) {
-        m_isToBeGeneratedAgain = true;
-        return;
-    }
-    reportFailureOfMachineProcedure(m_worker.build, m_inputs.program, m_code, m_procedure);
 }
 
 bool FunctionCodeGenerator::frameFitsImage()
@@ -404,31 +401,35 @@ CompiledCode generateCode(const CodeGenerationWorker& worker, const CodeGenerati
     RELEASE_ASSERT(code.isSwept());
 
     CurrentWorkScope work(inputs.program, code.function(), "emit"_s);
-    {
-        FunctionCodeGenerator generator(worker, inputs, code, totals);
-        CompiledCode compiled = generator.run();
-        if (!generator.isToBeGeneratedAgain()) [[likely]]
-            return compiled;
-    }
-    worker.arena.reset();
-    FunctionCodeGenerator generator(worker, inputs, code, totals, FramesOfGenerators::AreSaved);
+    FunctionCodeGenerator generator(worker, inputs, code, totals);
     return generator.run();
 }
 
-std::optional<CompiledCode> generateEntryWrittenByHand(const CodeGenerationWorker& worker, const CodeGenerationInputs& inputs, const Code& code, NOESCAPE const ScopedLambda<TypeID(unsigned)>& typeAskedOfEntryParameter, CodeGenerationTotals& totals)
+std::optional<CompiledCode> generateEntryWrittenByHand(const CodeGenerationWorker& worker, const CodeGenerationInputs& inputs, const Code& code, NOESCAPE const ScopedLambda<TypeID(unsigned)>& typeAskedOfEntryParameter, CodeGenerationTotals& totals, bool nobodyEnters)
 {
-    std::optional<Vector<QuestionOfEntry, 4>> questions = findQuestionsOfEntryWrittenByHand(inputs, worker.types, code.unit(), typeAskedOfEntryParameter);
+    std::optional<Vector<QuestionOfEntry, 4>> questions = nobodyEnters ? std::optional(Vector<QuestionOfEntry, 4>()) : findQuestionsOfEntryWrittenByHand(inputs, worker.types, code.unit(), typeAskedOfEntryParameter);
     if (!questions)
         return std::nullopt;
     worker.arena.reset();
     CurrentWorkScope work(inputs.program, code.function(), "emit"_s);
     FunctionCodeGenerator generator(worker, inputs, code, totals);
-    return generator.runEntryWrittenByHand(questions->span());
+    return generator.runEntryWrittenByHand(questions->span(), nobodyEnters);
 }
 
 bool hasStraightForm(const CodeGenerationInputs& inputs, CodeUnit unit, const BodyIndex& index)
 {
     return StraightEmitter::covers(inputs, unit, index);
+}
+
+bool canEmitResumeBody(const CodeGenerationWorker& worker, const CodeGenerationInputs& inputs, FunctionID function, const BodyIndex& index, CodeGenerationTotals& totals)
+{
+    CodeUnit unit { function, CodeRole::SlowBody };
+    if (!StraightEmitter::covers(inputs, unit, index))
+        return false;
+    Code code;
+    code.reset(unit);
+    FunctionCodeGenerator generator(worker, inputs, code, totals);
+    return generator.canEmitStraight(index);
 }
 
 std::optional<CompiledCode> generateStraightCode(const CodeGenerationWorker& worker, const CodeGenerationInputs& inputs, const Code& code, const BodyIndex& index, CodeGenerationTotals& totals)

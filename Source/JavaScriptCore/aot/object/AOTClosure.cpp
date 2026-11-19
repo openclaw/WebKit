@@ -16,6 +16,7 @@
 #include "AOTErrorMessages.h"
 #include "AOTFunctionDescription.h"
 #include "AOTFunctionNames.h"
+#include "AOTHeapCacheRegistry.h"
 #include "AOTHeapHooks.h"
 #include "AOTInstance.h"
 #include "AOTLayoutData.h"
@@ -24,6 +25,9 @@
 #include "AOTProgramIdentifiers.h"
 #include "AOTProgramStatics.h"
 #include "AOTPropertyWalk.h"
+#include "AOTRuntimeCheckFailure.h"
+#include "AOTRuntimeHooks.h"
+#include "AOTRuntimeReporter.h"
 #include "AOTSlimClosure.h"
 #include "AOTState.h"
 #include "AOTStaticFields.h"
@@ -160,7 +164,8 @@ static void analyzeCaptures(JSCell* cell, uint32_t closureNumber, std::span<cons
     JSCell* scope = scopeInHeapSnapshotOf(cell);
     JSCell* holder = scope ? scope : cell;
     Instance* instance = cell->structure()->realm()->aotInstance();
-    if (JSCell* environment = instance ? instance->state->statics->environmentOfModuleThatDefines(closureNumber) : nullptr)
+    JSCell* environment = instance ? instance->state->statics->environmentOfModuleThatDefines(closureNumber) : nullptr;
+    if (environment)
         analyzer.analyzeEdge(holder, environment, RootMarkReason::None);
     if (String name = cell->inherits<JSFunction>() ? String() : CompiledCallee::displayName(asObject(cell)); !name.isEmpty())
         analyzer.setLabelForCell(cell, name);
@@ -169,7 +174,10 @@ static void analyzeCaptures(JSCell* cell, uint32_t closureNumber, std::span<cons
         JSValue reference = JSValue::decode(captures[i]);
         if (!reference || !reference.isCell())
             continue;
-        if (UniquedStringImpl* name = identifiers.nameInHeapSnapshots(closureNumber, i))
+        UniquedStringImpl* name = identifiers.nameInHeapSnapshots(closureNumber, i);
+        if (name && environment && identifiers.isVariableOfModuleInHeapSnapshots(closureNumber, i))
+            instance->state->statics->analyzeVariableOfModule(environment, reference.asCell(), name, analyzer);
+        else if (name)
             analyzer.analyzeVariableNameEdge(holder, reference.asCell(), name);
         else
             analyzer.analyzeIndexEdge(holder, reference.asCell(), i);
@@ -290,7 +298,7 @@ bool mayHaveLazyProperty(VM& vm, JSCell* cell, UniquedStringImpl* uid, LookupPos
     auto* closure = uncheckedDowncast<Closure>(cell);
     if (!closure->kind().isConstructor)
         return false;
-    return !closure->classData() || !closure->getDirect(vm, vm.propertyNames->prototype);
+    return !closure->classData() || !closure->getDirect(vm, vm.propertyNames->prototype) || closure->canHoldStaticFieldInVariable(uid);
 }
 
 static JSC_DECLARE_CUSTOM_GETTER(closurePrototypeProperty);
@@ -323,10 +331,14 @@ const LayoutData* Closure::classData() const
 
 bool Closure::isLazyClassObject() const
 {
-    if (!kind().isConstructor || getDirect(vm(), vm().propertyNames->prototype))
-        return false;
     const LayoutData* classLayout = classData();
-    if (!classLayout)
+    return classLayout && isLazyClassObjectOf(*classLayout);
+}
+
+bool Closure::isLazyClassObjectOf(const LayoutData& layout) const
+{
+    const LayoutData* classLayout = &layout;
+    if (!classLayout->createsClassObjectOnMutation || getDirect(vm(), vm().propertyNames->prototype))
         return false;
     const ClassTable& classes = state().objects->classes;
     return classLayout->createsClassObjectOnMutation && (classLayout->createsPrototypeBeforeClassObject || classes.classPrototypeIfExists(*classLayout) || classes.prototypeAwaitsFirstTouch(*classLayout));
@@ -341,16 +353,38 @@ bool Closure::hasStructureOfNewClosure(VM& vm) const
     return structureID() == ofNewClosure->id();
 }
 
-static NEVER_INLINE void createClassObject(Closure* classObject)
+bool Closure::hasStaticFieldsLeft() const
 {
-    State& state = classObject->state();
-    state.objects->classes.createClassPart(state.instance.globalObject, classObject, ClassTable::ClassPart::ClassObject);
+    const ClassTable& classes = state().objects->classes;
+    if (!classes.leavesSomeStaticFields())
+        return false;
+    const LayoutData* classLayout = classData();
+    return classLayout && classes.hasStaticFieldsLeft(*classLayout) && StaticFields::areReadInVariables(*this);
 }
 
-void Closure::ensureClassObject(VM&)
+bool Closure::canHoldStaticFieldInVariable(UniquedStringImpl* uid) const
+{
+    return (hasStaticFieldsLeft() || isLazyClassObject()) && state().objects->classes.staticField(*classData(), uid);
+}
+
+static NEVER_INLINE void createClassObject(Closure* classObject, ClassTable::StaticFieldsOfPart staticFields)
+{
+    State& state = classObject->state();
+    state.objects->classes.createClassPart(state.instance.globalObject, classObject, ClassTable::ClassPart::ClassObject, staticFields);
+}
+
+void Closure::ensureClassObject(VM& vm)
 {
     if (isLazyClassObject())
-        createClassObject(this);
+        createClassObject(this, ClassTable::StaticFieldsOfPart::MoveToProperties);
+    else if (hasStaticFieldsLeft()) [[unlikely]]
+        StaticFields::moveToProperties(vm, *this);
+}
+
+void Closure::ensureStaticMethods(VM&)
+{
+    if (isLazyClassObject())
+        createClassObject(this, ClassTable::StaticFieldsOfPart::StayInVariables);
 }
 
 static Structure* structureSharedWithClassesInheritingFrom(VM& vm, const Closure& classObject, JSObject* parent)
@@ -359,8 +393,11 @@ static Structure* structureSharedWithClassesInheritingFrom(VM& vm, const Closure
     if (!classLayout.staticMethods().empty() || !classLayout.staticFields().empty())
         return nullptr;
     State& state = classObject.state();
-    if (parent != state.instance.globalObject->functionPrototype() && classLayout.evaluation() != EvaluationState::ProvenOnce)
-        return nullptr;
+    if (classLayout.evaluation() != EvaluationState::ProvenOnce) {
+        bool isFirstEvaluation = state.objects->closures.closureIfCreated(state.objects->classes.functionOfOwnClosure(classObject)) == &classObject;
+        if (parent != state.instance.globalObject->functionPrototype() || !isFirstEvaluation)
+            return nullptr;
+    }
     return state.objects->classes.classObjectStructureInheritingFrom(vm, parent);
 }
 
@@ -403,6 +440,7 @@ static JSObject* createPrototypeObjectOfFunction(VM& vm, JSGlobalObject* globalO
     structure = Structure::addPropertyTransition(vm, structure, vm.propertyNames->constructor, static_cast<unsigned>(PropertyAttribute::DontEnum), offset);
     JSObject* prototype = constructEmptyObject(vm, structure);
     prototype->putDirectOffset(vm, offset, function);
+    countEvent(vm, RuntimeCounterID::PrototypeObjectsOfFunctionsCreated);
     return prototype;
 }
 
@@ -417,12 +455,28 @@ bool Closure::ensurePrototypeProperty(VM& vm)
         return false;
     JSGlobalObject* globalObject = state().instance.globalObject;
     JSObject* prototype;
-    if (kind().isGenerator)
+    FunctionRareData* rareData = kind().isGenerator ? this->rareData() : nullptr;
+    if (Structure* structureOfGenerators = rareData ? rareData->internalFunctionAllocationStructure() : nullptr)
+        prototype = structureOfGenerators->storedPrototypeObject();
+    else if (kind().isGenerator)
         prototype = constructEmptyObject(globalObject, kind().isAsync ? static_cast<JSObject*>(globalObject->asyncGeneratorPrototype()) : globalObject->generatorPrototype());
     else
         prototype = createPrototypeObjectOfFunction(vm, globalObject, this);
     putDirect(vm, vm.propertyNames->prototype, prototype, PropertyAttribute::DontEnum | PropertyAttribute::DontDelete);
     state().objects->classes.didCreatePrototypePropertyOf(this);
+    state().objects->closures.didGivePrototypePropertyTo(vm, this);
+    return true;
+}
+
+bool Closure::tryCreatePrototypeProperty(VM& vm, JSValue value)
+{
+    if (classData() || kind().isConstructor || kind().isGenerator || !FunctionTables::hasPrototypePropertyAtCreation(kind()))
+        return false;
+    if (!structure()->isStructureExtensible() || getDirect(vm, vm.propertyNames->prototype) || !state().objects->classes.definesNoClassOf(state().objects->classes.functionOfOwnClosure(*this)))
+        return false;
+    if (FunctionRareData* rareData = this->rareData())
+        rareData->clear("Store to prototype property of a function");
+    putDirect(vm, vm.propertyNames->prototype, value, PropertyAttribute::DontEnum | PropertyAttribute::DontDelete);
     state().objects->closures.didGivePrototypePropertyTo(vm, this);
     return true;
 }
@@ -452,22 +506,40 @@ static bool canDefineStaticMemberWithoutTransition(VM& vm, Closure& classObject,
     return !classObject.isLazyClassObject();
 }
 
+static bool tryCompleteAccessorInSlot(JSGlobalObject* globalObject, JSObject* holder, PropertyName key, JSObject* function, MethodKind kind)
+{
+    VM& vm = globalObject->vm();
+    Structure* structure = holder->structure();
+    unsigned attributes = 0;
+    PropertyOffset offset = structure->get(vm, key, attributes);
+    if (!isValidOffset(offset) || attributes != (PropertyAttribute::Accessor | PropertyAttribute::DontEnum))
+        return false;
+    auto* current = uncheckedDowncast<GetterSetter>(holder->getDirect(offset));
+    JSObject* getter = kind == MethodKind::Getter ? function : current->isGetterNull() ? nullptr : current->getter();
+    JSObject* setter = kind == MethodKind::Setter ? function : current->isSetterNull() ? nullptr : current->setter();
+    structure->didReplaceProperty(offset);
+    holder->putDirectOffset(vm, offset, GetterSetter::create(vm, globalObject, getter, setter));
+    return true;
+}
+
 bool tryDefineClassMemberWithoutTransition(JSGlobalObject* globalObject, Closure& classObject, const LayoutData& classLayout, JSObject* holder, PropertyName key, JSObject* function, MethodKind kind)
 {
     VM& vm = globalObject->vm();
     if (parseIndex(key))
-        return false;
-    if (classObject.state().objects->classes.keepsStructuresForNextEvaluation(classObject, classLayout))
         return false;
     bool isStatic = holder == &classObject;
     if (isStatic ? !canDefineStaticMemberWithoutTransition(vm, classObject, key) : holder->type() != FinalObjectType)
         return false;
 
     Structure* structure = holder->structure();
+    if (!structure->isStructureExtensible() || structure->isImmutableProperty(key.uid()))
+        return false;
+    if (kind != MethodKind::Method && tryCompleteAccessorInSlot(globalObject, holder, key, function, kind))
+        return true;
+    if (classObject.state().objects->classes.keepsStructuresForNextEvaluation(classObject, classLayout))
+        return false;
     bool isOwnStructure = structure->transitionKind() == TransitionKind::Unknown || structure->transitionKind() == TransitionKind::MakeListedPropertiesImmutable;
     if (!isOwnStructure || !structure->isPinnedPropertyTable() || structure->isDictionary())
-        return false;
-    if (!structure->isStructureExtensible() || structure->isImmutableProperty(key.uid()))
         return false;
 
     bool isMarkedAsPrototype = structure->mayBePrototype();
@@ -477,31 +549,15 @@ bool tryDefineClassMemberWithoutTransition(JSGlobalObject* globalObject, Closure
         if (isMarkedAsPrototype)
             structure->setMayBePrototype(true);
     });
-    constexpr unsigned accessorAttributes = PropertyAttribute::Accessor | PropertyAttribute::DontEnum;
-    unsigned attributes = 0;
-    PropertyOffset offset = structure->get(vm, key, attributes);
-    if (kind == MethodKind::Method) {
-        if (isValidOffset(offset))
-            return false;
-        holder->putDirectWithoutTransition(vm, key, function, static_cast<unsigned>(PropertyAttribute::DontEnum));
-        return true;
-    }
-
-    JSObject* getter = kind == MethodKind::Getter ? function : nullptr;
-    JSObject* setter = kind == MethodKind::Setter ? function : nullptr;
-    if (!isValidOffset(offset)) {
-        holder->putDirectNonIndexAccessorWithoutTransition(vm, key, GetterSetter::create(vm, globalObject, getter, setter), accessorAttributes);
-        return true;
-    }
-    if (attributes != accessorAttributes)
+    if (isValidOffset(structure->get(vm, key)))
         return false;
-    auto* current = uncheckedDowncast<GetterSetter>(holder->getDirect(offset));
-    if (!getter && !current->isGetterNull())
-        getter = current->getter();
-    if (!setter && !current->isSetterNull())
-        setter = current->setter();
-    structure->didReplaceProperty(offset);
-    holder->putDirectOffset(vm, offset, GetterSetter::create(vm, globalObject, getter, setter));
+    if (kind == MethodKind::Method)
+        holder->putDirectWithoutTransition(vm, key, function, static_cast<unsigned>(PropertyAttribute::DontEnum));
+    else {
+        JSObject* getter = kind == MethodKind::Getter ? function : nullptr;
+        JSObject* setter = kind == MethodKind::Setter ? function : nullptr;
+        holder->putDirectNonIndexAccessorWithoutTransition(vm, key, GetterSetter::create(vm, globalObject, getter, setter), PropertyAttribute::Accessor | PropertyAttribute::DontEnum);
+    }
     return true;
 }
 
@@ -519,7 +575,10 @@ void Closure::getOwnSpecialPropertyNames(JSObject* object, JSGlobalObject* globa
 [[noreturn]] static void crashOnFalseProofOfClosure(uint32_t closureNumber, ASCIILiteral mutation)
 {
     FunctionID function = closureFunctionWithNumber(closureNumber);
-    dataLogLn("AOT: ", mutation, " of a closure of the function f", function.index(), " (", initialNameProperty(function), "): the compiler has proven that it never happens, and compiled code takes such closures to be as they were made without a look. This is a bug in Bun.");
+    RuntimeCheckFailure failure("object mutation check failed"_s);
+    failure.inFunction(function);
+    failure.detail(mutation, " on a closure of ", reportedFunctionName(function), ", but the compiler proved that this never happens");
+    failure.report();
     CRASH_WITH_INFO(function.index());
 }
 
@@ -555,25 +614,30 @@ bool holdsWhatIsFoundAbove(VM& vm, const JSObject* object, UniquedStringImpl* ui
     return own->getter() == found->getter() && own->setter() == found->setter();
 }
 
-void holdClosureToLackingNameSlowCase(VM& vm, const JSCell* closure, UniquedStringImpl* uid)
+bool closureAdmitsName(VM& vm, const JSCell* closure, UniquedStringImpl* uid)
 {
     std::optional<uint32_t> number = numberOfClosureHeldToListedNames(vm, closure);
     if (!number)
-        return;
+        return true;
     const CommonIdentifiers& names = *vm.propertyNames;
     if (uid == names.name.impl() || uid == names.length.impl() || uid == names.prototype.impl() || uid == names.arguments.impl() || uid == names.caller.impl())
-        return;
+        return true;
     if (uid->isSymbol() && static_cast<SymbolImpl*>(uid)->isPrivate())
-        return;
+        return true;
     std::optional<uint32_t> name = identifiersOf(*Instance::owning(closure)).numberOf(uid);
-    if (name && std::ranges::binary_search(programTables().namesLaidOnClosures(), NameLaidOnClosuresData { closureFunctionWithNumber(*number).index(), *name }))
+    return name && std::ranges::binary_search(programTables().closurePropertyNames(), ClosurePropertyNameData { closureFunctionWithNumber(*number).index(), *name });
+}
+
+void holdClosureToLackingNameSlowCase(VM& vm, const JSCell* closure, UniquedStringImpl* uid)
+{
+    if (closureAdmitsName(vm, closure, uid))
         return;
     const JSObject* object = static_cast<const JSObject*>(closure);
     unsigned attributes = 0;
     JSValue value = object->getDirect(vm, PropertyName(uid), attributes);
     if (!value || holdsWhatIsFoundAbove(vm, object, uid, value, attributes))
         return;
-    crashOnFalseProofOfClosure(*number, "AddName"_s);
+    crashOnFalseProofOfClosure(*numberOfClosureHeldToListedNames(vm, closure), "AddProperty"_s);
 }
 
 void holdClosureToItsPrototype(VM& vm, const JSCell* closure)
@@ -604,23 +668,43 @@ static void didChangePrototypeProperty(Closure* closure)
             classes.disarmMemberGuards(*constructed);
         }
     }
-    if (JSValue prototype = closure->getDirect(vm, vm.propertyNames->prototype); prototype && prototype.isObject())
-        asObject(prototype)->didBecomePrototype(vm);
 }
 
-static bool restatesInitialName(VM& vm, const Closure& closure, PropertyName name, const PropertyDescriptor& descriptor)
+static constexpr unsigned initialAttributesOfName = PropertyAttribute::DontEnum | PropertyAttribute::ReadOnly;
+
+static bool tryDefineInitialName(VM& vm, Closure& closure, PropertyName name, const PropertyDescriptor& descriptor)
 {
-    if (name != vm.propertyNames->name || closure.classData() || closure.kind().hasInitialNamePrefix())
+    if (name != vm.propertyNames->name || closure.classData() || descriptor.isAccessorDescriptor() || !descriptor.value() || !descriptor.value().isString())
         return false;
     FunctionRareData* rareData = closure.rareData();
-    if ((rareData && rareData->hasReifiedName()) || closure.getDirect(vm, vm.propertyNames->name))
+    if ((rareData && rareData->hasReifiedName()) || uncheckedDowncast<NativeExecutable>(closure.executable())->isNamedAsBound() || closure.getDirect(vm, vm.propertyNames->name))
         return false;
-    if (descriptor.isAccessorDescriptor() || !descriptor.value() || !descriptor.value().isString())
+    unsigned overriddenAttributes = (descriptor.writablePresent() ? PropertyAttribute::ReadOnly : PropertyAttribute::None) | (descriptor.enumerablePresent() ? PropertyAttribute::DontEnum : PropertyAttribute::None) | (descriptor.configurablePresent() ? PropertyAttribute::DontDelete : PropertyAttribute::None);
+    unsigned attributes = (descriptor.attributes() & overriddenAttributes) | (initialAttributesOfName & ~overriddenAttributes);
+    if (attributes == initialAttributesOfName && !closure.kind().hasInitialNamePrefix()) {
+        auto defined = asString(descriptor.value())->tryGetValue();
+        auto initial = initialNamePropertyString(vm, closure.state(), closure.function())->tryGetValue();
+        if (!defined->isNull() && !initial->isNull() && defined.data == initial.data)
+            return true;
+    }
+    Structure* structure = closure.structure();
+    if (!structure->isStructureExtensible() || structure->mayHaveImmutableProperties())
         return false;
-    if ((descriptor.writablePresent() && descriptor.writable()) || (descriptor.enumerablePresent() && descriptor.enumerable()) || (descriptor.configurablePresent() && !descriptor.configurable()))
+    closure.setNameProperty(vm, asString(descriptor.value()), attributes);
+    countEvent(vm, RuntimeCounterID::InitialNamesReplaced);
+    return true;
+}
+
+static bool reifyWrittenName(VM& vm, Closure& closure)
+{
+    FunctionRareData* rareData = closure.rareData();
+    if ((rareData && rareData->hasReifiedName()) || uncheckedDowncast<NativeExecutable>(closure.executable())->isNamedAsBound())
         return false;
-    auto defined = asString(descriptor.value())->tryGetValue();
-    return !defined->isNull() && defined.data == initialNameProperty(closure.function());
+    JSString* name = initialNamePropertyString(vm, closure.state(), closure.function());
+    closure.ensureRareData(vm)->setHasReifiedName();
+    AllowLazyMaterializationOfImmutableProperties allowMaterialization(vm);
+    closure.putDirect(vm, vm.propertyNames->name, name, initialAttributesOfName);
+    return true;
 }
 
 bool Closure::getOwnPropertySlot(JSObject* object, JSGlobalObject* globalObject, PropertyName propertyName, PropertySlot& slot)
@@ -629,14 +713,18 @@ bool Closure::getOwnPropertySlot(JSObject* object, JSGlobalObject* globalObject,
     Closure* closure = uncheckedDowncast<Closure>(object);
     if (JSObject::getOwnPropertySlot(object, globalObject, propertyName, slot))
         return true;
-    if (closure->isLazyClassObject()) {
+    const LayoutData* classLayout = closure->classData();
+    bool isLazyClassObject = classLayout && closure->isLazyClassObjectOf(*classLayout);
+    if (classLayout && !classLayout->staticFields().empty()) {
         if (JSValue value = StaticFields::tryRead(*closure, propertyName.uid())) {
             slot.setValue(closure, static_cast<unsigned>(PropertyAttribute::None), value);
             return true;
         }
+    }
+    if (isLazyClassObject) {
         if (propertyName != vm.propertyNames->prototype && propertyName != vm.propertyNames->name && propertyName != vm.propertyNames->length && !closure->state().objects->classes.hasStaticMethodNamed(*closure->classData(), propertyName.uid()))
             return false;
-        closure->ensureClassObject(vm);
+        closure->ensureStaticMethods(vm);
         if (JSObject::getOwnPropertySlot(object, globalObject, propertyName, slot))
             return true;
     }
@@ -649,7 +737,24 @@ bool Closure::getOwnPropertySlot(JSObject* object, JSGlobalObject* globalObject,
         slot.setValue(closure, PropertyAttribute::ReadOnly | PropertyAttribute::DontEnum, value);
         return true;
     }
+    if (isName && !closure->kind().hasInitialNamePrefix() && reifyWrittenName(vm, *closure))
+        return JSObject::getOwnPropertySlot(object, globalObject, propertyName, slot);
     return Base::getOwnPropertySlot(object, globalObject, propertyName, slot);
+}
+
+bool Closure::mayHoldOwnProperties(VM& vm, std::span<UniquedStringImpl* const> names) const
+{
+    for (UniquedStringImpl* name : names) {
+        if (isValidOffset(structure()->get(vm, PropertyName(name))))
+            return true;
+    }
+    const LayoutData* classLayout = classData();
+    if (!classLayout || (classLayout->staticMethods().empty() && classLayout->staticFields().empty()))
+        return false;
+    const ClassTable& classes = state().objects->classes;
+    return std::ranges::any_of(names, [&](UniquedStringImpl* name) {
+        return classes.hasStaticMethodNamed(*classLayout, name) || classes.staticField(*classLayout, name);
+    });
 }
 
 bool Closure::isNameThatBuiltinFunctionsRefuse(VM& vm, UniquedStringImpl* uid)
@@ -667,13 +772,13 @@ bool Closure::refusesOwnProperty(VM& vm, PropertyName name) const
 
 bool Closure::isBuiltinFunction() const
 {
-    return ModuleTable(state().instance.tables()).isRuntimeFunction(function());
+    return kind().isInRuntimeModule && ModuleTable(state().instance.tables()).isRuntimeFunction(function());
 }
 
-static bool storesPropertyOfClosureBelowClosure(VM& vm, Closure& closure, PropertyName name, const PutPropertySlot& slot)
+static bool canPutDirectly(VM& vm, Closure& closure, PropertyName name, const PutPropertySlot& slot)
 {
     JSObject* above = closure.getPrototypeDirect().getObject();
-    if (!above || above->type() != CompiledClosureType || slot.thisValue() != JSValue(&closure))
+    if (!above || (above->type() != CompiledClosureType && !isCompiledObject(above)) || slot.thisValue() != JSValue(&closure))
         return false;
     const CommonIdentifiers& names = *vm.propertyNames;
     if (name == names.prototype || name == names.name || name == names.length)
@@ -696,10 +801,20 @@ bool Closure::holdsStaticFieldUnder(UniquedStringImpl* uid) const
     return classes.staticField(*classLayout, uid) && !classes.hasStaticMethodNamed(*classLayout, uid);
 }
 
+bool Closure::valueUnderIsHeardByNobody(UniquedStringImpl* uid) const
+{
+    const ClassTable& classes = state().objects->classes;
+    if (const LayoutData* classLayout = classData())
+        return holdsStaticFieldUnder(uid) || classes.nobodyHearsOfValueUnder(*classLayout, ClassSide::Static, uid);
+    ClassSide side = ClassSide::Static;
+    const LayoutData* constructed = classes.classHeldBy(const_cast<Closure*>(this), side);
+    return constructed && side == ClassSide::Static && classes.nobodyHearsOfValueUnder(*constructed, side, uid);
+}
+
 static bool tryReplaceStaticFieldOfClassObject(VM& vm, Closure& closure, PropertyName name, JSValue value, PutPropertySlot& slot)
 {
     Structure* structure = closure.structure();
-    if (structure->isDictionary() || !closure.holdsStaticFieldUnder(name.uid()))
+    if (structure->isDictionary() || structure->isImmutableProperty(name.uid()) || structure->hasFrozenElementsInPlace() || !closure.valueUnderIsHeardByNobody(name.uid()))
         return false;
     unsigned attributes = 0;
     PropertyOffset offset = structure->get(vm, name, attributes);
@@ -715,34 +830,47 @@ bool Closure::put(JSCell* cell, JSGlobalObject* globalObject, PropertyName name,
 {
     VM& vm = globalObject->vm();
     Closure* closure = uncheckedDowncast<Closure>(cell);
-    if (slot.thisValue() == JSValue(closure) && closure->refusesOwnProperty(vm, name)) [[unlikely]] {
+    if (slot.thisValue() == JSValue(closure) && closure->refusesOwnProperty(vm, name) && !closure->structure()->isImmutablePropertyForReader(name.uid())) [[unlikely]] {
         auto scope = DECLARE_THROW_SCOPE(vm);
         slot.disableCaching();
         bool isTold = slot.isStrictMode() || (slot.context() != PutPropertySlot::ReflectSet && name != vm.propertyNames->hasInstanceSymbol);
         return typeError(globalObject, scope, isTold, assignmentToNameThatBuiltinFunctionInheritsMessage(name.uid()));
+    }
+    if (name == vm.propertyNames->prototype && slot.thisValue() == JSValue(closure) && closure->tryCreatePrototypeProperty(vm, value)) {
+        slot.disableCaching();
+        return true;
     }
     ClassTable& classes = closure->state().objects->classes;
     const LayoutData* classLayout = closure->classData();
     bool isStoreToClassObject = classLayout && slot.thisValue() == JSValue(closure);
     if (isStoreToClassObject && StaticFields::tryStore(*closure, name.uid(), value))
         return true;
-    if (isStoreToClassObject && tryReplaceStaticFieldOfClassObject(vm, *closure, name, value, slot))
+    if (isStoreToClassObject && StaticFields::tryCreateByStore(vm, *closure, name, value)) {
+        holdClosureToLackingNameSlowCase(vm, closure, name.uid());
+        slot.disableCaching();
         return true;
+    }
+    if (slot.thisValue() == JSValue(closure) && tryReplaceStaticFieldOfClassObject(vm, *closure, name, value, slot))
+        return true;
+    Structure* structureBefore = closure->structure();
     closure->ensureClassObject(vm);
     if (name == vm.propertyNames->prototype)
         closure->ensurePrototypeProperty(vm);
-    bool result = storesPropertyOfClosureBelowClosure(vm, *closure, name, slot) ? closure->putInlineFast(globalObject, name, value, slot) : Base::put(cell, globalObject, name, value, slot);
+    bool result = canPutDirectly(vm, *closure, name, slot) ? closure->putInlineFast(globalObject, name, value, slot) : Base::put(cell, globalObject, name, value, slot);
     if (slot.thisValue() == JSValue(closure))
         holdClosureToLackingNameSlowCase(vm, closure, name.uid());
     if (isStoreToClassObject) {
+        bool callsSetter = slot.type() == PutPropertySlot::SetterProperty;
         bool replacesUndeclaredProperty = slot.type() == PutPropertySlot::ExistingProperty && !classes.hasStaticMethodNamed(*classLayout, name.uid());
-        if (!replacesUndeclaredProperty)
+        if (!replacesUndeclaredProperty && !callsSetter)
             slot.disableCaching();
-        if (slot.type() != PutPropertySlot::SetterProperty) {
+        if (!callsSetter) {
             classes.holdMemberToProof(vm, *classLayout, ClassSide::Static, closure, name.uid());
             classes.didChangeMember(*classLayout, ClassSide::Static, name.uid());
         }
     }
+    if (slot.type() == PutPropertySlot::ExistingProperty && closure->structure() != structureBefore)
+        slot.disableCaching();
     if (name == vm.propertyNames->prototype) [[unlikely]] {
         slot.disableCaching();
         didChangePrototypeProperty(closure);
@@ -779,19 +907,23 @@ bool Closure::defineOwnProperty(JSObject* object, JSGlobalObject* globalObject, 
     VM& vm = globalObject->vm();
     auto scope = DECLARE_THROW_SCOPE(vm);
     Closure* closure = uncheckedDowncast<Closure>(object);
-    if (closure->refusesOwnProperty(vm, name)) [[unlikely]]
+    const bool isClosedName = closure->refusesOwnProperty(vm, name);
+    if (isClosedName && !closure->structure()->isImmutablePropertyForReader(name.uid()) && !RuntimeHooks::definesInheritedValue(closure, name, descriptor)) [[unlikely]]
         return typeError(globalObject, scope, shouldThrow, assignmentToNameThatBuiltinFunctionInheritsMessage(name.uid()));
-    if (restatesInitialName(vm, *closure, name, descriptor))
+    if (tryDefineInitialName(vm, *closure, name, descriptor))
         return true;
     ClassTable& classes = closure->state().objects->classes;
     const LayoutData* classLayout = closure->classData();
-    if (classLayout && tryDefineStaticFieldInVariable(*closure, name, descriptor))
+    if (classLayout && !isClosedName && tryDefineStaticFieldInVariable(*closure, name, descriptor))
         return true;
     closure->ensureClassObject(vm);
+    if (isClosedName) [[unlikely]]
+        RuntimeHooks::closeNamesOfFunction(vm, closure, name);
     if (name == vm.propertyNames->prototype)
         closure->ensurePrototypeProperty(vm);
     bool result = Base::defineOwnProperty(object, globalObject, name, descriptor, shouldThrow);
-    RETURN_IF_EXCEPTION(scope, false);
+    if (Exception* exception = scope.exception(); exception && !vm.isTerminationException(exception)) [[unlikely]]
+        return false;
     holdClosureToLackingNameSlowCase(vm, closure, name.uid());
     if (classLayout) {
         classes.holdMemberToProof(vm, *classLayout, ClassSide::Static, closure, name.uid());
@@ -852,12 +984,23 @@ bool Closure::setPrototype(JSObject* object, JSGlobalObject* globalObject, JSVal
     if (classLayout && object->getPrototypeDirect() != prototype)
         closure->state().objects->classes.didChangePrototypeLink(*classLayout, ClassSide::Static);
     JSValue prototypeBefore = object->getPrototypeDirect();
+    auto scope = DECLARE_THROW_SCOPE(vm);
     bool result = Base::setPrototype(object, globalObject, prototype, shouldThrow);
+    if (Exception* exception = scope.exception(); exception && !vm.isTerminationException(exception)) [[unlikely]]
+        return false;
     if (object->getPrototypeDirect() != prototypeBefore)
         holdClosureToItsPrototype(vm, closure);
     if (classLayout)
         closure->state().objects->classes.holdLinkToProof(vm, *classLayout, ClassSide::Static, closure);
     return result;
+}
+
+void PropertyWalk::willPutDirectOnClosure(VM& vm, JSObject* object, UniquedStringImpl* uid)
+{
+    Closure* closure = uncheckedDowncast<Closure>(object);
+    const LayoutData* classLayout = closure->classData();
+    if (classLayout && !classLayout->staticFields().empty() && StaticFields::tryRead(*closure, uid))
+        closure->ensureClassObject(vm);
 }
 
 void PropertyWalk::didPutDirectOnClosure(VM& vm, JSObject* object, UniquedStringImpl* uid)
@@ -1097,11 +1240,6 @@ bool ReifiedSlimClosure::put(JSCell* cell, JSGlobalObject* globalObject, Propert
     if (name == vm.propertyNames->prototype) [[unlikely]]
         slot.disableCaching();
     return result;
-}
-
-bool ReifiedSlimClosure::deleteProperty(JSCell* cell, JSGlobalObject* globalObject, PropertyName name, DeletePropertySlot& slot)
-{
-    return Base::deleteProperty(cell, globalObject, name, slot);
 }
 
 bool SlimClosure::putByIndex(JSCell* cell, JSGlobalObject* globalObject, unsigned index, JSValue value, bool shouldThrow)

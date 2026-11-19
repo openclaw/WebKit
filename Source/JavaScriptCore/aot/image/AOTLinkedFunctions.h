@@ -96,6 +96,7 @@ public:
         , m_fusedCallEntries(WTF::move(fusedCallEntries))
     {
         RELEASE_ASSERT(m_placesInCode.size() == m_functions.size());
+        RELEASE_ASSERT(std::ranges::is_sorted(m_fusedCallEntries, { }, &FusedCallEntry::unitIndex) && std::ranges::is_sorted(m_fusedCallEntries, { }, &FusedCallEntry::place));
         indexPlacesInCode();
     }
     explicit LinkedFunctions(Vector<CompiledCode>&& functions, Vector<FusedCallEntry>&& fusedCallEntries = { })
@@ -142,6 +143,13 @@ public:
 
     std::span<const FusedCallEntry> fusedCallEntries() const { return m_fusedCallEntries.span(); }
 
+    bool hasFusedCallEntry(Typed::CodeUnit unit, uint32_t unitIndex) const
+    {
+        uint32_t place = placeInCodeOf(unit, unitIndex);
+        auto fused = std::ranges::lower_bound(m_fusedCallEntries, place, { }, &FusedCallEntry::place);
+        return unit.role == Typed::CodeRole::GenericCallEntry && fused != m_fusedCallEntries.end() && fused->place == place;
+    }
+
     std::optional<uint32_t> positionOfUnit(Typed::CodeUnit unit, uint32_t unitIndex) const
     {
         uint32_t place = placeInCodeOf(unit, unitIndex);
@@ -153,7 +161,17 @@ public:
         return positionOfCodeAt(place);
     }
 
+    void reorder(std::span<const uint32_t> order);
+    std::span<const uint32_t> newPositions() const { return m_newPositions.span(); }
+
     std::optional<uint32_t> positionOfCodeAt(uint32_t place) const
+    {
+        std::optional<uint32_t> position = originalPositionOfCodeAt(place);
+        return position && !m_newPositions.isEmpty() ? m_newPositions[*position] : position;
+    }
+
+private:
+    std::optional<uint32_t> originalPositionOfCodeAt(uint32_t place) const
     {
         std::span<const uint32_t> places = m_placesInCode.span();
         size_t first = 0;
@@ -203,6 +221,7 @@ private:
     ListOfKeptCode m_functions;
     Vector<uint32_t> m_placesInCode;
     Vector<uint32_t> m_firstPositionInGroupOfPlaces;
+    Vector<uint32_t> m_newPositions;
     unsigned m_shiftOfGroupsOfPlaces { 0 };
     Vector<BlocksOfUnits> m_blocks;
     Vector<FusedCallEntry> m_fusedCallEntries;

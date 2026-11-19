@@ -154,6 +154,62 @@ static void checkFrameTestMarkThatFollowsFrameSetupBesideCall(bool testsStackAhe
     AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(uint64_t { 4 }) == 5);
 }
 
+enum class EndOfFrameTestPatch : uint8_t { GoesOn, GoesOnIntoOops, EndsBlockAndGoesOn, EndsFunction };
+
+static bool scanRefusesPatchThatMayCollectWithoutFrame(EndOfFrameTestPatch end, bool showsRegistersToCollector)
+{
+    ProcedureTraits traits;
+    traits.hasHandlers = end == EndOfFrameTestPatch::EndsBlockAndGoesOn;
+    TestProcedure test(traits);
+    Output& out = test.out();
+    Operation* kept = test.argumentGPR(0);
+    PatchOperation* patch = out.patch(Void);
+    AOT_TEST_CHECK(patch->effects.mayCollect);
+    patch->setRunsWithoutFrame(true);
+    patch->setShowsRegistersToCollector(showsRegistersToCollector);
+    patch->setGenerator([](CCallHelpers&, const PatchParameters&) { });
+    switch (end) {
+    case EndOfFrameTestPatch::GoesOn:
+        out.ret(kept);
+        break;
+    case EndOfFrameTestPatch::GoesOnIntoOops:
+        out.unreachable();
+        break;
+    case EndOfFrameTestPatch::EndsBlockAndGoesOn: {
+        Block* continuation = out.newBlock();
+        Block* landingPad = out.newBlock();
+        out.appendSuccessor(normalEdge(continuation));
+        out.appendSuccessor(rareEdge(landingPad));
+        patch->clobberLateOnSuccessor(1, RegisterSet());
+        patch->effects.terminal = true;
+        out.appendTo(continuation);
+        out.ret(kept);
+        out.appendTo(landingPad);
+        out.ret(kept);
+        break;
+    }
+    case EndOfFrameTestPatch::EndsFunction:
+        patch->effects.terminal = true;
+        break;
+    }
+    if (test.prepare())
+        return false;
+    const std::optional<Failure>& failure = test.procedure().failure();
+    AOT_TEST_CHECK(failure && failure->kind == FailureKind::MissingFrameSetup && failure->operation == patch->index());
+    return true;
+}
+
+static void testMachineFramePatchThatMayCollectWithoutFrameShowsItsRegistersOrEndsFunction()
+{
+    AOT_TEST_CHECK(!scanRefusesPatchThatMayCollectWithoutFrame(EndOfFrameTestPatch::GoesOn, true));
+    AOT_TEST_CHECK(scanRefusesPatchThatMayCollectWithoutFrame(EndOfFrameTestPatch::GoesOn, false));
+    AOT_TEST_CHECK(!scanRefusesPatchThatMayCollectWithoutFrame(EndOfFrameTestPatch::GoesOnIntoOops, true));
+    AOT_TEST_CHECK(scanRefusesPatchThatMayCollectWithoutFrame(EndOfFrameTestPatch::GoesOnIntoOops, false));
+    AOT_TEST_CHECK(!scanRefusesPatchThatMayCollectWithoutFrame(EndOfFrameTestPatch::EndsBlockAndGoesOn, true));
+    AOT_TEST_CHECK(scanRefusesPatchThatMayCollectWithoutFrame(EndOfFrameTestPatch::EndsBlockAndGoesOn, false));
+    AOT_TEST_CHECK(!scanRefusesPatchThatMayCollectWithoutFrame(EndOfFrameTestPatch::EndsFunction, false));
+}
+
 static void testMachineFramePatchThatTestsStackItselfStandsAheadOfFramedPart()
 {
     checkFrameTestMarkThatFollowsFrameSetupBesideCall(false);
@@ -380,6 +436,40 @@ static void testMachineFrameCoversRareBlocksAlone()
     function.checkAnswers();
 }
 
+static void testMachineFrameIsTornDownAlikeWhereOriginsAreNoted()
+{
+    for (bool joinOnlyReturns : { false, true }) {
+        Vector<uint8_t> codeWithoutNotes;
+        for (bool notes : { false, true }) {
+            ProcedureTraits traits;
+            traits.notesRangesOfOrigins = notes;
+            TestProcedure test(traits);
+            Output& out = test.out();
+            LBasicBlock rare = out.newBlock();
+            LBasicBlock join = out.newBlock();
+            LValue a = test.argumentGPR(0);
+            out.branch(out.testNonZero64(a, 1), rareEdge(rare), normalEdge(join));
+            out.appendTo(rare);
+            appendFrameTestCall(test)->setNeedsFrameRecord(true);
+            out.jump(join);
+            out.appendTo(join);
+            out.ret(joinOnlyReturns ? a : out.add(a, 2));
+            compileOrFail(test);
+
+            AOT_FRAME_TEST_CHECK(test, test.procedure().frame().coverage() == FrameCoverage::RareRegions && plannedBlockOnlyReturns(test.procedure(), join) == (joinOnlyReturns && GPRInfo::argumentGPR0 == GPRInfo::returnValueGPR));
+            if (!notes) {
+                codeWithoutNotes = Vector<uint8_t>(test.linkedCode());
+                continue;
+            }
+            AOT_FRAME_TEST_CHECK(test, equalSpans(codeWithoutNotes.span(), test.linkedCode()));
+            ptrdiff_t bytesOfJump = 0;
+            for (const RangeOfOrigin& range : test.procedure().rangesOfOrigins())
+                bytesOfJump += range.operation == rare->last()->index() ? MacroAssembler::differenceBetween(range.begin, range.end) : 0;
+            AOT_FRAME_TEST_CHECK(test, isARM64() ? bytesOfJump == 4 : bytesOfJump > 0);
+        }
+    }
+}
+
 static void testMachineSmallColdBlockStandsNearItsJump(bool isRare)
 {
     constexpr unsigned numberOfSums = 40;
@@ -592,82 +682,7 @@ static RegisterMask registersLostAtFrameTestSuspension(TestProcedure& test)
     return lost;
 }
 
-static constexpr uint64_t leftoverInFrameTest = 0x1ef701ef701ef701ull;
-
-static unsigned lowestFrameTestWordKept(const Frame& frame)
-{
-    return frame.bytesBelowFrameRecord() / bytesOfFrameTestWord - SavedFrame::numberOfWordsSkippedFor(frame.bytesDeadAtSuspensions() / bytesOfFrameTestWord);
-}
-
-static bool isFrameTestWordKeptClean(const Procedure& proc, unsigned location)
-{
-    const Frame& frame = proc.frame();
-    if (location <= frame.numberOfCalleeSaves() || location > lowestFrameTestWordKept(frame))
-        return false;
-    for (const StackSlot* slot : proc.stackSlots()) {
-        if (!slot->isDeadAtSuspensions() && frameTestWordHolds(location, slot->offsetFromFP(), slot->byteSize()))
-            return false;
-    }
-    return true;
-}
-
-static PatchOperation* appendFrameTestLeftovers(Output& out)
-{
-    PatchOperation* patch = out.patch(Void);
-    patch->effects = Effects::none();
-    patch->effects.writesLocalState = true;
-    patch->numGPScratchRegisters = 1;
-    patch->setGenerator([](CCallHelpers& jit, const PatchParameters& params) {
-        AllowMacroScratchRegisterUsage allowScratch(jit);
-        const Frame& frame = params.frame();
-        AOT_TEST_CHECK(params.frameIsSetUp());
-        jit.move(CCallHelpers::TrustedImm64(static_cast<int64_t>(leftoverInFrameTest)), params.gpScratch(0));
-        for (unsigned location = 1; location <= lowestFrameTestWordKept(frame); ++location) {
-            int32_t offset = -bytesOfFrameTestWord * static_cast<int32_t>(location);
-            bool isClearedAtSetup = offset >= frame.beginOfWordsClearedAtSetup() && offset < frame.endOfWordsClearedAtSetup();
-            if (isFrameTestWordKeptClean(params.proc(), location) && !isClearedAtSetup)
-                jit.store64(params.gpScratch(0), CCallHelpers::Address(CCallHelpers::framePointerRegister, offset));
-        }
-    });
-    return patch;
-}
-
-static void emitFrameTestCountOfLeftovers(CCallHelpers& jit, const Procedure& proc, uint64_t leftover, GPRReg count, GPRReg word, GPRReg pattern)
-{
-    jit.move(CCallHelpers::TrustedImm64(static_cast<int64_t>(leftover)), pattern);
-    for (unsigned location = 1; location <= lowestFrameTestWordKept(proc.frame()); ++location) {
-        if (!isFrameTestWordKeptClean(proc, location))
-            continue;
-        jit.load64(CCallHelpers::Address(CCallHelpers::framePointerRegister, -bytesOfFrameTestWord * static_cast<int32_t>(location)), word);
-        CCallHelpers::Jump isNoLeftover = jit.branch64(CCallHelpers::NotEqual, word, pattern);
-        jit.add64(CCallHelpers::TrustedImm32(1), count);
-        isNoLeftover.link(&jit);
-    }
-}
-
-static bool isFrameTestWordClearedAt(const Frame& frame, const PatchOperation* suspension, unsigned location)
-{
-    unsigned lowestWordKept = lowestFrameTestWordKept(frame);
-    return suspension->frameWordsClearedInFrontOfSuspension().get(location)
-        || (location <= lowestWordKept && location + suspension->numberOfFrameWordsToClearAtFirstSuspension() > lowestWordKept);
-}
-
-static unsigned numberOfFrameTestWordsClearedInFrontOf(const PatchOperation* suspension)
-{
-    const BitSpan& words = suspension->frameWordsClearedInFrontOfSuspension();
-    unsigned count = 0;
-    for (size_t word = 0; word < words.size(); ++word)
-        count += words.get(word);
-    return count;
-}
-
-enum class FrameTestSuspension : uint8_t {
-    GoesOn,
-    IsFirst,
-    IsLater,
-};
-
-static PatchOperation* appendFrameTestSuspension(TestProcedure& test, Operation* sumOfRoots, std::span<Operation* const> roots, FrameTestSuspension kind = FrameTestSuspension::IsLater, uint64_t leftover = leftoverInFrameTest)
+static PatchOperation* appendFrameTestSuspension(TestProcedure& test, Operation* sumOfRoots, std::span<Operation* const> roots)
 {
     RegisterMask lost = registersLostAtFrameTestSuspension(test);
     PatchOperation* suspension = test.out().patch(Void);
@@ -676,12 +691,11 @@ static PatchOperation* appendFrameTestSuspension(TestProcedure& test, Operation*
         suspension->append(root, ValueRep::LateColdAny);
     suspension->clobberLate(lost);
     suspension->setIsSuspension(true);
-    suspension->setGenerator([lost, kind, leftover](CCallHelpers& jit, const PatchParameters& params) {
+    suspension->setGenerator([lost](CCallHelpers& jit, const PatchParameters& params) {
         AllowMacroScratchRegisterUsage allowScratch(jit);
         constexpr GPRReg address = GPRInfo::argumentGPR0;
         constexpr GPRReg word = GPRInfo::argumentGPR1;
         constexpr GPRReg sum = GPRInfo::argumentGPR2;
-        constexpr GPRReg pattern = GPRInfo::argumentGPR3;
         const Frame& frame = params.frame();
         const std::optional<BitSpan>& deadWords = params.value()->frameWordsDeadAcrossSuspension();
         AOT_TEST_CHECK(params.frameIsSetUp() && deadWords);
@@ -698,23 +712,8 @@ static PatchOperation* appendFrameTestSuspension(TestProcedure& test, Operation*
                 AOT_TEST_CHECK(!frameTestWordHolds(location, rep.offsetFromFP(), numberOfBytes) || (location <= numberOfWordsKept && !deadWords->get(location)));
         }
 
-        if (kind == FrameTestSuspension::IsFirst) {
-            unsigned lowestWordKept = lowestFrameTestWordKept(frame);
-            unsigned numberOfWordsToClear = params.value()->numberOfFrameWordsToClearAtFirstSuspension();
-            AOT_TEST_CHECK(numberOfWordsToClear <= SavedFrame::maxClearedWords && frame.numberOfCalleeSaves() + numberOfWordsToClear <= lowestWordKept);
-            params[0].emitRestore(jit, address);
-            jit.move(CCallHelpers::TrustedImm32(0), sum);
-            emitFrameTestCountOfLeftovers(jit, params.proc(), leftover, sum, word, pattern);
-            jit.store64(sum, CCallHelpers::Address(address, 2 * bytesOfFrameTestWord));
-            jit.move(CCallHelpers::TrustedImm32(0), sum);
-            for (unsigned location = lowestWordKept; location + numberOfWordsToClear > lowestWordKept; --location)
-                jit.store64(sum, CCallHelpers::Address(CCallHelpers::framePointerRegister, -bytesOfFrameTestWord * static_cast<int32_t>(location)));
-            emitFrameTestCountOfLeftovers(jit, params.proc(), leftover, sum, word, pattern);
-            jit.store64(sum, CCallHelpers::Address(address, bytesOfFrameTestWord));
-        }
-
         emitFrameTestPoison(jit, lost);
-        for (unsigned location = 1; location <= numberOfWords && kind != FrameTestSuspension::GoesOn; ++location) {
+        for (unsigned location = 1; location <= numberOfWords; ++location) {
             if (location > numberOfWordsKept || deadWords->get(location))
                 jit.store64(word, CCallHelpers::Address(CCallHelpers::framePointerRegister, -bytesOfFrameTestWord * static_cast<int32_t>(location)));
         }
@@ -777,7 +776,7 @@ static void checkFrameTestPartsOfSavedFrame(TestProcedure& test)
     AOT_FRAME_TEST_CHECK(test, frame.beginOfWordsClearedAtSetup() == frame.endOfWordsClearedAtSetup() && !test.printedFrame().contains("wordsClearedAtSetup"_s));
 }
 
-static unsigned checkFrameTestDeadWords(TestProcedure& test, const Operation* valueNotDefinedOnEveryPath = nullptr)
+static unsigned checkFrameTestDeadWords(TestProcedure& test)
 {
     Procedure& proc = test.procedure();
     const Frame& frame = proc.frame();
@@ -790,53 +789,45 @@ static unsigned checkFrameTestDeadWords(TestProcedure& test, const Operation* va
     std::span<PatchOperation* const> suspensions = proc.allocation().suspensions();
     for (uint32_t indexOfSuspension = 0; indexOfSuspension < suspensions.size(); ++indexOfSuspension) {
         const PatchOperation* suspension = suspensions[indexOfSuspension];
-        const BitSpan& spillsHeld = proc.allocation().spillsHeldAt(indexOfSuspension);
+        const BitSpan& liveSpills = proc.allocation().liveSpillsAt(indexOfSuspension);
         const std::optional<BitSpan>& deadWords = suspension->frameWordsDeadAcrossSuspension();
         Position early = proc.order().earlyPositionOf(suspension);
         Position late = proc.order().latePositionOf(suspension);
-        auto isCleared = [&](unsigned location) {
-            return isFrameTestWordClearedAt(frame, suspension, location);
-        };
-        AOT_FRAME_TEST_CHECK(test, deadWords && suspension->numberOfFrameWordsToClearAtFirstSuspension() <= SavedFrame::maxClearedWords);
+        AOT_FRAME_TEST_CHECK(test, deadWords);
         AOT_FRAME_TEST_CHECK(test, text.contains(makeString("suspension @"_s, suspension->index(), ": dead words ["_s)));
         for (unsigned location = 1; location <= numberOfSaves; ++location)
-            AOT_FRAME_TEST_CHECK(test, !deadWords->get(location) && !isCleared(location));
+            AOT_FRAME_TEST_CHECK(test, !deadWords->get(location));
         AOT_FRAME_TEST_CHECK(test, !(numberOfSaves % 2) || deadWords->get(numberOfSaves + 1));
 
         for (unsigned location = roundUpToMultipleOf<2>(numberOfSaves) + 1; location <= numberOfWordsKept; ++location) {
             bool isHeld = false;
             bool mayBeHeld = false;
-            bool isHeldInFront = false;
             for (SpillIndex index = 0; index < spills.size(); ++index) {
                 const SpillFacts& spill = spills[index];
-                bool isHeldHere = spillsHeld.get(index);
+                bool isHeldHere = liveSpills.get(index);
                 AOT_FRAME_TEST_CHECK(test, !isHeldHere || (spill.livesAcrossSuspension && spill.begin <= late && spill.end >= early));
                 if (!frameTestWordHolds(location, frame.offsetFromFPOf(index), bytesForWidth(spill.width)))
                     continue;
                 isHeld |= isHeldHere;
                 mayBeHeld |= spill.begin <= late && spill.end >= early;
-                isHeldInFront |= isHeldHere && spill.value != valueNotDefinedOnEveryPath && spill.begin < late;
             }
             for (const StackSlot* slot : proc.stackSlots()) {
                 if (frameTestWordHolds(location, slot->offsetFromFP(), slot->byteSize()))
-                    isHeld = mayBeHeld = isHeldInFront = true;
+                    isHeld = mayBeHeld = true;
             }
             AOT_FRAME_TEST_CHECK(test, !isHeld || !deadWords->get(location));
             AOT_FRAME_TEST_CHECK(test, mayBeHeld || deadWords->get(location));
-            AOT_FRAME_TEST_CHECK(test, !isHeldInFront || !isCleared(location));
             numberOfDeadWords += deadWords->get(location);
         }
     }
     return numberOfDeadWords;
 }
 
-static void runFrameTestOfFunctionThatSavesItsFrame(unsigned numberAcrossCall, unsigned numberAcrossSecond, bool firstSuspensionGoesOn)
+static void runFrameTestOfFunctionThatSavesItsFrame(unsigned numberAcrossCall, unsigned numberAcrossSecond)
 {
     constexpr uint64_t a = 5000;
     constexpr unsigned numberAcrossBoth = 2;
     constexpr unsigned numberAcrossFirst = 4;
-    constexpr unsigned mostPlacesFreeBehindFirst = numberAcrossFirst + 2;
-    AOT_TEST_CHECK(numberAcrossSecond > mostPlacesFreeBehindFirst);
     ProcedureTraits traits;
     traits.savesFrameOnSuspend = true;
     TestProcedure test(traits);
@@ -850,7 +841,6 @@ static void runFrameTestOfFunctionThatSavesItsFrame(unsigned numberAcrossCall, u
 
     Operation* seed = test.argumentGPR(0);
     Operation* argumentWithSums = test.argumentGPR(1);
-    appendFrameTestLeftovers(out);
     Operation* sums = out.opaque(argumentWithSums);
     Vector<Operation*> acrossBoth = defineFrameTestValues(out, seed, numberAcrossBoth);
     Vector<Operation*> acrossFirst = defineFrameTestValues(out, out.add(seed, 100), numberAcrossFirst);
@@ -866,14 +856,14 @@ static void runFrameTestOfFunctionThatSavesItsFrame(unsigned numberAcrossCall, u
     rootsOfFirst.appendVector(acrossFirst);
     rootsOfFirst.append(rootThatDies);
     rootsOfFirst.append(halfWordRoot);
-    PatchOperation* first = appendFrameTestSuspension(test, sums, rootsOfFirst.span(), firstSuspensionGoesOn ? FrameTestSuspension::GoesOn : FrameTestSuspension::IsFirst);
+    PatchOperation* first = appendFrameTestSuspension(test, sums, rootsOfFirst.span());
     Operation* seedOfSecond = addUpFrameTestValues(out, sumAcrossCall, acrossFirst.span());
     Vector<Operation*> acrossSecond = defineFrameTestValues(out, seedOfSecond, numberAcrossSecond);
 
     Vector<Operation*> rootsOfSecond = acrossBoth;
     rootsOfSecond.appendVector(acrossSecond);
     rootsOfSecond.append(halfWordRoot);
-    PatchOperation* second = appendFrameTestSuspension(test, sums, rootsOfSecond.span(), firstSuspensionGoesOn ? FrameTestSuspension::IsFirst : FrameTestSuspension::IsLater);
+    PatchOperation* second = appendFrameTestSuspension(test, sums, rootsOfSecond.span());
     Operation* result = out.load64(out.address(frameSlots, out.slotBase(keptSlot), sizeof(uint64_t)));
     result = addUpFrameTestValues(out, result, acrossBoth.span());
     result = addUpFrameTestValues(out, result, acrossSecond.span());
@@ -888,13 +878,6 @@ static void runFrameTestOfFunctionThatSavesItsFrame(unsigned numberAcrossCall, u
     checkFrameTestPartsOfSavedFrame(test);
     AOT_FRAME_TEST_CHECK(test, checkFrameTestDeadWords(test));
 
-    unsigned fewestNewWords = numberAcrossSecond - mostPlacesFreeBehindFirst;
-    unsigned numberOfWordsToClear = first->numberOfFrameWordsToClearAtFirstSuspension();
-    AOT_FRAME_TEST_CHECK(test, numberOfWordsToClear >= std::min<unsigned>(fewestNewWords, SavedFrame::maxClearedWords));
-    AOT_FRAME_TEST_CHECK(test, numberOfWordsToClear + numberOfFrameTestWordsClearedInFrontOf(first) >= fewestNewWords);
-    AOT_FRAME_TEST_CHECK(test, test.printedFrame().contains(makeString("], lowest words cleared at first suspension = "_s, numberOfWordsToClear)));
-    AOT_FRAME_TEST_CHECK(test, (numberOfFrameTestWordsClearedInFrontOf(first) + numberOfFrameTestWordsClearedInFrontOf(second) > 0) == test.printedFrame().contains("words cleared in front = ["_s));
-
     unsigned numberOfSpillsKept = 0;
     for (const SpillFacts& spill : allocation.spills())
         numberOfSpillsKept += spill.livesAcrossSuspension;
@@ -907,115 +890,15 @@ static void runFrameTestOfFunctionThatSavesItsFrame(unsigned numberAcrossCall, u
     uint64_t expectedSumOfRoots = sumOfFrameTestValues(a, numberAcrossBoth) + sumOfFrameTestValues(a + 100, numberAcrossFirst) + a + 500 + halfWord + livingToTheEnd;
     std::array<uint64_t, 3> words { 0, poison, poison };
     AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(a, words.data()) == a + 7 + livingToTheEnd);
-    AOT_FRAME_TEST_CHECK(test, words[0] == expectedSumOfRoots && !words[1]);
-    AOT_FRAME_TEST_CHECK(test, firstSuspensionGoesOn || words[2] >= std::min<unsigned>(fewestNewWords, SavedFrame::maxClearedWords) - 1);
+    AOT_FRAME_TEST_CHECK(test, words[0] == expectedSumOfRoots);
 }
 
 static void testMachineFrameOfFunctionThatSavesItsFrame()
 {
     for (unsigned numberAcrossCall = 0; numberAcrossCall <= numberOfCalleeSavedGPRsInFrameTests() + 2; ++numberAcrossCall) {
-        for (unsigned numberAcrossSecond : { 12u, 30u }) {
-            runFrameTestOfFunctionThatSavesItsFrame(numberAcrossCall, numberAcrossSecond, false);
-            runFrameTestOfFunctionThatSavesItsFrame(numberAcrossCall, numberAcrossSecond, true);
-        }
+        for (unsigned numberAcrossSecond : { 12u, 30u })
+            runFrameTestOfFunctionThatSavesItsFrame(numberAcrossCall, numberAcrossSecond);
     }
-}
-
-static void runFrameTestOfWordsStoredOnOnePath(bool takesArm)
-{
-    constexpr uint64_t a = 7000;
-    constexpr unsigned numberInArm = 3;
-    ProcedureTraits traits;
-    traits.savesFrameOnSuspend = true;
-    TestProcedure test(traits);
-    Output& out = test.out();
-    Operation* argumentWithSeed = test.argumentGPR(0);
-    Operation* argumentWithSums = test.argumentGPR(1);
-    Operation* choice = test.argumentGPR(2);
-    appendFrameTestLeftovers(out);
-    Operation* seed = out.opaque(argumentWithSeed);
-    Operation* sums = out.opaque(argumentWithSums);
-    Block* arm = out.newBlock();
-    Block* join = out.newBlock();
-    ValueFromBlock fromEntry = out.anchor(out.int64Zero);
-    out.branch(out.testNonZero64(choice, 1), normalEdge(arm), normalEdge(join));
-
-    out.appendTo(arm);
-    Vector<Operation*> inArm = defineFrameTestValues(out, seed, numberInArm);
-    appendFrameTestSuspension(test, sums, inArm.span(), takesArm ? FrameTestSuspension::IsFirst : FrameTestSuspension::IsLater);
-    ValueFromBlock fromArm = out.anchor(addUpFrameTestValues(out, out.int64Zero, inArm.span()));
-    out.jump(join);
-
-    out.appendTo(join);
-    Operation* sumOfArm = out.phi(Int64, fromEntry, fromArm);
-    Operation* behindJoin = out.opaque(out.add(seed, 50));
-    appendFrameTestSuspension(test, sums, singleElementSpan(behindJoin), takesArm ? FrameTestSuspension::IsLater : FrameTestSuspension::IsFirst);
-    out.ret(out.add(out.add(sumOfArm, behindJoin), seed));
-
-    compileOrFail(test);
-    AOT_FRAME_TEST_CHECK(test, test.procedure().allocation().suspensions().size() == 2);
-    checkFrameTestLayout(test);
-    checkFrameTestDeadWords(test);
-
-    uint64_t expectedSumOfArm = takesArm ? sumOfFrameTestValues(a, numberInArm) : 0;
-    std::array<uint64_t, 3> words { 0, poison, poison };
-    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(a, words.data(), uint64_t { takesArm }) == expectedSumOfArm + a + 50 + a);
-    AOT_FRAME_TEST_CHECK(test, words[0] == expectedSumOfArm + a + 50 && !words[1]);
-}
-
-static void testMachineFrameClearsWordsStoredOnOnePath()
-{
-    runFrameTestOfWordsStoredOnOnePath(false);
-    runFrameTestOfWordsStoredOnOnePath(true);
-}
-
-static void testMachineFrameKeepsNoLeftoverInWordHeldByRangeAlone()
-{
-    constexpr uint64_t a = 9000;
-    ProcedureTraits traits;
-    traits.savesFrameOnSuspend = true;
-    TestProcedure test(traits);
-    Output& out = test.out();
-    Operation* choice = test.argumentGPR(2);
-    Operation* seed = out.opaque(test.argumentGPR(0));
-    Operation* sums = out.opaque(test.argumentGPR(1));
-    Block* defining = out.newBlock();
-    Block* shared = out.newBlock();
-    Block* reading = out.newBlock();
-    out.branch(out.testNonZero64(choice, 1), normalEdge(defining), normalEdge(shared));
-
-    out.appendTo(defining);
-    Operation* value = out.opaque(out.add(seed, 1));
-    out.branch(out.testNonZero64(choice, 2), unlikelyEdge(reading), normalEdge(shared));
-
-    out.appendTo(shared);
-    PatchOperation* suspensionInShared = appendFrameTestSuspension(test, sums, { }, FrameTestSuspension::IsFirst, a + 1);
-    out.ret(seed);
-
-    out.appendTo(reading);
-    PatchOperation* suspensionInReading = appendFrameTestSuspension(test, sums, singleElementSpan(value), FrameTestSuspension::IsFirst, a + 1);
-    out.ret(value);
-
-    compileOrFail(test);
-    const Order& order = test.procedure().order();
-    const Allocation& allocation = test.procedure().allocation();
-    const Frame& frame = test.procedure().frame();
-    AOT_FRAME_TEST_CHECK(test, allocation.suspensions().size() == 2);
-    checkFrameTestLayout(test);
-    checkFrameTestPartsOfSavedFrame(test);
-    checkFrameTestDeadWords(test, value);
-
-    AOT_FRAME_TEST_CHECK(test, allocation.isSpilled(value));
-    const SpillFacts& spill = allocation.spills()[allocation.spillOf(value)];
-    unsigned location = static_cast<unsigned>(-frame.offsetFromFPOf(allocation.spillOf(value)) / bytesOfFrameTestWord);
-    bool rangeReachesOverShared = spill.begin < order.latePositionOf(suspensionInShared) && spill.end >= order.earlyPositionOf(suspensionInShared);
-    AOT_FRAME_TEST_CHECK(test, !isFrameTestWordClearedAt(frame, suspensionInReading, location));
-    AOT_FRAME_TEST_CHECK(test, !rangeReachesOverShared || isFrameTestWordClearedAt(frame, suspensionInShared, location));
-
-    std::array<uint64_t, 3> words { 0, poison, poison };
-    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(a, words.data(), uint64_t { 3 }) == a + 1 && words[0] == a + 1);
-    words = { 0, poison, poison };
-    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(a, words.data(), uint64_t { 0 }) == a && !words[0] && !words[1]);
 }
 
 static void testMachineFrameKeepsNoSpillThatNoPathReadsBehindSuspension()
@@ -1052,7 +935,7 @@ static void testMachineFrameKeepsNoSpillThatNoPathReadsBehindSuspension()
     AOT_FRAME_TEST_CHECK(test, allocation.isSpilled(value));
     const SpillFacts& spill = allocation.spills()[allocation.spillOf(value)];
     AOT_FRAME_TEST_CHECK(test, spill.begin < order.earlyPositionOf(suspension) && spill.end > order.latePositionOf(suspension));
-    AOT_FRAME_TEST_CHECK(test, !spill.livesAcrossSuspension && !allocation.spillsHeldAt(0).get(allocation.spillOf(value)));
+    AOT_FRAME_TEST_CHECK(test, !spill.livesAcrossSuspension && !allocation.liveSpillsAt(0).get(allocation.spillOf(value)));
 
     std::array<uint64_t, 3> words { 0, poison, poison };
     AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(a, words.data(), uint64_t { 1 }) == a + 1 && !words[0]);
@@ -1098,9 +981,9 @@ static void testMachineFrameKeepsManySpillsThatLiveThroughBlockOfSuspension()
     checkFrameTestDeadWords(test);
     AOT_FRAME_TEST_CHECK(test, allocation.spills().size() > 64);
     for (Operation* value : readBehindJoin)
-        AOT_FRAME_TEST_CHECK(test, allocation.isSpilled(value) && allocation.spillsHeldAt(0).get(allocation.spillOf(value)) && allocation.spills()[allocation.spillOf(value)].livesAcrossSuspension);
+        AOT_FRAME_TEST_CHECK(test, allocation.isSpilled(value) && allocation.liveSpillsAt(0).get(allocation.spillOf(value)) && allocation.spills()[allocation.spillOf(value)].livesAcrossSuspension);
     for (Operation* value : readOnOtherWay)
-        AOT_FRAME_TEST_CHECK(test, !allocation.isSpilled(value) || !allocation.spillsHeldAt(0).get(allocation.spillOf(value)));
+        AOT_FRAME_TEST_CHECK(test, !allocation.isSpilled(value) || !allocation.liveSpillsAt(0).get(allocation.spillOf(value)));
 
     std::array<uint64_t, 3> words { 0, poison, poison };
     AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(a, words.data(), uint64_t { 0 }) == sumOfFrameTestValues(a, numberOfEach));
@@ -1168,14 +1051,14 @@ static void testMachineFrameKeepsManySpillsThatLiveRoundLoopWithSuspension()
     unsigned numberKeptOutsideSpills = 0;
     for (const Vector<Operation*>& values : { readInLoop, readBehindLoop }) {
         for (Operation* value : values) {
-            bool isHeld = allocation.isSpilled(value) && allocation.spillsHeldAt(0).get(allocation.spillOf(value));
+            bool isHeld = allocation.isSpilled(value) && allocation.liveSpillsAt(0).get(allocation.spillOf(value));
             AOT_FRAME_TEST_CHECK(test, !isHeld || allocation.spills()[allocation.spillOf(value)].livesAcrossSuspension);
             numberKeptOutsideSpills += !isHeld;
         }
     }
     AOT_FRAME_TEST_CHECK(test, numberKeptOutsideSpills <= 1);
     for (Operation* value : readInFrontOfLoop)
-        AOT_FRAME_TEST_CHECK(test, !allocation.isSpilled(value) || !allocation.spillsHeldAt(0).get(allocation.spillOf(value)));
+        AOT_FRAME_TEST_CHECK(test, !allocation.isSpilled(value) || !allocation.liveSpillsAt(0).get(allocation.spillOf(value)));
 }
 
 static bool oneByteReachesFrameTestSpill(TestProcedure& test, const Operation* value)
@@ -1210,7 +1093,6 @@ static void testMachineFrameThatIsSavedMovesStackSlotsAndHalfWordsWhole()
 
     Operation* argumentWithSeed = test.argumentGPR(0);
     Operation* argumentWithSums = test.argumentGPR(1);
-    appendFrameTestLeftovers(out);
     Operation* seed = out.opaque(argumentWithSeed);
     Operation* sums = out.opaque(argumentWithSums);
     out.store64(out.add(seed, 7), wordOfKeptSlot());
@@ -1230,7 +1112,7 @@ static void testMachineFrameThatIsSavedMovesStackSlotsAndHalfWordsWhole()
 
     Vector<Operation*> roots = kept;
     roots.appendVector(halfWords);
-    PatchOperation* first = appendFrameTestSuspension(test, sums, roots.span(), FrameTestSuspension::IsFirst);
+    PatchOperation* first = appendFrameTestSuspension(test, sums, roots.span());
     sum = addUpFrameTestValues(out, out.add(sum, out.load64(wordOfKeptSlot())), readOnceMore);
     for (unsigned read = 0; read < numberOfReads; ++read) {
         appendFrameTestCall(test);
@@ -1285,7 +1167,7 @@ static void testMachineFrameThatIsSavedMovesStackSlotsAndHalfWordsWhole()
         + numberOfReads * static_cast<uint32_t>(a + 600 + busyHalfWord) + sumOfKept + sumOfHalfWords;
     std::array<uint64_t, 3> words { 0, poison, poison };
     AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(a, words.data()) == expected);
-    AOT_FRAME_TEST_CHECK(test, words[0] == 2 * (sumOfKept + sumOfHalfWords) && !words[1]);
+    AOT_FRAME_TEST_CHECK(test, words[0] == 2 * (sumOfKept + sumOfHalfWords));
 }
 
 static void testMachineFrameWordThatSuspensionNamesByNumberComesFirst()
@@ -1351,7 +1233,6 @@ static void testMachineFrameClearsAtSetupWordsThatSavesWrite()
     Operation* argumentWithSeed = test.argumentGPR(0);
     Operation* argumentWithSums = test.argumentGPR(1);
     Operation* choice = test.argumentGPR(2);
-    appendFrameTestLeftovers(out);
     Operation* value = out.opaque(out.add(argumentWithSeed, 1));
     Operation* sums = out.opaque(argumentWithSums);
     out.store64(value, out.address(test.heaps().argumentBuffer, sums, 3 * sizeof(uint64_t)));
@@ -1360,7 +1241,7 @@ static void testMachineFrameClearsAtSetupWordsThatSavesWrite()
     out.branch(out.testNonZero64(choice, 1), rareEdge(rare), normalEdge(end));
 
     out.appendTo(rare);
-    appendFrameTestSuspension(test, sums, singleElementSpan(value), FrameTestSuspension::IsFirst);
+    appendFrameTestSuspension(test, sums, singleElementSpan(value));
     out.jump(end);
 
     out.appendTo(end);
@@ -1383,10 +1264,10 @@ static void testMachineFrameClearsAtSetupWordsThatSavesWrite()
 
     std::array<uint64_t, 4> words { 0, poison, poison, 0 };
     AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(a, words.data(), uint64_t { 1 }) == answer);
-    AOT_FRAME_TEST_CHECK(test, words[0] == a + 1 && !words[1] && words[3] == a + 1);
+    AOT_FRAME_TEST_CHECK(test, words[0] == a + 1 && words[3] == a + 1);
     words = { 0, poison, poison, 0 };
     AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(a, words.data(), uint64_t { 0 }) == answer);
-    AOT_FRAME_TEST_CHECK(test, !words[0] && words[1] == poison && words[3] == a + 1);
+    AOT_FRAME_TEST_CHECK(test, !words[0] && words[3] == a + 1);
 }
 
 static SpillIndex findFrameTestPointerBeside(const Allocation& allocation, const Operation* reference)
@@ -1893,6 +1774,180 @@ static void testMachineFrameIsSetUpAheadOfLoopThatNeedsIt()
     AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(uint64_t { 6 }, uint64_t { 100 }) == 112 && setups.numberRun == 1);
 }
 
+static void runFrameTestOfWayOutThatRareRegionLeadsBackTo(bool wayOutGoesOn, bool standsInLoopThatTurns)
+{
+    TestProcedure test;
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    FrameTestSetupsThatCount setups;
+    FrameTestMark markOnWayOut;
+    proc.setStackCheckGenerator(noteAndCountFrameTestSetup, &setups);
+    Operation* a = test.argumentGPR(0);
+    Operation* b = test.argumentGPR(1);
+    Block* before = out.newBlock();
+    Block* turning = out.newBlock();
+    Block* guard = out.newBlock();
+    Block* wayOut = out.newBlock();
+    Block* returning = out.newBlock();
+    Block* working = out.newBlock();
+    Block* done = out.newBlock();
+    Block* slow = out.newBlock();
+    Block* slowAgain = out.newBlock();
+    Block* slowOn = out.newBlock();
+    Block* leaving = standsInLoopThatTurns ? out.newBlock() : nullptr;
+    Block* comingRound = standsInLoopThatTurns ? out.newBlock() : nullptr;
+
+    out.branch(out.testIsZero64(a, 32), normalEdge(before), normalEdge(returning));
+    out.appendTo(before);
+    ValueFromBlock firstCount = out.anchor(out.int64Zero);
+    out.jump(turning);
+    out.appendTo(turning);
+    Operation* count = out.phi(Int64, firstCount);
+    out.branch(out.testNonZero64(a, 8), rareEdge(slow), normalEdge(guard));
+    out.appendTo(guard);
+    out.branch(out.testNonZero64(a, 1), normalEdge(wayOut), normalEdge(working));
+    out.appendTo(wayOut);
+    appendFrameTestMark(out, markOnWayOut, true);
+    if (wayOutGoesOn) {
+        Block* onward = out.newBlock();
+        out.jump(onward);
+        out.appendTo(onward);
+    }
+    out.ret(b);
+    out.appendTo(returning);
+    out.ret(b);
+    out.appendTo(working);
+    appendFrameTestCall(test);
+    Operation* nextCount = out.add(count, 1);
+    out.branch(out.testNonZero64(a, 4), rareEdge(slowAgain), normalEdge(done));
+    out.appendTo(done);
+    if (standsInLoopThatTurns) {
+        Block* last = out.newBlock();
+        out.addIncomingToPhi(count, out.anchor(nextCount));
+        out.branch(out.lessThan(nextCount, out.constInt64(3)), normalEdge(turning), normalEdge(leaving));
+        out.appendTo(leaving);
+        appendFrameTestCall(test);
+        out.branch(out.testNonZero64(a, 64), rareEdge(comingRound), normalEdge(last));
+        out.appendTo(comingRound);
+        Operation* countAgain = out.add(nextCount, 1);
+        out.addIncomingToPhi(count, out.anchor(countAgain));
+        out.branch(out.lessThan(countAgain, out.constInt64(6)), normalEdge(turning), normalEdge(slowOn));
+        out.appendTo(last);
+    }
+    out.ret(out.add(out.add(a, b), nextCount));
+    out.appendTo(slow);
+    appendFrameTestCall(test);
+    out.branch(out.testNonZero64(a, 16), normalEdge(wayOut), normalEdge(slowOn));
+    out.appendTo(slowAgain);
+    appendFrameTestCall(test);
+    out.jump(slowOn);
+    out.appendTo(slowOn);
+    appendFrameTestCall(test);
+    out.ret(out.add(b, 1000));
+
+    compileOrFail(test);
+    const Frame& frame = proc.frame();
+    const Allocation& allocation = proc.allocation();
+    const Order& order = proc.order();
+    AOT_FRAME_TEST_CHECK(test, order.of(slow).isRare() && order.of(slow).rareRegion == order.of(slowAgain).rareRegion);
+    AOT_FRAME_TEST_CHECK(test, frame.coverage() == FrameCoverage::FramedPart);
+    if (standsInLoopThatTurns) {
+        AOT_FRAME_TEST_CHECK(test, order.of(turning).isLoopHead && order.of(working).loop == order.of(turning).loop && order.of(leaving).loop == order.of(turning).loop);
+        AOT_FRAME_TEST_CHECK(test, allocation.isHeadOfFramedPart(before) && allocation.headsOfFramedPart().size() == 1 && markOnWayOut.frameIsSetUp);
+    } else {
+        AOT_FRAME_TEST_CHECK(test, order.of(wayOut).isLoopHead && order.of(working).loop == order.of(wayOut).loop && order.headOf(working) < order.headOf(slow));
+        AOT_FRAME_TEST_CHECK(test, allocation.isHeadOfFramedPart(working) && !allocation.isInFramedPart(guard) && !allocation.isInFramedPart(wayOut));
+        AOT_FRAME_TEST_CHECK(test, !frame.holdsStepsOf(guard) && !frame.holdsStepsOf(wayOut) && !markOnWayOut.frameIsSetUp);
+    }
+    checkFrameTestRanges(test);
+    checkFrameTestLayout(test);
+    struct Case {
+        uint64_t a;
+        uint64_t expected;
+        uint64_t numberOfSetups;
+    };
+    const uint64_t turns = standsInLoopThatTurns ? 3 : 1;
+    const uint64_t setupsOnWayOut = standsInLoopThatTurns ? 1 : 0;
+    for (Case testCase : { Case { 32, 10, 0 }, Case { 1, 10, setupsOnWayOut }, Case { 0, 10 + turns, 1 }, Case { 4, 1010, 1 }, Case { 8, 1010, 1 }, Case { 24, 10, 1 }, Case { 64, standsInLoopThatTurns ? uint64_t { 1010 } : uint64_t { 75 }, 1 } }) {
+        setups.numberRun = 0;
+        AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(testCase.a, uint64_t { 10 }) == testCase.expected && setups.numberRun == testCase.numberOfSetups);
+    }
+}
+
+static void testMachineFrameWayOutThatRareRegionLeadsBackToHoldsNoHeadBack() { runFrameTestOfWayOutThatRareRegionLeadsBackTo(false, false); }
+static void testMachineFrameWayOutThatGoesOnAndNeverComesRoundHoldsNoHeadBack() { runFrameTestOfWayOutThatRareRegionLeadsBackTo(true, false); }
+static void testMachineFrameRareWayThatComesRoundKeepsHeadAheadOfLoop() { runFrameTestOfWayOutThatRareRegionLeadsBackTo(false, true); }
+
+static void testMachineFrameLoopThatTurnsInsideStretchThatNeverTurnsFindsFrameSetUpAheadOfIt()
+{
+    TestProcedure test;
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    FrameTestSetupsThatCount setups;
+    FrameTestMark markOnWayOut;
+    proc.setStackCheckGenerator(noteAndCountFrameTestSetup, &setups);
+    Operation* a = test.argumentGPR(0);
+    Operation* b = test.argumentGPR(1);
+    Block* guard = out.newBlock();
+    Block* wayOut = out.newBlock();
+    Block* working = out.newBlock();
+    Block* turning = out.newBlock();
+    Block* done = out.newBlock();
+    Block* last = out.newBlock();
+    Block* slow = out.newBlock();
+    Block* slowAgain = out.newBlock();
+    Block* slowOn = out.newBlock();
+
+    out.branch(out.testNonZero64(a, 8), rareEdge(slow), normalEdge(guard));
+    out.appendTo(guard);
+    out.branch(out.testNonZero64(a, 1), normalEdge(wayOut), normalEdge(working));
+    out.appendTo(wayOut);
+    appendFrameTestMark(out, markOnWayOut, true);
+    out.ret(b);
+    out.appendTo(working);
+    ValueFromBlock firstCount = out.anchor(out.int64Zero);
+    out.jump(turning);
+    out.appendTo(turning);
+    Operation* count = out.phi(Int64, firstCount);
+    appendFrameTestCall(test);
+    Operation* nextCount = out.add(count, 1);
+    out.addIncomingToPhi(count, out.anchor(nextCount));
+    out.branch(out.lessThan(nextCount, out.constInt64(3)), normalEdge(turning), normalEdge(done));
+    out.appendTo(done);
+    out.branch(out.testNonZero64(a, 4), rareEdge(slowAgain), normalEdge(last));
+    out.appendTo(last);
+    out.ret(out.add(out.add(a, b), nextCount));
+    out.appendTo(slow);
+    appendFrameTestCall(test);
+    out.branch(out.testNonZero64(a, 16), normalEdge(wayOut), normalEdge(slowOn));
+    out.appendTo(slowAgain);
+    appendFrameTestCall(test);
+    out.jump(slowOn);
+    out.appendTo(slowOn);
+    appendFrameTestCall(test);
+    out.ret(out.add(b, 1000));
+
+    compileOrFail(test);
+    const Frame& frame = proc.frame();
+    const Allocation& allocation = proc.allocation();
+    const Order& order = proc.order();
+    AOT_FRAME_TEST_CHECK(test, order.of(wayOut).isLoopHead && order.of(turning).isLoopHead && order.of(working).loop == order.of(wayOut).loop);
+    AOT_FRAME_TEST_CHECK(test, order.loops()[order.of(turning).loop].parent == order.of(wayOut).loop && order.loops()[order.of(wayOut).loop].parent == noLoop);
+    AOT_FRAME_TEST_CHECK(test, frame.coverage() == FrameCoverage::FramedPart && allocation.isHeadOfFramedPart(working) && allocation.isInFramedPart(turning) && !allocation.isHeadOfFramedPart(turning));
+    AOT_FRAME_TEST_CHECK(test, !allocation.isInFramedPart(guard) && !allocation.isInFramedPart(wayOut) && !frame.holdsStepsOf(wayOut) && !markOnWayOut.frameIsSetUp);
+    checkFrameTestRanges(test);
+    checkFrameTestLayout(test);
+    struct Case {
+        uint64_t a;
+        uint64_t expected;
+        uint64_t numberOfSetups;
+    };
+    for (Case testCase : { Case { 1, 10, 0 }, Case { 0, 13, 1 }, Case { 4, 1010, 1 }, Case { 8, 1010, 1 }, Case { 24, 10, 1 } }) {
+        setups.numberRun = 0;
+        AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(testCase.a, uint64_t { 10 }) == testCase.expected && setups.numberRun == testCase.numberOfSetups);
+    }
+}
+
 static void runFrameTestOfStoreBesideGuard(bool storeStandsAheadOfGuard, unsigned largestFrameSetUpWithoutStackCheck = 0)
 {
     TestProcedure test;
@@ -1998,12 +2053,27 @@ static void runFrameTestOfNarrowReferenceAheadOfGuard(bool passesRareSafepoint)
     reference->markAsNarrowReference();
     Block* returning = out.newBlock();
     Block* calling = out.newBlock();
+    Block* slow = nullptr;
+    auto appendSafepointThatWritesPointerDown = [&](int32_t offset) {
+        PatchOperation* safepoint = out.patch(Void);
+        safepoint->appendSomeRegister(destination);
+        safepoint->clobberLate(clobbered);
+        safepoint->setGenerator([clobbered, reference, offset](CCallHelpers& jit, const PatchParameters& params) {
+            AllowMacroScratchRegisterUsage allowScratch(jit);
+            GPRReg pointer = params[0].gpr() == GPRInfo::argumentGPR0 ? GPRInfo::argumentGPR1 : GPRInfo::argumentGPR0;
+            SpillIndex spill = findFrameTestPointerBeside(params.proc().allocation(), reference);
+            AOT_TEST_CHECK(params.frameIsSetUp() && spill != noSpill);
+            jit.load64(CCallHelpers::Address(CCallHelpers::framePointerRegister, params.frame().offsetFromFPOf(spill)), pointer);
+            jit.store64(pointer, CCallHelpers::Address(params[0].gpr(), offset));
+            emitFrameTestPoison(jit, clobbered);
+        });
+    };
     if (passesRareSafepoint) {
-        Block* slow = out.newBlock();
+        slow = out.newBlock();
         Block* guard = out.newBlock();
         out.branch(out.testNonZero64(argument, 2), rareEdge(slow), normalEdge(guard));
         out.appendTo(slow);
-        appendFrameTestCall(test);
+        appendSafepointThatWritesPointerDown(sizeof(uint64_t));
         out.jump(guard);
         out.appendTo(guard);
     }
@@ -2011,43 +2081,36 @@ static void runFrameTestOfNarrowReferenceAheadOfGuard(bool passesRareSafepoint)
     out.appendTo(returning);
     out.ret(out.constInt64(5));
     out.appendTo(calling);
-    PatchOperation* safepoint = out.patch(Void);
-    safepoint->appendSomeRegister(destination);
-    safepoint->clobberLate(clobbered);
-    safepoint->setGenerator([clobbered, reference](CCallHelpers& jit, const PatchParameters& params) {
-        AllowMacroScratchRegisterUsage allowScratch(jit);
-        GPRReg pointer = params[0].gpr() == GPRInfo::argumentGPR0 ? GPRInfo::argumentGPR1 : GPRInfo::argumentGPR0;
-        SpillIndex spill = findFrameTestPointerBeside(params.proc().allocation(), reference);
-        AOT_TEST_CHECK(params.frameIsSetUp() && spill != noSpill);
-        jit.load64(CCallHelpers::Address(CCallHelpers::framePointerRegister, params.frame().offsetFromFPOf(spill)), pointer);
-        jit.store64(pointer, CCallHelpers::Address(params[0].gpr()));
-        emitFrameTestPoison(jit, clobbered);
-    });
+    appendSafepointThatWritesPointerDown(0);
     out.ret(out.zeroExtPtr(reference));
 
     compileOrFail(test);
     const Allocation& allocation = proc.allocation();
     AOT_FRAME_TEST_CHECK(test, proc.liveness().of(reference).has(ValueFlag::NeedsPointerBesideIt) && allocation.onlyHeadOfFramedPart() == calling);
-    AOT_FRAME_TEST_CHECK(test, allocation.needsFrameAheadOfFramedPart() == passesRareSafepoint);
-    AOT_FRAME_TEST_CHECK(test, proc.frame().coverage() == (passesRareSafepoint ? FrameCoverage::WholeFunction : FrameCoverage::FramedPart));
+    AOT_FRAME_TEST_CHECK(test, !allocation.needsFrameAheadOfFramedPart() && proc.frame().coverage() == FrameCoverage::FramedPart);
+    AOT_FRAME_TEST_CHECK(test, !proc.frame().holdsStepsOf(reference->owner()) && !proc.frame().holdsStepsOf(returning));
+    AOT_FRAME_TEST_CHECK(test, !slow || (proc.order().of(slow).isRare() && !allocation.isInFramedPart(slow)));
     SpillIndex pointer = findFrameTestPointerBeside(allocation, reference);
     AOT_FRAME_TEST_CHECK(test, pointer != noSpill);
-    const BlockSteps& stepsOfKeeper = allocation.stepsOf(passesRareSafepoint ? reference->owner() : calling);
+    auto numberOfStoresIn = [&](const Block* block) {
+        const BlockSteps& steps = allocation.stepsOf(block);
+        unsigned number = 0;
+        for (uint32_t index = steps.begin; index < steps.end; ++index)
+            number += allocation.step(index).kind == StepKind::KeepPointer && allocation.step(index).destination == Location::spill(pointer);
+        return number;
+    };
     unsigned numberOfStores = 0;
-    for (uint32_t index = 0; index < allocation.steps().size(); ++index) {
-        if (allocation.step(index).kind != StepKind::KeepPointer)
-            continue;
-        ++numberOfStores;
-        AOT_FRAME_TEST_CHECK(test, allocation.step(index).destination == Location::spill(pointer) && stepsOfKeeper.begin <= index && index < stepsOfKeeper.end);
-    }
-    AOT_FRAME_TEST_CHECK(test, numberOfStores == 1);
+    for (const Step& step : allocation.steps())
+        numberOfStores += step.kind == StepKind::KeepPointer;
+    AOT_FRAME_TEST_CHECK(test, numberOfStoresIn(calling) == 1 && (!slow || numberOfStoresIn(slow) == 1) && numberOfStores == (slow ? 2u : 1u));
 
     for (uint64_t low : { 0x80000100u, 0x80000101u, 0x80000102u, 0x80000103u }) {
         uint64_t word = (uint64_t { 7 } << 32) + low;
-        uint64_t found = 0;
+        std::array<uint64_t, 2> found { };
         bool returnsAtOnce = word & 1;
-        AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word, &found) == (returnsAtOnce ? uint64_t { 5 } : low));
-        AOT_FRAME_TEST_CHECK(test, found == (returnsAtOnce ? uint64_t { 0 } : low << cell32Shift));
+        AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word, found.data()) == (returnsAtOnce ? uint64_t { 5 } : low));
+        AOT_FRAME_TEST_CHECK(test, found[0] == (returnsAtOnce ? uint64_t { 0 } : low << cell32Shift));
+        AOT_FRAME_TEST_CHECK(test, found[1] == (slow && (word & 2) ? low << cell32Shift : uint64_t { 0 }));
     }
 }
 
@@ -2295,7 +2358,902 @@ static void testMachineFrameKeepsPointerAtHeadBehindPartsThatSpilledReference()
     AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(high + 0x80000108u) == 7);
     AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(high + 0x80000100u) == 5);
 }
-static void testMachineFrameKeepsPointerAtDefinitionForSafepointAheadOfFramedPart() { runFrameTestOfNarrowReferenceAheadOfGuard(true); }
+static void testMachineFrameKeepsPointerAtRareSafepointAheadOfFramedPart() { runFrameTestOfNarrowReferenceAheadOfGuard(true); }
+
+static unsigned numberOfFrameTestPointersKeptIn(const Allocation& allocation, const Block* block)
+{
+    uint32_t begin = block ? allocation.stepsOf(block).begin : 0;
+    uint32_t end = block ? allocation.stepsOf(block).end : static_cast<uint32_t>(allocation.steps().size());
+    unsigned number = 0;
+    for (uint32_t index = begin; index < end; ++index)
+        number += allocation.step(index).kind == StepKind::KeepPointer;
+    return number;
+}
+
+static void testMachineFrameKeepsPointerAtSafepointOfRareRegionEnteredFromFramedPartAndFromAheadOfIt()
+{
+    TestProcedure test;
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    RegisterMask clobbered = callerSavedRegistersOfFrameTest(test);
+    Operation* argument = test.argumentGPR(0);
+    Operation* destination = test.argumentGPR(1);
+    Operation* reference = out.opaque(out.castToInt32(argument));
+    reference->markAsNarrowReference();
+    Block* guard = out.newBlock();
+    Block* returning = out.newBlock();
+    Block* calling = out.newBlock();
+    Block* done = out.newBlock();
+    Block* slow = out.newBlock();
+    auto appendSafepointThatWritesPointerDown = [&](int32_t offset) {
+        PatchOperation* safepoint = out.patch(Void);
+        safepoint->appendSomeRegister(destination);
+        safepoint->clobberLate(clobbered);
+        safepoint->setGenerator([clobbered, reference, offset](CCallHelpers& jit, const PatchParameters& params) {
+            AllowMacroScratchRegisterUsage allowScratch(jit);
+            GPRReg pointer = params[0].gpr() == GPRInfo::argumentGPR0 ? GPRInfo::argumentGPR1 : GPRInfo::argumentGPR0;
+            SpillIndex spill = findFrameTestPointerBeside(params.proc().allocation(), reference);
+            AOT_TEST_CHECK(params.frameIsSetUp() && spill != noSpill);
+            jit.load64(CCallHelpers::Address(CCallHelpers::framePointerRegister, params.frame().offsetFromFPOf(spill)), pointer);
+            jit.store64(pointer, CCallHelpers::Address(params[0].gpr(), offset));
+            jit.store64(CCallHelpers::TrustedImm32(0), CCallHelpers::Address(CCallHelpers::framePointerRegister, params.frame().offsetFromFPOf(spill)));
+            emitFrameTestPoison(jit, clobbered);
+        });
+    };
+    out.branch(out.testNonZero64(argument, 2), rareEdge(slow), normalEdge(guard));
+    out.appendTo(guard);
+    out.branch(out.testNonZero64(argument, 1), normalEdge(returning), normalEdge(calling));
+    out.appendTo(returning);
+    out.ret(out.constInt64(5));
+    out.appendTo(calling);
+    appendSafepointThatWritesPointerDown(0);
+    out.branch(out.testNonZero64(argument, 4), rareEdge(slow), normalEdge(done));
+    out.appendTo(done);
+    out.ret(out.zeroExtPtr(reference));
+    out.appendTo(slow);
+    appendSafepointThatWritesPointerDown(sizeof(uint64_t));
+    out.ret(out.add(out.zeroExtPtr(reference), 1));
+
+    compileOrFail(test);
+    const Allocation& allocation = proc.allocation();
+    AOT_FRAME_TEST_CHECK(test, proc.liveness().of(reference).has(ValueFlag::NeedsPointerBesideIt) && proc.order().of(slow).isRare());
+    AOT_FRAME_TEST_CHECK(test, proc.frame().coverage() == FrameCoverage::FramedPart && allocation.onlyHeadOfFramedPart() == calling && !allocation.isInFramedPart(slow));
+    AOT_FRAME_TEST_CHECK(test, !proc.frame().holdsStepsOf(reference->owner()) && !proc.frame().holdsStepsOf(guard) && !proc.frame().holdsStepsOf(returning));
+    AOT_FRAME_TEST_CHECK(test, numberOfFrameTestPointersKeptIn(allocation, calling) == 1 && numberOfFrameTestPointersKeptIn(allocation, slow) == 1 && numberOfFrameTestPointersKeptIn(allocation, nullptr) == 2);
+
+    for (uint64_t low : { 0x80000100u, 0x80000101u, 0x80000102u, 0x80000103u, 0x80000104u, 0x80000105u, 0x80000106u }) {
+        uint64_t word = (uint64_t { 7 } << 32) + low;
+        std::array<uint64_t, 2> found { };
+        bool goesSlowAtOnce = word & 2;
+        bool returnsAtOnce = !goesSlowAtOnce && (word & 1);
+        bool calls = !goesSlowAtOnce && !returnsAtOnce;
+        bool goesSlow = goesSlowAtOnce || (calls && (word & 4));
+        AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word, found.data()) == (returnsAtOnce ? uint64_t { 5 } : low + goesSlow));
+        AOT_FRAME_TEST_CHECK(test, found[0] == (calls ? low << cell32Shift : uint64_t { 0 }));
+        AOT_FRAME_TEST_CHECK(test, found[1] == (goesSlow ? low << cell32Shift : uint64_t { 0 }));
+    }
+}
+
+enum class ShapeOfRareRegionAheadOfFramedPart : uint8_t {
+    TwoSafepointsInOneBlock,
+    TwoEntries,
+    EndsFunction,
+};
+
+static void runFrameTestOfRareRegionAheadOfFramedPart(ShapeOfRareRegionAheadOfFramedPart shape)
+{
+    TestProcedure test;
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    RegisterMask clobbered = callerSavedRegistersOfFrameTest(test);
+    Operation* argument = test.argumentGPR(0);
+    Operation* destination = test.argumentGPR(1);
+    Operation* reference = out.opaque(out.castToInt32(argument));
+    reference->markAsNarrowReference();
+    Block* second = out.newBlock();
+    Block* guard = out.newBlock();
+    Block* returning = out.newBlock();
+    Block* calling = out.newBlock();
+    Block* slow = out.newBlock();
+    Block* otherEntry = out.newBlock();
+    Block* meeting = out.newBlock();
+    auto appendSafepointThatWritesPointerDown = [&](int32_t offset, bool findsPointer = true) {
+        PatchOperation* safepoint = out.patch(Void);
+        safepoint->appendSomeRegister(destination);
+        safepoint->clobberLate(clobbered);
+        safepoint->setGenerator([clobbered, reference, offset, findsPointer](CCallHelpers& jit, const PatchParameters& params) {
+            AllowMacroScratchRegisterUsage allowScratch(jit);
+            GPRReg pointer = params[0].gpr() == GPRInfo::argumentGPR0 ? GPRInfo::argumentGPR1 : GPRInfo::argumentGPR0;
+            SpillIndex spill = findFrameTestPointerBeside(params.proc().allocation(), reference);
+            AOT_TEST_CHECK(params.frameIsSetUp() && spill != noSpill);
+            if (findsPointer) {
+                jit.load64(CCallHelpers::Address(CCallHelpers::framePointerRegister, params.frame().offsetFromFPOf(spill)), pointer);
+                jit.store64(pointer, CCallHelpers::Address(params[0].gpr(), offset));
+                jit.store64(CCallHelpers::TrustedImm32(0), CCallHelpers::Address(CCallHelpers::framePointerRegister, params.frame().offsetFromFPOf(spill)));
+            }
+            emitFrameTestPoison(jit, clobbered);
+        });
+    };
+    out.branch(out.testNonZero64(argument, 2), rareEdge(slow), normalEdge(second));
+    out.appendTo(second);
+    out.branch(out.testNonZero64(argument, 4), rareEdge(otherEntry), normalEdge(guard));
+    out.appendTo(guard);
+    out.branch(out.testNonZero64(argument, 1), normalEdge(returning), normalEdge(calling));
+    out.appendTo(returning);
+    out.ret(out.constInt64(5));
+    out.appendTo(calling);
+    appendSafepointThatWritesPointerDown(0);
+    out.ret(out.zeroExtPtr(reference));
+    out.appendTo(slow);
+    appendSafepointThatWritesPointerDown(sizeof(uint64_t), shape != ShapeOfRareRegionAheadOfFramedPart::EndsFunction);
+    if (shape == ShapeOfRareRegionAheadOfFramedPart::TwoSafepointsInOneBlock)
+        appendSafepointThatWritesPointerDown(2 * sizeof(uint64_t));
+    if (shape == ShapeOfRareRegionAheadOfFramedPart::EndsFunction)
+        out.ret(out.constInt64(6));
+    else
+        out.jump(meeting);
+    out.appendTo(otherEntry);
+    out.jump(meeting);
+    out.appendTo(meeting);
+    appendSafepointThatWritesPointerDown(3 * sizeof(uint64_t));
+    out.ret(out.add(out.zeroExtPtr(reference), 1));
+
+    compileOrFail(test);
+    const Allocation& allocation = proc.allocation();
+    const Order& order = proc.order();
+    AOT_FRAME_TEST_CHECK(test, proc.liveness().of(reference).has(ValueFlag::NeedsPointerBesideIt) && order.of(slow).isRare() && order.of(meeting).isRare());
+    AOT_FRAME_TEST_CHECK(test, proc.frame().coverage() == FrameCoverage::FramedPart && allocation.onlyHeadOfFramedPart() == calling && !allocation.isInFramedPart(slow) && !allocation.isInFramedPart(meeting));
+    AOT_FRAME_TEST_CHECK(test, !proc.frame().holdsStepsOf(reference->owner()) && !proc.frame().holdsStepsOf(second) && !proc.frame().holdsStepsOf(guard) && !proc.frame().holdsStepsOf(returning));
+    AOT_FRAME_TEST_CHECK(test, numberOfFrameTestPointersKeptIn(allocation, calling) == 1 && numberOfFrameTestPointersKeptIn(allocation, meeting) == 1);
+    switch (shape) {
+    case ShapeOfRareRegionAheadOfFramedPart::TwoSafepointsInOneBlock:
+        AOT_FRAME_TEST_CHECK(test, numberOfFrameTestPointersKeptIn(allocation, slow) == 2);
+        break;
+    case ShapeOfRareRegionAheadOfFramedPart::TwoEntries:
+        AOT_FRAME_TEST_CHECK(test, numberOfFrameTestPointersKeptIn(allocation, slow) == 1 && order.of(slow).rareRegion == order.of(meeting).rareRegion && order.of(slow).entersRareRegion && order.of(meeting).predecessors.size() == 2);
+        break;
+    case ShapeOfRareRegionAheadOfFramedPart::EndsFunction:
+        AOT_FRAME_TEST_CHECK(test, !numberOfFrameTestPointersKeptIn(allocation, slow) && order.of(slow).rareRegion != order.of(meeting).rareRegion);
+        break;
+    }
+
+    for (uint64_t low : { 0x80000100u, 0x80000101u, 0x80000102u, 0x80000103u, 0x80000104u, 0x80000105u, 0x80000106u }) {
+        uint64_t word = (uint64_t { 7 } << 32) + low;
+        std::array<uint64_t, 4> found { };
+        uint64_t pointer = low << cell32Shift;
+        bool goesSlow = word & 2;
+        bool entersOtherwise = !goesSlow && (word & 4);
+        bool returnsAtOnce = !goesSlow && !entersOtherwise && (word & 1);
+        bool endsInSlow = goesSlow && shape == ShapeOfRareRegionAheadOfFramedPart::EndsFunction;
+        bool meets = (goesSlow && !endsInSlow) || entersOtherwise;
+        AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word, found.data()) == (endsInSlow ? uint64_t { 6 } : returnsAtOnce ? uint64_t { 5 } : low + meets));
+        AOT_FRAME_TEST_CHECK(test, found[0] == (!goesSlow && !entersOtherwise && !returnsAtOnce ? pointer : uint64_t { 0 }));
+        AOT_FRAME_TEST_CHECK(test, found[1] == (goesSlow && !endsInSlow ? pointer : uint64_t { 0 }));
+        AOT_FRAME_TEST_CHECK(test, found[2] == (goesSlow && shape == ShapeOfRareRegionAheadOfFramedPart::TwoSafepointsInOneBlock ? pointer : uint64_t { 0 }));
+        AOT_FRAME_TEST_CHECK(test, found[3] == (meets ? pointer : uint64_t { 0 }));
+    }
+}
+
+static void testMachineFrameKeepsPointerAtEachOfTwoSafepointsInRareBlockAheadOfFramedPart() { runFrameTestOfRareRegionAheadOfFramedPart(ShapeOfRareRegionAheadOfFramedPart::TwoSafepointsInOneBlock); }
+static void testMachineFrameKeepsPointerWhereTwoEntriesOfRareRegionAheadOfFramedPartMeet() { runFrameTestOfRareRegionAheadOfFramedPart(ShapeOfRareRegionAheadOfFramedPart::TwoEntries); }
+static void testMachineFrameKeepsNoPointerInRareBlockAheadOfFramedPartThatEndsFunction() { runFrameTestOfRareRegionAheadOfFramedPart(ShapeOfRareRegionAheadOfFramedPart::EndsFunction); }
+
+static void testMachineFrameReferenceKeptForInnerPointerReadBehindRareSafepointAheadOfFramedPartHasItsPointerThere()
+{
+    std::array<uint64_t, 2> elements { 11, 22 };
+    std::array<const uint64_t*, 1> ownerInMemory { elements.data() };
+
+    TestProcedure test;
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    RegisterMask clobbered = callerSavedRegistersOfFrameTest(test);
+    Operation* argument = test.argumentGPR(0);
+    Operation* destination = test.argumentGPR(1);
+    Operation* base = test.argumentGPR(2);
+    Operation* reference = out.opaque(out.castToInt32(argument));
+    reference->markAsNarrowReference();
+    AbstractHeap storageOfOwner(test.heaps().argumentBuffer.index(), 0, OptionSet<HeapTrait> { HeapTrait::HoldsInnerPointer });
+    Operation* storage = out.loadPtr(out.address(storageOfOwner, out.add(base, out.shl(out.zeroExtPtr(reference), out.constInt32(cell32Shift)))));
+    Block* first = out.newBlock();
+    Block* slow = out.newBlock();
+    Block* on = out.newBlock();
+    Block* second = out.newBlock();
+    auto appendSafepointThatWritesPointerDown = [&] {
+        PatchOperation* safepoint = out.patch(Void);
+        safepoint->effects.mayCollect = true;
+        safepoint->appendSomeRegister(destination);
+        safepoint->clobberLate(clobbered);
+        safepoint->setGenerator([clobbered, reference](CCallHelpers& jit, const PatchParameters& params) {
+            AllowMacroScratchRegisterUsage allowScratch(jit);
+            GPRReg pointer = params[0].gpr() == GPRInfo::argumentGPR0 ? GPRInfo::argumentGPR1 : GPRInfo::argumentGPR0;
+            SpillIndex spill = findFrameTestPointerBeside(params.proc().allocation(), reference);
+            AOT_TEST_CHECK(params.frameIsSetUp() && spill != noSpill);
+            jit.load64(CCallHelpers::Address(CCallHelpers::framePointerRegister, params.frame().offsetFromFPOf(spill)), pointer);
+            jit.store64(pointer, CCallHelpers::Address(params[0].gpr()));
+            emitFrameTestPoison(jit, clobbered);
+        });
+    };
+    out.branch(out.testNonZero64(argument, 1), unlikelyEdge(second), normalEdge(first));
+    out.appendTo(first);
+    out.branch(out.testNonZero64(argument, 2), rareEdge(slow), normalEdge(on));
+    out.appendTo(slow);
+    appendSafepointThatWritesPointerDown();
+    out.jump(on);
+    out.appendTo(on);
+    out.ret(out.load64(out.address(test.heaps().argumentBuffer, storage, 0)));
+    out.appendTo(second);
+    appendSafepointThatWritesPointerDown();
+    out.ret(out.load64(out.address(test.heaps().argumentBuffer, storage, sizeof(uint64_t))));
+
+    compileOrFail(test);
+    const ValueFacts& facts = proc.liveness().of(reference);
+    AOT_FRAME_TEST_CHECK(test, storage->has(OperationFlag::IsInnerPointer) && facts.has(ValueFlag::IsKeptForCollector) && facts.has(ValueFlag::NeedsPointerBesideIt));
+    AOT_FRAME_TEST_CHECK(test, proc.order().of(slow).isRare() && !proc.order().of(second).isRare() && proc.order().of(second).orderIndex > proc.order().of(on).orderIndex);
+    AOT_FRAME_TEST_CHECK(test, findFrameTestPointerBeside(proc.allocation(), reference) != noSpill);
+
+    for (uint64_t low : { 0x80000100u, 0x80000101u, 0x80000102u, 0x80000103u }) {
+        uint64_t word = (uint64_t { 7 } << 32) + low;
+        uint64_t found = 0;
+        bool takesSecondWay = word & 1;
+        bool passesSafepoint = takesSecondWay || (word & 2);
+        uint64_t baseOfOwner = reinterpret_cast<uint64_t>(ownerInMemory.data()) - (low << cell32Shift);
+        AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word, &found, baseOfOwner) == (takesSecondWay ? uint64_t { 22 } : uint64_t { 11 }));
+        AOT_FRAME_TEST_CHECK(test, found == (passesSafepoint ? low << cell32Shift : uint64_t { 0 }));
+    }
+}
+
+static void runFrameTestOfNarrowReferenceBesideRareSafepointAheadOfFramedPart(bool isReadBehindRareSafepoint)
+{
+    TestProcedure test;
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    RegisterMask clobbered = callerSavedRegistersOfFrameTest(test);
+    Operation* argument = test.argumentGPR(0);
+    Operation* destination = test.argumentGPR(1);
+    Operation* reference = out.opaque(out.castToInt32(argument));
+    reference->markAsNarrowReference();
+    Block* stretch = out.newBlock();
+    Block* slow = out.newBlock();
+    Block* on = out.newBlock();
+    Block* other = out.newBlock();
+    auto appendSafepointThatWritesPointerDown = [&] {
+        PatchOperation* safepoint = out.patch(Void);
+        safepoint->effects.mayCollect = true;
+        safepoint->appendSomeRegister(destination);
+        safepoint->clobberLate(clobbered);
+        safepoint->setGenerator([clobbered, reference](CCallHelpers& jit, const PatchParameters& params) {
+            AllowMacroScratchRegisterUsage allowScratch(jit);
+            GPRReg pointer = params[0].gpr() == GPRInfo::argumentGPR0 ? GPRInfo::argumentGPR1 : GPRInfo::argumentGPR0;
+            SpillIndex spill = findFrameTestPointerBeside(params.proc().allocation(), reference);
+            AOT_TEST_CHECK(params.frameIsSetUp() && spill != noSpill);
+            jit.load64(CCallHelpers::Address(CCallHelpers::framePointerRegister, params.frame().offsetFromFPOf(spill)), pointer);
+            jit.store64(pointer, CCallHelpers::Address(params[0].gpr()));
+            emitFrameTestPoison(jit, clobbered);
+        });
+    };
+    out.branch(out.testNonZero64(argument, 1), unlikelyEdge(other), normalEdge(stretch));
+    out.appendTo(stretch);
+    out.branch(out.testNonZero64(argument, 2), rareEdge(slow), normalEdge(on));
+    out.appendTo(slow);
+    if (isReadBehindRareSafepoint)
+        appendSafepointThatWritesPointerDown();
+    else
+        appendFrameTestCall(test)->effects.mayCollect = true;
+    out.jump(on);
+    out.appendTo(on);
+    out.ret(isReadBehindRareSafepoint ? out.zeroExtPtr(reference) : out.constInt64(5));
+    out.appendTo(other);
+    appendSafepointThatWritesPointerDown();
+    out.ret(out.zeroExtPtr(reference));
+
+    compileOrFail(test);
+    const Allocation& allocation = proc.allocation();
+    AOT_FRAME_TEST_CHECK(test, proc.liveness().of(reference).has(ValueFlag::NeedsPointerBesideIt) && proc.order().of(slow).isRare() && !proc.order().of(other).isRare());
+    AOT_FRAME_TEST_CHECK(test, proc.order().of(other).orderIndex > proc.order().of(on).orderIndex);
+    AOT_FRAME_TEST_CHECK(test, findFrameTestPointerBeside(allocation, reference) != noSpill);
+
+    for (uint64_t low : { 0x80000100u, 0x80000101u, 0x80000102u, 0x80000103u }) {
+        uint64_t word = (uint64_t { 7 } << 32) + low;
+        uint64_t found = 0;
+        bool takesOtherWay = word & 1;
+        bool passesRareSafepoint = !takesOtherWay && (word & 2);
+        bool writesPointerDown = takesOtherWay || (passesRareSafepoint && isReadBehindRareSafepoint);
+        AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word, &found) == (takesOtherWay || isReadBehindRareSafepoint ? low : uint64_t { 5 }));
+        AOT_FRAME_TEST_CHECK(test, found == (writesPointerDown ? low << cell32Shift : uint64_t { 0 }));
+    }
+    if (isReadBehindRareSafepoint)
+        return;
+
+    AOT_FRAME_TEST_CHECK(test, proc.frame().coverage() == FrameCoverage::FramedPart && allocation.onlyHeadOfFramedPart() == other && !allocation.needsFrameAheadOfFramedPart());
+    AOT_FRAME_TEST_CHECK(test, !proc.frame().holdsStepsOf(stretch) && !proc.frame().holdsStepsOf(on));
+    const BlockSteps& stepsOfKeeper = allocation.stepsOf(other);
+    unsigned numberOfStores = 0;
+    for (uint32_t index = 0; index < allocation.steps().size(); ++index) {
+        if (allocation.step(index).kind != StepKind::KeepPointer)
+            continue;
+        ++numberOfStores;
+        AOT_FRAME_TEST_CHECK(test, stepsOfKeeper.begin <= index && index < stepsOfKeeper.end);
+    }
+    AOT_FRAME_TEST_CHECK(test, numberOfStores == 1);
+}
+
+static void testMachineFrameReferenceDeadAtRareSafepointAheadOfFramedPartWaitsForHeadWithItsPointer() { runFrameTestOfNarrowReferenceBesideRareSafepointAheadOfFramedPart(false); }
+static void testMachineFrameReferenceReadBehindRareSafepointAheadOfFramedPartHasItsPointerThere() { runFrameTestOfNarrowReferenceBesideRareSafepointAheadOfFramedPart(true); }
+
+static void testMachineFrameStretchThatBindsFewValuesHasNoFrameThoughUnlikelyWayLaterInOrderReadsMore()
+{
+    constexpr uint64_t word = 0x1000;
+    TestProcedure test;
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    const RegisterFile file = registerFileOfFrameTest(test);
+    unsigned half = numberOfFrameTestRegisters(file.allocatableIn(Bank::GP) & ~file.calleeSaved) - 2;
+    Operation* a = test.argumentGPR(0);
+    Operation* b = test.argumentGPR(1);
+    Block* slow = out.newBlock();
+    Block* choosing = out.newBlock();
+    Block* calling = out.newBlock();
+    Block* stretch = out.newBlock();
+    Vector<Operation*> readOnUnlikelyWayAlone;
+    for (unsigned index = 0; index < half; ++index)
+        readOnUnlikelyWayAlone.append(out.opaque(out.add(b, 2 * index)));
+    out.branch(out.testNonZero64(a, 1), unlikelyEdge(slow), normalEdge(choosing));
+    out.appendTo(choosing);
+    out.branch(out.testNonZero64(a, 2), normalEdge(calling), normalEdge(stretch));
+    out.appendTo(calling);
+    appendFrameTestCall(test);
+    out.ret(out.add(a, 100));
+    out.appendTo(stretch);
+    Vector<Operation*> readOnStretch;
+    for (unsigned index = 0; index < half; ++index)
+        readOnStretch.append(out.opaque(out.add(a, 4 * index)));
+    Operation* sumOnStretch = out.int64Zero;
+    for (Operation* value : readOnStretch)
+        sumOnStretch = out.add(sumOnStretch, value);
+    out.ret(sumOnStretch);
+    out.appendTo(slow);
+    appendFrameTestCall(test);
+    Operation* sumOnUnlikelyWay = out.int64Zero;
+    for (Operation* value : readOnUnlikelyWayAlone)
+        sumOnUnlikelyWay = out.add(sumOnUnlikelyWay, value);
+    out.ret(sumOnUnlikelyWay);
+
+    compileOrFail(test);
+    uint64_t expectedOnStretch = 0;
+    uint64_t expectedOnUnlikelyWay = 0;
+    for (unsigned index = 0; index < half; ++index) {
+        expectedOnStretch += word + 4 * index;
+        expectedOnUnlikelyWay += 7 + 2 * index;
+    }
+    AOT_FRAME_TEST_CHECK(test, !proc.order().of(slow).isRare() && proc.order().of(slow).orderIndex > proc.order().of(stretch).orderIndex);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word, uint64_t { 7 }) == expectedOnStretch);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word + 1, uint64_t { 7 }) == expectedOnUnlikelyWay);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word + 2, uint64_t { 7 }) == word + 102);
+    AOT_FRAME_TEST_CHECK(test, proc.frame().coverage() == FrameCoverage::FramedPart && !proc.frame().holdsStepsOf(stretch));
+}
+
+static PatchOperation* appendFrameTestCallThatLooksForWordAsCollectorDoes(TestProcedure& test, uint64_t word, uint64_t* numberOfTimesFound)
+{
+    RegisterMask clobbered = callerSavedRegistersOfFrameTest(test);
+    RegisterMask kept = registerFileOfFrameTest(test).calleeSavedIn(Bank::GP);
+    PatchOperation* call = test.out().patch(Void);
+    call->clobberLate(clobbered);
+    call->effects.mayCollect = true;
+    call->setNeedsFrameRecord(true);
+    call->setGenerator([clobbered, kept, word, numberOfTimesFound](CCallHelpers& jit, const PatchParameters& params) {
+        AOT_TEST_CHECK(params.frameIsSetUp());
+        emitFrameTestPoison(jit, clobbered);
+        const GPRReg cursor = GPRInfo::argumentGPR0;
+        const GPRReg wanted = GPRInfo::argumentGPR1;
+        const GPRReg held = GPRInfo::argumentGPR2;
+        AOT_TEST_CHECK(!((maskOf(Reg(cursor)) | maskOf(Reg(wanted)) | maskOf(Reg(held))) & ~clobbered));
+        jit.move(CCallHelpers::TrustedImm64(static_cast<int64_t>(word)), wanted);
+        CCallHelpers::JumpList found;
+        forEachRegister(kept, [&](Reg reg) {
+            found.append(jit.branch64(CCallHelpers::Equal, reg.gpr(), wanted));
+        });
+        jit.move(CCallHelpers::stackPointerRegister, cursor);
+        CCallHelpers::Label next = jit.label();
+        CCallHelpers::Jump isNotFound = jit.branch64(CCallHelpers::AboveOrEqual, cursor, CCallHelpers::framePointerRegister);
+        jit.load64(CCallHelpers::Address(cursor), held);
+        found.append(jit.branch64(CCallHelpers::Equal, held, wanted));
+        jit.add64(CCallHelpers::TrustedImm32(sizeof(uint64_t)), cursor);
+        jit.jump().linkTo(next, &jit);
+        found.link(&jit);
+        jit.move(CCallHelpers::TrustedImm64(static_cast<int64_t>(reinterpret_cast<uintptr_t>(numberOfTimesFound))), cursor);
+        jit.load64(CCallHelpers::Address(cursor), held);
+        jit.add64(CCallHelpers::TrustedImm32(1), held);
+        jit.store64(held, CCallHelpers::Address(cursor));
+        isNotFound.link(&jit);
+        emitFrameTestPoison(jit, clobbered);
+    });
+    return call;
+}
+
+static void testMachineFrameSecondHeadSavesOwnerThatStepsReadUnderFirstAlone()
+{
+    std::array<uint64_t, 3> elements { 11, 22, 33 };
+    std::array<const uint64_t*, 1> ownerInMemory { elements.data() };
+    uint64_t numberOfTimesFound = 0;
+
+    ProcedureTraits traits;
+    traits.chargesForCalleeSaves = true;
+    TestProcedure test(traits);
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    const unsigned numberKeptByCalls = numberOfFrameTestRegisters(registerFileOfFrameTest(test).calleeSavedIn(Bank::GP));
+    AbstractHeap storageOfOwner(test.heaps().argumentBuffer.index(), 0, OptionSet<HeapTrait> { HeapTrait::HoldsInnerPointer });
+    Operation* owner = out.opaque(test.argumentGPR(0));
+    Operation* selector = test.argumentGPR(1);
+    Operation* storage = out.loadPtr(out.address(storageOfOwner, owner));
+    Block* first = out.newBlock();
+    Block* other = out.newBlock();
+    Block* second = out.newBlock();
+    Block* leaving = out.newBlock();
+    Vector<Operation*> readMore;
+    for (unsigned index = 0; index < numberKeptByCalls; ++index)
+        readMore.append(out.opaque(out.add(selector, 2 + index)));
+    out.branch(out.testNonZero64(selector, 1), normalEdge(first), normalEdge(other));
+    out.appendTo(other);
+    out.branch(out.testNonZero64(selector, 2), normalEdge(second), normalEdge(leaving));
+    for (Block* head : { first, second }) {
+        out.appendTo(head);
+        appendFrameTestCallThatLooksForWordAsCollectorDoes(test, reinterpret_cast<uint64_t>(ownerInMemory.data()), &numberOfTimesFound);
+        Operation* sum = out.load64(out.address(test.heaps().argumentBuffer, storage, 2 * sizeof(uint64_t)));
+        if (head == first)
+            sum = out.add(sum, out.load64(out.address(test.heaps().argumentBuffer, out.loadPtr(out.address(test.heaps().argumentBuffer, owner)), sizeof(uint64_t))));
+        for (Operation* value : readMore)
+            sum = out.add(out.add(sum, value), out.opaque(value));
+        out.ret(sum);
+    }
+    out.appendTo(leaving);
+    out.ret(out.add(selector, 100));
+
+    compileOrFail(test);
+    const Allocation& allocation = proc.allocation();
+    AOT_FRAME_TEST_CHECK(test, storage->has(OperationFlag::IsInnerPointer) && proc.liveness().of(owner).has(ValueFlag::IsKeptForCollector));
+    AOT_FRAME_TEST_CHECK(test, proc.frame().coverage() == FrameCoverage::FramedPart && allocation.isHeadOfFramedPart(first) && allocation.isHeadOfFramedPart(second) && !proc.frame().holdsStepsOf(leaving) && allocation.isSpilled(owner));
+    for (Block* head : { first, second }) {
+        const Allocation::HeadOfFramedPart& steps = allocation.headOfFramedPartAbove(head);
+        bool savesOwner = false;
+        for (uint32_t index = steps.beginOfSteps; index < steps.endOfSteps; ++index)
+            savesOwner |= allocation.step(index).destination == Location::spill(allocation.spillOf(owner));
+        AOT_FRAME_TEST_CHECK(test, savesOwner);
+    }
+    auto expected = [&](uint64_t chosen, uint64_t read) {
+        for (unsigned index = 0; index < numberKeptByCalls; ++index)
+            read += 2 * (chosen + 2 + index);
+        return read;
+    };
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(ownerInMemory.data(), uint64_t { 1 }) == expected(1, 33 + 22) && numberOfTimesFound == 1);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(ownerInMemory.data(), uint64_t { 2 }) == expected(2, 33) && numberOfTimesFound == 2);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(ownerInMemory.data(), uint64_t { 4 }) == 104 && numberOfTimesFound == 2);
+}
+
+static void testMachineFrameHeadSavesOwnerThatCollectorAloneReads()
+{
+    std::array<uint64_t, 3> elements { 11, 22, 33 };
+    std::array<const uint64_t*, 1> ownerInMemory { elements.data() };
+    uint64_t numberOfTimesFound = 0;
+
+    ProcedureTraits traits;
+    traits.chargesForCalleeSaves = true;
+    TestProcedure test(traits);
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    const unsigned numberKeptByCalls = numberOfFrameTestRegisters(registerFileOfFrameTest(test).calleeSavedIn(Bank::GP));
+    AbstractHeap storageOfOwner(test.heaps().argumentBuffer.index(), 0, OptionSet<HeapTrait> { HeapTrait::HoldsInnerPointer });
+    Operation* owner = out.opaque(test.argumentGPR(0));
+    Operation* selector = test.argumentGPR(1);
+    Operation* storage = out.loadPtr(out.address(storageOfOwner, owner));
+    Block* calling = out.newBlock();
+    Block* leaving = out.newBlock();
+    Vector<Operation*> readMore;
+    for (unsigned index = 0; index < numberKeptByCalls; ++index)
+        readMore.append(out.opaque(out.add(selector, 2 + index)));
+    out.branch(out.testNonZero64(selector, 1), normalEdge(calling), normalEdge(leaving));
+    out.appendTo(calling);
+    appendFrameTestCallThatLooksForWordAsCollectorDoes(test, reinterpret_cast<uint64_t>(ownerInMemory.data()), &numberOfTimesFound);
+    Operation* sum = out.load64(out.address(test.heaps().argumentBuffer, storage, 2 * sizeof(uint64_t)));
+    for (Operation* value : readMore)
+        sum = out.add(out.add(sum, value), out.opaque(value));
+    out.ret(sum);
+    out.appendTo(leaving);
+    out.ret(out.add(selector, 100));
+
+    compileOrFail(test);
+    const Allocation& allocation = proc.allocation();
+    AOT_FRAME_TEST_CHECK(test, storage->has(OperationFlag::IsInnerPointer) && proc.liveness().of(owner).has(ValueFlag::IsKeptForCollector));
+    AOT_FRAME_TEST_CHECK(test, proc.frame().coverage() == FrameCoverage::FramedPart && allocation.isHeadOfFramedPart(calling) && !proc.frame().holdsStepsOf(leaving) && allocation.isSpilled(owner));
+    uint64_t expected = 33;
+    for (unsigned index = 0; index < numberKeptByCalls; ++index)
+        expected += 2 * (1 + 2 + index);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(ownerInMemory.data(), uint64_t { 1 }) == expected);
+    AOT_FRAME_TEST_CHECK(test, numberOfTimesFound == 1);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(ownerInMemory.data(), uint64_t { 2 }) == 102 && numberOfTimesFound == 1);
+}
+
+static PatchOperation* appendFrameTestPollThatLooksForWordAsCollectorDoes(TestProcedure& test, uint64_t word, uint64_t* numberOfTimesFound)
+{
+    constexpr GPRReg wanted = GPRInfo::argumentGPR0;
+    constexpr GPRReg held = GPRInfo::argumentGPR5;
+    RegisterMask clobbered = maskOf(Reg(wanted)) | maskOf(Reg(held));
+    RegisterMask looked = registerFileOfFrameTest(test).allocatableIn(Bank::GP) & ~clobbered;
+    PatchOperation* poll = test.out().patch(Void);
+    poll->clobberEarly(clobbered);
+    poll->clobberLate(clobbered);
+    poll->effects.mayCollect = true;
+    poll->setRunsWithoutFrame(true);
+    poll->setShowsRegistersToCollector(true);
+    poll->setGenerator([looked, word, numberOfTimesFound](CCallHelpers& jit, const PatchParameters& params) {
+        jit.move(CCallHelpers::TrustedImm64(static_cast<int64_t>(word)), wanted);
+        CCallHelpers::JumpList found;
+        forEachRegister(looked & params.usedRegistersMask(), [&](Reg reg) {
+            found.append(jit.branch64(CCallHelpers::Equal, reg.gpr(), wanted));
+        });
+        if (params.frameIsSetUp()) {
+            for (unsigned offset = 0; offset < params.frame().frameSize(); offset += sizeof(uint64_t)) {
+                jit.load64(CCallHelpers::Address(CCallHelpers::stackPointerRegister, static_cast<int32_t>(offset)), held);
+                found.append(jit.branch64(CCallHelpers::Equal, held, wanted));
+            }
+        }
+        CCallHelpers::Jump isNotFound = jit.jump();
+        found.link(&jit);
+        jit.move(CCallHelpers::TrustedImm64(static_cast<int64_t>(reinterpret_cast<uintptr_t>(numberOfTimesFound))), wanted);
+        jit.load64(CCallHelpers::Address(wanted), held);
+        jit.add64(CCallHelpers::TrustedImm32(1), held);
+        jit.store64(held, CCallHelpers::Address(wanted));
+        isNotFound.link(&jit);
+    });
+    return poll;
+}
+
+static void testMachineFrameOwnerIsHeldAtPollOfLoopOutsidePartThatSpilledIt()
+{
+    std::array<uint64_t, 3> elements { 11, 22, 33 };
+    std::array<const uint64_t*, 1> ownerInMemory { elements.data() };
+    uint64_t numberOfTimesFound = 0;
+
+    ProcedureTraits traits;
+    traits.chargesForCalleeSaves = true;
+    TestProcedure test(traits);
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    const unsigned numberKeptByCalls = numberOfFrameTestRegisters(registerFileOfFrameTest(test).calleeSavedIn(Bank::GP));
+    AbstractHeap storageOfOwner(test.heaps().argumentBuffer.index(), 0, OptionSet<HeapTrait> { HeapTrait::HoldsInnerPointer });
+    Operation* owner = test.argumentGPR(0);
+    Operation* selector = test.argumentGPR(1);
+    Operation* storage = out.loadPtr(out.address(storageOfOwner, owner));
+    Block* calling = out.newBlock();
+    Block* goingRound = out.newBlock();
+    Block* head = out.newBlock();
+    Block* reading = out.newBlock();
+    Block* readingRarely = out.newBlock();
+    Block* latch = out.newBlock();
+    Block* end = out.newBlock();
+    Vector<Operation*> readMore;
+    for (unsigned index = 0; index + 1 < numberKeptByCalls; ++index)
+        readMore.append(out.opaque(out.add(selector, 2 + index)));
+    out.branch(out.testNonZero64(selector, 1), normalEdge(calling), normalEdge(goingRound));
+    out.appendTo(calling);
+    appendFrameTestCall(test)->effects.mayCollect = true;
+    Operation* sumOfArm = out.add(out.load64(out.address(test.heaps().argumentBuffer, storage)), out.load64(out.address(test.heaps().argumentBuffer, storage, sizeof(uint64_t))));
+    for (Operation* value : readMore)
+        sumOfArm = out.add(out.add(sumOfArm, value), out.opaque(value));
+    ValueFromBlock sumFromCalling = out.anchor(sumOfArm);
+    ValueFromBlock roundsFromCalling = out.anchor(out.constInt64(2));
+    out.jump(head);
+    out.appendTo(goingRound);
+    ValueFromBlock sumFromGoingRound = out.anchor(out.opaque(out.add(selector, 5)));
+    ValueFromBlock roundsFromGoingRound = out.anchor(out.constInt64(2));
+    out.jump(head);
+    out.appendTo(head);
+    Operation* sum = out.phi(Int64, sumFromCalling, sumFromGoingRound);
+    Operation* roundsLeft = out.phi(Int64, roundsFromCalling, roundsFromGoingRound);
+    appendFrameTestPollThatLooksForWordAsCollectorDoes(test, reinterpret_cast<uint64_t>(ownerInMemory.data()), &numberOfTimesFound);
+    out.branch(roundsLeft, normalEdge(reading), normalEdge(end));
+    out.appendTo(reading);
+    Operation* sumOfRound = out.add(sum, out.load64(out.address(test.heaps().argumentBuffer, storage, 2 * sizeof(uint64_t))));
+    ValueFromBlock sumFromReading = out.anchor(sumOfRound);
+    out.branch(out.testNonZero64(selector, 4), rareEdge(readingRarely), normalEdge(latch));
+    out.appendTo(readingRarely);
+    appendFrameTestCall(test);
+    ValueFromBlock sumFromReadingRarely = out.anchor(out.add(sumOfRound, out.load64(out.address(test.heaps().argumentBuffer, storage, sizeof(uint64_t)))));
+    out.jump(latch);
+    out.appendTo(latch);
+    out.addIncomingToPhi(sum, out.anchor(out.phi(Int64, sumFromReading, sumFromReadingRarely)));
+    out.addIncomingToPhi(roundsLeft, out.anchor(out.sub(roundsLeft, 1)));
+    out.jump(head);
+    out.appendTo(end);
+    out.ret(out.add(sum, out.load64(out.address(test.heaps().argumentBuffer, storage))));
+
+    compileOrFail(test);
+    AOT_FRAME_TEST_CHECK(test, storage->has(OperationFlag::IsInnerPointer) && proc.liveness().of(owner).has(ValueFlag::IsKeptForCollector));
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(ownerInMemory.data(), uint64_t { 2 }) == 7 + 2 * 33 + 11);
+    AOT_FRAME_TEST_CHECK(test, numberOfTimesFound == 3);
+    uint64_t expected = 11 + 22 + 2 * 33 + 11;
+    for (unsigned index = 0; index + 1 < numberKeptByCalls; ++index)
+        expected += 2 * (3 + 2 + index);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(ownerInMemory.data(), uint64_t { 3 }) == expected);
+    AOT_FRAME_TEST_CHECK(test, numberOfTimesFound == 6);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(ownerInMemory.data(), uint64_t { 6 }) == 11 + 2 * (33 + 22) + 11 && numberOfTimesFound == 9);
+}
+
+enum class WhereTwoHeadsMeet : uint8_t { InUsualBlock, InRareBlock };
+
+static bool checkOwnerIsHeldAtPollBehindTwoHeads(unsigned numberOfSums, bool keepsFramedPart, WhereTwoHeadsMeet whereTheyMeet = WhereTwoHeadsMeet::InUsualBlock)
+{
+    std::array<uint64_t, 3> elements { 11, 22, 33 };
+    std::array<const uint64_t*, 1> ownerInMemory { elements.data() };
+    uint64_t numberOfTimesFound = 0;
+
+    ProcedureTraits traits;
+    traits.chargesForCalleeSaves = true;
+    TestProcedure test(traits);
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    const unsigned numberKeptByCalls = numberOfFrameTestRegisters(registerFileOfFrameTest(test).calleeSavedIn(Bank::GP));
+    AbstractHeap storageOfOwner(test.heaps().argumentBuffer.index(), 0, OptionSet<HeapTrait> { HeapTrait::HoldsInnerPointer });
+    Operation* owner = test.argumentGPR(0);
+    Operation* selector = test.argumentGPR(1);
+    Operation* storage = out.loadPtr(out.address(storageOfOwner, owner));
+    Block* first = out.newBlock();
+    Block* choosing = out.newBlock();
+    Block* second = out.newBlock();
+    Block* leaving = out.newBlock();
+    Block* behind = out.newBlock();
+    Vector<Operation*> readMore;
+    for (unsigned index = 0; index + 1 < numberKeptByCalls; ++index)
+        readMore.append(out.opaque(out.add(selector, 2 + index)));
+    out.branch(out.testNonZero64(selector, 1), normalEdge(first), normalEdge(choosing));
+    out.appendTo(choosing);
+    out.branch(out.testNonZero64(selector, 2), normalEdge(second), normalEdge(leaving));
+    out.appendTo(leaving);
+    out.ret(out.add(selector, 100));
+    auto appendArm = [&](Block* arm, unsigned offset) {
+        out.appendTo(arm);
+        appendFrameTestCall(test)->effects.mayCollect = true;
+        Operation* sum = out.add(out.load64(out.address(test.heaps().argumentBuffer, storage, offset)), out.load64(out.address(test.heaps().argumentBuffer, storage, offset)));
+        for (Operation* value : readMore)
+            sum = out.add(out.add(sum, value), out.opaque(value));
+        Vector<ValueFromBlock> results;
+        results.append(out.anchor(sum));
+        for (Operation* value : defineFrameTestValues(out, sum, numberOfSums))
+            results.append(out.anchor(value));
+        if (whereTheyMeet == WhereTwoHeadsMeet::InRareBlock) {
+            Block* returning = out.newBlock();
+            out.branch(out.testNonZero64(selector, 8), rareEdge(behind), normalEdge(returning));
+            out.appendTo(returning);
+            out.ret(sum);
+        } else
+            out.jump(behind);
+        return results;
+    };
+    Vector<ValueFromBlock> fromFirst = appendArm(first, 0);
+    Vector<ValueFromBlock> fromSecond = appendArm(second, sizeof(uint64_t));
+    out.appendTo(behind);
+    Vector<Operation*> sums;
+    for (unsigned index = 0; index <= numberOfSums; ++index)
+        sums.append(out.phi(Int64, fromFirst[index], fromSecond[index]));
+    appendFrameTestPollThatLooksForWordAsCollectorDoes(test, reinterpret_cast<uint64_t>(ownerInMemory.data()), &numberOfTimesFound);
+    out.ret(addUpFrameTestValues(out, out.load64(out.address(test.heaps().argumentBuffer, storage, 2 * sizeof(uint64_t))), sums.span()));
+
+    compileOrFail(test);
+    const Allocation& allocation = proc.allocation();
+    AOT_FRAME_TEST_CHECK(test, storage->has(OperationFlag::IsInnerPointer) && proc.liveness().of(owner).has(ValueFlag::IsKeptForCollector));
+    if (keepsFramedPart)
+        AOT_FRAME_TEST_CHECK(test, proc.frame().coverage() == FrameCoverage::FramedPart && allocation.isHeadOfFramedPart(first) && allocation.isHeadOfFramedPart(second) && !allocation.isInFramedPart(behind) && allocation.isSpilled(owner));
+    if (keepsFramedPart) {
+        AOT_FRAME_TEST_CHECK(test, std::ranges::any_of(allocation.registersAtHeadOf(behind), [&](const RegisterBinding& binding) {
+            return binding.value == owner;
+        }));
+    }
+    auto expectedOf = [&](uint64_t chosen, uint64_t element) {
+        uint64_t sum = 2 * element;
+        for (unsigned index = 0; index + 1 < numberKeptByCalls; ++index)
+            sum += 2 * (chosen + 2 + index);
+        return 33 + sum + sumOfFrameTestValues(sum, numberOfSums);
+    };
+    AOT_FRAME_TEST_CHECK(test, proc.order().of(behind).isRare() == (whereTheyMeet == WhereTwoHeadsMeet::InRareBlock));
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(ownerInMemory.data(), uint64_t { 9 }) == expectedOf(9, 11) && numberOfTimesFound == 1);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(ownerInMemory.data(), uint64_t { 10 }) == expectedOf(10, 22) && numberOfTimesFound == 2);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(ownerInMemory.data(), uint64_t { 4 }) == 104 && numberOfTimesFound == 2);
+    return proc.frame().coverage() == FrameCoverage::FramedPart;
+}
+
+static void testMachineFrameOwnerThatPartSpilledIsLoadedBackWhereWayLeavesPart()
+{
+    checkOwnerIsHeldAtPollBehindTwoHeads(0, true);
+}
+
+static void testMachineFrameOwnerThatPartSpilledIsHeldThoughNoRegisterIsFreeWhereWayLeavesPart()
+{
+    RegisterFile file = registerFileFor(ProcedureTraits());
+    const unsigned numberNoCallerCountsOn = numberOfFrameTestRegisters(file.allocatableIn(Bank::GP) & ~file.calleeSavedIn(Bank::GP));
+    unsigned numberThatKeepFramedPart = 0;
+    bool framedPartWasGivenUp = false;
+    for (unsigned numberOfSums = 0; numberOfSums <= numberNoCallerCountsOn + 1; ++numberOfSums) {
+        bool keepsFramedPart = checkOwnerIsHeldAtPollBehindTwoHeads(numberOfSums, false);
+        AOT_TEST_CHECK(!keepsFramedPart || !framedPartWasGivenUp);
+        numberThatKeepFramedPart += keepsFramedPart;
+        framedPartWasGivenUp |= !keepsFramedPart;
+    }
+    AOT_TEST_CHECK(numberThatKeepFramedPart && framedPartWasGivenUp);
+}
+
+static void testMachineFrameOwnerThatPartSpilledIsLoadedBackWhereWayLeavesPartIntoRareBlock()
+{
+    checkOwnerIsHeldAtPollBehindTwoHeads(0, true, WhereTwoHeadsMeet::InRareBlock);
+}
+
+static void testMachineFrameHeadSavesOnlyWhatIsReadUnderIt()
+{
+    constexpr uint64_t word = 0x1000;
+    ProcedureTraits traits;
+    traits.chargesForCalleeSaves = true;
+    TestProcedure test(traits);
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    const unsigned numberKeptByCalls = numberOfFrameTestRegisters(registerFileOfFrameTest(test).calleeSavedIn(Bank::GP));
+    Operation* a = test.argumentGPR(0);
+    Block* first = out.newBlock();
+    Block* choosing = out.newBlock();
+    Block* second = out.newBlock();
+    Block* leaving = out.newBlock();
+    Operation* readLeast = out.opaque(out.add(a, 1));
+    Vector<Operation*> readMore;
+    for (unsigned index = 0; index < numberKeptByCalls; ++index)
+        readMore.append(out.opaque(out.add(a, 2 + index)));
+    out.branch(out.testNonZero64(a, 1), normalEdge(first), normalEdge(choosing));
+    out.appendTo(first);
+    appendFrameTestCall(test);
+    Operation* sum = readLeast;
+    for (Operation* value : readMore)
+        sum = out.add(out.add(sum, value), out.opaque(value));
+    out.ret(sum);
+    out.appendTo(choosing);
+    out.branch(out.testNonZero64(a, 2), normalEdge(second), normalEdge(leaving));
+    out.appendTo(second);
+    appendFrameTestCall(test);
+    Operation* betweenCalls = out.opaque(readLeast);
+    appendFrameTestCall(test);
+    out.ret(out.add(out.add(betweenCalls, readLeast), out.opaque(readLeast)));
+    out.appendTo(leaving);
+    out.ret(out.add(a, 100));
+
+    compileOrFail(test);
+    const Allocation& allocation = proc.allocation();
+    uint64_t expectedOfFirst = word + 2;
+    for (unsigned index = 0; index < numberKeptByCalls; ++index)
+        expectedOfFirst += 2 * (word + 1 + 2 + index);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word + 1) == expectedOfFirst);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word + 2) == 3 * (word + 3));
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word) == word + 100);
+    AOT_FRAME_TEST_CHECK(test, proc.frame().coverage() == FrameCoverage::FramedPart && allocation.isHeadOfFramedPart(first) && allocation.isHeadOfFramedPart(second) && allocation.isSpilled(readLeast));
+    const Allocation::HeadOfFramedPart& headOfFirst = allocation.headOfFramedPartAbove(first);
+    const Allocation::HeadOfFramedPart& headOfSecond = allocation.headOfFramedPartAbove(second);
+    AOT_FRAME_TEST_CHECK(test, headOfFirst.endOfSteps - headOfFirst.beginOfSteps == 1 && allocation.step(headOfFirst.beginOfSteps).operation == readLeast);
+    AOT_FRAME_TEST_CHECK(test, headOfSecond.endOfSteps == headOfSecond.beginOfSteps);
+}
+
+static void testMachineFrameHeadSavesArgumentThatColdOperandAloneReadsUnderIt()
+{
+    constexpr uint64_t word = 0x1000;
+    constexpr uint64_t wordOfArgument = 0x1111222233334444ull;
+    std::array<uint64_t, 2> noted { };
+    ProcedureTraits traits;
+    traits.chargesForCalleeSaves = true;
+    TestProcedure test(traits);
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    Operation* a = test.argumentGPR(0);
+    Operation* argument = test.argumentGPR(1);
+    Block* first = out.newBlock();
+    Block* choosing = out.newBlock();
+    Block* second = out.newBlock();
+    Block* leaving = out.newBlock();
+    out.branch(out.testNonZero64(a, 1), normalEdge(first), normalEdge(choosing));
+    out.appendTo(first);
+    for (uint64_t& place : noted) {
+        appendFrameTestCall(test);
+        PatchOperation* reader = out.patch(Void);
+        reader->effects = Effects::none();
+        reader->effects.writesLocalState = true;
+        reader->append(argument, ValueRep::reg(GPRInfo::argumentGPR2));
+        reader->setGenerator([place = &place](CCallHelpers& jit, const PatchParameters& params) {
+            AllowMacroScratchRegisterUsage allowScratch(jit);
+            GPRReg address = jit.scratchRegister();
+            jit.move(CCallHelpers::TrustedImm64(std::bit_cast<int64_t>(place)), address);
+            jit.store64(params[0].gpr(), CCallHelpers::Address(address));
+        });
+    }
+    out.ret(out.constInt64(1));
+    out.appendTo(choosing);
+    out.branch(out.testNonZero64(a, 2), normalEdge(second), normalEdge(leaving));
+    out.appendTo(second);
+    appendFrameTestCall(test);
+    PatchOperation* coldReader = out.patch(Int64);
+    coldReader->effects = Effects::none();
+    coldReader->effects.writesLocalState = true;
+    coldReader->setFindsOperandsInFrameWithoutRecord(true);
+    coldReader->append(argument, ValueRep::ColdAny);
+    coldReader->setGenerator([](CCallHelpers& jit, const PatchParameters& params) {
+        AOT_TEST_CHECK(params.frameIsSetUp() && params.size() == 2 && params[1].isStack());
+        jit.load64(params.frame().addressInFrame(params[1].offsetFromFP()), params[0].gpr());
+    });
+    out.ret(coldReader);
+    out.appendTo(leaving);
+    out.ret(out.add(a, 100));
+
+    compileOrFail(test);
+    const Allocation& allocation = proc.allocation();
+    AOT_FRAME_TEST_CHECK(test, proc.frame().coverage() == FrameCoverage::FramedPart && allocation.isHeadOfFramedPart(first) && allocation.isHeadOfFramedPart(second));
+    AOT_FRAME_TEST_CHECK(test, allocation.isSpilled(argument) && !allocation.usedCalleeSaves());
+    const Allocation::HeadOfFramedPart& headOfSecond = allocation.headOfFramedPartAbove(second);
+    AOT_FRAME_TEST_CHECK(test, headOfSecond.endOfSteps - headOfSecond.beginOfSteps == 1 && allocation.step(headOfSecond.beginOfSteps).operation == argument);
+    AOT_FRAME_TEST_CHECK(test, !allocation.leavesOutSavesAtHeads());
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word + 2, wordOfArgument) == wordOfArgument);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word + 1, wordOfArgument) == 1 && noted[0] == wordOfArgument && noted[1] == wordOfArgument);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word, wordOfArgument) == word + 100);
+}
+
+static void testMachineFrameSaveThatNothingReadsUnderItsHeadIsLeftOutAndNoted()
+{
+    constexpr uint64_t word = 0x1000;
+    constexpr uint64_t wordOfArgument = 0x1111222233334444ull;
+    std::array<uint64_t, 3> noted { };
+    ProcedureTraits traits;
+    traits.chargesForCalleeSaves = true;
+    TestProcedure test(traits);
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    Operation* a = test.argumentGPR(0);
+    Operation* argument = test.argumentGPR(1);
+    Block* first = out.newBlock();
+    Block* choosing = out.newBlock();
+    Block* second = out.newBlock();
+    Block* leaving = out.newBlock();
+    auto note = [&](uint64_t& place, ValueRep constraint) {
+        PatchOperation* reader = out.patch(Void);
+        reader->effects = Effects::none();
+        reader->effects.writesLocalState = true;
+        reader->append(argument, constraint);
+        reader->setGenerator([place = &place](CCallHelpers& jit, const PatchParameters& params) {
+            AllowMacroScratchRegisterUsage allowScratch(jit);
+            GPRReg address = jit.scratchRegister();
+            jit.move(CCallHelpers::TrustedImm64(std::bit_cast<int64_t>(place)), address);
+            jit.store64(params[0].gpr(), CCallHelpers::Address(address));
+        });
+    };
+    out.branch(out.testNonZero64(a, 1), normalEdge(first), normalEdge(choosing));
+    out.appendTo(first);
+    note(noted[0], ValueRep::reg(GPRInfo::argumentGPR2));
+    appendFrameTestCall(test);
+    out.ret(out.constInt64(1));
+    out.appendTo(choosing);
+    out.branch(out.testNonZero64(a, 2), normalEdge(second), normalEdge(leaving));
+    out.appendTo(second);
+    for (unsigned place = 1; place < noted.size(); ++place) {
+        appendFrameTestCall(test);
+        note(noted[place], ValueRep::reg(GPRInfo::argumentGPR2));
+    }
+    out.ret(out.constInt64(2));
+    out.appendTo(leaving);
+    out.ret(out.add(a, 100));
+
+    compileOrFail(test);
+    const Allocation& allocation = proc.allocation();
+    AOT_FRAME_TEST_CHECK(test, proc.frame().coverage() == FrameCoverage::FramedPart && allocation.isHeadOfFramedPart(first) && allocation.isHeadOfFramedPart(second));
+    AOT_FRAME_TEST_CHECK(test, allocation.isSpilled(argument) && !allocation.usedCalleeSaves());
+    const Allocation::HeadOfFramedPart& headOfFirst = allocation.headOfFramedPartAbove(first);
+    const Allocation::HeadOfFramedPart& headOfSecond = allocation.headOfFramedPartAbove(second);
+    AOT_FRAME_TEST_CHECK(test, headOfFirst.endOfSteps == headOfFirst.beginOfSteps);
+    AOT_FRAME_TEST_CHECK(test, headOfSecond.endOfSteps - headOfSecond.beginOfSteps == 1 && allocation.step(headOfSecond.beginOfSteps).operation == argument);
+    AOT_FRAME_TEST_CHECK(test, allocation.leavesOutSavesAtHeads());
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word + 1, wordOfArgument) == 1 && noted[0] == wordOfArgument && !noted[1] && !noted[2]);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word + 2, wordOfArgument) == 2 && noted[1] == wordOfArgument && noted[2] == wordOfArgument);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word, wordOfArgument) == word + 100);
+}
 
 static void testMachineFrameIsSetUpForArmThatRunsOutOfRegisters()
 {
@@ -2497,6 +3455,126 @@ static void testMachineFrameOfRareRegionAheadOfFramedPartIsItsOwn()
     }
 }
 
+static void testMachineFrameBothHeadsAboveMeetingSaveWhatStepsReadInMeetingAlone()
+{
+    ProcedureTraits traits;
+    traits.chargesForCalleeSaves = true;
+    TestProcedure test(traits);
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    const unsigned numberKeptByCalls = numberOfFrameTestRegisters(registerFileOfFrameTest(test).calleeSavedIn(Bank::GP));
+    Operation* a = test.argumentGPR(0);
+    Operation* readInMeetingAlone = out.opaque(test.argumentGPR(1));
+    Block* returning = out.newBlock();
+    Block* guard = out.newBlock();
+    Block* slow = out.newBlock();
+    Block* head = out.newBlock();
+    Block* meeting = out.newBlock();
+    Vector<Operation*> readMore;
+    for (unsigned index = 0; index < numberKeptByCalls; ++index)
+        readMore.append(out.opaque(out.add(a, 2 + index)));
+
+    out.branch(out.testNonZero64(a, 2), rareEdge(slow), normalEdge(guard));
+    out.appendTo(guard);
+    out.branch(out.testNonZero64(a, 1), normalEdge(returning), normalEdge(head));
+    out.appendTo(returning);
+    out.ret(out.add(a, 100));
+    out.appendTo(head);
+    appendFrameTestCall(test);
+    ValueFromBlock fromHead = out.anchor(out.int64Zero);
+    out.jump(meeting);
+    out.appendTo(slow);
+    appendFrameTestCall(test);
+    ValueFromBlock fromRareWay = out.anchor(out.constInt64(1000));
+    out.jump(meeting);
+    out.appendTo(meeting);
+    Operation* sum = out.phi(Int64, fromHead, fromRareWay);
+    appendFrameTestCall(test);
+    sum = out.add(sum, readInMeetingAlone);
+    for (Operation* value : readMore)
+        sum = out.add(out.add(sum, value), out.opaque(value));
+    out.ret(sum);
+
+    compileOrFail(test);
+    const Allocation& allocation = proc.allocation();
+    AOT_FRAME_TEST_CHECK(test, proc.frame().coverage() == FrameCoverage::FramedPart && proc.order().of(slow).isRare());
+    AOT_FRAME_TEST_CHECK(test, allocation.isHeadOfFramedPart(head) && allocation.isHeadOfFramedPart(slow) && allocation.isInFramedPart(meeting) && !allocation.isHeadOfFramedPart(meeting) && allocation.isSpilled(readInMeetingAlone));
+    unsigned numberOfHeadsThatSaveIt = 0;
+    allocation.everyHeadOfFramedPartAbove(meeting, [&](const Allocation::HeadOfFramedPart& above) {
+        for (uint32_t index = above.beginOfSteps; index < above.endOfSteps; ++index)
+            numberOfHeadsThatSaveIt += allocation.step(index).destination == Location::spill(allocation.spillOf(readInMeetingAlone));
+        return true;
+    });
+    AOT_FRAME_TEST_CHECK(test, numberOfHeadsThatSaveIt == 2);
+    auto expected = [&](uint64_t chosen, uint64_t read) {
+        for (unsigned index = 0; index < numberKeptByCalls; ++index)
+            read += 2 * (chosen + 2 + index);
+        return read;
+    };
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(uint64_t { 1 }, uint64_t { 10 }) == 101);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(uint64_t { 4 }, uint64_t { 10 }) == expected(4, 10));
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(uint64_t { 6 }, uint64_t { 10 }) == expected(6, 1010));
+}
+
+static void testMachineFrameRareWayThatComesBackInBehindHeadJoinsFramedPart()
+{
+    TestProcedure test;
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    FrameTestSetupsThatCount setups;
+    proc.setStackCheckGenerator(noteAndCountFrameTestSetup, &setups);
+    Operation* a = test.argumentGPR(0);
+    Operation* b = test.argumentGPR(1);
+    Block* returning = out.newBlock();
+    Block* guard = out.newBlock();
+    Block* slow = out.newBlock();
+    Block* head = out.newBlock();
+    Block* meeting = out.newBlock();
+
+    out.branch(out.testNonZero64(a, 2), rareEdge(slow), normalEdge(guard));
+    out.appendTo(guard);
+    out.branch(out.testNonZero64(a, 1), normalEdge(returning), normalEdge(head));
+    out.appendTo(returning);
+    out.ret(b);
+    out.appendTo(head);
+    appendFrameTestCall(test);
+    ValueFromBlock fromHead = out.anchor(out.int64Zero);
+    out.jump(meeting);
+    out.appendTo(slow);
+    appendFrameTestCall(test);
+    ValueFromBlock fromRareWay = out.anchor(out.constInt64(1000));
+    out.jump(meeting);
+    out.appendTo(meeting);
+    Operation* extra = out.phi(Int64, fromHead, fromRareWay);
+    appendFrameTestCall(test);
+    out.ret(out.add(out.add(a, b), extra));
+
+    compileOrFail(test);
+    const Frame& frame = proc.frame();
+    const Allocation& allocation = proc.allocation();
+    AOT_FRAME_TEST_CHECK(test, frame.coverage() == FrameCoverage::FramedPart && proc.order().of(slow).isRare());
+    AOT_FRAME_TEST_CHECK(test, allocation.isHeadOfFramedPart(head) && allocation.isHeadOfFramedPart(slow) && allocation.isInFramedPart(meeting) && !allocation.isHeadOfFramedPart(meeting));
+    AOT_FRAME_TEST_CHECK(test, frame.isSetUpAtHeadOf(head) && frame.isSetUpAtHeadOf(slow) && !frame.isSetUpAtHeadOf(meeting) && !frame.isTornDownAtEndOf(head) && !frame.isTornDownAtEndOf(slow));
+    unsigned numberOfHeadsAboveMeeting = 0;
+    allocation.everyHeadOfFramedPartAbove(meeting, [&](const Allocation::HeadOfFramedPart& above) {
+        AOT_FRAME_TEST_CHECK(test, above.block == head || above.block == slow);
+        ++numberOfHeadsAboveMeeting;
+        return true;
+    });
+    AOT_FRAME_TEST_CHECK(test, numberOfHeadsAboveMeeting == 2);
+    checkFrameTestRanges(test);
+    checkFrameTestLayout(test);
+    struct Case {
+        uint64_t a;
+        uint64_t expected;
+        uint64_t numberOfSetups;
+    };
+    for (Case testCase : { Case { 1, 10, 0 }, Case { 4, 14, 1 }, Case { 6, 1016, 1 } }) {
+        setups.numberRun = 0;
+        AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(testCase.a, uint64_t { 10 }) == testCase.expected && setups.numberRun == testCase.numberOfSetups);
+    }
+}
+
 static void runFrameTestOfWaysThatMeet(bool hasStackSlot)
 {
     TestProcedure test;
@@ -2580,6 +3658,126 @@ static void testMachineFrameWayWithoutFrameReturnsInPlaceOfJump()
     AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(uint64_t { 4 }, uint64_t { 10 }) == 14);
 }
 
+static void testMachineFrameCallThatEndsFunctionTakesItsOperandsWithoutSpareRegisters()
+{
+    constexpr unsigned numberOfOperands = 6;
+    TestProcedure test;
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    Operation* operands[numberOfOperands];
+    for (unsigned index = 0; index < numberOfOperands; ++index)
+        operands[index] = test.argumentGPR(index);
+    Block* leaving = out.newBlock();
+    Block* calling = out.newBlock();
+
+    out.branch(out.testNonZero64(operands[1], 1), normalEdge(leaving), normalEdge(calling));
+    out.appendTo(leaving);
+    PatchOperation* leave = out.patch(Void);
+    for (unsigned index = 0; index < numberOfOperands; ++index)
+        leave->append(operands[(index + 1) % numberOfOperands], ValueRep::reg(operands[index]->argumentReg()));
+    leave->effects = Effects::none();
+    leave->effects.writesLocalState = true;
+    leave->effects.terminal = true;
+    leave->setRunsWithoutFrame(true);
+    leave->setGenerator([](CCallHelpers& jit, const PatchParameters& params) {
+        AOT_TEST_CHECK(!params.frameIsSetUp() && params.size() == numberOfOperands);
+        jit.move(CCallHelpers::TrustedImm32(0), GPRInfo::returnValueGPR);
+        for (unsigned index = 1; index < numberOfOperands; ++index) {
+            jit.lshift64(CCallHelpers::TrustedImm32(4), GPRInfo::returnValueGPR);
+            jit.add64(params[index].gpr(), GPRInfo::returnValueGPR);
+        }
+        jit.ret();
+    });
+    out.appendTo(calling);
+    appendFrameTestCall(test);
+    Operation* sum = operands[0];
+    for (unsigned index = 1; index < numberOfOperands; ++index)
+        sum = out.add(sum, operands[index]);
+    out.ret(sum);
+
+    compileOrFail(test);
+    const Frame& frame = proc.frame();
+    const Allocation& allocation = proc.allocation();
+    AOT_FRAME_TEST_CHECK(test, frame.coverage() == FrameCoverage::FramedPart && allocation.onlyHeadOfFramedPart() == calling && !frame.holdsStepsOf(leaving));
+    RegisterMask named = 0;
+    for (Operation* operand : operands)
+        named |= maskOf(operand->argumentReg());
+    const BlockSteps& steps = allocation.stepsOf(leaving);
+    unsigned numberOfRegistersBesideNamedOnes = 0;
+    RegisterMask seen = named;
+    for (uint32_t index = steps.begin; index < steps.end; ++index) {
+        const Step& step = allocation.step(index);
+        AOT_FRAME_TEST_CHECK(test, step.kind != StepKind::Reload && step.kind != StepKind::Save);
+        if (step.kind != StepKind::Move || !step.destination.isRegister() || (seen & maskOf(step.destination.reg())))
+            continue;
+        seen |= maskOf(step.destination.reg());
+        ++numberOfRegistersBesideNamedOnes;
+    }
+    AOT_FRAME_TEST_CHECK(test, numberOfRegistersBesideNamedOnes <= 1);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(uint64_t { 1 }, uint64_t { 3 }, uint64_t { 4 }, uint64_t { 5 }, uint64_t { 6 }, uint64_t { 7 }) == 0x45671);
+    AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(uint64_t { 1 }, uint64_t { 2 }, uint64_t { 4 }, uint64_t { 5 }, uint64_t { 6 }, uint64_t { 7 }) == 25);
+}
+
+static void testMachineFrameKeepsPointerAtSafepointOfRareRegionInLoopBehindFramedPart()
+{
+    constexpr uint64_t low = 0x80000100u;
+    constexpr uint64_t numberOfTurns = 3;
+    uint64_t numberOfTimesFound = 0;
+
+    TestProcedure test;
+    Output& out = test.out();
+    Procedure& proc = test.procedure();
+    Operation* reference = out.opaque(out.castToInt32(test.argumentGPR(0)));
+    reference->markAsNarrowReference();
+    Operation* selector = test.argumentGPR(1);
+    Block* calling = out.newBlock();
+    Block* passing = out.newBlock();
+    Block* turning = out.newBlock();
+    Block* slow = out.newBlock();
+    Block* on = out.newBlock();
+    Block* done = out.newBlock();
+    out.branch(out.testNonZero64(selector, 1), normalEdge(calling), normalEdge(passing));
+    out.appendTo(calling);
+    appendFrameTestCallThatLooksForWordAsCollectorDoes(test, low << cell32Shift, &numberOfTimesFound);
+    ValueFromBlock countBehindCall = out.anchor(out.int64Zero);
+    ValueFromBlock sumBehindCall = out.anchor(out.int64Zero);
+    out.jump(turning);
+    out.appendTo(passing);
+    ValueFromBlock countWithoutCall = out.anchor(out.int64Zero);
+    ValueFromBlock sumWithoutCall = out.anchor(out.int64Zero);
+    out.jump(turning);
+    out.appendTo(turning);
+    Operation* count = out.phi(Int64, countBehindCall, countWithoutCall);
+    Operation* sum = out.phi(Int64, sumBehindCall, sumWithoutCall);
+    out.branch(out.testNonZero64(selector, 2), rareEdge(slow), normalEdge(on));
+    out.appendTo(slow);
+    appendFrameTestCallThatLooksForWordAsCollectorDoes(test, low << cell32Shift, &numberOfTimesFound);
+    out.jump(on);
+    out.appendTo(on);
+    Operation* nextSum = out.add(sum, out.zeroExtPtr(reference));
+    Operation* nextCount = out.add(count, 1);
+    out.addIncomingToPhi(count, out.anchor(nextCount));
+    out.addIncomingToPhi(sum, out.anchor(nextSum));
+    out.branch(out.lessThan(nextCount, out.constInt64(numberOfTurns)), normalEdge(turning), normalEdge(done));
+    out.appendTo(done);
+    out.ret(nextSum);
+
+    compileOrFail(test);
+    const Allocation& allocation = proc.allocation();
+    const Order& order = proc.order();
+    AOT_FRAME_TEST_CHECK(test, proc.liveness().of(reference).has(ValueFlag::NeedsPointerBesideIt) && order.of(turning).isLoopHead && order.of(slow).isRare() && order.of(slow).loop == order.of(turning).loop);
+    AOT_FRAME_TEST_CHECK(test, proc.frame().coverage() == FrameCoverage::FramedPart && allocation.onlyHeadOfFramedPart() == calling && !allocation.isInFramedPart(turning) && !allocation.isInFramedPart(slow) && !allocation.isInFramedPart(on));
+    AOT_FRAME_TEST_CHECK(test, !proc.frame().holdsStepsOf(reference->owner()) && !proc.frame().holdsStepsOf(passing) && !proc.frame().holdsStepsOf(turning) && !proc.frame().holdsStepsOf(on) && !proc.frame().holdsStepsOf(done));
+    AOT_FRAME_TEST_CHECK(test, numberOfFrameTestPointersKeptIn(allocation, calling) == 1 && numberOfFrameTestPointersKeptIn(allocation, slow) == 1 && numberOfFrameTestPointersKeptIn(allocation, nullptr) == 2);
+
+    uint64_t word = (uint64_t { 7 } << 32) + low;
+    for (uint64_t ways = 0; ways < 4; ++ways) {
+        numberOfTimesFound = 0;
+        AOT_FRAME_TEST_CHECK(test, test.call<uint64_t>(word, ways) == numberOfTurns * low);
+        AOT_FRAME_TEST_CHECK(test, numberOfTimesFound == (ways & 1) + (ways & 2 ? numberOfTurns : 0));
+    }
+}
+
 #undef AOT_FRAME_TEST_CHECK
 
 } // namespace Machine
@@ -2589,6 +3787,18 @@ std::span<const NativeTest> machineFrameTests()
 {
     static constexpr NativeTest tests[] = {
         { "machine/frame/rare-blocks-with-calls-have-frames-of-their-own"_s, Machine::testMachineFrameCoversRareBlocksAlone },
+        { "machine/frame/it-is-torn-down-alike-where-origins-are-noted"_s, Machine::testMachineFrameIsTornDownAlikeWhereOriginsAreNoted },
+        { "machine/frame/a-head-saves-the-owner-that-the-collector-alone-reads"_s, Machine::testMachineFrameHeadSavesOwnerThatCollectorAloneReads },
+        { "machine/frame/a-second-head-saves-the-owner-that-steps-read-under-the-first-alone"_s, Machine::testMachineFrameSecondHeadSavesOwnerThatStepsReadUnderFirstAlone },
+        { "machine/frame/patch-that-may-collect-without-a-frame-shows-its-registers-or-ends-the-function"_s, Machine::testMachineFramePatchThatMayCollectWithoutFrameShowsItsRegistersOrEndsFunction },
+        { "machine/frame/the-owner-is-held-at-the-poll-of-a-loop-outside-the-part-that-spilled-it"_s, Machine::testMachineFrameOwnerIsHeldAtPollOfLoopOutsidePartThatSpilledIt },
+        { "machine/frame/an-owner-that-the-part-spilled-is-loaded-back-where-the-way-leaves-the-part"_s, Machine::testMachineFrameOwnerThatPartSpilledIsLoadedBackWhereWayLeavesPart },
+        { "machine/frame/an-owner-that-the-part-spilled-is-loaded-back-where-the-way-leaves-the-part-into-a-rare-block"_s, Machine::testMachineFrameOwnerThatPartSpilledIsLoadedBackWhereWayLeavesPartIntoRareBlock },
+        { "machine/frame/an-owner-that-the-part-spilled-is-held-though-no-register-is-free-where-the-way-leaves-the-part"_s, Machine::testMachineFrameOwnerThatPartSpilledIsHeldThoughNoRegisterIsFreeWhereWayLeavesPart },
+        { "machine/frame/a-head-saves-only-what-is-read-under-it"_s, Machine::testMachineFrameHeadSavesOnlyWhatIsReadUnderIt },
+        { "machine/frame/a-head-saves-the-argument-that-a-cold-operand-alone-reads-under-it"_s, Machine::testMachineFrameHeadSavesArgumentThatColdOperandAloneReadsUnderIt },
+        { "machine/frame/a-save-that-nothing-reads-under-its-head-is-left-out-and-noted"_s, Machine::testMachineFrameSaveThatNothingReadsUnderItsHeadIsLeftOutAndNoted },
+        { "machine/frame/a-stretch-that-binds-few-values-has-no-frame-though-an-unlikely-way-later-in-the-order-reads-more"_s, Machine::testMachineFrameStretchThatBindsFewValuesHasNoFrameThoughUnlikelyWayLaterInOrderReadsMore },
         { "machine/frame/patch-that-tests-the-stack-itself-stands-ahead-of-the-framed-part"_s, Machine::testMachineFramePatchThatTestsStackItselfStandsAheadOfFramedPart },
         { "machine/frame/patch-that-tests-the-stack-itself-gets-a-frame-where-nothing-else-needs-one"_s, Machine::testMachineFramePatchThatTestsStackItselfGetsFrameWhereNothingElseNeedsOne },
         { "machine/frame/small-rare-region-stands-among-the-other-code"_s, Machine::testMachineSmallRareRegionStandsAmongOtherCode },
@@ -2596,8 +3806,6 @@ std::span<const NativeTest> machineFrameTests()
         { "machine/frame/handlers-rejection-and-suspension-set-it-up-at-entry"_s, Machine::testMachineFrameIsSetUpAtEntryWhereTraitsAskForIt },
         { "machine/frame/callee-saves-ascend-below-the-record-and-come-back"_s, Machine::testMachineFrameCalleeSavesAscendBelowRecord },
         { "machine/frame/function-that-saves-its-frame"_s, Machine::testMachineFrameOfFunctionThatSavesItsFrame },
-        { "machine/frame/words-stored-on-one-path-are-cleared-at-the-suspension"_s, Machine::testMachineFrameClearsWordsStoredOnOnePath },
-        { "machine/frame/word-held-by-its-range-alone-keeps-no-leftover"_s, Machine::testMachineFrameKeepsNoLeftoverInWordHeldByRangeAlone },
         { "machine/frame/spill-that-no-path-reads-behind-a-suspension-is-not-kept"_s, Machine::testMachineFrameKeepsNoSpillThatNoPathReadsBehindSuspension },
         { "machine/frame/many-spills-that-live-through-the-block-of-a-suspension-are-kept"_s, Machine::testMachineFrameKeepsManySpillsThatLiveThroughBlockOfSuspension },
         { "machine/frame/many-spills-that-live-round-a-loop-with-a-suspension-are-kept"_s, Machine::testMachineFrameKeepsManySpillsThatLiveRoundLoopWithSuspension },
@@ -2614,6 +3822,10 @@ std::span<const NativeTest> machineFrameTests()
         { "machine/frame/rare-block-that-two-framed-parts-share-reads-what-lives-across-their-calls"_s, Machine::testMachineFrameRareBlockSharedByTwoFramedPartsReadsWhatLivesAcrossTheirCalls },
         { "machine/frame/rare-block-that-ways-out-of-two-framed-parts-enter-reads-what-lives-across-their-calls"_s, Machine::testMachineFrameRareBlockThatWaysOutOfTwoFramedPartsEnterReadsWhatLivesAcrossTheirCalls },
         { "machine/frame/loop-that-needs-it-finds-it-set-up"_s, Machine::testMachineFrameIsSetUpAheadOfLoopThatNeedsIt },
+        { "machine/frame/a-way-out-that-a-rare-region-leads-back-to-holds-no-head-back"_s, Machine::testMachineFrameWayOutThatRareRegionLeadsBackToHoldsNoHeadBack },
+        { "machine/frame/a-way-out-that-goes-on-and-never-comes-round-holds-no-head-back"_s, Machine::testMachineFrameWayOutThatGoesOnAndNeverComesRoundHoldsNoHeadBack },
+        { "machine/frame/a-rare-way-that-comes-round-keeps-the-head-ahead-of-the-loop"_s, Machine::testMachineFrameRareWayThatComesRoundKeepsHeadAheadOfLoop },
+        { "machine/frame/a-loop-that-turns-inside-a-stretch-that-never-turns-finds-the-frame-set-up-ahead-of-it"_s, Machine::testMachineFrameLoopThatTurnsInsideStretchThatNeverTurnsFindsFrameSetUpAheadOfIt },
         { "machine/frame/whatever-writes-on-the-way-to-it-follows-the-setup"_s, Machine::testMachineFrameIsSetUpAheadOfWhateverWritesOnWayToIt },
         { "machine/frame/what-is-defined-ahead-of-it-is-stored-at-its-head"_s, Machine::testMachineFrameStoresAtHeadWhatIsDefinedAheadOfIt },
         { "machine/frame/pointer-beside-a-reference-from-ahead-of-it-is-kept-at-its-head"_s, Machine::testMachineFrameKeepsPointerAtHeadOfFramedPart },
@@ -2621,14 +3833,25 @@ std::span<const NativeTest> machineFrameTests()
         { "machine/frame/no-pointer-is-kept-where-a-way-past-a-later-block-has-not-defined-the-reference"_s, Machine::testMachineFrameKeepsNoPointerWhereWayPastLaterBlockHasNotDefinedReference },
         { "machine/frame/no-pointer-is-kept-behind-the-other-successor-of-the-patch-that-defines-the-reference"_s, Machine::testMachineFrameKeepsNoPointerBehindOtherSuccessorOfPatchThatDefinesReference },
         { "machine/frame/the-pointer-is-kept-at-a-head-behind-parts-that-spilled-the-reference"_s, Machine::testMachineFrameKeepsPointerAtHeadBehindPartsThatSpilledReference },
+        { "machine/frame/a-reference-kept-for-an-inner-pointer-that-is-read-behind-a-rare-safepoint-ahead-of-the-framed-part-has-its-pointer-there"_s, Machine::testMachineFrameReferenceKeptForInnerPointerReadBehindRareSafepointAheadOfFramedPartHasItsPointerThere },
+        { "machine/frame/a-reference-that-is-dead-at-a-rare-safepoint-ahead-of-the-framed-part-waits-for-a-head-with-its-pointer"_s, Machine::testMachineFrameReferenceDeadAtRareSafepointAheadOfFramedPartWaitsForHeadWithItsPointer },
+        { "machine/frame/a-reference-that-is-read-behind-a-rare-safepoint-ahead-of-the-framed-part-has-its-pointer-there"_s, Machine::testMachineFrameReferenceReadBehindRareSafepointAheadOfFramedPartHasItsPointerThere },
         { "machine/frame/the-whole-function-is-covered-where-a-store-at-the-head-of-a-declined-framed-part-is-its-only-use-outside-rare-regions"_s, Machine::testMachineFrameCoversWholeFunctionWhereStoreAtHeadOfDeclinedFramedPartIsItsOnlyUseOutsideRareRegions },
-        { "machine/frame/safepoint-ahead-of-it-finds-the-pointer-kept"_s, Machine::testMachineFrameKeepsPointerAtDefinitionForSafepointAheadOfFramedPart },
+        { "machine/frame/safepoint-ahead-of-it-finds-the-pointer-kept"_s, Machine::testMachineFrameKeepsPointerAtRareSafepointAheadOfFramedPart },
+        { "machine/frame/safepoint-of-a-rare-region-entered-from-it-and-from-ahead-of-it-finds-the-pointer-kept"_s, Machine::testMachineFrameKeepsPointerAtSafepointOfRareRegionEnteredFromFramedPartAndFromAheadOfIt },
+        { "machine/frame/each-of-two-safepoints-in-a-rare-block-ahead-of-it-finds-the-pointer-kept"_s, Machine::testMachineFrameKeepsPointerAtEachOfTwoSafepointsInRareBlockAheadOfFramedPart },
+        { "machine/frame/safepoint-where-two-entries-of-a-rare-region-ahead-of-it-meet-finds-the-pointer-kept"_s, Machine::testMachineFrameKeepsPointerWhereTwoEntriesOfRareRegionAheadOfFramedPartMeet },
+        { "machine/frame/rare-block-ahead-of-it-that-ends-the-function-keeps-no-pointer"_s, Machine::testMachineFrameKeepsNoPointerInRareBlockAheadOfFramedPartThatEndsFunction },
+        { "machine/frame/safepoint-of-a-rare-region-in-a-loop-behind-it-finds-the-pointer-kept-in-every-turn"_s, Machine::testMachineFrameKeepsPointerAtSafepointOfRareRegionInLoopBehindFramedPart },
         { "machine/frame/arm-that-runs-out-of-registers-is-framed-by-itself"_s, Machine::testMachineFrameIsSetUpForArmThatRunsOutOfRegisters },
         { "machine/frame/rare-region-ahead-of-it-has-a-frame-of-its-own"_s, Machine::testMachineFrameOfRareRegionAheadOfFramedPartIsItsOwn },
+        { "machine/frame/a-rare-way-that-comes-back-in-behind-the-head-joins-the-framed-part"_s, Machine::testMachineFrameRareWayThatComesBackInBehindHeadJoinsFramedPart },
+        { "machine/frame/both-heads-above-a-meeting-save-what-steps-read-in-the-meeting-alone"_s, Machine::testMachineFrameBothHeadsAboveMeetingSaveWhatStepsReadInMeetingAlone },
         { "machine/frame/block-of-a-rare-region-does-not-read-what-its-sibling-saved"_s, Machine::testMachineFrameBlockOfRareRegionDoesNotReadWhatItsSiblingSaved },
         { "machine/frame/head-stands-where-every-way-on-calls"_s, Machine::testMachineFrameHeadStandsWhereEveryWayOnCalls },
         { "machine/frame/way-that-leaves-it-tears-it-down"_s, Machine::testMachineFrameIsTornDownWhereWayLeavesFramedPart },
         { "machine/frame/way-without-it-returns-in-place-of-a-jump"_s, Machine::testMachineFrameWayWithoutFrameReturnsInPlaceOfJump },
+        { "machine/frame/call-that-ends-the-function-takes-its-operands-without-spare-registers"_s, Machine::testMachineFrameCallThatEndsFunctionTakesItsOperandsWithoutSpareRegisters },
     };
     return tests;
 }

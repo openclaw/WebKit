@@ -30,6 +30,7 @@
 
 #include <atomic>
 #include <wtf/NeverDestroyed.h>
+#include <wtf/SIMDHelpers.h>
 #include <wtf/SIMDUTF.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/ZippedRange.h>
@@ -356,7 +357,7 @@ Ref<StringImpl> StringImpl::substring(unsigned start, unsigned length)
     return create(span16().subspan(start, length));
 }
 
-char32_t LEGACY_NODELETE StringImpl::codePointAt(unsigned i)
+NODELETE char32_t StringImpl::codePointAt(unsigned i)
 {
     if (is8Bit())
         return span8()[i];
@@ -389,6 +390,32 @@ Ref<StringImpl> StringImpl::convertToLowercaseWithoutLocale()
     return convertToLowercaseWithoutLocaleStartingAtFailingIndex16Bit(0);
 }
 
+// A subset of the characters with Changes_When_Lowercased=No in the Unicode Character Database
+// (DerivedCoreProperties.txt). It does not have to be complete: other characters are handled by ICU.
+static constexpr std::array<std::pair<char16_t, char16_t>, 5> caselessRanges { {
+    { 0x2000, 0x206F }, // General Punctuation
+    { 0x3000, 0xA4CF }, // CJK Symbols and Punctuation to Yi Radicals
+    { 0xAC00, 0xD7A3 }, // Hangul Syllables
+    { 0xE000, 0xFAFF }, // Private Use Area and CJK Compatibility Ideographs
+    { 0xFF01, 0xFF20 }, // Fullwidth ASCII punctuation and digits
+} };
+
+static bool containsOnlyASCIIOrCaseless(std::span<const char16_t> span)
+{
+    auto vectorMatch = [](auto input) ALWAYS_INLINE_LAMBDA {
+        auto matched = SIMD::lessThanOrEqual(input, SIMD::splat<uint16_t>(0x7F));
+        for (auto [first, last] : caselessRanges)
+            matched = SIMD::bitOr(matched, SIMD::lessThanOrEqual(SIMD::sub(input, SIMD::splat<uint16_t>(first)), SIMD::splat<uint16_t>(last - first)));
+        return SIMD::findFirstNonZeroIndex(SIMD::bitNot(matched));
+    };
+    auto scalarMatch = [](char16_t character) ALWAYS_INLINE_LAMBDA {
+        return !isASCII(character) && std::ranges::none_of(caselessRanges, [&](auto range) {
+            return isInRange(character, range.first, range.second);
+        });
+    };
+    return SIMD::find(span, vectorMatch, scalarMatch) == std::to_address(span.end());
+}
+
 Ref<StringImpl> StringImpl::convertToLowercaseWithoutLocaleStartingAtFailingIndex16Bit(unsigned failingIndex)
 {
     ASSERT(!is8Bit());
@@ -411,11 +438,11 @@ Ref<StringImpl> StringImpl::convertToLowercaseWithoutLocaleStartingAtFailingInde
             noUpper = false;
         ored |= character;
     }
-    // Nothing to do if the string is all ASCII with no uppercase.
-    if (noUpper && !(ored & ~0x7F))
+    bool needsICU = (ored & ~0x7F) && (ored < caselessRanges.front().first || !containsOnlyASCIIOrCaseless(span.subspan(failingIndex)));
+    if (noUpper && !needsICU)
         return *this;
 
-    if (!(ored & ~0x7F)) {
+    if (!needsICU) {
         std::span<char16_t> data16;
         auto newImpl = createUninitializedInternalNonEmpty(m_length, data16);
         copyCharacters(data16, span.first(failingIndex));
@@ -614,7 +641,7 @@ Ref<StringImpl> StringImpl::convertToUppercaseWithoutLocale16Bit(std::span<const
     return newImpl;
 }
 
-static inline bool LEGACY_NODELETE needsTurkishCasingRules(const AtomString& locale)
+NODELETE static inline bool needsTurkishCasingRules(const AtomString& locale)
 {
     // Either "tr" or "az" locale, with ASCII case insensitive comparison and allowing for an ignored subtag.
     char16_t first = locale[0];
@@ -624,14 +651,14 @@ static inline bool LEGACY_NODELETE needsTurkishCasingRules(const AtomString& loc
         && (locale.length() == 2 || locale[2] == '-');
 }
 
-static inline bool LEGACY_NODELETE needsGreekUppercasingRules(const AtomString& locale)
+NODELETE static inline bool needsGreekUppercasingRules(const AtomString& locale)
 {
     // The "el" locale, with ASCII case insensitive comparison and allowing for an ignored subtag.
     return isASCIIAlphaCaselessEqual(locale[0], 'e') && isASCIIAlphaCaselessEqual(locale[1], 'l')
         && (locale.length() == 2 || locale[2] == '-');
 }
 
-static inline bool LEGACY_NODELETE needsLithuanianCasingRules(const AtomString& locale)
+NODELETE static inline bool needsLithuanianCasingRules(const AtomString& locale)
 {
     // The "lt" locale, with ASCII case insensitive comparison and allowing for an ignored subtag.
     return isASCIIAlphaCaselessEqual(locale[0], 'l') && isASCIIAlphaCaselessEqual(locale[1], 't')
@@ -1140,7 +1167,7 @@ bool StringImpl::startsWithIgnoringASCIICase(StringView prefix) const
     return prefix && ::WTF::startsWithIgnoringASCIICase(*this, prefix);
 }
 
-bool LEGACY_NODELETE StringImpl::startsWith(char16_t character) const
+NODELETE bool StringImpl::startsWith(char16_t character) const
 {
     return m_length && (*this)[0] == character;
 }
@@ -1165,7 +1192,7 @@ bool StringImpl::endsWithIgnoringASCIICase(StringView suffix) const
     return suffix && ::WTF::endsWithIgnoringASCIICase(*this, suffix);
 }
 
-bool LEGACY_NODELETE StringImpl::endsWith(char16_t character) const
+NODELETE bool StringImpl::endsWith(char16_t character) const
 {
     return m_length && (*this)[m_length - 1] == character;
 }
@@ -1510,7 +1537,7 @@ bool equal(const StringImpl* a, const StringImpl* b)
     return equalCommon(a, b);
 }
 
-template<typename CharacterType> inline bool LEGACY_NODELETE equalInternal(const StringImpl* a, std::span<const CharacterType> b)
+template<typename CharacterType> NODELETE inline bool equalInternal(const StringImpl* a, std::span<const CharacterType> b)
 {
     if (!a)
         return !b.data();
@@ -1559,7 +1586,7 @@ bool equalIgnoringASCIICase(const StringImpl* a, const StringImpl* b)
     return a == b || (a && b && equalIgnoringASCIICase(*a, *b));
 }
 
-bool LEGACY_NODELETE equalIgnoringASCIICaseNonNull(const StringImpl* a, const StringImpl* b)
+NODELETE bool equalIgnoringASCIICaseNonNull(const StringImpl* a, const StringImpl* b)
 {
     ASSERT(a);
     ASSERT(b);
@@ -1593,7 +1620,7 @@ Ref<StringImpl> StringImpl::adopt(StringBuffer<char16_t>&& buffer)
     return adoptRef(*new StringImpl(buffer.release()));
 }
 
-size_t LEGACY_NODELETE StringImpl::sizeInBytes() const
+NODELETE size_t StringImpl::sizeInBytes() const
 {
     // FIXME: support substrings
     size_t size = length();

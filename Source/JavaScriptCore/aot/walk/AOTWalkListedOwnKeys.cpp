@@ -16,6 +16,7 @@
 #include "AOTOpcodeSets.h"
 #include "AOTTypeArena.h"
 #include "AOTWalkCopies.h"
+#include "AOTWalkKnown.h"
 #include <algorithm>
 #include <optional>
 #include <span>
@@ -28,7 +29,7 @@ static constexpr size_t mostFieldsOfOwnKeyListOutsideLoops = 8;
 
 namespace {
 
-enum class OwnKeyList : uint8_t { Keys, Values };
+enum class OwnKeyList : uint8_t { Keys, Values, Entries };
 
 struct CallOfOwnKeyList {
     const BodyValue& call;
@@ -65,6 +66,8 @@ static std::optional<OwnKeyList> listAskedForInListedOwnKeys(Walker& walker, con
         return OwnKeyList::Keys;
     if (builtin == table.canonicalID(Builtins::ObjectValues))
         return OwnKeyList::Values;
+    if (builtin == table.canonicalID(Builtins::ObjectEntries) && walker.isInLoop())
+        return OwnKeyList::Entries;
     return std::nullopt;
 }
 
@@ -103,7 +106,20 @@ static Reference buildListOfOrderInListedOwnKeys(Walker& walker, const CallOfOwn
 {
     Vector<Reference, 16> elements;
     for (FieldIndex field : order.fields) {
-        Reference element = asked.list == OwnKeyList::Keys ? nameOfOwnKeyInListedOwnKeys(walker, order.layout, field, asked.origin) : valueOfOwnKey(walker, object, order.layout, field, asked.origin);
+        Reference name = asked.list == OwnKeyList::Values ? Reference() : nameOfOwnKeyInListedOwnKeys(walker, order.layout, field, asked.origin);
+        Reference value = asked.list == OwnKeyList::Keys ? Reference() : valueOfCopiedKey(walker, asked.call, object, order.layout, field, asked.origin);
+        if ((asked.list != OwnKeyList::Values && !name) || (asked.list != OwnKeyList::Keys && !value))
+            return { };
+        Reference element = name ? name : value;
+        if (asked.list == OwnKeyList::Entries) {
+            Draft pair(Opcode::NewArray, asked.origin);
+            pair.setContents(walker.types().unionOf(walker.typeOf(name), walker.typeOf(value)));
+            pair.setElementsOperands(std::array { name, value });
+            walker.chooseConservativeFields(pair);
+            element = walker.build(WTF::move(pair));
+            if (element)
+                noteFreshList(walker, element);
+        }
         if (!element)
             return { };
         elements.append(element);
@@ -113,7 +129,7 @@ static Reference buildListOfOrderInListedOwnKeys(Walker& walker, const CallOfOwn
 
 static bool buildListOfObjectInSightInListedOwnKeys(Walker& walker, const CallOfOwnKeyList& asked, Reference source)
 {
-    std::optional<OwnKeyOrder> order = ownKeysInSight(walker, source);
+    std::optional<OwnKeyOrder> order = ownKeysInSight(walker, source, AccessorsAmongOwnKeys::AreCalled);
     if (!order || !canWriteOutInListedOwnKeys(order->fields.size()))
         return false;
     if (Reference list = buildListOfOrderInListedOwnKeys(walker, asked, source, *order))
@@ -121,12 +137,38 @@ static bool buildListOfObjectInSightInListedOwnKeys(Walker& walker, const CallOf
     return true;
 }
 
+static ValueID findReadOfLengthThatAloneReadsListInListedOwnKeys(Walker& walker, ValueID call)
+{
+    const BodyIndex& index = walker.currentBodyIndex();
+    BodyBlock block = index.block(index.blockOf(call));
+    ValueID list = call;
+    for (ValueID reader = index.onlyUsingValue(list); reader && reader.index() > list.index() && reader.index() <= list.index() + 2 && block.holds(reader); reader = index.onlyUsingValue(list)) {
+        BodyValue operation = index.value(reader);
+        ValueID between = reader.index() == list.index() + 2 ? ValueID(list.index() + 1) : ValueID();
+        bool readsUnderWrittenIndex = between && operation.opcode() == Opcode::ElemGet && operation.objectOperand() == list && operation.as<Opcode::ElemGet>().propertyOperand() == between
+            && index.opcodeOf(between) == Opcode::Integer && index.onlyUsingValue(between) == reader;
+        if (between && !readsUnderWrittenIndex)
+            return { };
+        if (operation.opcode() == Opcode::PropGet || readsUnderWrittenIndex) {
+            std::optional<BodyUser> taker = index.firstUser(reader);
+            bool readsLength = !readsUnderWrittenIndex && !operation.isFreeName() && operation.key() == walker.program().keyOf(BuiltinNames::length);
+            bool standsInStretch = reader.index() - block.firstValue().index() < walker.endOfStretchBeingWalked();
+            return (readsLength || readsUnderWrittenIndex) && standsInStretch && !(taker && taker->kind == BodyUseKind::BlockSubject) ? reader : ValueID();
+        }
+        if (!opcodesThatStateTypes.contains(operation.opcode()))
+            return { };
+        list = reader;
+    }
+    return { };
+}
+
 static bool buildListBehindTestsInListedOwnKeys(Walker& walker, const CallOfOwnKeyList& asked, ValueID written, Reference source)
 {
-    OwnKeyPlan plan = planOwnKeyWalk(walker, written, source);
+    OwnKeyPlan plan = planOwnKeyWalk(walker, written, source, mostFieldsOfOwnKeyWalk, mostArmsOfOwnKeyWalk, AccessorsAmongOwnKeys::AreCalled);
     if (!plan)
         return false;
-    if (asked.list == OwnKeyList::Keys && !plan.layoutsAreProven)
+    ValueID readOfLength = findReadOfLengthThatAloneReadsListInListedOwnKeys(walker, asked.call.id());
+    if (asked.list == OwnKeyList::Keys && !plan.layoutsAreProven && (!readOfLength || !plan.hasArmForEveryExpectedOrder))
         return false;
     size_t mostFields = walker.isInLoop() ? mostFieldsOfOwnKeyWalk : mostFieldsOfOwnKeyListOutsideLoops;
     for (const OwnKeyOrder& order : plan.orders) {
@@ -141,7 +183,7 @@ static bool buildListBehindTestsInListedOwnKeys(Walker& walker, const CallOfOwnK
     BodyBlock block = index.block(index.blockOf(call));
     uint32_t place = call.index() - block.firstValue().index();
 
-    walker.noteGuessOpened();
+    walker.recordSpeculation();
     BlockID asWritten = walker.addBlock(BlockFrequency::Unlikely);
     BlockID meeting = walker.addBlock();
 
@@ -149,14 +191,15 @@ static bool buildListBehindTestsInListedOwnKeys(Walker& walker, const CallOfOwnK
     for (size_t number = 0; number < plan.orders.size() && !walker.isUnreachable(); ++number) {
         BlockID whereTestFails = number + 1 == plan.orders.size() ? asWritten : walker.addBlock();
         Reference object = source;
-        if (goOnWhereObjectHasOwnKeys(walker, object, plan.orders[number], plan.layoutsAreProven, asked.origin, whereTestFails))
+        if (continueIfOwnKeys(walker, object, plan.orders[number], plan.layoutsAreProven, asked.origin, whereTestFails))
             tested.append({ walker.currentBlock(), object, number });
         if (walker.hasFailed())
             return true;
         walker.continueIn(whereTestFails);
     }
 
-    Walker::StretchInArms stretch = walker.stretchInArms(block.id(), place, place + 1, true);
+    uint32_t end = (readOfLength ? readOfLength.index() - block.firstValue().index() : place) + 1;
+    Walker::StretchInArms stretch = walker.stretchInArms(block.id(), place, end);
     Walker::ArmsThatMeet ends;
     walker.walkClosedArm(walker.currentBlock(), stretch, ends);
     if (walker.hasFailed())
@@ -170,16 +213,33 @@ static bool buildListBehindTestsInListedOwnKeys(Walker& walker, const CallOfOwnK
         if (!built)
             continue;
         walker.bind(call, built);
+        for (uint32_t next = place + 1; next < end; ++next)
+            walker.bind(ValueID(block.firstValue().index() + next), Reference());
+        if (end > place + 1)
+            walker.walkStretch(block.id(), place + 1, end);
         walker.listArm(stretch, ends);
         if (walker.hasFailed())
             return true;
     }
 
-    if (!walker.letArmsMeet(stretch, ends, meeting))
+    if (!walker.joinArms(stretch, ends, meeting))
         return true;
-    if (Reference met = walker.referenceBoundTo(call); met && walker.program().builtins().mayHavePristineInstances(BuiltinClasses::Array))
+    if (Reference met = end == place + 1 ? walker.referenceBoundTo(call) : Reference(); met && walker.program().builtins().mayHavePristineInstances(BuiltinClasses::Array))
         noteListMadeByCaller(walker, met);
     return true;
+}
+
+void noteListedOwnKeys(Walker& walker, ValueID id)
+{
+    BodyValue call = walker.currentBodyIndex().value(id);
+    if (call.opcode() != Opcode::Call || listAskedForInListedOwnKeys(walker, call) != OwnKeyList::Keys)
+        return;
+    Reference list = walker.isUnreachable() ? Reference() : walker.referenceBoundTo(call.id());
+    Reference object = walker.referenceOf(call.argumentsOperands()[0]);
+    if (!list || !list.isValue() || !object || !object.isValue())
+        return;
+    static constexpr AbstractHeapSet ownKeysHeaps { AbstractHeap::ShapeWords, AbstractHeap::OrderWords, AbstractHeap::NamedProperties };
+    noteKnown(walker, KnownNote::ListedOwnKeys, object, list, 0, LocationMasks(ownKeysHeaps), 1, true);
 }
 
 bool buildOwnKeyListOfItsOpcodes(Walker& walker, const BodyValue& value)
@@ -201,6 +261,8 @@ bool buildOwnKeyListOfItsOpcodes(Walker& walker, const BodyValue& value)
     if (!buildListOfObjectInSightInListedOwnKeys(walker, asked, source) && !buildListBehindTestsInListedOwnKeys(walker, asked, written, source))
         return false;
     walker.count(StatisticID::OwnKeyWalksExpanded);
+    if (*list == OwnKeyList::Keys)
+        noteListedOwnKeys(walker, value.id());
     return true;
 }
 

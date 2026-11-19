@@ -7,6 +7,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
 #include "AOTID.h"
 #include "AOTIRProgram.h"
 #include "AOTLayout.h"
@@ -23,7 +24,6 @@
 #include <optional>
 #include <span>
 #include <mutex>
-#include <wtf/BitVector.h>
 #include <wtf/FastMalloc.h>
 #include <wtf/HashMap.h>
 #include <wtf/Lock.h>
@@ -52,11 +52,12 @@ struct StorageOfLayout {
 };
 
 struct StorageOfLayouts {
-    StorageOfLayout of(LayoutID id) const { return id.index() < layouts.size() ? layouts[id.index()] : StorageOfLayout { }; }
+    ALWAYS_INLINE StorageOfLayout of(LayoutID id) const { return id.index() < layouts.size() ? layouts[id.index()] : StorageOfLayout { }; }
     bool isNeverAllocated(LayoutID id) const { return layoutsNeverAllocated.get(id.index()); }
-    bool holdsCompiledObjectsInUse(LayoutID id) const { return of(id).holdsCompiledObjects() && !isNeverAllocated(id); }
+    ALWAYS_INLINE bool holdsCompiledObjectsInUse(LayoutID id) const { return of(id).holdsCompiledObjects() && !isNeverAllocated(id); }
 
     BitVector layoutsNeverAllocated;
+    BitVector layoutsWithoutDirectInstances;
     BitVector layoutsThatRepeatTheirBases;
     Vector<LayoutID> nearestLayoutsAboveThatDoNotRepeat;
     Vector<StorageOfLayout> layouts;
@@ -104,6 +105,8 @@ struct PlacedSlot {
     bool deferredClosureCapturesObject { false };
     bool deferredClosureCapturesEnvironment { false };
     bool mayTakeWordLeftInCell { false };
+    bool isStable { false };
+    bool isStableWithoutNullish { false };
     uint32_t offset { 0 };
     std::optional<uint16_t> indexInLayoutRecord;
     FunctionID deferredFunction;
@@ -124,7 +127,8 @@ struct PlannedLayout {
 
     LayoutStorage storage { LayoutStorage::None };
     bool isRecordAlone { false };
-    bool liesOnlyInFrames { false };
+    bool marksFrozenObjects { false };
+    bool marksOtherPrototypes { false };
     bool cellsAreHandedBack { false };
     uint16_t numberOfRecordFields { 0 };
     uint32_t size { 0 };
@@ -139,6 +143,8 @@ struct PlannedLayout {
     std::optional<FieldIndex> environmentOfDeferredClosures;
     BitVector fieldsThatHoldRawValuesFromBirth;
     bool mayBearMark { false };
+    bool isFilledByInitializer { false };
+    Vector<FieldIndex> fieldsHeldFilled;
 };
 
 inline size_t PlannedLayout::findAppendedKey(PropertyKeyID key) const
@@ -255,6 +261,7 @@ struct FieldAccess {
     bool mayBeFilledWithoutStorage { false };
     bool findsOffsetByShape { false };
     PropertyKeyID key;
+    LayoutSetID layoutsThatTestInCodeLetThrough;
     PlacedSlot slot;
     PlacedSlot extensionWord;
     LayoutsOwnedOrLent<4> membersWithField;
@@ -301,9 +308,18 @@ struct PlannedVariable {
     VariableEncoding encoding { VariableEncoding::Plain };
     SlotRepresentation representation { SlotRepresentation::JSValue };
     bool isDescribedToRunTime { false };
+    bool hasViewMirror { false };
+    VariableID firstViewOfBuffer;
+    VariableID firstViewOfElementSize;
+    uint64_t locationsOfViewsOfBuffer { 0 };
     FunctionID function;
     uint64_t initialWord { 0 };
 };
+
+constexpr int32_t viewMirrorVectorOffset = 8;
+constexpr int32_t viewMirrorLengthOffset = 16;
+constexpr int32_t bufferLengthOffsetInViewMirror = 24;
+constexpr unsigned viewMirrorVariableSize = 32;
 
 enum class MemberCreation : uint8_t {
     AtDefinition,
@@ -336,6 +352,15 @@ struct MentionedKeys {
     BitVector isSpelledAsText;
 };
 
+enum class InlineFieldsOfModule : uint8_t { None, Few, Many };
+
+struct ModulesThatWriteFields {
+    UncheckedKeyHashSet<uint64_t, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> namesDefinedAbove;
+    Vector<uint32_t> firstOfKeys;
+    Vector<uint32_t> modules;
+    Vector<InlineFieldsOfModule> inlineFields;
+};
+
 struct SlotPlanParts {
     Vector<PlannedLayout> layouts;
     Vector<PlannedVariable> variables;
@@ -344,9 +369,10 @@ struct SlotPlanParts {
     BitVector functionsWhosePrototypePropertyStaysAsMade;
     Vector<ClassCreationPlan> classCreation;
     BitVector layoutsNeverAllocated;
+    BitVector layoutsWithoutDirectInstances;
     BitVector keysWithColumn;
     BitVector keysOfSlotsThatHoldMarks;
-    BitVector keysOfFields;
+    BitVector keysOfAccessors;
 };
 
 struct FieldAccessesOfSets {
@@ -381,6 +407,7 @@ struct FieldAccessesOfSets {
 
 bool fieldStaysInSlot(const Program&, const PlacedSlot&);
 class SlotPlan;
+bool takesAccessorsOfLibraryAlone(const Program&, const SlotPlan&, LayoutID, PropertyKeyID);
 struct LinkTables;
 void markFieldsHeldFilledInSlotPlan(const Program&, const LinkTables&, const ParallelLoops&, SlotPlanParts&);
 Vector<FieldIndex, 8> fieldsHeldFilledInSlots(const Program&, const LinkTables&, const SlotPlan&, LayoutID);
@@ -389,6 +416,7 @@ bool constantListsFieldsHeldFilledInSlots(const Program&, const LinkTables&, con
 
 class SlotPlan {
     WTF_DEPRECATED_MAKE_FAST_ALLOCATED(SlotPlan);
+    friend class FactMisstater;
 public:
     SlotPlan() = default;
     explicit SlotPlan(SlotPlanParts&& parts)
@@ -405,6 +433,7 @@ public:
     const PlannedLayout& layout(LayoutID id) const { return id.index() < m_parts.layouts.size() ? m_parts.layouts[id.index()] : m_unplannedLayout; }
     bool holdsCompiledObjects(LayoutID id) const { return layout(id).holdsCompiledObjects(); }
     bool isNeverAllocated(LayoutID id) const { return m_parts.layoutsNeverAllocated.get(id.index()); }
+    bool hasDirectInstances(LayoutID id) const { return !m_parts.layoutsWithoutDirectInstances.get(id.index()); }
     bool someLayoutInUseHoldsOtherThanCompiledObjects(uint32_t wordOfLayouts, uint64_t layoutsInWord) const { return wordOfLayouts >= m_layoutsInUseThatHoldOtherThanCompiledObjects.size() || (m_layoutsInUseThatHoldOtherThanCompiledObjects[wordOfLayouts] & layoutsInWord); }
 
     const PlacedSlot& slot(LayoutID id, FieldIndex field) const
@@ -435,7 +464,7 @@ public:
     JS_EXPORT_PRIVATE FieldAccess fieldAccess(const Program&, PropertyKeyID, LayoutSetID, std::span<const LayoutID> members, bool isStore) const;
     bool storeMayListKey(const FieldAccess& access) const
     {
-        return canLeaveSlot(access.slot.representation) && !access.membersWithField.isEmpty();
+        return mayBeCreatedByStore(access.slot.representation) && !access.membersWithField.isEmpty();
     }
     JS_EXPORT_PRIVATE std::optional<uint32_t> recordOfStoredField(const Program&, PropertyKeyID, std::span<const LayoutID> receivers) const;
     JS_EXPORT_PRIVATE StoredFieldForm formOfStoredField(const Program&, PropertyKeyID, std::span<const LayoutID> receivers) const;
@@ -444,19 +473,48 @@ public:
     ClosureForm closureFormOf(FunctionID id) const { return id.index() < m_parts.closureForms.size() ? m_parts.closureForms[id.index()] : ClosureForm::Full; }
     bool closuresGetOnlyListedNames(FunctionID id) const { return m_parts.functionsWhoseClosuresGetOnlyListedNames.get(id.index()); }
     bool prototypePropertyStaysAsMade(FunctionID id) const { return m_parts.functionsWhosePrototypePropertyStaysAsMade.get(id.index()); }
-    size_t numberOfFunctionsWhoseClosuresGetOnlyListedNames() const { return m_parts.functionsWhoseClosuresGetOnlyListedNames.bitCount(); }
+    size_t closedClosureFunctionCount() const { return m_parts.functionsWhoseClosuresGetOnlyListedNames.bitCount(); }
     const ClassCreationPlan& classCreation(LayoutID id) const { return id.index() < m_parts.classCreation.size() ? m_parts.classCreation[id.index()] : m_unplannedClass; }
 
-    bool hasColumn(PropertyKeyID key) const { return m_parts.keysWithColumn.get(key.index()); }
     bool someSlotUnderKeyHoldsMark(PropertyKeyID key) const { return m_parts.keysOfSlotsThatHoldMarks.get(key.index()); }
+    bool someLayoutHasAccessor(PropertyKeyID key) const { return m_parts.keysOfAccessors.get(key.index()); }
     const BitVector& keysWithColumn() const { return m_parts.keysWithColumn; }
-    bool namesField(PropertyKeyID key) const { return m_parts.keysOfFields.get(key.index()); }
+    void setModulesThatWriteFields(ModulesThatWriteFields&& modules) { m_modulesThatWriteFields = WTF::move(modules); }
+    bool someLayoutHasField(PropertyKeyID key) const
+    {
+        std::span<const uint32_t> first = m_modulesThatWriteFields.firstOfKeys.span();
+        return static_cast<size_t>(key.index()) + 1 >= first.size() || first[key.index()] != first[key.index() + 1];
+    }
+    static uint64_t nameInModule(ModuleID module, PropertyKeyID key) { return static_cast<uint64_t>(module.index()) << 32 | key.bits(); }
+    bool mayBeDefinedAbove(ModuleID module, PropertyKeyID key) const
+    {
+        const auto& names = m_modulesThatWriteFields.namesDefinedAbove;
+        return module && key && !names.isEmpty() && names.contains(nameInModule(module, key));
+    }
+    bool someLayoutWrittenInHasField(ModuleID module, PropertyKeyID key) const
+    {
+        std::span<const uint32_t> first = m_modulesThatWriteFields.firstOfKeys.span();
+        if (!module || static_cast<size_t>(key.index()) + 1 >= first.size())
+            return false;
+        return std::ranges::binary_search(m_modulesThatWriteFields.modules.span().subspan(first[key.index()], first[key.index() + 1] - first[key.index()]), module.index());
+    }
+
+    InlineFieldsOfModule inlineFieldsWrittenIn(ModuleID module, PropertyKeyID key) const
+    {
+        std::span<const uint32_t> first = m_modulesThatWriteFields.firstOfKeys.span();
+        if (!module || static_cast<size_t>(key.index()) + 1 >= first.size())
+            return InlineFieldsOfModule::None;
+        auto modules = m_modulesThatWriteFields.modules.span().subspan(first[key.index()], first[key.index() + 1] - first[key.index()]);
+        auto found = std::ranges::lower_bound(modules, module.index());
+        return found != modules.end() && *found == module.index() ? m_modulesThatWriteFields.inlineFields[first[key.index()] + (found - modules.begin())] : InlineFieldsOfModule::None;
+    }
 
     unsigned numberOfLayouts() const { return m_parts.layouts.size(); }
     unsigned numberOfVariables() const { return m_parts.variables.size(); }
 
 private:
     SlotPlanParts m_parts;
+    ModulesThatWriteFields m_modulesThatWriteFields;
     PlannedLayout m_unplannedLayout;
     PlacedSlot m_unplannedSlot;
     ClassCreationPlan m_unplannedClass;

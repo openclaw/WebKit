@@ -61,6 +61,13 @@ PureDoubleBits PureDoubleBits::branchIfNotFinite(StubAssembler& jit, GPRReg bits
     return PureDoubleBits(bits);
 }
 
+PureDoubleBits PureDoubleBits::branchIfNaN(StubAssembler& jit, GPRReg bits, GPRReg scratch, GPRReg holdsInfinityDoubled, Jump& isNaN)
+{
+    jit.lshift64(bits, TrustedImm32(1), scratch);
+    isNaN = jit.branch64(CCallHelpers::Above, scratch, holdsInfinityDoubled);
+    return PureDoubleBits(bits);
+}
+
 static void subtractNumberTag(StubAssembler& jit, GPRReg bitsAndResult)
 {
     jit.withNumberTag([&](auto tag) {
@@ -146,6 +153,65 @@ void boxExactInt32(StubAssembler& jit, GPRReg integer, GPRReg result)
     }
 #endif
     boxInt32(jit, integer, result);
+}
+
+#if CPU(X86_64)
+static constexpr int32_t bitsThatNoInt32Sets = (1 << 22) - 1;
+static_assert(!((std::bit_cast<uint64_t>(static_cast<double>(std::numeric_limits<int32_t>::max())) | PNaNAsBits) & bitsThatNoInt32Sets));
+
+template<typename LoadNumber>
+static void returnBoxOfBits(StubAssembler& jit, GPRReg bits, FPRReg number, GPRReg integer, FPRReg scratch, GPRReg result, const LoadNumber& loadNumber)
+{
+    ASSERT(noOverlap(number, scratch));
+    Jump mayBeInt32 = jit.branchTest32(CCallHelpers::Zero, bits, TrustedImm32(bitsThatNoInt32Sets));
+    Label isNoInt32 = jit.label();
+    subtractNumberTag(jit, bits);
+    jit.move(bits, result);
+    jit.returnToCaller();
+
+    mayBeInt32.link(&jit);
+    loadNumber();
+    const OwnedScratchRegister ownedScratch(jit);
+    const GPRReg bitsOfInteger = ownedScratch;
+    RELEASE_ASSERT(noOverlap(bits, integer, bitsOfInteger));
+    jit.truncateDoubleToInt32(number, integer);
+    jit.convertInt32ToDouble(integer, scratch);
+    jit.moveDoubleTo64(scratch, bitsOfInteger);
+    jit.branch64(CCallHelpers::NotEqual, bitsOfInteger, bits).linkTo(isNoInt32, &jit);
+    boxInt32(jit, integer, result);
+    jit.returnToCaller();
+}
+#endif
+
+void returnBoxedNumber(StubAssembler& jit, PureDouble number, GPRReg integer, FPRReg scratch, GPRReg result)
+{
+#if CPU(X86_64)
+    jit.moveDoubleTo64(number.fpr(), result);
+    returnBoxOfBits(jit, result, number.fpr(), integer, scratch, result, [] { });
+#else
+    JumpList isNoInt32;
+    branchIfNotExactInt32(jit, number.fpr(), integer, isNoInt32, scratch);
+    boxInt32(jit, integer, result);
+    jit.returnToCaller();
+    isNoInt32.link(&jit);
+    boxDouble(jit, number, result);
+    jit.returnToCaller();
+#endif
+}
+
+void returnBoxOfDoubleElement(StubAssembler& jit, BaseIndex element, FPRReg number, GPRReg bits, GPRReg integer, FPRReg scratch, JumpList& isHole, GPRReg result)
+{
+#if CPU(X86_64)
+    jit.load64(element, bits);
+    returnBoxOfBits(jit, bits, number, integer, scratch, result, [&] {
+        jit.move64ToDouble(bits, number);
+        PureDouble::branchIfNaN(jit, number, isHole);
+    });
+#else
+    UNUSED_PARAM(bits);
+    jit.loadDouble(element, number);
+    returnBoxedNumber(jit, PureDouble::branchIfNaN(jit, number, isHole), integer, scratch, result);
+#endif
 }
 
 void decodeCell32(StubAssembler& jit, GPRReg word, GPRReg result)
@@ -297,14 +363,14 @@ void setFlagThatFieldHasLeft(StubAssembler& jit, GPRReg cell, GPRReg scratch)
 
 void setMarkOfCell(StubAssembler& jit, GPRReg cell, GPRReg scratch)
 {
-    const Address byteWithMark(cell, offsetOfByteWithMark);
+    const Address shapeWord(cell, offsetOfShapeWord);
 #if CPU(X86_64)
     UNUSED_PARAM(scratch);
-    jit.and8(TrustedImm32(static_cast<uint8_t>(~byteWithMarkIsUnmarked)), byteWithMark);
+    jit.and32(TrustedImm32(static_cast<int32_t>(~shapeWordIsUnmarked)), shapeWord);
 #else
-    jit.load8(byteWithMark, scratch);
-    jit.and32(TrustedImm32(static_cast<uint8_t>(~byteWithMarkIsUnmarked)), scratch);
-    jit.store8(scratch, byteWithMark);
+    jit.load32(shapeWord, scratch);
+    jit.and32(TrustedImm32(static_cast<int32_t>(~shapeWordIsUnmarked)), scratch);
+    jit.store32(scratch, shapeWord);
 #endif
 }
 
@@ -353,7 +419,11 @@ void branchIfHasNamesOrIsNotOfThisRealm(StubAssembler& jit, GPRReg structure, Ju
 
 Jump branchIfNotPristine(StubAssembler& jit, GPRReg cell)
 {
+#if CPU(ARM64)
+    return jit.branchTest32(CCallHelpers::Zero, Address(cell, JSCell::indexingTypeAndMiscOffset()), TrustedImm32(IsPristine << 8 * (JSCell::typeInfoFlagsOffset() - JSCell::indexingTypeAndMiscOffset())));
+#else
     return jit.branchTest8(CCallHelpers::Zero, Address(cell, JSCell::typeInfoFlagsOffset()), TrustedImm32(IsPristine));
+#endif
 }
 
 void loadPristineArrayKind(StubAssembler& jit, GPRReg array, GPRReg kind, unsigned mask)
@@ -380,6 +450,13 @@ Jump branchIfWatchpointSetIsNotWatched(StubAssembler& jit, Address set, GPRReg s
     jit.or32(TrustedImm32(InlineWatchpointSet::IsThinFlag), scratch);
     isThin.link(&jit);
     return jit.branch64(CCallHelpers::NotEqual, scratch, TrustedImm32(static_cast<int32_t>(InlineWatchpointSet::encodeState(IsWatched))));
+}
+
+void branchUnlessAccessorPair(CCallHelpers& jit, GPRReg word, JumpList& isNoPair)
+{
+    isNoPair.append(jit.branchTest64(CCallHelpers::Zero, word));
+    isNoPair.append(jit.branchIfNotCell(word));
+    isNoPair.append(jit.branch8(CCallHelpers::NotEqual, Address(word, JSCell::typeInfoTypeOffset()), TrustedImm32(GetterSetterType)));
 }
 
 Jump branchIfNotFunctionType(CCallHelpers& jit, GPRReg cell, GPRReg scratch)

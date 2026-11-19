@@ -8,6 +8,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTEffectsNet.h"
 #include "AOTPhaseTimes.h"
 #include "AOTSectionWriter.h"
 #include "AOTThreads.h"
@@ -35,7 +36,18 @@ Reader::Reader(Program& program, BuildContext& build)
 bool Reader::run()
 {
     m_program.admitsReplacedBuiltins = m_build.options().admitsReplacedBuiltins();
-    m_program.rowsOfNativeCodeWriteNullish = AOT::hasFlag(m_build.options().testing, Wire::TestingSwitch::NativeCodeAnswersNullish);
+    m_program.shouldAssumeNullishHostResults = AOT::hasFlag(m_build.options().testing, Wire::TestingSwitch::AssumeNullishHostResults);
+    UnderstatedEffects understatedEffects = UnderstatedEffects::decode(m_build.options().understatedEffects);
+    if (understatedEffects.part == PartOfEffects::RangeOfResult)
+        m_program.builtinInjectedAsMinimumInteger = understatedEffects.row;
+    if (understatedEffects.part == PartOfEffects::KindOfResult && understatedEffects.kind == KindOfEffectsRow::Operation)
+        m_program.opcodeInjectedAsOtherKind = understatedEffects.row + 1;
+    else if (understatedEffects.part == PartOfEffects::KindOfResult)
+        m_program.builtinInjectedAsNull = understatedEffects.row;
+    if (understatedEffects.part == PartOfEffects::ContentsOfResult)
+        m_program.builtinInjectedAsHoldingNull = understatedEffects.row;
+    if (understatedEffects.part == PartOfEffects::FreshnessOfResult)
+        m_program.builtinInjectedAsFresh = understatedEffects.row;
     m_program.admitsInspector = m_build.options().admitsUnseenCode();
     m_program.excludedCode = m_build.options().excludedCode;
 
@@ -240,9 +252,12 @@ void Reader::forEachListReadIntoTableOfItsName(const Wire::Sections& sections, c
     functor(sections.expectedResults, m_program.expectedResults);
     functor(sections.variables, m_program.variables);
     functor(sections.modules, m_program.modules);
+    functor(sections.moduleInstances, m_program.moduleInstances);
+    functor(sections.moduleLinks, m_program.moduleLinks);
     functor(sections.moduleFailures, m_program.moduleFailures);
     functor(sections.ambiguousExports, m_program.ambiguousExports);
     functor(sections.sourceStamps, m_program.sourceStamps);
+    functor(sections.declaredRecords, m_program.declaredRecords);
     functor(sections.evalScopes, m_program.evalScopes);
     functor(sections.data, m_program.data);
     functor(sections.entries, m_program.entries);
@@ -299,6 +314,10 @@ void Reader::readLayouts()
                 continue;
             if (TypeID expected = m_types->typeExpectedBesideViews(fields[field].declared.type))
                 declared.expect(ExpectedType(expected));
+            else if (declared.isExpected() && declared.writtenFlags().contains(PositionFlags::IsFromCompiler)) {
+                if (TypeID made = m_types->typeOfRecordMadeForField(fields[field].declared.type))
+                    declared.expect(ExpectedType(made));
+            }
         }
     });
 }

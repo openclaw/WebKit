@@ -8,6 +8,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
 #include "AOTBuiltinTable.h"
 #include "AOTFactRecords.h"
 #include "AOTIRProgram.h"
@@ -17,7 +18,6 @@
 #include <algorithm>
 #include <optional>
 #include <utility>
-#include <wtf/BitVector.h>
 
 namespace JSC { namespace AOT { namespace Typed {
 
@@ -227,7 +227,10 @@ static ObjectShapesOfBuiltin objectShapesInRowsOf(const BuiltinTable& builtins, 
             notePlace(action.value);
     }
 
-    if (!builtins.moduleLoadsOf(canonical).empty() || !builtins.calledFunctionsOf(canonical).empty())
+    bool callsUndescribedFunction = std::ranges::any_of(builtins.calledFunctionsOf(canonical), [](const BuiltinCalledFunction& called) {
+        return !called.uses.areListed;
+    });
+    if (!builtins.moduleLoadsOf(canonical).empty() || callsUndescribedFunction)
         shapes.contents.noteObjectThatNoRowDescribes();
     return shapes;
 }
@@ -253,7 +256,7 @@ bool callOrReadOfBuiltinIsEvent(const BuiltinTable& builtins, BuiltinID canonica
         if (isThisBuiltin(loader.callee) || isThisBuiltin(loader.named))
             return true;
     }
-    return builtins.letsInUnseenCode(canonical) || builtins.unseenCodeOf(canonical) || raisesEventWhenCalled(builtins, canonical);
+    return builtins.letsInUnseenCode(canonical) || builtins.unseenCodeOf(canonical);
 }
 
 static Vector<uint32_t> placesOfFunctionsByGroup(std::span<const FunctionInOrderOfObjects> functions, NOESCAPE const Invocable<unsigned(const FunctionInOrderOfObjects&)> auto& groupOf)
@@ -466,10 +469,21 @@ void ObjectTable::addObjectsOfProgram(const Program& program, const BitVector& m
             setLayoutOfObjectRecord(m_records[constructedObjectOf(constructor).index()], LayoutID(index), mayHaveLayoutBelow.quickGet(index));
     }
 
-    Vector<uint8_t> isModuleOfLibrary(numberOfModules, [&](size_t index) -> uint8_t {
+    auto isCommonJSFileThatExports = [&](uint32_t index) {
+        return program.modules[index].kind == ModuleKind::CommonJs && program.modules[index].exportsVariable;
+    };
+    Vector<uint32_t> modulesOfLibrary;
+    Vector<uint32_t> commonJSFilesThatExport;
+    Vector<uint32_t> modulesThatBodiesName;
+    for (uint32_t index = 0; index < numberOfModules; ++index) {
         const Module& module = program.modules[index];
-        return module.kind == ModuleKind::RuntimeSource || module.flags.contains(ModuleFlags::IsLibrary);
-    });
+        if (module.kind == ModuleKind::RuntimeSource || module.flags.contains(ModuleFlags::IsLibrary))
+            modulesOfLibrary.append(index);
+        if (isCommonJSFileThatExports(index))
+            commonJSFilesThatExport.append(index);
+        if (modulesNamedByModuleBuiltins.get(index))
+            modulesThatBodiesName.append(index);
+    }
     uint32_t numberOfBuiltins = m_builtins.builtinCount();
     for (uint32_t index = 0; index < numberOfBuiltins; ++index) {
         BuiltinID builtin(index);
@@ -477,12 +491,9 @@ void ObjectTable::addObjectsOfProgram(const Program& program, const BitVector& m
             continue;
         bool isMadeForLibraryAlone = m_builtins.isUnder(builtin, Builtins::NativeFunctions);
         bool isMadeForCommonJSFilesAlone = m_builtins.isUnder(builtin, Builtins::ModuleObject);
-        for (uint32_t module = 0; module < numberOfModules; ++module) {
-            if (isMadeForLibraryAlone && !isModuleOfLibrary[module])
-                continue;
-            if (isMadeForCommonJSFilesAlone && (program.modules[module].kind != ModuleKind::CommonJs || !program.modules[module].exportsVariable))
-                continue;
-            if (!isMadeForLibraryAlone && !isMadeForCommonJSFilesAlone && !modulesNamedByModuleBuiltins.get(module))
+        const Vector<uint32_t>& modulesItIsMadeFor = isMadeForLibraryAlone ? modulesOfLibrary : isMadeForCommonJSFilesAlone ? commonJSFilesThatExport : modulesThatBodiesName;
+        for (uint32_t module : modulesItIsMadeFor) {
+            if (isMadeForLibraryAlone && isMadeForCommonJSFilesAlone && !isCommonJSFileThatExports(module))
                 continue;
             m_moduleBuiltins.append({ builtin, ModuleID(module) });
         }
@@ -496,7 +507,7 @@ void ObjectTable::addObjectsOfProgram(const Program& program, const BitVector& m
     carryObjectRecordsOver(m_records.span(), records.mutableSpan(), loops);
     m_records = WTF::move(records);
 
-    constexpr OptionSet<ModuleFlags> flagsOfModulesWithSeveralNamespaces { ModuleFlags::RunsAgain, ModuleFlags::MayBeMocked, ModuleFlags::MayBeEvicted };
+    constexpr OptionSet<ModuleFlags> flagsOfModulesWithSeveralNamespaces { ModuleFlags::MayBeReevaluated, ModuleFlags::MayBeMocked, ModuleFlags::MayBeEvicted };
     begin(ObjectKind::Namespace);
     for (uint32_t index = 0; index < numberOfModules; ++index) {
         ObjectRecord record = objectRecordOfKind(ObjectKind::Namespace, index, { ObjectTrait::HasNoShape, ObjectTrait::IsOtherObject });

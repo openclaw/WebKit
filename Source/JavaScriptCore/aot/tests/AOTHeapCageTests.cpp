@@ -12,6 +12,8 @@
 #include "AOTRuntimeTable.h"
 #include "AOTState.h"
 #include "AOTVector.h"
+#include "ArgList.h"
+#include "BlockDirectoryInlines.h"
 #include "CagedAlignedMemoryAllocator.h"
 #include "Completion.h"
 #include "DeferGCInlines.h"
@@ -585,31 +587,58 @@ static void runInProcessWithCage()
 
 #if OS(LINUX) && !ASAN_ENABLED && USE(MIMALLOC)
 static constexpr ASCIILiteral markStackTest = "heap-cage/cage/mark-stack-that-cannot-grow-says-why"_s;
+static constexpr ASCIILiteral lastWordsOnStructuresTest = "heap-cage/cage/last-words-on-structures-take-no-memory"_s;
 
-static void testMarkStackThatCannotGrowSaysWhy()
+static void saysLastWordsUnderLimitOnAddressSpace(ASCIILiteral test, ASCIILiteral lastWords, const Invocable<void()> auto& body)
 {
     if (MarkedBlockCage::isEnabled()) {
         AOT_TEST_CHECK(MarkedBlockCage::require().has_value() && MarkedBlockCage::isRequired());
+        body();
+        return;
+    }
+
+    ChildProcessLauncher launcher("/bin/sh"_s, { });
+    Vector<String> arguments { "-c"_s, "ulimit -c 0 && ulimit -v 2097152 && exec \"$0\" \"$@\""_s, String(programPath()), String(nativeSubcommandName), String(singleProcessFlag), String(test), "--useAOT=true"_s };
+    ChildProcessResult result = launcher.run(arguments.span());
+    if (!result.exitedWith(EXIT_FAILURE) || !result.output.contains(lastWords)) {
+        dataLogLn(result.output);
+        dataLogLn("The process under a limit on address space ", result.description());
+        failNativeTest(__FILE__, __LINE__, test.characters());
+    }
+}
+
+static void saysLastWordsWithNothingLeft(ASCIILiteral test, ASCIILiteral lastWords, const Invocable<void()> auto& findNoMemory)
+{
+    saysLastWordsUnderLimitOnAddressSpace(test, lastWords, [&] {
         void* taken = nullptr;
-        for (size_t size : { 64 * MB, MB, 64 * KB, 4 * KB, KB, static_cast<size_t>(256), static_cast<size_t>(64), static_cast<size_t>(16) }) {
+        auto takeAllOfSize = [&](size_t size) {
             void* block;
             while (tryFastMalloc(size).getValue(block)) {
                 *static_cast<void**>(block) = taken;
                 taken = block;
             }
-        }
-        MarkStackArray stack;
-        return;
-    }
+        };
+        for (size_t size : { 64 * MB, MB, 64 * KB, 4 * KB })
+            takeAllOfSize(size);
+        for (size_t size = KB; size; size -= 16)
+            takeAllOfSize(size);
+        findNoMemory();
+    });
+}
 
-    ChildProcessLauncher launcher("/bin/sh"_s, { });
-    Vector<String> arguments { "-c"_s, "ulimit -c 0 && ulimit -v 2097152 && exec \"$0\" \"$@\""_s, String(programPath()), String(nativeSubcommandName), String(singleProcessFlag), String(markStackTest), "--useAOT=true"_s };
-    ChildProcessResult result = launcher.run(arguments.span());
-    if (!result.exitedWith(EXIT_FAILURE) || !result.output.contains("FATAL: out of memory. The limit on address space (ulimit -v) leaves no room for more JavaScript objects. Raise the limit."_s)) {
-        dataLogLn(result.output);
-        dataLogLn("The process under a limit on address space ", result.description());
-        failNativeTest(__FILE__, __LINE__, markStackTest.characters());
-    }
+static void testMarkStackThatCannotGrowSaysWhy()
+{
+    saysLastWordsWithNothingLeft(markStackTest, "FATAL: out of memory. The limit on address space (ulimit -v) leaves no room for more JavaScript objects. Raise the limit."_s, [] {
+        MarkStackArray stack;
+    });
+}
+
+static void testLastWordsOnStructuresTakeNoMemory()
+{
+    saysLastWordsWithNothingLeft(lastWordsOnStructuresTest, "FATAL: out of memory. The limit on address space (ulimit -v) leaves this executable "_s, [] {
+        MarkedBlockCage::logExhaustion(MarkedBlockCage::ExhaustedHeap::Structures);
+        _exit(EXIT_FAILURE);
+    });
 }
 #endif
 
@@ -912,7 +941,325 @@ static void checkTableIsUnchangedWhenGrowthFails()
     AOT_TEST_CHECK(empty.capacity() == capacity);
 }
 
+class LargePiecesOfMalloc {
+    WTF_MAKE_NONCOPYABLE(LargePiecesOfMalloc);
+public:
+    LargePiecesOfMalloc()
+    {
+        takeAllOfSize(64 * MB);
+        for (size_t size = MB; size >= 64 * KB; size -= 8 * KB)
+            takeAllOfSize(size);
+    }
+
+    ~LargePiecesOfMalloc() { giveBack(); }
+
+    void giveBack()
+    {
+        while (m_taken)
+            fastFree(std::exchange(m_taken, *static_cast<void**>(m_taken)));
+    }
+
+private:
+    void takeAllOfSize(size_t size)
+    {
+        void* piece;
+        while (tryFastMalloc(size).getValue(piece)) {
+            *static_cast<void**>(piece) = m_taken;
+            m_taken = piece;
+        }
+    }
+
+    void* m_taken { nullptr };
+};
+
+static BlockDirectory& directoryOf(const JSCell* cell)
+{
+    AOT_TEST_CHECK(cell && !cell->isPreciseAllocation());
+    return *cell->markedBlock().handle().directory();
+}
+
+static unsigned numberOfBlocks(BlockDirectory& directory)
+{
+    unsigned count = 0;
+    directory.forEachBlock([&](MarkedBlock::Handle*) {
+        ++count;
+    });
+    return count;
+}
+
+class BlocksOfNoHeap {
+    WTF_MAKE_NONCOPYABLE(BlocksOfNoHeap);
+public:
+    BlocksOfNoHeap(VM& vm, JSGlobalObject* realm)
+        : m_vm(vm)
+        , m_blocks(vm.heap.objectSpace().blocks())
+        , m_directory(directoryOf(constructEmptyObject(realm)))
+    {
+    }
+
+    ~BlocksOfNoHeap()
+    {
+        while (m_count)
+            m_blocks.remove(block(--m_count));
+    }
+
+    bool tryAdd()
+    {
+        if (!m_vm.heap.cage().willAddBlock(m_vm, m_directory))
+            return false;
+        unsigned capacity = m_blocks.set().capacity();
+        m_blocks.add(block(m_count++));
+        AOT_TEST_CHECK(m_blocks.set().capacity() == capacity);
+        return true;
+    }
+
+    void addUntilCapacityIs(unsigned capacity)
+    {
+        while (m_blocks.set().capacity() < capacity)
+            AOT_TEST_CHECK(tryAdd());
+        AOT_TEST_CHECK(m_blocks.set().capacity() == capacity);
+    }
+
+    void addUntilSetHasNoRoom()
+    {
+        unsigned capacity = m_blocks.set().capacity();
+        while (tryAdd()) { }
+        AOT_TEST_CHECK(m_blocks.set().capacity() == capacity);
+    }
+
+private:
+    static MarkedBlock* block(unsigned index) { return std::bit_cast<MarkedBlock*>(static_cast<uintptr_t>(index + 1) * blockSize); }
+
+    VM& m_vm;
+    MarkedBlockSet& m_blocks;
+    BlockDirectory& m_directory;
+    unsigned m_count { 0 };
+};
+
+static constexpr ASCIILiteral noRoomForObjectsUnderLimit = "FATAL: out of memory. The limit on address space (ulimit -v) leaves no room for more JavaScript objects. Raise the limit."_s;
+
+static constexpr unsigned capacityOfSetWithLargeTable = 16384;
+
+static void checkSetOfBlocksWithoutMemoryToGrowTakesWhatItHasRoomFor()
+{
+    TestVM test;
+    JSGlobalObject* realm = test.createRealm();
+    VM& vm = test.vm();
+    const auto& set = vm.heap.objectSpace().blocks().set();
+    DeferGC deferGC(vm);
+    BlocksOfNoHeap blocks(vm, realm);
+
+    blocks.addUntilCapacityIs(capacityOfSetWithLargeTable);
+
+    LargePiecesOfMalloc pieces;
+    blocks.addUntilSetHasNoRoom();
+    AOT_TEST_CHECK(set.size() > capacityOfSetWithLargeTable / 2 - capacityOfSetWithLargeTable / 16);
+    AOT_TEST_CHECK(!blocks.tryAdd() && set.capacity() == capacityOfSetWithLargeTable);
+    AOT_TEST_CHECK(!vm.traps().needsOutOfMemoryError());
+
+    pieces.giveBack();
+    AOT_TEST_CHECK(blocks.tryAdd() && set.capacity() == 2 * capacityOfSetWithLargeTable);
+}
+
+static constexpr ASCIILiteral setOfBlocksWithoutRoomTest = "heap-cage/cage/set-of-blocks-without-room-for-a-block-says-why"_s;
+
+static void testSetOfBlocksWithoutRoomForBlockSaysWhy()
+{
+    saysLastWordsUnderLimitOnAddressSpace(setOfBlocksWithoutRoomTest, noRoomForObjectsUnderLimit, [] {
+        TestVM test;
+        JSGlobalObject* realm = test.createRealm();
+        VM& vm = test.vm();
+        DeferGC deferGC(vm);
+        BlocksOfNoHeap blocks(vm, realm);
+        blocks.addUntilCapacityIs(capacityOfSetWithLargeTable);
+        LargePiecesOfMalloc pieces;
+        blocks.addUntilSetHasNoRoom();
+        for (unsigned count = 0; count < 100000; ++count)
+            constructEmptyObject(realm);
+    });
+}
+
+static constexpr ASCIILiteral structureBlockWithoutRoomTest = "heap-cage/cage/structure-block-that-the-set-has-no-room-for-names-the-limit-on-address-space"_s;
+
+static void testStructureBlockThatSetHasNoRoomForNamesLimitOnAddressSpace()
+{
+    saysLastWordsUnderLimitOnAddressSpace(structureBlockWithoutRoomTest, noRoomForObjectsUnderLimit, [] {
+        TestVM test;
+        JSGlobalObject* realm = test.createRealm();
+        VM& vm = test.vm();
+        DeferGC deferGC(vm);
+        BlocksOfNoHeap blocks(vm, realm);
+        blocks.addUntilCapacityIs(capacityOfSetWithLargeTable);
+        LargePiecesOfMalloc pieces;
+        blocks.addUntilSetHasNoRoom();
+        for (unsigned count = 0; count < 100000; ++count)
+            JSFinalObject::createStructure(vm, realm, jsNull(), 0);
+    });
+}
+
+static void checkStorageGetsNoBlockThatSetHasNoRoomFor()
+{
+    TestVM test;
+    JSGlobalObject* realm = test.createRealm();
+    VM& vm = test.vm();
+    DeferGC deferGC(vm);
+    BlocksOfNoHeap blocks(vm, realm);
+    blocks.addUntilCapacityIs(capacityOfSetWithLargeTable);
+    LargePiecesOfMalloc pieces;
+    blocks.addUntilSetHasNoRoom();
+
+    constexpr size_t size = 64;
+    constexpr unsigned most = 100000;
+    auto tryAllocate = [&] {
+        return vm.auxiliarySpace().allocate(vm, size, nullptr, AllocationFailureMode::ReturnNull);
+    };
+    unsigned made = 0;
+    while (made < most && tryAllocate())
+        ++made;
+    AOT_TEST_CHECK(made < most);
+    AOT_TEST_CHECK(!tryAllocate());
+
+    pieces.giveBack();
+    AOT_TEST_CHECK(tryAllocate());
+}
+
+static constexpr unsigned capacityOfListBeforeLargeList = 2053;
+static constexpr unsigned capacityOfLargeListOfBlocks = 3079;
+
+static constexpr ASCIILiteral listOfBlocksWithoutRoomTest = "heap-cage/cage/list-of-blocks-without-room-for-a-block-says-why"_s;
+
+static void testListOfBlocksWithoutRoomForBlockSaysWhy()
+{
+    saysLastWordsUnderLimitOnAddressSpace(listOfBlocksWithoutRoomTest, noRoomForObjectsUnderLimit, [] {
+        TestVM test;
+        JSGlobalObject* realm = test.createRealm();
+        VM& vm = test.vm();
+        DeferGC deferGC(vm);
+        BlocksOfNoHeap blocks(vm, realm);
+        blocks.addUntilCapacityIs(capacityOfSetWithLargeTable);
+
+        BlockDirectory& directory = directoryOf(constructEmptyObject(realm));
+        auto addObjects = [&] {
+            for (unsigned count = 0; count < 100; ++count)
+                constructEmptyObject(realm);
+        };
+        while (numberOfBlocks(directory) <= capacityOfListBeforeLargeList)
+            addObjects();
+        AOT_TEST_CHECK(numberOfBlocks(directory) < capacityOfLargeListOfBlocks);
+
+        LargePiecesOfMalloc pieces;
+        for (unsigned count = 0; count < 16 * capacityOfLargeListOfBlocks; ++count)
+            addObjects();
+    });
+}
+
+static void checkDirectoryTakesNoBlockThatItsListHasNoRoomFor()
+{
+    TestVM test;
+    test.createRealm();
+    VM& vm = test.vm();
+    constexpr unsigned lengthOfKept = 200;
+    constexpr unsigned lengthOfDropped = 300;
+    auto create = [&](unsigned length) {
+        JSBigInt* cell = JSBigInt::tryCreateWithLength(vm, length);
+        AOT_TEST_CHECK(cell);
+        return cell;
+    };
+
+    MarkedArgumentBuffer kept;
+    BlockDirectory* directory;
+    BlockDirectory* directoryOfDropped;
+    {
+        DeferGCForAWhile deferGC(vm);
+        auto createKept = [&] {
+            JSBigInt* cell = create(lengthOfKept);
+            kept.append(cell);
+            return &cell->markedBlock();
+        };
+        for (unsigned count = 0; count < 300; ++count)
+            createKept();
+        MarkedBlock* block = createKept();
+        MarkedBlock* next;
+        while ((next = createKept()) == block) { }
+        block = next;
+        unsigned cellsPerBlock = 1;
+        while ((next = createKept()) == block)
+            ++cellsPerBlock;
+        directory = &directoryOf(kept.last().asCell());
+        unsigned cellsInLastBlock = 1;
+        while (numberOfBlocks(*directory) < capacityOfLargeListOfBlocks || cellsInLastBlock < cellsPerBlock) {
+            block = next;
+            next = createKept();
+            cellsInLastBlock = next == block ? cellsInLastBlock + 1 : 1;
+        }
+        AOT_TEST_CHECK(numberOfBlocks(*directory) == capacityOfLargeListOfBlocks);
+
+        for (unsigned count = 0; count < 200; ++count)
+            create(lengthOfDropped);
+        directoryOfDropped = &directoryOf(create(lengthOfDropped));
+    }
+    vm.heap.collectSync(CollectionScope::Full);
+    AOT_TEST_CHECK(numberOfBlocks(*directory) == capacityOfLargeListOfBlocks);
+    unsigned blocksOfDropped = numberOfBlocks(*directoryOfDropped);
+    AOT_TEST_CHECK(blocksOfDropped);
+    AOT_TEST_CHECK(vm.heap.objectSpace().blocks().set().size() < 4000);
+
+    DeferGCForAWhile deferGC(vm);
+    LargePiecesOfMalloc pieces;
+    AOT_TEST_CHECK(!JSBigInt::tryCreateWithLength(vm, lengthOfKept));
+    AOT_TEST_CHECK(numberOfBlocks(*directory) == capacityOfLargeListOfBlocks && numberOfBlocks(*directoryOfDropped) == blocksOfDropped);
+
+    pieces.giveBack();
+    AOT_TEST_CHECK(JSBigInt::tryCreateWithLength(vm, lengthOfKept));
+    AOT_TEST_CHECK(numberOfBlocks(*directory) == capacityOfLargeListOfBlocks + 1);
+}
+
 #endif
+
+static void checkBitsGrowForListOfBlocksThatGrewBeforeItsBlock()
+{
+    TestVM test;
+    VM& vm = test.vm();
+    DeferGCForAWhile deferGC(vm);
+    constexpr unsigned length = 100;
+    auto create = [&] {
+        JSBigInt* cell = JSBigInt::tryCreateWithLength(vm, length);
+        AOT_TEST_CHECK(cell && !cell->isPreciseAllocation());
+        return cell;
+    };
+    JSBigInt* cell = create();
+    for (unsigned count = 0; count < 300; ++count)
+        cell = create();
+    BlockDirectory& directory = *cell->markedBlock().handle().directory();
+    directory.assertMayAccessBitsUnlocked();
+    unsigned blocksBefore = 0;
+    directory.forEachBlock([&](MarkedBlock::Handle*) {
+        ++blocksBefore;
+    });
+
+    constexpr unsigned blocksToAdd = 100;
+    unsigned blocksAdded = 0;
+    Vector<MarkedBlock::Handle*> added;
+    while (blocksAdded < blocksToAdd) {
+        AOT_TEST_CHECK(directory.tryMakeRoomForBlock());
+        MarkedBlock* block = &cell->markedBlock();
+        cell = create();
+        if (&cell->markedBlock() != block) {
+            AOT_TEST_CHECK(cell->markedBlock().handle().directory() == &directory);
+            added.append(&cell->markedBlock().handle());
+            ++blocksAdded;
+        }
+    }
+
+    unsigned blocksAfter = 0;
+    directory.forEachBlock([&](MarkedBlock::Handle* handle) {
+        ++blocksAfter;
+        AOT_TEST_CHECK(handle->directory() == &directory);
+    });
+    AOT_TEST_CHECK(blocksAfter == blocksBefore + blocksToAdd);
+    for (MarkedBlock::Handle* handle : added)
+        AOT_TEST_CHECK(directory.isLive(handle));
+}
 
 static bool covers(MarkedBlockCage::Indices indices, uintptr_t base, const void* pointer, size_t size)
 {
@@ -1320,7 +1667,6 @@ static void checkReserveThatTheErrorForStructuresAndTablesTookIsKeptAgain()
     cage.addExhaustedHeap(MarkedBlockCage::ExhaustedHeap::Tables);
     AOT_TEST_CHECK(createOutOfMemoryError(realm));
     AOT_TEST_CHECK(vm.traps().needsOutOfMemoryError() && cage.errorWaitsForPoll());
-    // As where a cell of the error needs a block.
     AOT_TEST_CHECK(cage.releaseReserve() && cage.reserveSize() < whole);
     didThrowOwedOutOfMemoryError(vm);
     AOT_TEST_CHECK(vm.traps().needsOutOfMemoryError() && cage.errorWaitsForPoll());
@@ -1526,6 +1872,7 @@ std::span<const NativeTest> heapCageTests()
         { "heap-cage/cage/off-without-compiled-code"_s, testCageIsOffWithoutCompiledCode },
 #if OS(LINUX) && !ASAN_ENABLED && USE(MIMALLOC)
         { markStackTest, testMarkStackThatCannotGrowSaysWhy },
+        { lastWordsOnStructuresTest, testLastWordsOnStructuresTakeNoMemory },
         { "heap-cage/cage/shared-reserve-is-whole-again-behind-a-cage-that-threw"_s, runInProcessWithSharedRange<checkSharedReserveIsWholeAgainBehindCageThatThrew> },
         { "heap-cage/cage/shared-reserve-is-whole-again-behind-a-cage-that-stays"_s, runInProcessWithSharedRange<checkSharedReserveIsWholeAgainBehindCageThatStays> },
         { "heap-cage/cage/shared-reserve-holds-large-cells-of-several-cages"_s, runInProcessWithSharedRange<checkSharedReserveHoldsLargeCellsOfSeveralCages> },
@@ -1533,6 +1880,12 @@ std::span<const NativeTest> heapCageTests()
         { "heap-cage/cage/no-address-in-the-image-names-a-cell-under-a-limit-on-address-space"_s, runInProcessWithSharedRange<checkNoAddressInImageNamesCell> },
         { "heap-cage/cage/error-of-another-request-settles-cells-under-a-limit-on-address-space"_s, runInProcessWithSharedRange<checkErrorOfAnotherRequestAndErrorOwedForCells<true>> },
         { "heap-cage/tables/a-table-that-finds-no-memory-to-grow-stays-as-it-was"_s, checkTableIsUnchangedWhenGrowthFails },
+        { "heap-cage/cage/set-of-blocks-without-memory-to-grow-takes-what-it-has-room-for"_s, runInProcessWithSharedRange<checkSetOfBlocksWithoutMemoryToGrowTakesWhatItHasRoomFor> },
+        { setOfBlocksWithoutRoomTest, testSetOfBlocksWithoutRoomForBlockSaysWhy },
+        { structureBlockWithoutRoomTest, testStructureBlockThatSetHasNoRoomForNamesLimitOnAddressSpace },
+        { "heap-cage/cage/storage-gets-no-block-that-the-set-has-no-room-for"_s, runInProcessWithSharedRange<checkStorageGetsNoBlockThatSetHasNoRoomFor> },
+        { listOfBlocksWithoutRoomTest, testListOfBlocksWithoutRoomForBlockSaysWhy },
+        { "heap-cage/cage/directory-takes-no-block-that-its-list-has-no-room-for"_s, runInProcessWithSharedRange<checkDirectoryTakesNoBlockThatItsListHasNoRoomFor> },
 #endif
         { "heap-cage/cage/used-indices-cover-allocations"_s, withCage<checkUsedIndicesCoverAllocations> },
         { "heap-cage/cage/every-cell-is-inside"_s, withCage<checkEveryCellIsInside> },
@@ -1545,6 +1898,7 @@ std::span<const NativeTest> heapCageTests()
         { "heap-cage/cage/second-heap-gets-its-own-base"_s, withCage<checkSecondHeapGetsItsOwnBase> },
         { "heap-cage/cage/range-is-reused"_s, withCage<checkRangeIsReused> },
         { "heap-cage/cage/reserve-is-kept-once-half-full"_s, withCage<checkReserveIsKeptOnceHalfFull> },
+        { "heap-cage/cage/bits-grow-for-a-list-of-blocks-that-grew-before-its-block"_s, withCage<checkBitsGrowForListOfBlocksThatGrewBeforeItsBlock> },
         { "heap-cage/cage/infallible-scope-uses-reserve"_s, withCage<checkInfallibleScopeUsesReserve> },
         { "heap-cage/cage/constants-are-compiled-in-full-cage"_s, withCage<checkConstantsAreCompiledInFullCage> },
         { "heap-cage/cage/error-waits-at-function-entries-alone"_s, withCage<checkErrorWaitsAtFunctionEntriesAlone> },

@@ -8,6 +8,7 @@
 #if ENABLE(AOT)
 
 #include "AOTOperationEmitter.h"
+#include "AOTStubsAllocation.h"
 #include "IndexingType.h"
 #include <optional>
 #include <span>
@@ -27,7 +28,9 @@ public:
     explicit CellAllocationEmitter(CodeGenerator& generator) : OperationEmitter(generator) { }
 
     CellPointer allocateHeapCell(Pointer allocatorOrNull, LBasicBlock slowPath);
-    CellPointer allocateHeapCell(Pointer allocator, std::optional<size_t> cellSize, LBasicBlock slowPath);
+    CellPointer allocateHeapCell(Pointer allocator, std::optional<size_t> cellSize, LBasicBlock slowPath, bool refillsInline = true);
+    bool allocatesInline(const OperationContext&) const;
+    bool allocatesInline(const OperationContext&, const MentionedAllocation&) const;
     void storeHeader(CellPointer, Integer header);
 
     CellPointer allocateObject(InlineAllocation, LBasicBlock slowPath);
@@ -35,6 +38,7 @@ public:
     MentionedAllocation allocationOf(const OperationContext&, LayoutID, std::span<const FieldIndex> initialFields);
     MentionedAllocation environmentAllocationOf(LayoutID);
     MentionedAllocation closureAllocationOf(unsigned numberOfCaptures);
+    Pointer endOfAllocationSiteRecord(const MentionedAllocation&);
     Pointer allocationSiteRecord(const MentionedAllocation&);
     CellPointer allocate(const OperationContext&, const MentionedAllocation&, ZeroedBy = ZeroedBy::Nobody);
     std::pair<CellPointer, Condition> allocateInstance(const OperationContext&, const MentionedAllocation&, CellPointer prototype);
@@ -42,40 +46,32 @@ public:
     CellPointer allocateFromTemplate(const OperationContext&, const MentionedAllocation&, std::span<const uint8_t> bodyOfEmptyCell);
     CellPointer allocateObjectCopy(const OperationContext&, const MentionedAllocation&, CellPointer source, unsigned fieldBytes);
     void copyFieldWords(CellPointer source, CellPointer cell, unsigned fieldBytes);
+    void copyWords(CellPointer source, unsigned offsetInSource, CellPointer cell, unsigned offsetInCell, unsigned bytes);
+    static constexpr size_t maxBytesZeroedInLine = 256;
+    static constexpr unsigned bytesStoredInTurnOfLoop = 8 * sizeof(uint64_t);
+    void storeWordInLoop(CellPointer, const Layout&, unsigned begin, unsigned end, int64_t word);
     CellPointer allocateInFrame(const OperationContext&, size_t size);
-    void clearWhatCellLentHolds(ValueID cell);
-    void noteWordsThatCellLentHolds(ValueID cell, std::span<const uint32_t> offsets);
-    void clearWhatWasLentUnderHandler(BlockID handler);
 
     std::pair<CellPointer, Pointer> allocateArray(const OperationContext&, Word32 length, Word32 vectorLength, IndexingType, LBasicBlock slowPath);
     CellPointer allocateArrayOfLength(const OperationContext&, IndexingType, unsigned length);
     void finishArrayOfLength(const OperationContext&, CellPointer array, unsigned length);
-    CellPointer newArrayOf(const OperationContext&, std::span<const Boxed> elements);
+    CellPointer newArrayOfNumbers(const OperationContext&, std::span<const Boxed>);
+    CellPointer newArrayOf(const OperationContext&, std::span<const Boxed> elements, bool hasPropertyRoom = false);
     CellPointer newArrayFromBuffer(const OperationContext&, Word32 count, Pointer buffer);
 
 private:
     Integer rowOf(const MentionedAllocation& allocation) { return zeroExtended(numberOf(allocation.mention)); }
-    void copyFromBuffer(Word32 count, Pointer buffer, Pointer butterfly, LBasicBlock copyLoop, LBasicBlock copyElement, LBasicBlock copied);
     void zeroBody(CellPointer, const MentionedAllocation&);
+    CellPointer allocateInline(const MentionedAllocation&, CellInitialization, LValue bodyTemplate, LBasicBlock slowPath);
+    CellPointer allocateInlineOr(const MentionedAllocation&, CellInitialization, LValue bodyTemplate, NOESCAPE const Invocable<CellPointer()> auto& callStub);
     LValue slotOfFrameCell(const OperationContext&, size_t size);
 
     struct SlotOfClosuresLent {
         Machine::StackSlot* slot { nullptr };
         uint32_t blockIndex { 0 };
         ValueID call;
-        ValueID cell;
-        std::span<const uint32_t> wordsThatMayHoldCells;
     };
     Vector<SlotOfClosuresLent, 4> m_slotsOfClosuresLent;
-
-    struct WordLentOutOfFrame {
-        Machine::StackSlot* slot;
-        uint32_t offset;
-    };
-    using WordsLentOutOfFrame = Machine::ArenaVector<WordLentOutOfFrame>;
-    WordsLentOutOfFrame& wordsLentUnderHandler(BlockID handler);
-    Machine::PatchOperation* patchThatZeroesWordsOfFrame();
-    Vector<WordsLentOutOfFrame*> m_wordsLentUnderHandlers;
 };
 
 } } } // namespace JSC::AOT::Typed

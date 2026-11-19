@@ -14,6 +14,7 @@
 #include "AOTObjectModel.h"
 #include "AOTOperationArguments.h"
 #include "AOTOperationScope.h"
+#include "AOTRuntimeCheckFailure.h"
 #include "AOTStringBuilderStorage.h"
 #include "AOTVector.h"
 #include "JSCInlines.h"
@@ -36,7 +37,27 @@ namespace JSC { namespace AOT {
 static constexpr size_t numberOfQuotes = 2;
 static constexpr size_t maxEscapedCharacterLength = 6;
 
-static_assert(maxLengthOfEscapedJSONString(1) == maxEscapedCharacterLength + numberOfQuotes && maxLengthOfEscapedJSONString(0) == numberOfQuotes);
+static_assert(maxEscapedJSONStringLength(1) == maxEscapedCharacterLength + numberOfQuotes && maxEscapedJSONStringLength(0) == numberOfQuotes);
+
+Latin1Character* appendLongJSONInteger(Latin1Character* cursor, int64_t integer)
+{
+    if (integer != static_cast<int32_t>(integer)) {
+        char* to = std::bit_cast<char*>(cursor);
+        return std::bit_cast<Latin1Character*>(std::to_chars(to, to + maxJSONIntegerLength, integer).ptr);
+    }
+    uint32_t magnitude = static_cast<uint32_t>(integer);
+    if (integer < 0) {
+        *cursor++ = '-';
+        magnitude = 0 - magnitude;
+    }
+    if (magnitude < 10000)
+        return appendUpToFourJSONDigits(cursor, magnitude);
+    if (magnitude < 100000000)
+        return appendFourJSONDigits(appendUpToFourJSONDigits(cursor, magnitude / 10000), magnitude % 10000);
+    uint32_t low = magnitude % 100000000;
+    cursor = appendUpToFourJSONDigits(cursor, magnitude / 100000000);
+    return appendFourJSONDigits(appendFourJSONDigits(cursor, low / 10000), low % 10000);
+}
 
 NEVER_INLINE Latin1Character* appendQuotedAndEscapedJSONString(Latin1Character* cursor, std::span<const Latin1Character> characters)
 {
@@ -48,13 +69,11 @@ NEVER_INLINE Latin1Character* appendQuotedAndEscapedJSONString(Latin1Character* 
     return cursor;
 }
 
-void stopAtJSONTextMismatch(const String& written, const String& writtenByGeneralWay)
+void crashOnJSONOutputMismatch(const String& written, const String& genericOutput)
 {
-    unsigned same = 0;
-    while (same < written.length() && same < writtenByGeneralWay.length() && written[same] == writtenByGeneralWay[same])
-        ++same;
-    unsigned start = same > 20 ? same - 20 : 0;
-    dataLogLn("AOT: the quick writer of JSON answered ", written.length(), " characters, and the general way writes ", writtenByGeneralWay.length(), ": they part at ", same, ": ", written.substring(start, 60), " | ", writtenByGeneralWay.substring(start, 60), ". This is a bug in Bun.");
+    RuntimeCheckFailure failure("JSON.stringify check failed"_s);
+    failure.detail("the fast path and the generic path produced ", written.length() == genericOutput.length() ? "different strings of the same length"_s : "strings of different lengths"_s);
+    failure.report();
     CRASH();
 }
 

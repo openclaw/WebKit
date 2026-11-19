@@ -4,19 +4,31 @@
 # function run(n) { var t; for (var i = 0; i < n; i++) t = new Reply(i); return t; }
 # RUN: walk f2 mechanisms=all
 # CHECK-LABEL: code f2:Body
+# The guard is asked in front of the loop, and where it holds no turn asks. The other copy of the loop asks in each turn.
+# CHECK-NOT: = NewObject
+# CHECK: [[before]]: {{*}} = AreMembersUnchanged conditions=[{kind=MemberPassedByStores layout=L0 key="sent"}]
+# CHECK-NEXT: Branch [[before]] -> taken [[unchanged]](), notTaken
+# CHECK-NOT: = NewObject
 # CHECK: [[test]]: {{*}} = AreMembersUnchanged conditions=[{kind=MemberPassedByStores layout=L0 key="sent"}]
 # CHECK-NEXT: Branch [[test]] -> taken [[typed]](), notTaken [[closed]]()
 # CHECK: [[typed]]() isInLoop=true:
-# CHECK-NEXT: = PutSlotOrAdd {{*}}key="sent" receivers=[L0] level=Proven
+# What a sloppy constructor function stores fills its object: behind the guard the object is born with both fields; where the guard fails the construction goes by the call.
+# CHECK-NOT: PutSlot
+# CHECK: = NewObject {{*}}layout=L0 fields=[0, 1]
 # CHECK: [[closed]]() frequency=Rare isInLoop=true:
-# CHECK: = PropSet {{*}}key="sent"
+# CHECK: = Construct
+# CHECK: [[unchanged]]():
+# CHECK-NOT: AreMembersUnchanged
+# CHECK: = NewObject {{*}}layout=L0 fields=[0, 1]
+# CHECK-NOT: AreMembersUnchanged
 # Nothing lies above under `code`: nobody asks a guard about it.
 # RUN(CODE): walk f2 mechanisms=all
 # CODE-NOT: key="code"}]
-# A read finds what lies above: an empty slot is no answer, and no guard of reads is asked, which the default has ended.
+# A read finds what lies above: an empty slot is no answer, so the read looks above it, and no guard of reads is asked, which the default has ended.
 # function read(r) { return r.sent; }
 # RUN(READ): walk f3 mechanisms=all
-# READ-NOT: GetSlotOrUndefined
+# READ-NOT: AreMembersUnchanged conditions=[{layout=L0 key="sent"}]
+# READ: = GetSlotOrUndefined {{*}}key="sent" receivers=[L0] level=Expected [looksAboveEmptySlot]
 # READ-NOT: AreMembersUnchanged conditions=[{layout=L0 key="sent"}]
 # READ: Return
 
@@ -35,11 +47,12 @@ function f0 module=m0 kind=Module thisType={type=anything} results=[{type=anythi
     v6 = NewClosure function=f3
     v7 = Integer integer=3
     v8 = Call v5, -, v7
-    v9 = Call v6, -, v8
-    v10 = Builtin builtin=GlobalThis
-    v11 = PropGet v10 key="sink" [isFreeName]
-    v12 = Call v11, -, v9
-    Return v12
+    v9 = PropDelete v8 key="sent" mode=Sloppy
+    v10 = Call v6, -, v8
+    v11 = Builtin builtin=GlobalThis
+    v12 = PropGet v11 key="sink" [isFreeName]
+    v13 = Call v12, -, v10
+    Return v13
 }
 function f1 name="Reply" module=m0 flags=[IsSloppy, HasThis, HasExplicitName] length=1 thisType={type=anything} parameters=[{type=anything}] results=[{type=anything}] constructedClass=L0 {
   b0(v0: anything, v1: anything):

@@ -99,6 +99,14 @@ static constexpr uint64_t x86TargetSmallestInstanceConstant = [] {
     return smallest;
 }();
 
+static constexpr uint64_t x86TargetFilterBit(uint64_t bits) { return uint64_t { 1 } << (bits * 0x9e3779b97f4a7c15u >> 58); }
+static constexpr uint64_t x86TargetConstantFilter = [] {
+    uint64_t filter = 0;
+    for (const X86TargetInstanceConstant& constant : x86TargetInstanceConstants)
+        filter |= x86TargetFilterBit(constant.bits);
+    return filter;
+}();
+
 static constexpr std::array<uint64_t, x86TargetInstanceConstants.size()> x86TargetBitsOfInstanceConstants = [] {
     std::array<uint64_t, x86TargetInstanceConstants.size()> bits { };
     for (size_t index = 0; index < bits.size(); ++index)
@@ -122,22 +130,6 @@ static_assert(JSValue::ValueNull < JSValue::ValueUndefined && JSValue::ValueUnde
 static_assert((undefinedCell32 << cell32Shift) < FaultSite::reach);
 static constexpr uint32_t x86TargetTrapReach = static_cast<uint32_t>(FaultSite::reach - (undefinedCell32 << cell32Shift));
 
-static bool x86TargetSwitchHasDenseRun(std::span<const int64_t> values)
-{
-    for (size_t begin = 0; begin + minCasesForJumpTable <= values.size(); ++begin) {
-        size_t numberOfCases = 1;
-        while (numberOfCases < minCasesForJumpTable) {
-            uint64_t distanceToNext = static_cast<uint64_t>(values[begin + numberOfCases]) - static_cast<uint64_t>(values[begin]);
-            if (distanceToNext >= maxEntriesOfJumpTablePerCase * (numberOfCases + 1))
-                break;
-            ++numberOfCases;
-        }
-        if (numberOfCases == minCasesForJumpTable)
-            return true;
-    }
-    return false;
-}
-
 RegisterFile registerFileFor(const ProcedureTraits& traits)
 {
     if (traits.savesRegistersOfCallers) {
@@ -157,7 +149,7 @@ RegisterFile registerFileFor(const ProcedureTraits& traits)
 
 std::optional<PinnedConstant> findPinnedConstant(uint64_t bits)
 {
-    if (bits < x86TargetSmallestInstanceConstant)
+    if (bits < x86TargetSmallestInstanceConstant || !(x86TargetConstantFilter & x86TargetFilterBit(bits)))
         return std::nullopt;
     for (const X86TargetInstanceConstant& constant : x86TargetInstanceConstants) {
         if (constant.bits == bits)
@@ -212,6 +204,7 @@ bool acceptsMemoryDestination(const Operation& computation)
     case Shl:
     case SShr:
     case ZShr:
+    case RotR:
     case Clz:
     case PopCount:
     case Abs:
@@ -292,7 +285,7 @@ bool scaledSumAcceptsBase(const Operation& base)
 unsigned numberOfScratchGPRsOf(const ProcedureTraits& traits, const Operation& operation)
 {
     if (operation.opcode() == Switch)
-        return x86TargetSwitchHasDenseRun(operation.switchData().caseValues) ? 1 : 0;
+        return operation.switchData().caseValues.size() >= minCasesForSwitchWindow ? 1 : 0;
     if (operation.opcode() == PopCount)
         return MacroAssembler::supportsCountPopulation(traits.features) ? 0 : 1;
     return 0;

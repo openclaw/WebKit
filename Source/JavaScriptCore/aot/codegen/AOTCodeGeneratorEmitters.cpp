@@ -71,6 +71,7 @@
 #include "AOTStringBuilderEmitter.h"
 #include "AOTStringBuilderPartEmitter.h"
 #include "AOTStringEmitter.h"
+#include "AOTStubsOperations.h"
 #include "AOTThrowEmitter.h"
 #include "AOTTruthinessEmitter.h"
 #include "AOTTypeTestEmitter.h"
@@ -90,17 +91,29 @@ CodeGenerator::CodeGenerator(const FunctionInputs& inputs, Machine::Procedure& p
     , m_out(proc)
     , m_checksAllocation(proc.traits().checksAllocation)
     , m_checksEffects(AOT::hasFlag(inputs.build.options().testing, Wire::TestingSwitch::CheckEffectsAtRunTime))
-    , m_rowThatSaysLess(inputs.build.options().rowThatSaysLess)
+    , m_understatedEffects(inputs.build.options().understatedEffects)
 {
+    if (FunctionID id = code().function())
+        m_isTrapOfProxy = facts().linked().function(id).isTrapOfProxy;
     if (proc.traits().notesRangesOfOrigins) {
-        records.formsSaid.beginNoting();
+        records.formsSaid.beginNoting(m_isTrapOfProxy);
         m_out.noteFormsIn(records.formsSaid);
     }
     m_notesForms = records.formsSaid.areNoted();
     m_watchesOperations = m_notesForms || m_checksAllocation || m_checksEffects;
     if (build().options().recorded.validates) [[unlikely]] {
-        m_out.verifyInheritedLoads(heaps().collectorState.index(), [this](LValue readSameBits) {
-            m_out.check(m_out.isZero32(readSameBits))->setGenerator([](CCallHelpers& jit, const Machine::PatchParameters&) {
+        m_out.verifyReusedLoads({ heaps().collectorState.index(), heaps().entire(AbstractHeap::TypedArrayElements).index() }, [this](LValue readSameBits) {
+            static constexpr OperationCall stop { .returns = OperationCall::Returns::Void, .saves = OperationCall::Saves::CallerSavedRegisters };
+            Origin origin = m_operation ? m_operation->origin() : Origin();
+            uint32_t function = code().inlineFrames()[origin.inlineFrame].callee.index();
+            build().statistics().count(StatisticID::ReusedLoadsVerified);
+            m_out.check(m_out.isZero32(readSameBits))->setGenerator([records = &m_records, function, position = origin.position](CCallHelpers& jit, const Machine::PatchParameters& params) {
+                if (params.frameIsSetUp()) {
+                    AllowMacroScratchRegisterUsage allowScratch(jit);
+                    jit.move(CCallHelpers::TrustedImm32(function), argumentGPROfPreservingCall(stop, AOT::Entry::operationAOTStopAtStaleLoad, 1));
+                    jit.move(CCallHelpers::TrustedImm32(position), argumentGPROfPreservingCall(stop, AOT::Entry::operationAOTStopAtStaleLoad, 2));
+                    records->stubCalls.call(jit, callOperationPreservingRegisters(stop), offsetInRuntimeTable(AOT::Entry::operationAOTStopAtStaleLoad), OptionalIndex());
+                }
                 jit.breakpoint();
             });
         });

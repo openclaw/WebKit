@@ -130,12 +130,15 @@ void MathBuiltinEmitter::generateCallNumberConstructor(const InlineCall& call)
 
 void MathBuiltinEmitter::generateParseInt(const InlineCall& call)
 {
+    if (typeOf(call.argument(0)).isNumber()) {
+        finish(call, callLeaf<Number>(RuntimeOperation::ParseIntNumber, { numberOperand(call.argument(0)) }));
+        return;
+    }
     std::optional<Word32> radix;
     if (ValueID argument = call.argumentOrNull(1))
         radix = int32Operand(argument);
     CellPointer string = cellOperand(call.argument(0));
-    missUnless(call, logicalNot(isRopeString(string)));
-    CharacterView view = emitter<StringEmitter>().viewOfFlatString(string);
+    CharacterView view = emitter<StringEmitter>().viewWithoutResolving(call.context(), string, rareEdge(missBlockOf(call)));
     Number result = emitter<StringEmitter>().selectByWidth<Number>(view.is8Bit, [&](bool is8Bit) {
         return callLeaf<Number>(is8Bit ? RuntimeOperation::ParseInt8 : RuntimeOperation::ParseInt16, { view.characters, view.length, radix.value_or(word32(0)) });
     }, Machine::EdgeClass::Normal);

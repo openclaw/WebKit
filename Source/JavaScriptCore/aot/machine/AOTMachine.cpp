@@ -5,16 +5,31 @@
 
 #include "config.h"
 #include "AOTMachine.h"
+#include "AOTInliningAcrossFiles.h"
 
 #if ENABLE(AOT)
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <limits>
+#include <wtf/BitVector.h>
 #include <wtf/MathExtras.h>
 #include <wtf/Vector.h>
 
 namespace JSC { namespace AOT { namespace Machine {
+
+static constexpr std::array<uint16_t, sizeOfTableByOpcode> machineCoreChildFlags = [] {
+    std::array<uint16_t, sizeOfTableByOpcode> flags { };
+    for (unsigned index = 0; index < numberOfOpcodes; ++index) {
+        Opcode opcode = static_cast<Opcode>(index);
+        if (opcode != Trunc)
+            flags[index] |= static_cast<uint16_t>(OperationFlag::UpperHalfIsRead);
+        if (!readsZeroExtendedWord(opcode, 1))
+            flags[index] |= static_cast<uint16_t>(OperationFlag::HasOpaqueReader);
+    }
+    return flags;
+}();
 
 static bool machineCoreCountsChildrenAtThisRead(const Operation* operation)
 {
@@ -26,7 +41,7 @@ void Operation::countChildrenAtFirstUse()
     Operation* operation = this;
     do {
         ASSERT(operation->m_owner && countsChildrenAtFirstUse(operation->m_opcode));
-        uint16_t flagsOfChildren = operation->m_opcode == Trunc ? 0 : static_cast<uint16_t>(OperationFlag::UpperHalfIsRead);
+        uint16_t flagsOfChildren = machineCoreChildFlags[operation->m_opcode];
         Operation* childReadFirst = nullptr;
         Operation* secondChildReadFirst = nullptr;
         Operation* thirdChildReadFirst = nullptr;
@@ -69,7 +84,7 @@ NEVER_INLINE void Operation::countChildrenAtFirstUseWithWorklist()
     Operation* operation = this;
     for (;;) {
         ASSERT(operation->m_owner && countsChildrenAtFirstUse(operation->m_opcode));
-        uint16_t flagsOfChildren = operation->m_opcode == Trunc ? 0 : static_cast<uint16_t>(OperationFlag::UpperHalfIsRead);
+        uint16_t flagsOfChildren = machineCoreChildFlags[operation->m_opcode];
         for (Operation* child : std::span<Operation* const>(operation->m_children, operation->m_auxiliary)) {
             child->m_flags |= flagsOfChildren;
             if (child->m_useCount) {
@@ -126,17 +141,7 @@ FactsOfSuspension& PatchOperation::ensureFactsOfSuspension()
     return *m_factsOfSuspension;
 }
 
-void PatchOperation::markChildAsLetGoByCallee(unsigned child)
-{
-    RELEASE_ASSERT(m_opcode == Patch && child < m_operands.size());
-    for (unsigned marked : childrenLetGoByCallee()) {
-        if (this->child(marked) == this->child(child))
-            return;
-    }
-    m_childrenLetGoByCallee.append(m_procedure.arena(), child);
-}
-
-void PatchOperation::leaveOperandsWhereTheyLie()
+ALWAYS_INLINE_INTO_OTHER_FILES void PatchOperation::leaveOperandsWhereTheyLie()
 {
     RELEASE_ASSERT(m_opcode == Patch && bringsOperandsToTheirRegisters() && m_registersToBringOperandsTo.isEmpty());
     if (numGPScratchRegisters)
@@ -231,14 +236,14 @@ Procedure::Procedure(Arena& arena, const HeapTree& heapTree, const ProcedureTrai
     m_operations.reserve(arena, 64);
 }
 
-void Procedure::fail(FailureKind kind, const Operation* operation)
+void Procedure::fail(FailureKind kind, const Operation* operation, PlaceOfCheck check)
 {
     if (m_failure)
         return;
     if (operation)
-        m_failure = Failure { kind, operation->origin(), operation->index() };
+        m_failure = Failure { kind, operation->origin(), operation->index(), check };
     else
-        m_failure = Failure { kind, Origin(), UINT32_MAX };
+        m_failure = Failure { kind, Origin(), UINT32_MAX, check };
 }
 
 void Procedure::noteRoomThatBuildingLeaves(ListThatBuildingLeaves list, void* room, size_t bytes)
@@ -258,6 +263,106 @@ void Procedure::letGoOfWhatBuildingLeaves()
 NEVER_INLINE Block* Procedure::addBlock()
 {
     return addBlockInline();
+}
+
+NEVER_INLINE Block* Procedure::addBlockThatOnlyJumps()
+{
+    return addBlockWithRoomForOperations<1>();
+}
+
+static bool wayLeadsFromEntrypointInto(const Procedure& procedure, const Block* asked)
+{
+    BitVector isReached(procedure.numberOfBlocks());
+    Vector<const Block*, 16> toLookAt;
+    auto reach = [&](const Block* block) {
+        if (!isReached.set(block->index()))
+            toLookAt.append(block);
+    };
+    for (const Entrypoint& entrypoint : procedure.entrypoints())
+        reach(entrypoint.block);
+    while (!toLookAt.isEmpty()) {
+        const Block* block = toLookAt.takeLast();
+        if (block == asked)
+            return true;
+        for (const Edge& edge : block->successors())
+            reach(edge.block());
+    }
+    return false;
+}
+
+void Procedure::stopAtStoreOverLoadThatStands(const Operation* store)
+{
+    if (wayLeadsFromEntrypointInto(*this, store->owner()))
+        fail(FailureKind::MalformedProcedure, store);
+    else
+        m_storesOverLoadsWhereNoWayLed.append(m_arena, store);
+}
+
+void Procedure::stopAtStoresThatWayLeadsToAfterAll()
+{
+    for (const Operation* store : m_storesOverLoadsWhereNoWayLed) {
+        if (wayLeadsFromEntrypointInto(*this, store->owner())) {
+            fail(FailureKind::MalformedProcedure, store);
+            return;
+        }
+    }
+}
+
+void Procedure::separateShiftsOfSums()
+{
+    for (auto [sum, own] : m_ownShiftsOfSums.span()) {
+        Operation* shared = sum->m_children[1];
+        ASSERT(shared->opcode() == Shl && own->opcode() == Shl);
+        if (!sum->useCount() || shared->useCount() < 2 || shared->useCount() == std::numeric_limits<uint16_t>::max())
+            continue;
+        sum->m_children[1] = own;
+        shared->loseUse();
+        if (own->gainUseLeavingChildrenUncounted(shared->m_flags))
+            own->countChildrenAtFirstUse();
+    }
+}
+
+void Procedure::compareTermsOfSums()
+{
+    auto isOnlyReader = [](const Operation* reader, const Operation* sum) {
+        return sum->opcode() == Add && sum->useCount() == 1 && sum->owner() == reader->owner();
+    };
+    for (auto [branch, comparison] : m_branchesOnSums.span()) {
+        Operation* sum = branch->m_children[0];
+        if (!isOnlyReader(branch, sum))
+            continue;
+        branch->m_children[0] = comparison;
+        comparison->gainUse();
+        sum->loseUse();
+    }
+    for (auto [comparison, constant] : m_comparisonsOfSums.span()) {
+        Operation* sum = comparison->m_children[0];
+        if (!comparison->useCount() || !isOnlyReader(comparison, sum))
+            continue;
+        Operation* term = sum->m_children[0];
+        Operation* bound = comparison->m_children[1];
+        uint16_t flagsOfRead = machineCoreChildFlags[comparison->opcode()];
+        comparison->m_children[0] = term;
+        comparison->m_children[1] = constant;
+        term->gainUse(flagsOfRead);
+        constant->gainUse(flagsOfRead);
+        sum->loseUse();
+        bound->loseUse();
+    }
+}
+
+void Procedure::settleUpperHalvesOfPhis()
+{
+    for (bool someChanged = !m_upsilonsOfWordsBetweenPhis.isEmpty(); someChanged;) {
+        someChanged = false;
+        for (const Operation* upsilon : m_upsilonsOfWordsBetweenPhis) {
+            Operation* phi = upsilon->phi();
+            if (!upsilon->child(0)->has(OperationFlag::UpperHalfMayBeSet) || phi->has(OperationFlag::UpperHalfMayBeSet))
+                continue;
+            phi->m_flags |= static_cast<uint16_t>(OperationFlag::UpperHalfMayBeSet);
+            someChanged = true;
+        }
+    }
 }
 
 Block* Procedure::addEntrypoint(uint16_t id)
@@ -305,7 +410,8 @@ static uint32_t machineCoreHashOfConstantData(std::span<const uint8_t> bytes, ui
     for (; bytesLeft; --bytesLeft, ++cursor)
         hash = (hash ^ *cursor) * 16777619u;
     WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
-    return static_cast<uint32_t>(hash >> 32) ^ static_cast<uint32_t>(hash);
+    hash = (hash ^ hash >> 32) * 0x9E3779B97F4A7C15ull;
+    return static_cast<uint32_t>(hash >> 32);
 }
 
 // The encoder calls this wherever it materializes a double, so the cost of a call must not grow with the number of constants.

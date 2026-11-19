@@ -89,6 +89,26 @@ struct FakeStorage : FakeObject<capacity * sizeof(uint64_t)> {
     uint64_t& property(unsigned index) { return this->template at<uint64_t>((capacity - 1 - index) * sizeof(uint64_t)); }
 };
 
+template<unsigned capacity, unsigned vectorLength>
+struct FakeStorageWithElements : FakeObject<((capacity + vectorLength + 2) & ~1u) * sizeof(uint64_t)> {
+    FakeStorageWithElements()
+    {
+        for (size_t offset = 0; offset < this->bytes.size(); offset += sizeof(uint64_t))
+            this->template at<uint64_t>(offset) = untouched;
+    }
+
+    uint64_t butterfly() const { return this->address() + (capacity + 1) * sizeof(uint64_t); }
+    uint64_t& word(int indexFromButterfly) { return this->template at<uint64_t>((static_cast<int>(capacity) + 1 + indexFromButterfly) * static_cast<ptrdiff_t>(sizeof(uint64_t))); }
+    void fill(uint32_t publicLength)
+    {
+        word(-1) = static_cast<uint64_t>(vectorLength) << 32 | publicLength;
+        for (unsigned index = 0; index < capacity; ++index)
+            word(-2 - static_cast<int>(index)) = bitsOf(jsNumber(static_cast<int32_t>(100 + index)));
+        for (unsigned index = 0; index < vectorLength; ++index)
+            word(index) = bitsOf(jsNumber(static_cast<int32_t>(200 + index)));
+    }
+};
+
 class PropertyStores {
     WTF_MAKE_NONCOPYABLE(PropertyStores);
 public:
@@ -130,7 +150,7 @@ public:
         instance.image.programSymbols = &m_symbols;
         instance.image.fieldTableEntries = m_emptyFieldTable.data() + highestShapeWithoutFields;
         instance.image.fieldRecordIndices = m_emptyFieldRecordIndices.data();
-        instance.cellCageBase = MarkedBlockCage::baseOf(this);
+        instance.cellCageBase = memoryOfFakeObjects().cageBase();
         instance.objects.keyOrderRuns = m_keyOrderRuns.get();
 
         m_auxiliarySpace.at<void*>(CompleteSubspace::offsetOfAllocatorForSizeStep() + initialOutOfLineCapacity * sizeof(uint32_t)) = &allocatorOfFirstStorage;
@@ -186,7 +206,7 @@ public:
     StubRun store(const StoreCase& storeCase, uint64_t receiver, uint64_t value)
     {
         runner.forgetAccessTable();
-        std::fill_n(m_keyOrderRuns.get(), numberOfKeyOrderRuns, KeyOrderRun { });
+        std::fill_n(m_keyOrderRuns.get(), sizeOfKeyOrderRunTable, KeyOrderRun { });
         return storeAgain(storeCase, receiver, value);
     }
     StubRun storeAgain(const StoreCase& storeCase, uint64_t receiver, uint64_t value) { return runner.run(putById(storeCase.mode), { receiver, value }, storedName); }
@@ -201,7 +221,7 @@ private:
     std::array<uint32_t, (slimClosureStructureID >> StructureRowWords::granuleShift) + 1> m_rows { };
     std::array<std::array<PackedSlot, 3 * numberOfNames>, numberOfSlotAccesses> m_planes { };
     std::array<HashedSlot, 64> m_hashedSlots { };
-    std::unique_ptr<KeyOrderRun[]> m_keyOrderRuns { std::make_unique<KeyOrderRun[]>(numberOfKeyOrderRuns) };
+    std::unique_ptr<KeyOrderRun[]> m_keyOrderRuns { std::make_unique<KeyOrderRun[]>(sizeOfKeyOrderRunTable) };
 #if ENABLE(AOT_POSITION_INDEPENDENT_IMAGE)
     std::array<LazyStringHeader, numberOfNames> m_identifiers { };
     std::array<uint32_t, numberOfNames> m_identifierOffsets { };
@@ -309,7 +329,7 @@ static void testAdditionsWithFirstStorage()
         stores.file(storeCase, slot);
         FakeStorage<initialOutOfLineCapacity> storage;
         FakePlainObject object(PropertyStores::structureID);
-        stores.allocatorOfFirstStorage.makeRoomAt(storage.address(), sizeof(storage.bytes));
+        stores.allocatorOfFirstStorage.makeRoomAt(storage.address(), storage.bytes.size());
         StubRun run = stores.store(storeCase, object.address(), value);
         AOT_TEST_CHECK(!run.calledOperation && !stores.allocatorOfFirstStorage.hasRoom());
         AOT_TEST_CHECK(object.structureID() == PropertyStores::structureIDAfterAddition && object.butterfly() == storage.butterfly());
@@ -322,7 +342,7 @@ static void testAdditionsWithFirstStorage()
         checkLeftToAdditionBySlot(stores, storeCase, slot, objectWithoutRoom, value);
 
         FakePlainObject objectThatHasStorage(PropertyStores::structureID, storage.butterfly());
-        stores.allocatorOfFirstStorage.makeRoomAt(storage.address(), sizeof(storage.bytes));
+        stores.allocatorOfFirstStorage.makeRoomAt(storage.address(), storage.bytes.size());
         checkLeftToAdditionBySlot(stores, storeCase, slot, objectThatHasStorage, value);
         stores.allocatorOfFirstStorage.makeRoomAt(0, 0);
     });
@@ -341,7 +361,7 @@ static void checkAdditionsWithDoubledStorage(PropertyStores& stores, FakeAllocat
             fullStorage.property(index) = bitsOf(jsNumber(static_cast<int32_t>(100 + index)));
         FakeStorage<doubledCapacity> storage;
         FakePlainObject object(PropertyStores::structureID, fullStorage.butterfly());
-        allocator.makeRoomAt(storage.address(), sizeof(storage.bytes));
+        allocator.makeRoomAt(storage.address(), storage.bytes.size());
         StubRun run = stores.store(storeCase, object.address(), value);
         AOT_TEST_CHECK(!run.calledOperation && !allocator.hasRoom());
         AOT_TEST_CHECK(object.structureID() == PropertyStores::structureIDAfterAddition && object.butterfly() == storage.butterfly());
@@ -356,7 +376,7 @@ static void checkAdditionsWithDoubledStorage(PropertyStores& stores, FakeAllocat
         checkLeftToAdditionBySlot(stores, storeCase, slot, objectWithoutRoom, value);
 
         FakePlainObject objectWithoutStorage(PropertyStores::structureID);
-        allocator.makeRoomAt(storage.address(), sizeof(storage.bytes));
+        allocator.makeRoomAt(storage.address(), storage.bytes.size());
         checkLeftToAdditionBySlot(stores, storeCase, slot, objectWithoutStorage, value);
         allocator.makeRoomAt(0, 0);
     });
@@ -390,7 +410,7 @@ static void testAdditionsBesideIndexingHeader()
         stores.allocatorOfFirstStorage.makeRoomAt(0, 0);
 
         stores.file(storeCase, doubled);
-        stores.allocatorOfDoubledStorage.makeRoomAt(room.address(), sizeof(room.bytes));
+        stores.allocatorOfDoubledStorage.makeRoomAt(room.address(), room.bytes.size());
         checkLeftToAdditionBySlot(stores, storeCase, doubled, object, value);
         AOT_TEST_CHECK(stores.allocatorOfDoubledStorage.hasRoom());
         stores.allocatorOfDoubledStorage.makeRoomAt(0, 0);
@@ -400,6 +420,75 @@ static void testAdditionsBesideIndexingHeader()
         for (unsigned index = 0; index < doubledCapacity; ++index)
             AOT_TEST_CHECK(room.property(index) == untouched);
     });
+}
+
+template<unsigned capacity, unsigned vectorLength>
+static void checkAdditionCopiesElements(PropertyStores& stores, FakeAllocator& allocator, uint8_t flags)
+{
+    constexpr unsigned newCapacity = capacity ? 2 * capacity : initialOutOfLineCapacity;
+    const uint64_t value = bitsOf(jsNumber(42));
+    const Slot slot = createAddition(firstOutOfLineOffset + capacity, newCapacity, Slot::storageHasIndexingHeader | Slot::copiesElements | flags);
+    for (PutMode mode : allPutModes) {
+        StoreCase storeCase { mode, FiledIn::HashedTable };
+        stores.file(storeCase, slot);
+        FakeStorageWithElements<capacity, vectorLength> before;
+        FakeStorageWithElements<newCapacity, vectorLength> after;
+        before.fill(vectorLength - 1);
+        FakePlainObject object(PropertyStores::structureID, before.butterfly());
+        uint8_t& flagsOfCell = object.at<uint8_t>(JSCell::typeInfoFlagsOffset());
+        flagsOfCell = UINT8_MAX;
+        allocator.makeRoomAt(after.address(), after.bytes.size());
+        StubRun run = stores.store(storeCase, object.address(), value);
+        AOT_TEST_CHECK(!run.calledOperation && !allocator.hasRoom());
+        AOT_TEST_CHECK(object.structureID() == PropertyStores::structureIDAfterAddition && object.butterfly() == after.butterfly());
+        AOT_TEST_CHECK(flagsOfCell == (flags & Slot::clearsPristineFlag ? static_cast<uint8_t>(~IsPristine) : UINT8_MAX));
+        for (int index = -1 - static_cast<int>(capacity); index < static_cast<int>(vectorLength); ++index)
+            AOT_TEST_CHECK(after.word(index) == before.word(index));
+        for (unsigned index = capacity; index < newCapacity; ++index)
+            AOT_TEST_CHECK(after.word(-2 - static_cast<int>(index)) == (index == capacity ? value : 0));
+
+        FakePlainObject objectWithoutRoom(PropertyStores::structureID, before.butterfly());
+        checkLeftToAdditionBySlot(stores, storeCase, slot, objectWithoutRoom, value);
+        allocator.makeRoomAt(0, 0);
+    }
+}
+
+static void testAdditionsCopyElements()
+{
+    PropertyStores stores;
+    for (uint8_t flags : std::initializer_list<uint8_t> { 0, Slot::clearsPristineFlag }) {
+        checkAdditionCopiesElements<0, 3>(stores, stores.allocatorOfDoubledStorage, flags);
+        checkAdditionCopiesElements<0, 2>(stores, stores.allocatorOfDoubledStorage, flags);
+        checkAdditionCopiesElements<0, 11>(stores, stores.allocatorOfStorageDoubledTwice, flags);
+        checkAdditionCopiesElements<initialOutOfLineCapacity, 7>(stores, stores.allocatorOfStorageDoubledTwice, flags);
+        checkAdditionCopiesElements<initialOutOfLineCapacity, 6>(stores, stores.allocatorOfStorageDoubledTwice, flags);
+    }
+}
+
+static void testAdditionsClearPristineFlag()
+{
+    PropertyStores stores;
+    const uint64_t value = bitsOf(jsNumber(42));
+    for (PutMode mode : allPutModes) {
+        StoreCase storeCase { mode, FiledIn::HashedTable };
+        FakeStorage<initialOutOfLineCapacity> storage;
+        FakePlainObject object(PropertyStores::structureID, storage.butterfly());
+        object.at<uint8_t>(JSCell::typeInfoFlagsOffset()) = UINT8_MAX;
+        stores.file(storeCase, createAddition(firstOutOfLineOffset + 1, 0, Slot::clearsPristineFlag));
+        StubRun run = stores.store(storeCase, object.address(), value);
+        AOT_TEST_CHECK(!run.calledOperation && object.structureID() == PropertyStores::structureIDAfterAddition && object.butterfly() == storage.butterfly());
+        AOT_TEST_CHECK(storage.property(1) == value && storage.property(0) == untouched && object.at<uint8_t>(JSCell::typeInfoFlagsOffset()) == static_cast<uint8_t>(~IsPristine));
+
+        FakeStorage<initialOutOfLineCapacity> firstStorage;
+        FakePlainObject objectWithoutStorage(PropertyStores::structureID);
+        objectWithoutStorage.at<uint8_t>(JSCell::typeInfoFlagsOffset()) = UINT8_MAX;
+        stores.file(storeCase, createAddition(firstOutOfLineOffset, initialOutOfLineCapacity, Slot::clearsPristineFlag));
+        stores.allocatorOfFirstStorage.makeRoomAt(firstStorage.address(), firstStorage.bytes.size());
+        run = stores.store(storeCase, objectWithoutStorage.address(), value);
+        AOT_TEST_CHECK(!run.calledOperation && objectWithoutStorage.butterfly() == firstStorage.butterfly() && firstStorage.property(0) == value);
+        AOT_TEST_CHECK(objectWithoutStorage.at<uint8_t>(JSCell::typeInfoFlagsOffset()) == static_cast<uint8_t>(~IsPristine));
+        stores.allocatorOfFirstStorage.makeRoomAt(0, 0);
+    }
 }
 
 static void testSetters()
@@ -416,6 +505,10 @@ static void testSetters()
     FakeObject<16> absentSetter;
     absentSetter.setHeader(0, NullSetterFunctionType);
     FakeObject<sizeof(GetterSetter)> accessors;
+    accessors.setHeader(0, GetterSetterType);
+    FakeObject<sizeof(GetterSetter)> cellOfOtherKind;
+    cellOfOtherKind.setHeader(0, FinalObjectType);
+    cellOfOtherKind.at<uint64_t>(GetterSetter::offsetOfSetter()) = setter.address();
     FakePlainObject object(PropertyStores::structureID);
     object.word(Slot::wordIndexFor(offset)) = accessors.address();
 
@@ -435,6 +528,13 @@ static void testSetters()
         AOT_TEST_CHECK(run.recordedArguments[0] == object.address() && run.recordedArguments[1] == accessors.address() && run.recordedArguments[2] == value);
         AOT_TEST_CHECK(static_cast<uint32_t>(run.recordedArguments[3]) == static_cast<uint32_t>(storeCase.mode));
         AOT_TEST_CHECK(object.word(Slot::wordIndexFor(offset)) == accessors.address());
+
+        for (uint64_t word : std::initializer_list<uint64_t> { cellOfOtherKind.address(), JSValue::ValueEmpty, bitsOf(jsNumber(5)) }) {
+            object.word(Slot::wordIndexFor(offset)) = word;
+            run = stores.store(storeCase, object.address(), value);
+            AOT_TEST_CHECK(run.calledOperation && run.landedCall.place == LandedCall::Place::Nowhere && object.word(Slot::wordIndexFor(offset)) == word);
+        }
+        object.word(Slot::wordIndexFor(offset)) = accessors.address();
     });
 }
 
@@ -710,11 +810,12 @@ static void testInheritedSettersOfAbsentFields()
     setter.setHeader(PropertyStores::slimClosureStructureID, SlimClosureType);
     setter.at<uint64_t>(offsetOfSlimClosureWord) = stores.runner.closureWord(1);
     FakeObject<sizeof(GetterSetter)> accessors;
+    accessors.setHeader(0, GetterSetterType);
     accessors.at<uint64_t>(GetterSetter::offsetOfSetter()) = setter.address();
     FakePlainObject holder(0);
     holder.word(Slot::wordIndexFor(offset)) = accessors.address();
     const SlotData field = SlotData::create(FakeTypedObject::offsetOfField, SlotRepresentation::JSValue);
-    const Slot slot = *Slot::tryCreateFieldAndHolder(toStructureID(PropertyStores::structureID), Slot::Kind::FieldOrInheritedSetter, Slot::dependsOnChain, field, std::bit_cast<JSCell*>(holder.address()), offset, stores.runner.instance().cellCageBase);
+    const Slot slot = *Slot::tryCreateFieldAndHolder(toStructureID(PropertyStores::structureID), Slot::Kind::FieldOrInheritedAccessor, Slot::dependsOnChain, field, std::bit_cast<JSCell*>(holder.address()), offset, stores.runner.instance().cellCageBase);
 
     for (PutMode mode : { PutMode::Strict, PutMode::Sloppy }) {
         StoreCase storeCase { mode, FiledIn::HashedTable };
@@ -730,6 +831,20 @@ static void testInheritedSettersOfAbsentFields()
         FakeTypedObject object(JSValue::ValueUndefined);
         checkUncached(stores, storeCase, object.address(), value);
         AOT_TEST_CHECK(object.field() == JSValue::ValueUndefined);
+
+        constexpr uint32_t orderWordThatLeavesFieldOut = orderWordOf(9, 3);
+        stores.file(storeCase, *Slot::tryCreateFieldAndHolder(toStructureID(PropertyStores::structureID), Slot::Kind::FieldOrInheritedAccessor, Slot::dependsOnChain | Slot::emptySlotMayBeUndefined, SlotData::decode(orderWordThatLeavesFieldOut), std::bit_cast<JSCell*>(holder.address()), offset, stores.runner.instance().cellCageBase));
+        for (uint32_t otherBits : { 0u, orderWordHasExtraProperties, orderWordIntegrityBits }) {
+            FakeTypedObject objectThatLeavesFieldOut(JSValue::ValueEmpty, orderWordThatLeavesFieldOut | otherBits);
+            StubRun run = stores.store(storeCase, objectThatLeavesFieldOut.address(), value);
+            AOT_TEST_CHECK(!run.calledOperation && run.landedCall.place == LandedCall::Place::CompiledFunction && !objectThatLeavesFieldOut.field());
+            AOT_TEST_CHECK(run.landedCall.values.callee == setter.address() && run.landedCall.values.thisValue == objectThatLeavesFieldOut.address() && run.landedCall.values.arguments[0] == value);
+        }
+        for (uint32_t otherWord : { orderWordOf(9, 4), orderWordOf(9, 2), orderWordOf(8, 3), orderWordThatLeavesFieldOut | orderWordHasFieldOutsideSlot, outOfLineOrderWord }) {
+            FakeTypedObject objectUnderOtherWord(JSValue::ValueEmpty, otherWord);
+            checkUncached(stores, storeCase, objectUnderOtherWord.address(), value);
+            AOT_TEST_CHECK(!objectUnderOtherWord.field());
+        }
     }
 }
 
@@ -779,14 +894,48 @@ static void testAdditionsToExtraProperties()
         checkUncached(stores, storeCase, notExtensibleObject.address(), value);
         AOT_TEST_CHECK(isUnchanged(notExtensibleObject));
 
+        auto setCellState = [](FakeTypedObject& object, CellState state) {
+            object.at<uint8_t>(JSCell::cellStateOffset()) = static_cast<uint8_t>(state);
+        };
+        auto checkAdded = [&](FakeTypedObject& object) {
+            AOT_TEST_CHECK(storage.property(1) == value && storage.property(0) == untouched && storage.property(2) == untouched);
+            AOT_TEST_CHECK(object.at<uint32_t>(JSCell::structureIDOffset()) == PropertyStores::structureIDAfterAddition && extraProperties.structureID() == structureIDOfExtraPropertiesAfterAddition);
+            storage.property(1) = untouched;
+            extraProperties.at<uint32_t>(JSCell::structureIDOffset()) = structureIDOfExtraProperties;
+        };
+
+        extraProperties.setCellState(CellState::PossiblyBlack);
+        FakeTypedObject objectWithMarkedExtraProperties(extraPropertiesWord, orderWordHasExtraProperties);
+        checkLeftToAdditionBySlot(fitting, objectWithMarkedExtraProperties);
+        extraProperties.setCellState(CellState::DefinitelyWhite);
+
         FakeTypedObject markedObject(extraPropertiesWord, orderWordHasExtraProperties);
-        markedObject.at<uint8_t>(JSCell::cellStateOffset()) = static_cast<uint8_t>(CellState::PossiblyBlack);
-        checkLeftToAdditionBySlot(fitting, markedObject);
+        setCellState(markedObject, CellState::PossiblyBlack);
+        stores.runner.recordCallsOf(Entry::operationAOTBarrierSlow);
+        StubRun run = stores.store(storeCase, markedObject.address(), value);
+        stores.runner.countCallsOf(Entry::operationAOTBarrierSlow);
+        AOT_TEST_CHECK(run.numberOfRecordedCalls == 1 && run.recordedArguments[0] == markedObject.address());
+        checkAdded(markedObject);
 
         FakeTypedObject object(extraPropertiesWord, orderWordHasExtraProperties);
-        StubRun run = stores.store(storeCase, object.address(), value);
-        AOT_TEST_CHECK(!run.calledOperation && storage.property(1) == value && storage.property(0) == untouched && storage.property(2) == untouched);
-        AOT_TEST_CHECK(object.at<uint32_t>(JSCell::structureIDOffset()) == PropertyStores::structureIDAfterAddition && extraProperties.structureID() == structureIDOfExtraPropertiesAfterAddition);
+        AOT_TEST_CHECK(!stores.store(storeCase, object.address(), value).calledOperation);
+        checkAdded(object);
+
+        setBarrierThreshold(instance, tautologicalThreshold);
+        instance.mutatorShouldBeFenced = true;
+        FakeTypedObject objectInCollection(extraPropertiesWord, orderWordHasExtraProperties);
+        AOT_TEST_CHECK(!stores.store(storeCase, objectInCollection.address(), value).calledOperation);
+        checkAdded(objectInCollection);
+
+        FakeTypedObject markedObjectInCollection(extraPropertiesWord, orderWordHasExtraProperties);
+        setCellState(markedObjectInCollection, CellState::PossiblyBlack);
+        stores.runner.recordCallsOf(Entry::operationAOTRememberObjects);
+        run = stores.store(storeCase, markedObjectInCollection.address(), value);
+        stores.runner.countCallsOf(Entry::operationAOTRememberObjects);
+        AOT_TEST_CHECK(run.numberOfRecordedCalls == 1 && run.recordedArguments[0] == extraProperties.address() && run.recordedArguments[1] == markedObjectInCollection.address());
+        checkAdded(markedObjectInCollection);
+        instance.mutatorShouldBeFenced = false;
+        setBarrierThreshold(instance, blackThreshold);
     }
 }
 
@@ -823,7 +972,7 @@ static void testAdditionsToExtraPropertiesInNewStorage()
         FakePlainObject extraPropertiesWithoutStorage(structureIDOfExtraProperties);
         FakeTypedObject objectWithoutStorage(hiddenWordFor(extraPropertiesWithoutStorage), orderWordHasExtraProperties);
         stores.file(storeCase, first);
-        stores.allocatorOfFirstStorage.makeRoomAt(firstStorage.address(), sizeof(firstStorage.bytes));
+        stores.allocatorOfFirstStorage.makeRoomAt(firstStorage.address(), firstStorage.bytes.size());
         AOT_TEST_CHECK(!stores.store(storeCase, objectWithoutStorage.address(), value).calledOperation && !stores.allocatorOfFirstStorage.hasRoom());
         AOT_TEST_CHECK(objectWithoutStorage.at<uint32_t>(JSCell::structureIDOffset()) == PropertyStores::structureIDAfterAddition);
         AOT_TEST_CHECK(extraPropertiesWithoutStorage.structureID() == structureIDOfExtraPropertiesAfterAddition && extraPropertiesWithoutStorage.butterfly() == firstStorage.butterfly());
@@ -835,7 +984,7 @@ static void testAdditionsToExtraPropertiesInNewStorage()
             fullStorage.property(index) = valueAt(index);
         FakeStorage<doubledCapacity> doubledStorage;
         FakePlainObject extraProperties(structureIDOfExtraProperties, fullStorage.butterfly());
-        stores.allocatorOfDoubledStorage.makeRoomAt(doubledStorage.address(), sizeof(doubledStorage.bytes));
+        stores.allocatorOfDoubledStorage.makeRoomAt(doubledStorage.address(), doubledStorage.bytes.size());
         for (const Slot& slot : { besideIndexingHeader, pastLimit }) {
             FakeTypedObject object(hiddenWordFor(extraProperties), orderWordHasExtraProperties);
             stores.file(storeCase, slot);
@@ -1315,7 +1464,7 @@ public:
                 record.name = name;
                 record.flags = isOutOfLine ? fieldIsOutOfLine : 0;
                 record.slot = SlotData::create(isOutOfLine ? offsetInExtension : FakeTypedObject::offsetOfField, representation);
-                record.type = type;
+                record.typeNumber = static_cast<uint16_t>(type >> ProgramTables::shiftOfNearTypeNumbers);
                 m_fields[rowOf(shape) + name] = index | (isStoredWithoutTypeTest ? FieldRecordIndex::isStoredWithoutTypeTest : 0);
                 index += 2;
             }
@@ -1417,19 +1566,32 @@ static void testFieldsFoundInFieldTable()
     });
 }
 
+static void testInstructionsOfStoreUnderNameThatLayoutLacks()
+{
+#if AOT_STUB_RUNNER_COUNTS_INSTRUCTIONS && CPU(X86_64) && !ASSERT_ENABLED
+    constexpr uint32_t budget = 143;
+    PropertyStores stores;
+    FieldTable table(stores);
+    stores.clearCaches();
+    stores.runner.setCountsInstructions(true);
+    FakeObjectWithShape withoutRow(FieldTable::shapeWithoutTheNames, bitsOf(jsNumber(1)));
+    StubRun run = stores.store(StoreCase { PutMode::Strict, FiledIn::Front }, withoutRow.address(), bitsOf(jsNumber(42)));
+    AOT_TEST_CHECK(run.calledOperation && run.instructionsInStubs && withoutRow.field() == bitsOf(jsNumber(1)));
+    if (*run.instructionsInStubs != budget)
+        dataLogLn("a store under a name that the layout lacks, found in no table: ", *run.instructionsInStubs, " instructions, the budget is ", budget);
+    AOT_TEST_CHECK(*run.instructionsInStubs <= budget);
+#endif
+}
+
 static void testStoresGoByTablesAlone()
 {
     PropertyStores stores;
     FieldTable table(stores);
-    AccessTableWords& words = stores.runner.instance().propertyCaches.accessTable;
-    AccessTable::Store& place = words.stores[AccessTable::indexFor(PropertyStores::structureID, PropertyStores::storedName)];
-    const uint64_t key = AccessTable::keyFor(PropertyStores::structureID, PropertyStores::storedName);
     const uint64_t before = bitsOf(jsNumber(1));
     const uint64_t number = bitsOf(jsNumber(42));
     forEachStoreWithEmptyCaches(stores, [&](const StoreCase& storeCase) {
         FakeObjectWithShape object(FieldTable::shapeThatTakesAnyValue, before);
         AOT_TEST_CHECK(!stores.store(storeCase, object.address(), number).calledOperation && object.field() == number);
-        AOT_TEST_CHECK(place.key != key && !words.holdsStoresToUnwatchedStructures);
         FakeObjectWithShape withoutRow(FieldTable::shapeWithoutTheNames, before);
         AOT_TEST_CHECK(stores.storeAgain(storeCase, withoutRow.address(), number).calledOperation && withoutRow.field() == before && withoutRow.wordAfterFieldIsUntouched());
 
@@ -1439,7 +1601,6 @@ static void testStoresGoByTablesAlone()
             auto stored = [&]() -> uint64_t& { return isInlineOffset(offset) ? plain.word(Slot::wordIndexFor(offset)) : storage.property(offset - firstOutOfLineOffset); };
             stores.file(storeCase, Slot::createInStorage(toStructureID(PropertyStores::structureID), Slot::Kind::Value, Slot::isOwn, nullptr, offset));
             AOT_TEST_CHECK(!stores.store(storeCase, plain.address(), number).calledOperation && stored() == number);
-            AOT_TEST_CHECK(place.key != key && !words.holdsStoresToUnwatchedStructures);
             stores.clearCaches();
             stored() = before;
             AOT_TEST_CHECK(stores.storeAgain(storeCase, plain.address(), number).calledOperation && stored() == before);
@@ -1514,7 +1675,7 @@ public:
         words.absenceFilters = m_filters.data();
         words.absenceFilterGenerationForStores = generation;
         words.changesUnderNamesOnChains = changesUnderNames;
-        words.namesOfObjectPrototypes = &namesOfObjectPrototypes;
+        words.objectPrototypeStoreStoppers = &objectPrototypeStoreStoppers;
         words.namesChangedOnChains = &namesChangedOnChains;
         letEveryStorePass();
     }
@@ -1528,7 +1689,7 @@ public:
     void letEveryStorePass() { filter() = { PropertyStores::structureID, generation, { }, changesUnderNames, 0 }; }
     void setFlags(uint8_t flags) { m_stores.structure.at<uint8_t>(CompiledStructure::offsetOfFlags()) = flags; }
 
-    uint64_t namesOfObjectPrototypes { 0 };
+    uint64_t objectPrototypeStoreStoppers { 0 };
     uint64_t namesChangedOnChains { 0 };
 
 private:
@@ -1696,9 +1857,9 @@ static void testFieldsCreatedByTheirRecords()
         chains.filter() = { };
         chains.setFlags(static_cast<uint8_t>(CompiledStructure::Flag::HasOnlyFieldsBelowObjectPrototype));
         AOT_TEST_CHECK(isCreatedInEveryShape());
-        chains.namesOfObjectPrototypes = uint64_t { 1 } << name;
+        chains.objectPrototypeStoreStoppers = uint64_t { 1 } << name;
         AOT_TEST_CHECK(isCreatedInEveryShape() == !asksChain);
-        chains.namesOfObjectPrototypes = ~(uint64_t { 1 } << name);
+        chains.objectPrototypeStoreStoppers = ~(uint64_t { 1 } << name);
         AOT_TEST_CHECK(isCreatedInEveryShape());
 
         chains.setFlags(0);
@@ -1724,6 +1885,51 @@ static void testFieldsCreatedByTheirRecords()
         AOT_TEST_CHECK(isCreatedInEveryShape());
         chains.filter().changesUnderNames = Chains::changesUnderNames;
     });
+}
+
+static void testCreationsAreRemembered()
+{
+    PropertyStores stores;
+    FieldTable table(stores);
+    Instance& instance = stores.runner.instance();
+    constexpr uint32_t slotKey = slotKeyFor(FakeTypedObject::offsetOfField, false);
+    constexpr uint32_t orderBefore = orderWordOf(3, 1);
+    constexpr uint32_t orderAfter = orderWordOf(5, 2);
+    constexpr uint32_t frozen = orderWordIsFrozen | orderWordIsSealed | orderWordIsNotExtensible;
+    const uint64_t number = bitsOf(jsNumber(42));
+    std::array<KeyOrderTransition, 16> transitions { };
+    instance.objects.keyOrderTransitions = transitions.data();
+    instance.objects.keyOrderTransitionMask = static_cast<uint32_t>(transitions.size() - 1);
+    uint32_t& creationGeneration = instance.propertyCaches.creationGeneration;
+    for (uint32_t shape : { FieldTable::shapeThatTakesAnyValue, FieldTable::shapeWithTypedField }) {
+        uint64_t wordsBefore = static_cast<uint64_t>(shapeWordOf(shape)) << 32 | orderBefore;
+        KeyOrderTransition& transition = transitions[KeyOrderTransition::hashOf(wordsBefore, slotKey) & instance.objects.keyOrderTransitionMask];
+        forEachStoreWithEmptyCaches(stores, [&](const StoreCase& storeCase) {
+            Chains chains(stores);
+            const bool asksChain = storeCase.mode != PutMode::Define;
+            auto isCreatedAgain = [&](uint32_t orderWord = orderBefore) {
+                FakeObjectWithShapeAndOrder object(shape, 0, orderWord);
+                bool isCreated = !stores.storeAgain(storeCase, object.address(), number).calledOperation;
+                AOT_TEST_CHECK(object.field() == (isCreated ? number : 0) && object.orderWord() == (isCreated ? orderAfter : orderWord));
+                return isCreated;
+            };
+            creationGeneration = 1;
+            transition = { wordsBefore, slotKey, orderAfter };
+            FakeObjectWithShapeAndOrder first(shape, 0, orderBefore);
+            AOT_TEST_CHECK(!stores.store(storeCase, first.address(), number).calledOperation && first.field() == number && first.orderWord() == orderAfter);
+            transition = { };
+            AOT_TEST_CHECK(isCreatedAgain());
+            AOT_TEST_CHECK(!isCreatedAgain(orderBefore | frozen));
+            chains.filter().namesThatStopStores[0] = UINT64_MAX;
+            AOT_TEST_CHECK(isCreatedAgain());
+            ++creationGeneration;
+            AOT_TEST_CHECK(isCreatedAgain() == !asksChain);
+            chains.letEveryStorePass();
+            AOT_TEST_CHECK(isCreatedAgain());
+            chains.filter().namesThatStopStores[0] = UINT64_MAX;
+            AOT_TEST_CHECK(isCreatedAgain());
+        });
+    }
 }
 
 static void testFieldsCreatedOutsideTheCellByTheirRecords()
@@ -1787,10 +1993,13 @@ std::span<const NativeTest> stubPropertyStoreTests()
         { "stubs/put-by-id/additions-with-first-storage"_s, ImageTests::whenExecutable<testAdditionsWithFirstStorage> },
         { "stubs/put-by-id/additions-with-doubled-storage"_s, ImageTests::whenExecutable<testAdditionsWithDoubledStorage> },
         { "stubs/put-by-id/additions-beside-indexing-header"_s, ImageTests::whenExecutable<testAdditionsBesideIndexingHeader> },
+        { "stubs/put-by-id/additions-copy-elements"_s, ImageTests::whenExecutable<testAdditionsCopyElements> },
+        { "stubs/put-by-id/additions-clear-pristine-flag"_s, ImageTests::whenExecutable<testAdditionsClearPristineFlag> },
         { "stubs/put-by-id/setters"_s, ImageTests::whenExecutable<testSetters> },
         { "stubs/put-by-id/exits"_s, ImageTests::whenExecutable<testExits> },
         { "stubs/put-by-id/barriers"_s, ImageTests::whenExecutable<testBarriers> },
         { "stubs/write-barrier/remembers-owner-without-operation"_s, ImageTests::whenExecutable<testBarrierRemembersOwnerWithoutOperation> },
+        { "stubs/put-by-id/instructions/a-name-that-the-layout-lacks"_s, ImageTests::whenExecutable<testInstructionsOfStoreUnderNameThatLayoutLacks> },
         { "stubs/put-by-id/typed-fields"_s, ImageTests::whenExecutable<testTypedFields> },
         { "stubs/put-by-id/fields-that-leave-the-stub"_s, ImageTests::whenExecutable<testFieldsThatLeaveTheStub> },
         { "stubs/put-by-id/created-fields"_s, ImageTests::whenExecutable<testCreatedFields> },
@@ -1808,6 +2017,7 @@ std::span<const NativeTest> stubPropertyStoreTests()
         { "stubs/put-by-id/fields-stored-by-their-records"_s, ImageTests::whenExecutable<testFieldsStoredByTheirRecords> },
         { "stubs/put-by-id/fields-created-by-their-records"_s, ImageTests::whenExecutable<testFieldsCreatedByTheirRecords> },
         { "stubs/put-by-id/fields-created-by-slots-that-remember-the-order"_s, ImageTests::whenExecutable<testFieldsCreatedBySlotsThatRememberTheOrder> },
+        { "stubs/put-by-id/creations-are-remembered"_s, ImageTests::whenExecutable<testCreationsAreRemembered> },
         { "stubs/put-by-id/fields-created-outside-the-cell-by-their-records"_s, ImageTests::whenExecutable<testFieldsCreatedOutsideTheCellByTheirRecords> },
         { "stubs/put-by-val/integrity-levels"_s, ImageTests::whenExecutable<testKeyedStoresToObjectsWithIntegrityLevels> },
         { "stubs/put-by-val/symbols-whose-holders-are-prepared"_s, ImageTests::whenExecutable<testKeyedStoresUnderSymbolsWhoseHoldersArePrepared> },

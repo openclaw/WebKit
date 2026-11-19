@@ -16,6 +16,7 @@
 #include <span>
 #include <utility>
 #include <wtf/Atomics.h>
+#include <wtf/Condition.h>
 #include <wtf/Deque.h>
 #include <wtf/Function.h>
 #include <wtf/Lock.h>
@@ -39,12 +40,19 @@ public:
     explicit BytesSharedByThreads(size_t size) { m_bytes.fill(0, size); }
 
     size_t size() const { return m_bytes.size(); }
-    uint8_t at(size_t index) const { return WTF::atomicLoad(&m_bytes[index], std::memory_order_relaxed); }
-    void set(size_t index, uint8_t value) { WTF::atomicStore(&m_bytes[index], value, std::memory_order_relaxed); }
+    uint8_t at(size_t index) const { return WTF::atomicLoad<MemoryOrder::Relaxed>(&m_bytes[index]); }
+    void set(size_t index, uint8_t value) { WTF::atomicStore<MemoryOrder::Relaxed>(&m_bytes[index], value); }
+    void add(size_t index, uint8_t bits)
+    {
+        if ((at(index) & bits) != bits)
+            WTF::atomicExchangeOr<MemoryOrder::Relaxed>(&m_bytes[index], bits);
+    }
 
 private:
     mutable Vector<uint8_t> m_bytes;
 };
+
+class LoopTeam;
 
 class ParallelLoops {
     WTF_MAKE_NONCOPYABLE(ParallelLoops);
@@ -53,9 +61,11 @@ public:
     static constexpr size_t workerStackSize = 64 * MB;
 
     JS_EXPORT_PRIVATE explicit ParallelLoops(unsigned width, const HostThreadPool* = nullptr);
+    JS_EXPORT_PRIVATE ~ParallelLoops();
 
     unsigned width() const { return m_width; }
     const HostThreadPool* hostPool() const { return m_hostPool; }
+    LoopTeam& team() const { return m_team; }
 
     JS_EXPORT_PRIVATE void schedule(void (*run)(void* argument), void* argument) const;
 
@@ -74,6 +84,7 @@ private:
     const HostThreadPool* const m_hostPool;
     const ParallelLoops* const m_loopsOfBuild;
     RefPtr<WorkerPool> m_ownPool;
+    const Ref<LoopTeam> m_team;
 };
 
 JS_EXPORT_PRIVATE void runOnBuildThread(NOESCAPE const ScopedLambda<void()>&);
@@ -97,6 +108,8 @@ public:
 
     JS_EXPORT_PRIVATE size_t numberOfJobsWaiting() const;
 
+    JS_EXPORT_PRIVATE void waitUntilAllHaveRun();
+
 private:
     explicit BackgroundJobs(const ParallelLoops&);
 
@@ -108,6 +121,7 @@ private:
     mutable Lock m_lock;
     Deque<Job> m_jobs WTF_GUARDED_BY_LOCK(m_lock);
     bool m_isRunning WTF_GUARDED_BY_LOCK(m_lock) { false };
+    Condition m_allHaveRun;
 };
 
 template<typename T>
@@ -133,8 +147,10 @@ Vector<Vector<T>> collectChunksInParallel(const ParallelLoops& loops, unsigned c
     ChunksOfIndices division = divideIntoChunks(count);
     Vector<Vector<T>> chunks(division.size());
     forEachIndexInParallel(loops, division.size(), [&](unsigned chunk) {
-        for (unsigned index = division.firstIndexOf[chunk]; index < division.firstIndexOf[chunk + 1]; ++index)
-            collect(index, chunks[chunk]);
+        Vector<T>& collected = chunks[chunk];
+        unsigned end = division.firstIndexOf[chunk + 1];
+        for (unsigned index = division.firstIndexOf[chunk]; index < end; ++index)
+            collect(index, collected);
     });
     return chunks;
 }

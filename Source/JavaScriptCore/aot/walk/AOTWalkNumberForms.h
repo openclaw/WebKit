@@ -20,12 +20,13 @@ namespace JSC { namespace AOT { namespace Typed {
 
 bool hasMechanismsOfNumberForms(const Walker&);
 PrimitiveKnownToFolding primitiveKnownInNumberForms(const Walker&, Reference);
+PrimitiveKnownToFolding primitiveKnownInNumberForms(const Walker&, Reference, const Type&);
 std::optional<int64_t> integerKnownInNumberForms(const Walker&, Reference);
 Reference integerInNumberForms(Walker&, int64_t);
 Reference booleanInNumberForms(Walker&, bool);
 Reference buildOperatorInNumberForms(Walker&, Opcode, Reference left, Reference right, Origin);
 Reference buildInAllowedFormInNumberForms(Walker&, Draft&&);
-void goOnWhereTestPassesInNumberForms(Walker&, Reference passes, BlockID otherwise);
+void continueIfTrue(Walker&, Reference passes, BlockID otherwise);
 Reference buildNarrowedInNumberForms(Walker&, Reference value, Reference test, uint32_t operandIndex, bool isOnTakenEdge, Origin);
 struct WayInNumberForms {
     BlockID end;
@@ -35,8 +36,8 @@ struct WayInNumberForms {
 Reference meetInNumberForms(Walker&, BlockID meeting, std::span<const WayInNumberForms>, Reference* metBeside = nullptr);
 
 struct DivisionAsWritten {
-    ValueID dividend;
-    ValueID divisor;
+    Reference dividend;
+    Reference divisor;
 };
 std::optional<DivisionAsWritten> findQuotientOfIntegers(Walker&, ValueID number, const InputsOfTypedOperation&);
 struct WholeRemainder {
@@ -56,10 +57,16 @@ struct BitsOfDividendCompared {
 std::optional<BitsOfDividendCompared> tryCompareBitsOfDividend(Walker&, Origin, const WholeRemainder&, int64_t comparedWith);
 Reference buildComparisonWhereDivisorsAreNotZero(Walker&, Draft&& comparison, std::span<const ValueID> divisorsThatMayBeZero);
 bool buildNumberRemainderWithItsTest(Walker&, const BodyValue& remainder);
+Reference buildWideProduct(Walker&, const BodyValue& sum);
+std::optional<unsigned> widthOfCarriedDigit(const BodyIndex&, ValueID carried, ValueID parameter);
+Reference buildLowBitsOfWideProduct(Walker&, Reference narrow, Reference mask, Origin);
+ValueID findTestOfRemainder(Walker&, const BodyValue& remainder);
 
 inline constexpr OpcodeSet opcodesThatBuildNumberFormTakes = allBitwiseOperators | allEqualities | allRelations | OpcodeSet { Opcode::Add, Opcode::Sub, Opcode::Mul, Opcode::Div, Opcode::Mod, Opcode::Pow,
     Opcode::LogicalNot, Opcode::ToBoolean };
 AOT_LINK_OF_WALK(buildNumberForm, opcodesThatBuildNumberFormTakes)
+inline constexpr OpcodeSet opcodesThatBuildOperatorOnWhatWalkHasBuiltTakes = opcodesThatBuildNumberFormTakes | opcodesThatBuildTypedOperatorTakes;
+AOT_LINK_OF_WALK(buildOperatorOnWhatWalkHasBuilt, opcodesThatBuildOperatorOnWhatWalkHasBuiltTakes)
 
 
 Reference buildCallOnNumbers(Walker&, const CallByOneRow&);
@@ -67,12 +74,13 @@ std::optional<PrimitiveKnownToFolding> foldExactly(Walker&, const CallByOneRow&)
 
 Reference buildCharCode(Walker&, const CallByOneRow&);
 Reference codeUnitBesideCharCode(Walker&, Reference number);
-Reference codeUnitBesideCharacter(Walker&, Reference character);
+Reference codePointBesideCharacter(Walker&, Reference character);
 Reference integerThatCharCodeIsKnownToBe(Walker&, Reference number);
 Reference integerThatCharCodeIsKnownToBe(Walker&, const BodyValue& user, ValueID number);
 bool buildComparisonByCodeUnit(Walker&, const BodyValue& comparison, const InputsOfTypedOperation&);
 
 bool buildElementAccessUnderNumber(Walker&, const BodyValue&, const InputsOfTypedOperation&);
+bool tellsNumberFromUndefinedInKeyOfView(Walker&, const BodyValue&, const TypesOfInputs&);
 
 struct SwitchOnNumbers {
     Reference subject;

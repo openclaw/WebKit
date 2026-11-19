@@ -7,6 +7,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
 #include "AOTBody.h"
 #include "AOTBuiltinIDTypes.h"
 #include "AOTCodeRole.h"
@@ -18,6 +19,7 @@
 #include "AOTResultRules.h"
 #include "AOTSchemaRecords.h"
 #include "AOTSchemaSupport.h"
+#include "AOTSystemResources.h"
 #include "AOTTypeKinds.h"
 #include "AOTTypeNarrowing.h"
 #include "AOTVector.h"
@@ -26,15 +28,17 @@
 #include "TypedArrayType.h"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <optional>
 #include <span>
 #include <type_traits>
-#include <wtf/BitVector.h>
 #include <wtf/FastMalloc.h>
 #include <wtf/HashMap.h>
 #include <wtf/Noncopyable.h>
+#include <wtf/OSAllocator.h>
 #include <wtf/OptionSet.h>
+#include <wtf/PageBlock.h>
 #include <wtf/PrintStream.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/text/WTFString.h>
@@ -110,18 +114,16 @@ static_assert(sizeof(Reference) == sizeof(uint32_t) && !Reference() && !Referenc
 
 static constexpr uint8_t byteOfRoomThatIsTaken = 0xa5;
 
-template<typename T, unsigned logOfSegmentSize>
+template<typename T, unsigned logOfMostRecords>
 class StableArray {
     WTF_MAKE_NONCOPYABLE(StableArray);
     static_assert(std::is_trivially_copyable_v<T> && std::is_trivially_destructible_v<T>);
 public:
-    static constexpr uint32_t segmentSize = 1u << logOfSegmentSize;
-
     StableArray() = default;
     ~StableArray()
     {
-        for (uint32_t index = 0; index < m_capacity; index += segmentSize)
-            fastFree(recordAt(index));
+        if (m_records)
+            releaseAddresses(m_records, m_bytesReserved);
     }
 
     uint32_t size() const { return m_size; }
@@ -130,12 +132,12 @@ public:
     ALWAYS_INLINE T& operator[](uint32_t index) LIFETIME_BOUND
     {
         ASSERT(index < m_size);
-        return *recordAt(index);
+        return m_records[index];
     }
     ALWAYS_INLINE const T& operator[](uint32_t index) const LIFETIME_BOUND
     {
         ASSERT(index < m_size);
-        return *recordAt(index);
+        return m_records[index];
     }
     T& last() LIFETIME_BOUND { return (*this)[m_size - 1]; }
     const T& last() const LIFETIME_BOUND { return (*this)[m_size - 1]; }
@@ -144,7 +146,7 @@ public:
     {
         uint32_t index = m_size;
         if (index == m_capacity) [[unlikely]]
-            addSegment();
+            commitMoreRecords();
         ++m_size;
         (*this)[index] = value;
         return index;
@@ -153,7 +155,7 @@ public:
     {
         uint32_t index = m_size;
         if (index == m_capacity) [[unlikely]]
-            addSegment();
+            commitMoreRecords();
         ++m_size;
         return *new (NotNull, &(*this)[index]) T;
     }
@@ -168,37 +170,83 @@ public:
         m_size = newSize;
     }
     void clear() { m_size = 0; }
-    void takeRoomOf(StableArray& former)
+    void releasePages(uint32_t first, uint32_t end)
     {
-        RELEASE_ASSERT(!m_capacity);
-        m_addressesOfIndexZero = std::exchange(former.m_addressesOfIndexZero, { });
-        m_addressOfIndexZeroBySegment = m_addressesOfIndexZero.span().data();
-        m_capacity = std::exchange(former.m_capacity, 0);
-        former.m_addressOfIndexZeroBySegment = nullptr;
-        former.m_size = 0;
 #if ASSERT_ENABLED
-        for (uint32_t index = 0; index < m_capacity; index += segmentSize)
-            memset(static_cast<void*>(recordAt(index)), byteOfRoomThatIsTaken, sizeof(T) * segmentSize);
+        memset(static_cast<void*>(m_records + first), byteOfRoomThatIsTaken, sizeof(T) * (end - first));
+#else
+        uintptr_t begin = roundUpToMultipleOf(pageSize(), std::bit_cast<uintptr_t>(m_records + first));
+        uintptr_t behind = std::bit_cast<uintptr_t>(m_records + end) & ~(static_cast<uintptr_t>(pageSize()) - 1);
+        if (begin < behind) {
+            OSAllocator::decommit(std::bit_cast<void*>(begin), behind - begin);
+            OSAllocator::commit(std::bit_cast<void*>(begin), behind - begin, true, false);
+        }
 #endif
+    }
+    void forgetUnit()
+    {
+#if ASSERT_ENABLED
+        if (m_size)
+            memset(static_cast<void*>(m_records), byteOfRoomThatIsTaken, sizeof(T) * m_size);
+#endif
+        m_size = 0;
+        if (m_bytesCommitted > mostBytesKept) [[unlikely]]
+            decommitRest();
     }
 
 private:
-    ALWAYS_INLINE T* recordAt(uint32_t index) const
+    static constexpr size_t commitGranularity = 256 * KB;
+    static constexpr size_t mostBytesKept = 512 * KB;
+
+    COLD NEVER_INLINE void reserve()
     {
-        RELEASE_ASSERT(index < m_capacity);
-        return reinterpret_cast<T*>(m_addressOfIndexZeroBySegment[index >> logOfSegmentSize] + static_cast<uintptr_t>(index) * sizeof(T));
+        static constexpr size_t parts = 64;
+        static constexpr size_t mostBytesReserved = roundUpToMultipleOf<commitGranularity>(sizeof(T) << logOfMostRecords);
+        m_bytesReserved = mostBytesReserved;
+        static std::atomic<bool> addressesAreUnlimited { false };
+        if (addressesAreUnlimited.load(std::memory_order_relaxed))
+            m_records = static_cast<T*>(tryReserveAddresses(m_bytesReserved));
+        while (!m_records && m_bytesReserved > commitGranularity) {
+            if (void* probe = tryReserveAddresses(m_bytesReserved * parts)) {
+                releaseAddresses(probe, m_bytesReserved * parts);
+                addressesAreUnlimited.store(m_bytesReserved == mostBytesReserved, std::memory_order_relaxed);
+                break;
+            }
+            m_bytesReserved = roundUpToMultipleOf<commitGranularity>(m_bytesReserved / 2);
+        }
+        if (!m_records)
+            m_records = static_cast<T*>(tryReserveAddresses(m_bytesReserved));
+        while (!m_records && m_bytesReserved > commitGranularity) {
+            m_bytesReserved = roundUpToMultipleOf<commitGranularity>(m_bytesReserved / 2);
+            m_records = static_cast<T*>(tryReserveAddresses(m_bytesReserved));
+        }
+        if (!m_records) {
+            exitIfBuildIsOutOfMemory();
+            RELEASE_ASSERT_WITH_MESSAGE(m_records, "AOT: no addresses are left for the records of a unit");
+        }
     }
-    COLD NEVER_INLINE void addSegment()
+    COLD NEVER_INLINE void commitMoreRecords()
     {
-        m_addressesOfIndexZero.append(reinterpret_cast<uintptr_t>(fastMalloc(sizeof(T) * segmentSize)) - static_cast<uintptr_t>(m_capacity) * sizeof(T));
-        m_addressOfIndexZeroBySegment = m_addressesOfIndexZero.span().data();
-        m_capacity += segmentSize;
+        if (!m_records)
+            reserve();
+        RELEASE_ASSERT_WITH_MESSAGE(m_bytesCommitted < m_bytesReserved, "AOT: a unit has more records than the process may reserve addresses for");
+        OSAllocator::commit(reinterpret_cast<uint8_t*>(m_records) + m_bytesCommitted, commitGranularity, true, false);
+        m_bytesCommitted += commitGranularity;
+        m_capacity = static_cast<uint32_t>(m_bytesCommitted / sizeof(T));
     }
 
-    Vector<uintptr_t, 4> m_addressesOfIndexZero;
-    const uintptr_t* m_addressOfIndexZeroBySegment { nullptr };
+    COLD NEVER_INLINE void decommitRest()
+    {
+        OSAllocator::decommit(reinterpret_cast<uint8_t*>(m_records) + mostBytesKept, m_bytesCommitted - mostBytesKept);
+        m_bytesCommitted = mostBytesKept;
+        m_capacity = static_cast<uint32_t>(m_bytesCommitted / sizeof(T));
+    }
+
+    T* m_records { nullptr };
     uint32_t m_size { 0 };
     uint32_t m_capacity { 0 };
+    size_t m_bytesReserved { 0 };
+    size_t m_bytesCommitted { 0 };
 };
 
 class SideWords {
@@ -245,17 +293,14 @@ public:
 
     void rewindTo(Mark);
     void clear() { rewindTo({ }); }
-    void takeRoomOf(SideWords& former)
+    void forgetUnit()
     {
-        RELEASE_ASSERT(m_segments.isEmpty());
-        former.clear();
-        if (!former.m_segments.isEmpty() && former.m_segments.first().capacity > wordsPerSegment) {
-            fastFree(former.m_segments.first().words);
-            former.m_segments.removeAt(0);
-        }
-        m_segments = std::exchange(former.m_segments, { });
-        former.clear();
         clear();
+        if (!m_segments.isEmpty() && m_segments.first().capacity > wordsPerSegment) {
+            fastFree(m_segments.first().words);
+            m_segments.removeAt(0);
+            clear();
+        }
 #if ASSERT_ENABLED
         for (const Segment& segment : m_segments)
             memset(segment.words, byteOfRoomThatIsTaken, static_cast<size_t>(segment.capacity) * sizeof(uint32_t));
@@ -367,6 +412,18 @@ public:
         m_size = size;
         memset(static_cast<void*>(m_words), 0xFF, inlineCapacity * sizeof(T));
     }
+    ALWAYS_INLINE void resetToFewWordsOfOnes(uint32_t size)
+    {
+        ASSERT(size <= inlineCapacity);
+        m_size = size;
+        memset(static_cast<void*>(m_words), 0xFF, inlineCapacity * sizeof(T));
+    }
+    ALWAYS_INLINE void resetToWordsAtHand(const std::array<T, inlineCapacity>& words, uint32_t size)
+    {
+        ASSERT(size <= inlineCapacity);
+        m_size = size;
+        memcpy(static_cast<void*>(m_words), words.data(), inlineCapacity * sizeof(T));
+    }
     ALWAYS_INLINE void resetTo(const T* words, uint32_t size)
     {
         T* own = size > inlineCapacity ? resizeWithoutWords(size) : m_words;
@@ -468,7 +525,7 @@ public:
     uint32_t numberOfOperands() const { return m_hasSideWords ? m_words[3] : m_numberOfInlineOperands; }
     uint32_t numberOfNamedOperands() const { return m_hasSideWords ? m_words[2] & maxNumberOfNamedOperands : m_numberOfInlineOperands; }
     uint32_t numberOfVariadicOperands() const { return numberOfOperands() - numberOfNamedOperands(); }
-    ValueID operand(uint32_t operandIndex) const
+    ALWAYS_INLINE ValueID operand(uint32_t operandIndex) const
     {
         std::span<const ValueID> all = operands();
         RELEASE_ASSERT(operandIndex < all.size());
@@ -500,7 +557,7 @@ public:
             return { sideWords(), numberOfSidePayloadWords() };
         return { m_words.data() + m_numberOfInlineOperands, m_numberOfInlinePayloadWords };
     }
-    uint32_t payloadWordAt(unsigned word) const
+    ALWAYS_INLINE uint32_t payloadWordAt(unsigned word) const
     {
         std::span<const uint32_t> words = payload();
         if (word < words.size()) [[likely]]
@@ -564,7 +621,7 @@ struct Operation : Instruction {
     BlockID block() const { return blockIndex == noBlock ? BlockID() : BlockID(blockIndex); }
     EffectTraits traits() const { return EffectTraits::fromBits(traitBits); }
 
-    OperandKind operandKind(uint32_t operandIndex) const { return operandKindOf(opcode, operandIndex); }
+    ALWAYS_INLINE OperandKind operandKind(uint32_t operandIndex) const { return operandKindOf(opcode, operandIndex); }
     OperandUses operandUses(uint32_t operandIndex) const { return operandUsesOf(opcode, operandIndex); }
 
 #include "AOTSchemaOperationGetters.inc"
@@ -578,9 +635,11 @@ public:
     std::span<const ValueID> span() const { return m_records.span(); }
 
 private:
+    friend class Code;
     friend class CodeTextParser;
     friend class Walker;
     Vector<ValueID, 8> m_records;
+    BlockID m_heldFor;
 };
 
 struct Edge {
@@ -605,7 +664,7 @@ struct Terminator : Instruction {
     EdgeID firstEdge;
     uint32_t numberOfEdges { 0 };
 
-    OperandKind operandKind(uint32_t operandIndex) const { return operandKindOf(kind, operandIndex); }
+    ALWAYS_INLINE OperandKind operandKind(uint32_t operandIndex) const { return operandKindOf(kind, operandIndex); }
     OperandUses operandUses(uint32_t operandIndex) const { return operandUsesOf(kind, operandIndex); }
 
     bool isConditionalBranch() const { return kind == TerminatorKind::Branch || kind == TerminatorKind::TestAndBranch; }
@@ -628,6 +687,8 @@ struct Terminator : Instruction {
 #include "AOTSchemaTerminatorGetters.inc"
 };
 
+enum class BeliefAheadOfEdges : uint8_t { NoEdgeIsAwaited, Nothing, Listed, GivenUp };
+
 struct Block {
     Terminator terminator;
     EdgeID handler;
@@ -638,15 +699,28 @@ struct Block {
     bool isLoopHead { false };
     bool isEntry { false };
     bool meetsStepWrittenByHand { false };
+    bool keepsSitesThoughRare { false };
+    bool isInRareLoop { false };
+    bool isSealed { false };
+    BeliefAheadOfEdges beliefAheadOfEdges { BeliefAheadOfEdges::NoEdgeIsAwaited };
 
     bool isHandlerBlock() const { return role != BlockRole::Ordinary; }
     bool hasEnded() const { return terminator.isSet; }
     std::span<const ValueID> parameters() const LIFETIME_BOUND { return { m_parameters, m_numberOfParameters }; }
+    static constexpr size_t mostParametersSearchedFromFront = 32;
+    ALWAYS_INLINE size_t placeOfParameter(ValueID parameter) const
+    {
+        if (m_numberOfParameters > mostParametersSearchedFromFront) [[unlikely]]
+            return placeAmongManyParameters(parameter);
+        return std::ranges::find(parameters(), parameter) - parameters().begin();
+    }
     EdgeID firstEdgeIn() const { return m_firstEdgeIn; }
 
 private:
     friend class Code;
     friend class Sweep;
+
+    size_t placeAmongManyParameters(ValueID) const;
 
     const ValueID* m_parameters { nullptr };
     uint32_t m_numberOfParameters { 0 };
@@ -689,6 +763,7 @@ enum class FateOfPoll : uint8_t {
 struct PollWithFate {
     ValueID poll;
     FateOfPoll fate { FateOfPoll::IsDropped };
+    ValueID unlessKept;
 };
 
 class DraftWords {
@@ -719,7 +794,7 @@ public:
     }
 
     std::span<const uint32_t> payload() const LIFETIME_BOUND { return m_payload.span(); }
-    uint32_t payloadWordAt(unsigned word) const
+    ALWAYS_INLINE uint32_t payloadWordAt(unsigned word) const
     {
         if (word < m_payload.size()) [[likely]]
             return m_payload[word];
@@ -780,11 +855,27 @@ protected:
         m_operands.resetToWordsOfOnes(numberOfNamedOperands);
         m_payload.resetTo(defaultPayload.data(), static_cast<uint32_t>(defaultPayload.size()));
     }
+    ALWAYS_INLINE void resetOperandsAndPayload(const FreshWordsOfOperation& fresh)
+    {
+        if (fresh.numberOfPayloadWords > numberOfFreshPayloadWordsAtHand || fresh.numberOfNamedOperands > numberOfOperandsKeptInDraft) [[unlikely]] {
+            resetOperandsAndPayloadOfManyWords(fresh);
+            return;
+        }
+        flags = 0;
+        m_numberOfNamedOperands = fresh.numberOfNamedOperands;
+        m_operands.resetToFewWordsOfOnes(fresh.numberOfNamedOperands);
+        m_payload.resetToWordsAtHand(fresh.firstPayloadWords, fresh.numberOfPayloadWords);
+    }
+    NEVER_INLINE void resetOperandsAndPayloadOfManyWords(const FreshWordsOfOperation& fresh)
+    {
+        resetOperandsAndPayload(fresh.numberOfNamedOperands, { fresh.payload, fresh.numberOfPayloadWords });
+    }
     void copyWordsOf(const Instruction&, NOESCAPE const Invocable<Reference(ValueID)> auto& referenceOf);
 
 private:
-    ShortList<Reference, 8> m_operands;
-    ShortList<uint32_t, 12> m_payload;
+    static constexpr uint32_t numberOfOperandsKeptInDraft = 8;
+    ShortList<Reference, numberOfOperandsKeptInDraft> m_operands;
+    ShortList<uint32_t, numberOfFreshPayloadWordsAtHand> m_payload;
     uint32_t m_numberOfNamedOperands { 0 };
 };
 
@@ -799,29 +890,64 @@ void DraftWords::copyWordsOf(const Instruction& instruction, NOESCAPE const Invo
     m_payload.replaceFrom(0, instruction.payload(), absentPayloadWord);
 }
 
+struct SteppedWithCounter {
+    ValueID stepped;
+    ValueID counter;
+    ValueID steppedStart;
+    ValueID counterStart;
+    bool counterRises { false };
+
+    bool operator==(const SteppedWithCounter&) const = default;
+};
+
+struct GroundsOfPosition {
+    ValueID view;
+    ValueID position;
+    ValueID length;
+    ValueID isBelow;
+    bool isBelowResult { true };
+    ValueID isFromZeroUp;
+    bool isNonNegativeResult { true };
+    ValueID counter;
+    ValueID start;
+    ValueID stepNonNegativeCheck;
+    ValueID limitWithinLengthCheck;
+    ValueID loweredCounter;
+    ValueID loweredFrom;
+    bool loweringLoopIsClosed { false };
+    SteppedWithCounter steppedBeside { };
+    ValueID counterTest;
+    bool counterTestResult { true };
+    ValueID remainder;
+};
+
 class PassedTest {
 public:
     struct Side {
         ValueID test;
-        bool answersYes { true };
+        bool testResult { true };
     };
     std::span<const Side> sides() const LIFETIME_BOUND { return std::span(m_sides).first(m_numberOfSides); }
+    const std::optional<GroundsOfPosition>& groundsOfPosition() const LIFETIME_BOUND { return m_groundsOfPosition; }
     PassedTest with(const PassedTest& other) const
     {
         PassedTest both = *this;
         for (const Side& side : other.sides())
             both.add(side);
+        if (!both.m_groundsOfPosition)
+            both.m_groundsOfPosition = other.m_groundsOfPosition;
         return both;
     }
 
 private:
     friend class Walker;
+    friend struct GroundsWrittenInTests;
     PassedTest() = default;
-    PassedTest(ValueID test, bool answersYes) { add({ test, answersYes }); }
+    PassedTest(ValueID test, bool testResult) { add({ test, testResult }); }
     void add(const Side& added)
     {
         for (const Side& side : sides()) {
-            if (side.test == added.test && side.answersYes == added.answersYes)
+            if (side.test == added.test && side.testResult == added.testResult)
                 return;
         }
         RELEASE_ASSERT(m_numberOfSides < m_sides.size());
@@ -830,6 +956,7 @@ private:
 
     std::array<Side, 4> m_sides;
     uint8_t m_numberOfSides { 0 };
+    std::optional<GroundsOfPosition> m_groundsOfPosition;
 };
 
 struct Draft : DraftWords {
@@ -845,8 +972,8 @@ struct Draft : DraftWords {
     explicit Draft(Opcode newOpcode) { become(newOpcode); }
     Draft(Opcode newOpcode, Origin origin)
     {
-        become(newOpcode);
         setOrigin(origin);
+        become(newOpcode);
     }
 
     ALWAYS_INLINE void become(Opcode newOpcode)
@@ -859,13 +986,16 @@ struct Draft : DraftWords {
         standsForNoValueOfInput = false;
         inputValueGiven = { };
         testsPassed = std::nullopt;
-        const FreshWordsOfOperation& fresh = freshWordsOf(newOpcode);
-        resetOperandsAndPayload(fresh.numberOfNamedOperands, { fresh.payload, fresh.numberOfPayloadWords });
+        resetOperandsAndPayload(freshWordsOf(newOpcode));
     }
 
-    OperandKind operandKind(uint32_t operandIndex) const { return operandKindOf(opcode, operandIndex); }
+    ALWAYS_INLINE OperandKind operandKind(uint32_t operandIndex) const { return operandKindOf(opcode, operandIndex); }
     OperandUses operandUses(uint32_t operandIndex) const { return operandUsesOf(opcode, operandIndex); }
-    void restOn(const PassedTest& passed) { testsPassed = testsPassed ? testsPassed->with(passed) : passed; }
+    void restOn(const PassedTest& passed)
+    {
+        RELEASE_ASSERT(passed.groundsOfPosition() && passed.groundsOfPosition()->view == operand(0).id() && passed.groundsOfPosition()->position == operand(1).id());
+        testsPassed = testsPassed ? testsPassed->with(passed) : passed;
+    }
 
 #include "AOTSchemaOperationGetters.inc"
 #include "AOTSchemaOperationSetters.inc"
@@ -887,7 +1017,7 @@ struct TerminatorDraft : DraftWords {
         resetOperandsAndPayload(numberOfNamedOperandsOf(newKind), defaultPayloadOf(newKind));
     }
 
-    OperandKind operandKind(uint32_t operandIndex) const { return operandKindOf(kind, operandIndex); }
+    ALWAYS_INLINE OperandKind operandKind(uint32_t operandIndex) const { return operandKindOf(kind, operandIndex); }
     OperandUses operandUses(uint32_t operandIndex) const { return operandUsesOf(kind, operandIndex); }
 
 #include "AOTSchemaTerminatorGetters.inc"
@@ -900,19 +1030,12 @@ struct LiveAtSuspension {
     uint32_t count { 0 };
 };
 
-struct ReleaseBehindLastRead {
-    BlockID block;
-    ValueID behind;
-    ValueID released;
-};
-
 class Code {
     WTF_MAKE_NONCOPYABLE(Code);
 public:
     Code() = default;
 
     void reset(CodeUnit);
-    void takeRoomOf(Code& former);
 
     enum class FrequenciesOfBlocks : uint8_t { AsGiven, AllNormal, DrawnBySeed };
     void takeFrequenciesOfBlocks(FrequenciesOfBlocks taken, uint32_t seed)
@@ -930,9 +1053,9 @@ public:
     uint32_t numberOfBlocks() const { return m_blocks.size(); }
     uint32_t numberOfEdges() const { return m_edges.size(); }
 
-    const Operation& at(ValueID id) const LIFETIME_BOUND { return m_operations[id.index()]; }
-    const Block& at(BlockID id) const LIFETIME_BOUND { return m_blocks[id.index()]; }
-    const Edge& at(EdgeID id) const LIFETIME_BOUND { return m_edges[id.index()]; }
+    ALWAYS_INLINE const Operation& at(ValueID id) const LIFETIME_BOUND { return m_operations[id.index()]; }
+    ALWAYS_INLINE const Block& at(BlockID id) const LIFETIME_BOUND { return m_blocks[id.index()]; }
+    ALWAYS_INLINE const Edge& at(EdgeID id) const LIFETIME_BOUND { return m_edges[id.index()]; }
 
     bool isConstant(ValueID id) const { return !at(id).block(); }
     BlockID blockOf(ValueID id) const { return at(id).block(); }
@@ -946,16 +1069,39 @@ public:
     std::span<const PollWithFate> pollsWithFates() const LIFETIME_BOUND { return m_pollsWithFates.span(); }
 
     bool hasHandlers() const { return m_hasHandlers; }
+    bool hasBoxesForHandlers() const { return m_hasBoxesForHandlers; }
+    void noteBoxForHandler() { m_hasBoxesForHandlers = true; }
     bool hasSuspensions() const { return m_hasSuspensions; }
     bool hasLoops() const { return m_hasLoops; }
     bool holdsFrameCells() const { return m_holdsFrameCells; }
     bool holdsCallThatPlanHasNotCounted() const { return m_holdsCallThatPlanHasNotCounted; }
     bool callsOfFunctionNeverCollect() const { return m_callsOfFunctionNeverCollect; }
-    bool readsNumbersOutOfBytes() const { return m_readsNumbersOutOfBytes; }
+    bool readsNumbersOutOfBytes() const { return m_readsNumbersOutOfBytes || m_opcodesOfValues.contains(Opcode::GetDataViewElement); }
+    bool hasOptionalNumberArithmetic() const { return m_hasOptionalNumberArithmetic; }
+    bool callsItself() const { return m_callsItself; }
     bool isEntryThatWalksBody() const { return m_isEntryThatWalksBody; }
+    bool mayHoldReturnedCalls() const { return m_mayHoldReturnedCalls; }
+    bool has(Mechanism mechanism, const Facts& facts) const { return facts.mechanisms().contains(mechanism) && !m_mechanismsWithheld.contains(mechanism); }
     const OpcodeSet& opcodesOfValues() const LIFETIME_BOUND { return m_opcodesOfValues; }
 
-    void forEachEdgeInto(BlockID block, NOESCAPE const Invocable<void(const Edge&)> auto& functor) const
+    class AllIncomingEdges {
+    public:
+        void forEach(NOESCAPE const Invocable<void(const Edge&)> auto& functor) const { m_code.forEachIncomingEdgeUnsealed(m_block, functor); }
+
+    private:
+        friend class Code;
+        AllIncomingEdges(const Code& code, BlockID block)
+            : m_code(code)
+            , m_block(block)
+        {
+        }
+
+        const Code& m_code;
+        BlockID m_block;
+    };
+    AllIncomingEdges seal(BlockID);
+    AllIncomingEdges allIncomingEdges(BlockID block) const { return { *this, block }; }
+    void forEachIncomingEdgeUnsealed(BlockID block, NOESCAPE const Invocable<void(const Edge&)> auto& functor) const
     {
         for (EdgeID edge = at(block).firstEdgeIn(); edge; edge = at(edge).nextInto())
             functor(at(edge));
@@ -972,40 +1118,84 @@ public:
     Wire::SourceLocation locationOf(const Program&, Origin) const;
 
     bool isSwept() const { return m_isSwept; }
+    enum class SourcesOfNames : bool { StandAnywhere, StandEarlier };
+    template<const OpcodeSet& names, SourcesOfNames sources = SourcesOfNames::StandAnywhere, unsigned namesGoneDownInLine = 4>
+    ALWAYS_INLINE ValueID valueBehindNames(ValueID name) const
+    {
+        if constexpr (sources == SourcesOfNames::StandEarlier) {
+            if (!name)
+                return name;
+        }
+        const Operation& operation = at(name);
+        if (!names.contains(operation.opcode))
+            return name;
+        ASSERT(operation.operandUses(0).contains(OperandUse::Returns));
+        if constexpr (namesGoneDownInLine) {
+            ValueID source = operation.operand(0);
+            if constexpr (sources == SourcesOfNames::StandEarlier) {
+                if (source.index() >= name.index())
+                    return { };
+            }
+            return valueBehindNames<names, sources, namesGoneDownInLine - 1>(source);
+        } else
+            return valueBehindManyNames(name, names, sources);
+    }
+    ValueID valueBehindManyNames(ValueID, const OpcodeSet&, SourcesOfNames) const;
+    ValueID valueBehindRowOfNarrowed(ValueID name) const;
     bool isNeeded(ValueID id) const { return marksOf(id).contains(SweepMark::IsNeeded); }
     OptionSet<SweepMark> marksOf(ValueID id) const { return OptionSet<SweepMark>::fromRaw(m_marks[id.index()]); }
+    bool barrierIsCountedOn(ValueID store) const { return m_storesWhoseBarriersAreCountedOn.get(store.index()); }
+    bool someBarrierIsCountedOn() const { return !m_storesWhoseBarriersAreCountedOn.isEmpty(); }
+    void noteBarrierIsCountedOn(ValueID store) { m_storesWhoseBarriersAreCountedOn.set(store.index()); }
     bool isReached(BlockID id) const { return m_reachedBlocks.get(id.index()); }
-    std::span<const ValueID> valuesOf(BlockID id) const LIFETIME_BOUND { return m_order.span().subspan(at(id).m_firstInOrder, at(id).m_numberInOrder); }
+    std::span<const ValueID> valuesOf(const Block& block) const LIFETIME_BOUND { return m_order.span().subspan(block.m_firstInOrder, block.m_numberInOrder); }
+    std::span<const ValueID> valuesOf(BlockID id) const LIFETIME_BOUND { return valuesOf(at(id)); }
+    uint32_t numberOfOperationsInOrder() const { return m_numberOfOperationsInOrder; }
     EdgeID handlerOf(BlockID id) const { return m_isSwept && m_blocksWithoutThrows.get(id.index()) ? EdgeID() : at(id).handler; }
     uint8_t useCountOf(ValueID id) const { return m_useCounts[id.index()]; }
     ValueID onlyUserOf(ValueID id) const { return m_onlyUsers[id.index()]; }
     ValueID parameterFedBy(ValueID id) const { return m_parametersFed[id.index()]; }
     std::span<const ValueID> liveAt(ValueID suspension) const LIFETIME_BOUND;
     std::span<const LiveAtSuspension> suspensions() const LIFETIME_BOUND { return m_suspensions.span(); }
-    std::span<const ReleaseBehindLastRead> releasesBehindLastReadsIn(BlockID id) const LIFETIME_BOUND
-    {
-        auto found = std::ranges::equal_range(m_releasesBehindLastReads.span(), id, { }, &ReleaseBehindLastRead::block);
-        return { found.begin(), found.end() };
-    }
 
     BlockID addBlock(BlockRole = BlockRole::Ordinary, BlockFrequency = BlockFrequency::Normal);
     BlockID addBlockBehindEdge(EdgeID, BlockFrequency, bool isInLoop);
     void setLoopMarks(BlockID, bool isInLoop, bool isLoopHead);
+    void markRareBlockThatKeepsSites(BlockID);
+    void markBlockInRareLoop(BlockID);
+    void noteBeliefAheadOfEdges(BlockID, BeliefAheadOfEdges);
     void makeBlocksRare(uint32_t first, uint32_t end);
     void makeBlockRare(BlockID);
-    void makeBlockUnlikely(BlockID);
+    void makeBlockNormal(BlockID);
+    void makeBlockUnlikely(BlockID, bool thoughRare = false);
     void setSubject(BlockID, ValueID);
     void markMeetingOfStepWrittenByHand(BlockID);
     void setParameters(BlockID, std::span<const ValueID>);
     ValueID appendParameter(BlockID, TypeID, Representation, Origin);
     void setTypeOfJoinParameter(ValueID, TypeID);
+    void setCheckedTypeOfProof(ValueID check, TypeID);
     void makeTypeTestAskInFull(ValueID);
     void makeTestAskInFull(ValueID);
+    void letJoinFailWhereItsReaderFails(ValueID);
+    void turnFinishIntoUnusedString(ValueID);
+    void turnBranchIntoJump(BlockID, EdgeID lastOnWay);
+    void leadJumpPastBlockThatJumps(BlockID);
     void leaveCheckOfProofToTestBehind(ValueID);
     void bearListWithStorage(ValueID, ArrayStorage);
+    void letListRememberStorageAtSite(ValueID, bool takesAnyValueAtFirst = false);
+    void letListForgetStorageAtSite(ValueID);
     ValueID append(BlockID, const Draft&, TypeID proven, EffectTraits);
     void noteEffectsBelieved(ValueID, const Effects&);
+    void noteTestsPassedFor(ValueID, const PassedTest&);
+    const PassedTest* testsPassedFor(ValueID) const;
+    void noteSteppedWithCounter(const SteppedWithCounter&);
+    std::span<const SteppedWithCounter> steppedWithCounters() const LIFETIME_BOUND { return m_steppedWithCounters.span(); }
+    bool keepsTestsPassed() const { return m_keepsTestsPassed; }
+    void setKeepsTestsPassed(bool keeps) { m_keepsTestsPassed = keeps; }
+    void setMarksLoops(bool marks) { m_marksLoops = marks; }
     const Effects* effectsBelievedOf(ValueID) const;
+    void noteThatOperationWritesWhatTurnHasMade(ValueID);
+    bool writesWhatTurnHasMade(ValueID) const;
     struct TestOfGuardInFrontOfCopy {
         ValueID test;
         FunctionID callee;
@@ -1013,6 +1203,45 @@ public:
     };
     void noteTestOfGuardInFrontOfCopy(TestOfGuardInFrontOfCopy noted) { m_testsOfGuardsInFrontOfCopies.append(noted); }
     std::span<const TestOfGuardInFrontOfCopy> testsOfGuardsInFrontOfCopies() const LIFETIME_BOUND { return m_testsOfGuardsInFrontOfCopies.span(); }
+    struct InputOfHoleReadAsNaN {
+        ValueID read;
+        FunctionID function;
+        ValueID written;
+    };
+    void noteInputOfHoleReadAsNaN(InputOfHoleReadAsNaN noted)
+    {
+        while (!m_inputsOfHolesReadAsNaN.isEmpty() && m_inputsOfHolesReadAsNaN.last().read.index() >= noted.read.index())
+            m_inputsOfHolesReadAsNaN.removeLast();
+        m_readsAnsweredByHolesReadAsNaN.removeAllMatching([&](const InputOfHoleReadAsNaN& answered) {
+            return answered.read.index() >= noted.read.index();
+        });
+        m_inputsOfHolesReadAsNaN.append(noted);
+    }
+    std::span<const InputOfHoleReadAsNaN> inputsOfHolesReadAsNaN() const LIFETIME_BOUND { return m_inputsOfHolesReadAsNaN.span(); }
+    void noteReadAnsweredByHoleReadAsNaN(InputOfHoleReadAsNaN answered) { m_readsAnsweredByHolesReadAsNaN.append(answered); }
+    std::span<const InputOfHoleReadAsNaN> readsAnsweredByHolesReadAsNaN() const LIFETIME_BOUND { return m_readsAnsweredByHolesReadAsNaN.span(); }
+    struct CellsMadeForOneOperation {
+        ValueID first;
+        ValueID second;
+    };
+    void noteCellsMadeForOneOperation(CellsMadeForOneOperation noted)
+    {
+        while (!m_cellsMadeForOneOperation.isEmpty() && m_cellsMadeForOneOperation.last().second.index() >= noted.second.index())
+            m_cellsMadeForOneOperation.removeLast();
+        m_cellsMadeForOneOperation.append(noted);
+    }
+    std::span<const CellsMadeForOneOperation> cellsMadeForOneOperation() const LIFETIME_BOUND { return m_cellsMadeForOneOperation.span(); }
+    void recordSyntheticVariableRead(ValueID read)
+    {
+        while (!m_syntheticVariableReads.isEmpty() && m_syntheticVariableReads.last().index() >= read.index())
+            m_syntheticVariableReads.removeLast();
+        m_syntheticVariableReads.append(read);
+    }
+    std::span<const ValueID> syntheticVariableReads() const LIFETIME_BOUND { return m_syntheticVariableReads.span(); }
+    void setMergedObjects(const BitVector& parameters) { m_mergedObjects = parameters; }
+    bool isMergedObject(ValueID parameter) const { return m_mergedObjects.get(parameter.index()); }
+    void noteValueThatFoldedArithmeticGives(ValueID given) { m_valuesThatFoldedArithmeticGives.append(given); }
+    std::span<const ValueID> valuesThatFoldedArithmeticGives() const LIFETIME_BOUND { return m_valuesThatFoldedArithmeticGives.span(); }
     ValueID appendConversion(BlockID, Opcode, ValueID operand, Representation, TypeID proven, Origin);
     ValueID addConstant(const Draft&, TypeID proven);
     ValueID addCopyOfConstant(ValueID constant, Representation);
@@ -1026,10 +1255,11 @@ public:
     uint32_t addInlineFrame(const InlineFrame&);
     uint16_t addEntry(BlockID);
     void addFactUse(const FactUse&);
-    void addFateOfPoll(ValueID poll, FateOfPoll);
+    void addFateOfPoll(ValueID poll, FateOfPoll, ValueID unlessKept = { });
     void reserveFrameWords(uint32_t numberOfWords) { m_numberOfFrameWords = std::max(m_numberOfFrameWords, numberOfWords); }
     void noteCallThatPlanHasNotCounted() { m_holdsCallThatPlanHasNotCounted = true; }
     void noteThatEntryWalksBody() { m_isEntryThatWalksBody = true; }
+    void withhold(Mechanisms mechanisms) { m_mechanismsWithheld = mechanisms; }
     void noteThatCallsOfFunctionNeverCollect() { m_callsOfFunctionNeverCollect = true; }
 
     struct OpenBlock {
@@ -1047,7 +1277,13 @@ public:
         uint32_t numberOfFrameWords { 0 };
         uint32_t numberOfFactUses { 0 };
         uint32_t numberOfEffectsBelieved { 0 };
+        uint32_t numberOfOperationsThatWriteWhatTurnHasMade { 0 };
+        uint32_t numberOfTestsPassed { 0 };
+        uint32_t numberOfSteppedCounters { 0 };
         uint32_t numberOfTestsOfGuardsInFrontOfCopies { 0 };
+        uint32_t numberOfInputsOfHolesReadAsNaN { 0 };
+        uint32_t numberOfReadsAnsweredByHolesReadAsNaN { 0 };
+        uint32_t numberOfValuesThatFoldedArithmeticGives { 0 };
         uint32_t numberOfPollsWithFates { 0 };
         uint32_t numberOfChangesToOlderParts { 0 };
         uint32_t numberOfOlderBlocksEnded { 0 };
@@ -1059,6 +1295,8 @@ public:
         bool holdsCallThatPlanHasNotCounted { false };
         bool callsOfFunctionNeverCollect { false };
         bool readsNumbersOutOfBytes { false };
+        bool hasOptionalNumberArithmetic { false };
+        bool callsItself { false };
     };
     Mark mark() const;
     OpenBlock stateOf(BlockID) const;
@@ -1071,6 +1309,7 @@ public:
         auto behind = std::ranges::upper_bound(m_recordsAbandoned, record.index(), { }, &std::pair<uint32_t, uint32_t>::first);
         return record.index() < (behind - 1)->second;
     }
+    void releaseAbandonedBlocks();
     void keepChangesToOlderParts(bool keeps)
     {
         m_keepsChangesToOlderParts = keeps;
@@ -1085,21 +1324,33 @@ private:
 
     void fill(Instruction&, const DraftWords&);
     void appendEdgeInto(BlockID from, BlockID to, std::span<const ValueID> arguments);
+    void retargetSweptEdge(EdgeID, BlockID to, std::span<const ValueID> arguments);
     void layClosureInFrame(ValueID, LoanOfClosure);
     void layObjectInFrame(ValueID);
     BlockFrequency frequencyTakenFor(uint32_t block, BlockFrequency given);
     bool loopMarkIsDrawnAway(uint32_t block) const;
 
     CodeUnit m_unit;
-    StableArray<Operation, 10> m_operations;
-    StableArray<Block, 7> m_blocks;
-    StableArray<Edge, 8> m_edges;
+    StableArray<Operation, 26> m_operations;
+    StableArray<Block, 24> m_blocks;
+    StableArray<Edge, 25> m_edges;
     SideWords m_sideWords;
     Vector<InlineFrame, 4> m_inlineFrames;
     Vector<EntryOfCode, 2> m_entries;
     Vector<FactUse> m_factUses;
     Vector<std::pair<ValueID, Effects>> m_effectsBelieved;
+    Vector<ValueID> m_operationsThatWriteWhatTurnHasMade;
+    Vector<std::pair<ValueID, PassedTest>> m_testsPassed;
+    Vector<SteppedWithCounter> m_steppedWithCounters;
+    bool m_keepsTestsPassed { false };
+    bool m_marksLoops { true };
     Vector<TestOfGuardInFrontOfCopy> m_testsOfGuardsInFrontOfCopies;
+    Vector<InputOfHoleReadAsNaN> m_inputsOfHolesReadAsNaN;
+    Vector<InputOfHoleReadAsNaN> m_readsAnsweredByHolesReadAsNaN;
+    Vector<CellsMadeForOneOperation> m_cellsMadeForOneOperation;
+    Vector<ValueID> m_syntheticVariableReads;
+    BitVector m_mergedObjects;
+    Vector<ValueID> m_valuesThatFoldedArithmeticGives;
     Vector<PollWithFate> m_pollsWithFates;
     struct ChangeToOlderPart {
         EdgeID closed;
@@ -1110,6 +1361,7 @@ private:
         BlockID marked;
         BlockFrequency frequencyBefore { BlockFrequency::Normal };
         bool wasInLoop { false };
+        bool wasSealed { false };
     };
     Vector<ChangeToOlderPart> m_changesToOlderParts;
     struct OlderBlockEnded {
@@ -1121,7 +1373,7 @@ private:
     void keepMarksOfOlderBlock(uint32_t index)
     {
         if (m_keepsChangesToOlderParts && index < m_numberOfBlocksAtNewestMark)
-            m_changesToOlderParts.append(ChangeToOlderPart { { }, { }, { }, { }, { }, BlockID(index), m_blocks[index].frequency, m_blocks[index].isInLoop });
+            m_changesToOlderParts.append(ChangeToOlderPart { { }, { }, { }, { }, { }, BlockID(index), m_blocks[index].frequency, m_blocks[index].isInLoop, m_blocks[index].isSealed });
     }
     void setTerminator(BlockID blockID, Block& block, const Terminator& terminator)
     {
@@ -1141,13 +1393,18 @@ private:
     OpcodeSet m_opcodesOfValues;
     uint32_t m_numberOfFrameWords { 0 };
     bool m_hasHandlers { false };
+    bool m_hasBoxesForHandlers { false };
     bool m_hasSuspensions { false };
     bool m_hasLoops { false };
     bool m_holdsFrameCells { true };
     bool m_holdsCallThatPlanHasNotCounted { false };
     bool m_callsOfFunctionNeverCollect { false };
     bool m_readsNumbersOutOfBytes { false };
+    bool m_hasOptionalNumberArithmetic { false };
+    bool m_callsItself { false };
     bool m_isEntryThatWalksBody { false };
+    bool m_mayHoldReturnedCalls { false };
+    Mechanisms m_mechanismsWithheld;
     FrequenciesOfBlocks m_frequenciesOfBlocks { FrequenciesOfBlocks::AsGiven };
     uint32_t m_seedOfFrequencies { 0 };
     uint32_t m_numberOfBlocksPlacedOtherwise { 0 };
@@ -1156,13 +1413,15 @@ private:
     Vector<uint8_t> m_marks;
     Vector<uint8_t> m_useCounts;
     Vector<ValueID> m_onlyUsers;
+    mutable UncheckedKeyHashMap<uint32_t, uint32_t> m_valuesBehindRowsOfNarrowed;
     Vector<ValueID> m_parametersFed;
     Vector<ValueID> m_order;
+    uint32_t m_numberOfOperationsInOrder { 0 };
     BitVector m_reachedBlocks;
     BitVector m_blocksWithoutThrows;
+    BitVector m_storesWhoseBarriersAreCountedOn;
     Vector<LiveAtSuspension> m_suspensions;
     Vector<ValueID> m_liveValues;
-    Vector<ReleaseBehindLastRead> m_releasesBehindLastReads;
 };
 
 struct CodeTextContext {
@@ -1187,11 +1446,22 @@ inline ValueID valueThatTestSpeaksOf(const Code& code, ValueID test, uint32_t op
         return test;
     return operandIndex < operation.numberOfOperands() ? operation.operand(operandIndex) : ValueID();
 }
-inline constexpr OpcodeSet operationsThatStandAmongNarrowedValues = conversionsOfForm | OpcodeSet { Opcode::CheckProof, Opcode::AssumeType };
+inline constexpr OpcodeSet operationsThatStandAmongNarrowedValues = conversionsOfForm | OpcodeSet { Opcode::CheckProof };
 inline constexpr OpcodeSet readsThatNarrowTheirHolders { Opcode::GetSlot, Opcode::GetSlotOrUndefined };
+inline std::optional<uint64_t> lengthThatListIsMadeWith(const Code& code, const Operation& made)
+{
+    if (made.opcode == Opcode::NewArray)
+        return made.elementsOperands().size() + made.holes().size();
+    if (made.opcode != Opcode::NewArrayLike || made.sourceOperand() || !made.lengthOperand())
+        return std::nullopt;
+    const Operation& length = code.at(made.lengthOperand());
+    if (length.opcode != Opcode::Integer || length.integer() < 0 || length.integer() > static_cast<int64_t>(UINT32_MAX))
+        return std::nullopt;
+    return static_cast<uint64_t>(length.integer());
+}
 inline bool hasTestedForHole(const Operation& read)
 {
-    return read.opcode == Opcode::GetArrayElement && !read.isPresent() && !read.readsHoleAsNaN() && !testsItsOwnGuess(read);
+    return read.opcode == Opcode::GetArrayElement && !read.isPresent() && !read.readsHoleAsNaN();
 }
 template<typename Read>
 ReadOfEmptySlot whatReadOfEmptySlotGives(const Read& read)
@@ -1230,6 +1500,7 @@ TypeID typeOfNarrowed(const TypingContext&, const Code&, ValueID narrowed);
 TypeID typeOfJoinParameter(TypeArena&, std::span<const EdgeID> edgesThatReachJoin, NOESCAPE const ScopedLambda<TypeID(EdgeID)>& typeArrivingOn);
 
 String verifyCode(const CodeTextContext&, const Code&, InternalErrorKind* kindOfBrokenRule = nullptr);
+String verifySweptCode(const CodeTextContext&, const Code&, InternalErrorKind* kindOfBrokenRule = nullptr);
 String verifyFrameCellsOfSweptCode(const CodeTextContext&, const Code&, InternalErrorKind* kindOfBrokenRule = nullptr);
 class DominatorsOfCode {
     WTF_MAKE_NONCOPYABLE(DominatorsOfCode);
@@ -1248,6 +1519,7 @@ String verifyTypesOfCode(const TypingContext&, const CallingConventions&, const 
 extern const OpcodeSet opcodesWithoutEmitterInCode;
 inline const OpcodeSet& opcodesWithoutEmitter() { return opcodesWithoutEmitterInCode; }
 bool readsNumberOutOfBytes(const Operation&);
+bool readsNumberOrNothingOutOfBytes(const Operation&);
 bool handsOnBitsOfNaN(const Operation&);
 bool takesAnyNaN(const Operation& user, uint32_t operandIndex);
 

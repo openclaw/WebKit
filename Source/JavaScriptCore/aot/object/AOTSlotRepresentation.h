@@ -68,6 +68,9 @@ static constexpr uint32_t minCell32 = MarkedBlockCage::minIndex;
 static constexpr uint32_t absentCell32 = 0;
 static constexpr uint32_t nullCell32 = 2;
 static constexpr uint32_t undefinedCell32 = 10;
+static constexpr int64_t placeOfAbsentKeyInMap = -1;
+static constexpr int64_t placeInMapThatIsNotTold = -2;
+static constexpr int64_t placeInMapHoldsNarrowValue = 1;
 static_assert(nullCell32 == JSValue::ValueNull && undefinedCell32 == JSValue::ValueUndefined && absentCell32 == JSValue::ValueEmpty);
 
 static constexpr uint32_t uncreatedDeferredClosure = 0;
@@ -196,6 +199,16 @@ constexpr SlotTraits traitsOf(SlotRepresentation representation)
 constexpr unsigned widthOf(SlotRepresentation representation) { return traitsOf(representation).width; }
 constexpr bool representsAbsentAsZero(SlotRepresentation representation) { return traitsOf(representation).hasAbsent && !traitsOf(representation).absentBits; }
 constexpr bool canLeaveSlot(SlotRepresentation representation) { return traitsOf(representation).hasAbsent; }
+
+constexpr bool isListedOnlyByKeyOrder(SlotRepresentation representation) { return representation == SlotRepresentation::Int32; }
+constexpr bool mayBeCreatedByStore(SlotRepresentation representation) { return canLeaveSlot(representation) || isListedOnlyByKeyOrder(representation); }
+constexpr uint64_t bitsBeforeCreation(SlotRepresentation representation)
+{
+    if (isListedOnlyByKeyOrder(representation))
+        return static_cast<uint32_t>(absentInt32);
+    SlotTraits traits = traitsOf(representation);
+    return traits.hasAbsent ? traits.absentBits : 0;
+}
 
 constexpr SlotRepresentation hiddenReferenceRepresentation(bool usesWideReferences) { return usesWideReferences ? SlotRepresentation::Cell : SlotRepresentation::Cell32; }
 

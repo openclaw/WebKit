@@ -24,10 +24,10 @@ variable g1 module=m1 declared={type=anything|absent} flags=[IsReplaceable, Hold
 variable g2 name="exports" module=m4 declared={type=anything} initialization=Undefined
 variable g3 module=m4 declared={type=anything|absent} flags=[IsReplaceable, HoldsMock]
 module m0 path="/main.js" displayPath="main.js" body=f0
-module m1 path="/node_modules/dep/index.js" displayPath="dep.js" kind=CommonJs flags=[KeepsError, MayBeMocked, MayBeEvicted] requireResult=ModuleExports body=f1 exportsVariable=g0
-module m2 path="/node_modules/reads/index.js" displayPath="reads.js" kind=CommonJs flags=[KeepsError] requireResult=ModuleExports body=f2
-module m3 path="/project.cjs" displayPath="project.cjs" kind=CommonJs flags=[KeepsError] requireResult=ModuleExports body=f3
-module m4 path="/node_modules/other/index.js" displayPath="other.js" kind=CommonJs flags=[KeepsError, MayBeMocked, MayBeEvicted] requireResult=ModuleExports body=f4 exportsVariable=g2
+module m1 path="/node_modules/dep/index.js" displayPath="dep.js" kind=CommonJs flags=[CachesEvaluationError, MayBeMocked, MayBeEvicted] requireResult=ModuleExports body=f1 exportsVariable=g0
+module m2 path="/node_modules/reads/index.js" displayPath="reads.js" kind=CommonJs flags=[CachesEvaluationError] requireResult=ModuleExports body=f2
+module m3 path="/project.cjs" displayPath="project.cjs" kind=CommonJs flags=[CachesEvaluationError] requireResult=ModuleExports body=f3
+module m4 path="/node_modules/other/index.js" displayPath="other.js" kind=CommonJs flags=[CachesEvaluationError, MayBeMocked, MayBeEvicted] requireResult=ModuleExports body=f4 exportsVariable=g2
 entry module=m0
 entry module=m1
 entry module=m2
@@ -148,7 +148,7 @@ static void checkOriginalThatThrowsLeavesMockAndRunsAgain(LoadedProgram& program
     AOT_TEST_CHECK(scope.exception());
     scope.clearException();
     AOT_TEST_CHECK(globalNamed(program, "ranOnce"_s).isUndefined());
-    AOT_TEST_CHECK(hasMockInPlace(realm, dep));
+    AOT_TEST_CHECK(hasActiveMock(realm, dep));
     AOT_TEST_CHECK(required(program, project) == jsNumber(2));
 
     AOT_TEST_CHECK(required(program, package) == jsNumber(1));
@@ -211,7 +211,7 @@ static void checkMockThatEndsWhileOriginalRunsLeavesOriginal(LoadedProgram& prog
     };
     AOT_TEST_CHECK(required(program, package) == jsNumber(1));
     AOT_TEST_CHECK(!scope.exception());
-    AOT_TEST_CHECK(!hasMockInPlace(realm, dep));
+    AOT_TEST_CHECK(!hasActiveMock(realm, dep));
     AOT_TEST_CHECK(required(program, project) == jsNumber(1));
     AOT_TEST_CHECK(required(program, package) == jsNumber(1));
     AOT_TEST_CHECK(globalNamed(program, "ranTwice"_s).isUndefined());
@@ -232,7 +232,7 @@ static void checkMockLaidWhileOriginalRunsStandsBehindIt(LoadedProgram& program)
     AOT_TEST_CHECK(required(program, package) == jsNumber(1));
     AOT_TEST_CHECK(!scope.exception());
     AOT_TEST_CHECK(JSValue::decode(seenByProject) == jsNumber(3));
-    AOT_TEST_CHECK(hasMockInPlace(realm, dep));
+    AOT_TEST_CHECK(hasActiveMock(realm, dep));
     AOT_TEST_CHECK(required(program, project) == jsNumber(3));
     AOT_TEST_CHECK(required(program, package) == jsNumber(1));
     AOT_TEST_CHECK(globalNamed(program, "ranTwice"_s).isUndefined());

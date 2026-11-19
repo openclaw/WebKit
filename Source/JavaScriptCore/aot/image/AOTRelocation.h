@@ -7,9 +7,9 @@
 
 #if ENABLE(AOT)
 
+#include "AOTImageAssembler.h"
 #include "AOTVector.h"
 #include "AssemblerPolicy.h"
-#include "CCallHelpers.h"
 #include "LinkBuffer.h"
 #include "RelocationKind.h"
 #include <type_traits>
@@ -43,16 +43,30 @@ enum class ConstantKind : uint8_t {
     Unlabeled,
     Number,
     ShapeSet,
-    BitSetOverKnownShapes,
+    ShapeBitmap,
     OffsetTable,
     CellTemplate,
+    ByteLiteral,
 };
-static constexpr unsigned numberOfConstantKinds = 6;
-static_assert(static_cast<unsigned>(ConstantKind::CellTemplate) + 1 == numberOfConstantKinds);
+static constexpr unsigned numberOfConstantKinds = 7;
+static_assert(static_cast<unsigned>(ConstantKind::ByteLiteral) + 1 == numberOfConstantKinds);
 
 static constexpr uint16_t primaryEntry = 0;
 static constexpr uint16_t entryInFrontOfStub = 1;
+static constexpr uint16_t entryInFrontOfStubThatDoesTwoMoves = 2;
 static constexpr unsigned sizeOfMoveInFrontOfStub = isX86_64() ? 3 : 4;
+
+constexpr unsigned sizeOfHeadOfStub(uint16_t entry)
+{
+    switch (entry) {
+    case entryInFrontOfStub:
+        return sizeOfMoveInFrontOfStub;
+    case entryInFrontOfStubThatDoesTwoMoves:
+        return 2 * sizeOfMoveInFrontOfStub;
+    default:
+        return 0;
+    }
+}
 
 struct CodeSymbol {
     friend constexpr bool operator==(const CodeSymbol&, const CodeSymbol&) = default;
@@ -83,7 +97,7 @@ struct RelocatableCode {
 class JS_EXPORT_PRIVATE ImageLinkBuffer {
     WTF_MAKE_NONCOPYABLE(ImageLinkBuffer);
 public:
-    ImageLinkBuffer(CCallHelpers&, LinkBuffer::Profile);
+    ImageLinkBuffer(ImageAssembler&, LinkBuffer::Profile);
 
     LinkBuffer& linkBuffer() { return m_linkBuffer; }
     bool didFailToAllocate() const { return m_linkBuffer.didFailToAllocate(); }
@@ -92,9 +106,16 @@ public:
     std::span<uint8_t> bytes();
     Vector<uint8_t> takeBytes();
     CCallHelpers::Label end() const { return m_end; }
+    bool hasBranchIslands() const { return m_hasBranchIslands; }
 
 private:
+    size_t planBranchIslands(CCallHelpers&);
+
     CCallHelpers::Label m_end;
+#if CPU(ARM64)
+    ARM64BranchIslands m_branchIslands;
+#endif
+    bool m_hasBranchIslands { false };
     Vector<uint8_t> m_storage;
     LinkBuffer m_linkBuffer;
     uint32_t m_sizeOfCode { 0 };
@@ -102,6 +123,7 @@ private:
 };
 
 JS_EXPORT_PRIVATE void emitPadding(CCallHelpers&);
+JS_EXPORT_PRIVATE void emitUnreachable(CCallHelpers&);
 
 enum class InstanceWordWidth : uint8_t { Byte, Word32, Word64 };
 
@@ -180,10 +202,21 @@ ALWAYS_INLINE auto withKindAsConstant(RelocationKind kind, const Functor& functo
 class JS_EXPORT_PRIVATE RelocationRecorder {
     WTF_MAKE_NONCOPYABLE(RelocationRecorder);
 public:
-    RelocationRecorder(CCallHelpers&, const AssemblerPolicy&);
+    RelocationRecorder(ImageAssembler&, const AssemblerPolicy&);
 
     void moveAddress(CodeSymbol, GPRReg dest, PCRelativeReach);
+#if ENABLE(RETURN_ADDRESS_SIGNING)
+    void moveSignedAddress(CodeSymbol symbol, PCRelativeReach reach) { append(m_jit.moveSignedPCRelativeAddress(reach), addressKindFor(reach), symbol); }
+#endif
     void load64(CodeSymbol, GPRReg dest);
+#if CPU(X86_64)
+    void loadDouble(CodeSymbol, FPRReg dest);
+    void addDouble(CodeSymbol, FPRReg dest);
+    void subDouble(CodeSymbol, FPRReg dest);
+    void mulDouble(CodeSymbol, FPRReg dest);
+    void divDouble(CodeSymbol, FPRReg dest);
+    void compare64(GPRReg left, CodeSymbol);
+#endif
     ALWAYS_INLINE uint32_t call(CodeSymbol symbol)
     {
         CCallHelpers::Label site = m_jit.label();
@@ -196,6 +229,10 @@ public:
         m_jit.nearTailCall();
         return append(site, RelocationKind::Jump, symbol);
     }
+
+    bool exceedsBranchReach() const;
+    CCallHelpers::Label returnAddressOf(uint32_t call) const;
+    void routeTransfersThroughEnd();
 
     void moveNumber(CodeSymbol symbol, GPRReg dest) { append(m_jit.moveNumber32WithPatch(dest), RelocationKind::Number32, symbol); }
     void emitNumber32(CodeSymbol);
@@ -228,6 +265,20 @@ public:
     }
 #endif
 
+#if CPU(X86_64)
+    template<typename Functor>
+    auto withNumberAsImmediate(CodeSymbol symbol, const Functor& functor)
+    {
+        auto& buffer = m_jit.m_assembler.buffer();
+        auto result = functor(placeholderOfNumber);
+        std::span<uint8_t> immediate = WTF::unsafeMakeSpan(static_cast<uint8_t*>(buffer.data()), buffer.codeSize()).last(sizeof(int32_t));
+        RELEASE_ASSERT(WTF::unalignedLoad<int32_t>(immediate.data()) == placeholderOfNumber);
+        WTF::unalignedStore<int32_t>(immediate.data(), 0);
+        append(CCallHelpers::Jump(buffer.label().labelAtOffset(-static_cast<int>(sizeof(int32_t)))).label(), RelocationKind::Number32, symbol);
+        return result;
+    }
+#endif
+
     uint32_t numberOfRelocations() const { return m_pending.size(); }
     void reserveRoomFor(size_t number) { m_pending.reserveCapacity(number); }
 
@@ -237,6 +288,11 @@ public:
 private:
 #if CPU(X86_64)
     static constexpr int32_t placeholderOfInstanceWordDistance = 0x12345678;
+    static constexpr int32_t placeholderOfNumber = 0x23456789;
+#endif
+
+#if ENABLE(RETURN_ADDRESS_SIGNING)
+    CCallHelpers::Address moveInstanceAddressForLinkRegister(CodeSymbol, GPRReg instance);
 #endif
 
     struct PendingRelocation {
@@ -257,7 +313,7 @@ private:
         return index;
     }
 
-    CCallHelpers& m_jit;
+    ImageAssembler& m_jit;
     Vector<PendingRelocation, 32> m_pending;
 };
 

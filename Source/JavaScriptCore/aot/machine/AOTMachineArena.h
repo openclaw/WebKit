@@ -37,7 +37,7 @@ public:
 
     static constexpr size_t bytesTakenBy(size_t bytes) { return (bytes + alignmentOfCursor - 1) & ~(alignmentOfCursor - 1); }
 
-    void* allocate(size_t bytes, size_t alignment = alignof(std::max_align_t))
+    ALWAYS_INLINE void* allocate(size_t bytes, size_t alignment = alignof(std::max_align_t))
     {
         ASSERT(hasOneBitSet(alignment));
         uintptr_t start = alignment <= alignmentOfCursor ? m_cursor : (m_cursor + alignment - 1) & ~(static_cast<uintptr_t>(alignment) - 1);
@@ -59,7 +59,7 @@ public:
     }
 
     template<typename T, typename... Arguments>
-    T* create(Arguments&&... arguments)
+    ALWAYS_INLINE T* create(Arguments&&... arguments)
     {
         T* object = new (NotNull, allocate(sizeof(T), alignof(T))) T(std::forward<Arguments>(arguments)...);
         if constexpr (!std::is_trivially_destructible_v<T>)
@@ -68,7 +68,7 @@ public:
     }
 
     template<typename T>
-    T* allocateArray(size_t count)
+    ALWAYS_INLINE T* allocateArray(size_t count)
     {
         static_assert(std::is_trivially_destructible_v<T>);
         return static_cast<T*>(allocate(count * sizeof(T), alignof(T)));
@@ -148,6 +148,7 @@ private:
     };
 
     static constexpr size_t smallestChunkSize = 64 * KB;
+    static constexpr size_t largestChunkKept = MB;
     static constexpr size_t smallestRoomKept = 512;
     static_assert(smallestRoomKept >= sizeof(RoomLetGo) && smallestRoomKept <= smallestRoomLetGo);
 
@@ -172,6 +173,40 @@ private:
     uintptr_t m_cursorInChunk { 0 };
     uintptr_t m_endOfChunk { 0 };
     bool m_forgetsRoomsLetGoAtReset { false };
+};
+
+template<typename T>
+class UncheckedSpan {
+public:
+    UncheckedSpan() = default;
+    template<typename U>
+    UncheckedSpan(std::span<U> span)
+        : m_data(span.data())
+        , m_size(span.size())
+    {
+    }
+    template<typename U>
+    UncheckedSpan(UncheckedSpan<U> other)
+        : m_data(other.data())
+        , m_size(other.size())
+    {
+    }
+
+    T& operator[](size_t index) const
+    {
+        ASSERT(index < m_size);
+        return m_data[index];
+    }
+    T* data() const { return m_data; }
+    T* begin() const { return m_data; }
+    T* end() const { return m_data + m_size; }
+    std::span<T> span() const { return { m_data, m_size }; }
+    size_t size() const { return m_size; }
+    bool empty() const { return !m_size; }
+
+private:
+    T* m_data { nullptr };
+    size_t m_size { 0 };
 };
 
 template<typename T>
@@ -206,7 +241,7 @@ public:
     std::span<T> span() { return { m_data, m_size }; }
     std::span<const T> span() const { return { m_data, m_size }; }
 
-    void append(Arena& arena, const T& value)
+    ALWAYS_INLINE void append(Arena& arena, const T& value)
     {
         if (m_size == m_capacity) [[unlikely]]
             reserve(arena, m_capacity ? m_capacity * 2 : smallestCapacity);
@@ -219,7 +254,7 @@ public:
         new (NotNull, m_data + m_size++) T(value);
     }
 
-    T* appendUninitialized(Arena& arena)
+    ALWAYS_INLINE T* appendUninitialized(Arena& arena)
     {
         if (m_size == m_capacity) [[unlikely]]
             reserve(arena, m_capacity ? m_capacity * 2 : smallestCapacity);

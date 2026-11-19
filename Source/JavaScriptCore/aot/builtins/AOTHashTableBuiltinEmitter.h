@@ -25,8 +25,11 @@ public:
     Boxed normalizedKey(const OperationContext&, ValueID);
     Word32 hashOfBits(Boxed normalizedKey);
     Integer sizeOf(CellPointer table, HashTableOwner);
+    Integer findPlace(const OperationContext&, ValueID map, ValueID key);
+    Operand lookUpNormalizedKey(const OperationContext&, ValueID collection, ValueID key, Boxed normalizedKey, HashTableOwner, LookupAnswer);
 
 private:
+    bool isSoughtAtItsPlace(const OperationContext&, ValueID key);
     Boxed normalizedNumber(Number);
     void lookUp(const InlineCall&, HashTableOwner, LookupAnswer);
     Operand search(const OperationContext&, ValueID collection, ValueID key, HashTableOwner, LookupAnswer);

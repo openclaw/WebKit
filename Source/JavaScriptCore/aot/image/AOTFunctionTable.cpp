@@ -11,6 +11,7 @@
 #include "AOTBuildContext.h"
 #include "AOTCallingConventions.h"
 #include "AOTCodeLayout.h"
+#include "AOTStubsCallAdapters.h"
 #include "AOTFunctionTables.h"
 #include "AOTImage.h"
 #include "AOTLinkedFunctions.h"
@@ -130,31 +131,94 @@ std::optional<FrameTable> collectFrames(const LinkedFunctions& functions, BuildC
     return result;
 }
 
-static Vector<ImageFunction> encodeFunctions(const FunctionTableInputs& inputs, const ParallelLoops& loops)
+Vector<uint8_t> ImageFunctions::encode(std::span<const uint32_t> sideTables, std::span<const uint32_t> numbers)
 {
-    Vector<ImageFunction> records(inputs.functions.size());
-    forEachRangeOfIndicesInParallel(loops, inputs.functions.size(), [&](size_t first, size_t end) {
-        for (size_t position = first; position < end; ++position) {
-            const CompiledCode& code = inputs.functions[position];
-            const SiteDescription& sites = code.sites;
-            OptionSet<ImageFunctionFlag> flags = inputs.sideTableFlags[position];
-            flags.set(ImageFunctionFlag::HasInlineFrames, sites.hasEncodedInlineFrames());
-            flags.set(ImageFunctionFlag::HasPositions, inputs.hasPositions && !sites.positions.isEmpty());
-            flags.set(ImageFunctionFlag::SpillsArgumentRegisters, code.frame.spillsArgumentRegisters);
-            records[position] = ImageFunction::create(inputs.sideTableOffsets[position], code.function.index(), flags);
+    RELEASE_ASSERT(sideTables.size() == numbers.size());
+    Vector<uint32_t> groups;
+    Vector<Number24> listedNumbers;
+    Vector<uint16_t> steps;
+    Vector<uint32_t> listedPlaces;
+    UncheckedKeyHashMap<uint32_t, uint32_t, DefaultHash<uint32_t>, WTF::UnsignedWithZeroKeyHashTraits<uint32_t>> entryOfPlace;
+    uint32_t firstPlaceAfter = 0;
+    for (size_t index = 0; index < numbers.size(); ++index) {
+        size_t entry = index % functionsInGroup;
+        if (!entry) {
+            groups.append(0);
+            groups.append(static_cast<uint32_t>(listedNumbers.size()));
+            groups.append(firstPlaceAfter);
         }
-    });
-    return records;
+        if (entry && numbers[index] == numbers[index - 1] + 1)
+            groups[groups.size() - wordsOfGroup] |= 1u << entry;
+        else
+            listedNumbers.append(Number24(numbers[index]));
+
+        uint32_t place = sideTables[index];
+        firstPlaceAfter = std::max(firstPlaceAfter, place + 1);
+        if (uint32_t placeOfGroup = groups.last(); place >= placeOfGroup && place - placeOfGroup < isListedPlace)
+            steps.append(static_cast<uint16_t>(place - placeOfGroup));
+        else {
+            uint32_t listed = entryOfPlace.ensure(place, [&] {
+                listedPlaces.append(place);
+                return static_cast<uint32_t>(listedPlaces.size() - 1);
+            }).iterator->value;
+            steps.append(static_cast<uint16_t>(isListedPlace | listed));
+        }
+    }
+
+    bool needsWholePlaces = listedPlaces.size() > isListedPlace;
+    uint32_t firstWord = needsWholePlaces ? hasWholePlaces : static_cast<uint32_t>(listedPlaces.size());
+    size_t count = numbers.size();
+    Vector<uint32_t> words(FillWith { }, firstListWord(firstWord, count) + numberOfListedPlaces(firstWord) + wordsOfNumbers(listedNumbers.size()), 0);
+    std::span<uint32_t> span = words.mutableSpan();
+    span[0] = firstWord;
+    span[1] = static_cast<uint32_t>(listedNumbers.size());
+    span[2] = static_cast<uint32_t>(count);
+    if (needsWholePlaces)
+        memcpySpan(span.subspan(wordsOfHead), sideTables);
+    else {
+        memcpySpan(asWritableBytes(span.subspan(wordsOfHead)), asBytes(steps.span()));
+        memcpySpan(span.subspan(firstListWord(firstWord, count)), listedPlaces.span());
+    }
+    memcpySpan(span.subspan(firstGroupWord(firstWord, count)), groups.span());
+    memcpySpan(asWritableBytes(span.subspan(firstListWord(firstWord, count) + numberOfListedPlaces(firstWord))), asBytes(listedNumbers.span()));
+    return bytesOf(words);
 }
 
-static Vector<uint8_t> encodeFunctionStarts(const Vector<uint32_t>& starts)
+static Vector<uint8_t> encodeFunctions(const FunctionTableInputs& inputs)
+{
+    Vector<uint32_t> numbers(inputs.functions.size(), [&](size_t position) {
+        return inputs.functions[position].function.index();
+    });
+    return ImageFunctions::encode(inputs.sideTableOffsets, numbers.span());
+}
+
+Vector<uint8_t> FunctionStarts::encode(std::span<const uint32_t> starts)
 {
     constexpr uint32_t endOfStarts = std::numeric_limits<uint32_t>::max();
-    Vector<uint8_t> bytes;
-    bytes.reserveInitialCapacity((starts.size() + 1) * sizeof(uint32_t));
-    bytes.append(asBytes(starts.span()));
-    bytes.append(asByteSpan(endOfStarts));
-    return bytes;
+    size_t numberOfEntries = starts.size() + 1;
+    auto startAt = [&](size_t index) {
+        return index < starts.size() ? starts[index] : endOfStarts;
+    };
+    size_t firstGroup = numberOfWordsOfSteps(starts.size());
+    size_t numberOfGroups = numberOfGroupsFor(starts.size());
+    Vector<uint32_t> words;
+    words.fill(0, firstGroup + numberOfGroups);
+    for (size_t group = 0; group < numberOfGroups; ++group) {
+        size_t first = group * functionsInGroup;
+        size_t last = std::min<size_t>(first + functionsInGroup, numberOfEntries) - 1;
+        uint32_t start = startAt(first);
+        if (start < wideGroup && startAt(last) - start <= std::numeric_limits<uint16_t>::max()) {
+            words[firstGroup + group] = start;
+            auto* steps = reinterpret_cast<uint16_t*>(words.mutableSpan().data());
+            for (size_t index = first; index <= last; ++index)
+                steps[index] = static_cast<uint16_t>(startAt(index) - start);
+            continue;
+        }
+        words[firstGroup + group] = wideGroup | safeCast<uint32_t>(words.size() - firstGroup);
+        for (size_t index = first; index < first + functionsInGroup; ++index)
+            words.append(startAt(index));
+    }
+    return Vector<uint8_t>(asBytes(words.span()));
 }
 
 static Vector<uint32_t> encodeCodeGranules(const CodeLayout& layout)
@@ -162,13 +226,14 @@ static Vector<uint32_t> encodeCodeGranules(const CodeLayout& layout)
     const Vector<uint32_t>& bodyStarts = layout.bodyStarts;
     size_t granuleSize = static_cast<size_t>(1) << layout.codeGranuleShift;
     Vector<uint32_t> codeGranules;
-    codeGranules.reserveInitialCapacity((layout.functionsEnd + granuleSize - 1) / granuleSize);
+    codeGranules.reserveInitialCapacity((layout.functionsEnd + granuleSize - 1) / granuleSize + 1);
     uint32_t function = 0;
     for (size_t start = 0; start < layout.functionsEnd; start += granuleSize) {
         while (function + 1 < bodyStarts.size() && bodyStarts[function + 1] <= start)
             ++function;
-        codeGranules.append(function);
+        codeGranules.append(function >> FunctionStarts::groupShift);
     }
+    codeGranules.append(static_cast<uint32_t>(FunctionStarts::numberOfGroupsFor(bodyStarts.size()) - 1));
     return codeGranules;
 }
 
@@ -188,7 +253,10 @@ static Vector<uint64_t> encodeClosureWords(const FunctionTableInputs& inputs, Bu
             RELEASE_ASSERT(codeOffset && !(codeOffset % imageFunctionAlignment));
             entry = code.entry;
         } else if (auto fused = std::ranges::lower_bound(fusedCallEntries, numbers.unitOf(function), { }, &FusedCallEntry::unitIndex); fused != fusedCallEntries.end() && fused->unitIndex == numbers.unitOf(function)) {
-            std::optional<uint32_t> positionOfTarget = fused->unit.role == Typed::CodeRole::GenericCallEntry ? inputs.functions.positionOfCodeAt(fused->placeOfTarget) : inputs.functions.positionOfUnit(fused->unit, fused->unitIndex);
+            bool startsModule = inputs.plan.conventions().callEntryIsNumberOfModuleStart(fused->unit.function);
+            if (startsModule)
+                codeOffset = inputs.layout.sharedCodeCopies[0] + inputs.sharedCode.blob.offsetOf(startModuleThatRunTimeNames()).value();
+            std::optional<uint32_t> positionOfTarget = startsModule ? std::nullopt : fused->unit.role == Typed::CodeRole::GenericCallEntry ? inputs.functions.positionOfCodeAt(fused->placeOfTarget) : inputs.functions.positionOfUnit(fused->unit, fused->unitIndex);
             std::optional<uint32_t> offsetInTarget = positionOfTarget ? inputs.functions[*positionOfTarget].body.offsetOfEntry(Typed::fusedCallEntry) : std::nullopt;
             if (offsetInTarget)
                 codeOffset = inputs.layout.bodyStarts[*positionOfTarget] + *offsetInTarget;
@@ -205,6 +273,7 @@ static Vector<uint64_t> encodeClosureWords(const FunctionTableInputs& inputs, Bu
         ClosureWord::Flags flags = closureWordFlags(inputs.programTables.kindOfFunction(function.index()));
         flags.borrowedArguments = entry.borrowedArguments;
         flags.endsItsTailCalls = entry.endsItsTailCalls;
+        flags.returnsCapture = entry.returnsCapture;
         words[function.index() - range.omittedWordCount] = ClosureWord::encode({ codeOffset, entry.numberOfParameters }, numbers.closureNumberOf(function), flags);
     });
     return words;
@@ -267,16 +336,16 @@ EncodedFunctionTables encodeFunctionTables(const FunctionTableInputs& inputs, Bu
     const CodeLayout& layout = inputs.layout;
     const ParallelLoops& loops = context.parallelLoops();
     RELEASE_ASSERT(layout.bodyStarts.size() == functions.size());
-    RELEASE_ASSERT(inputs.sideTableFlags.size() == functions.size() && inputs.sideTableOffsets.size() == functions.size());
+    RELEASE_ASSERT(inputs.sideTableOffsets.size() == functions.size());
 
     if (!checkFunctionLimits(inputs, context) || !checkClosureFunctionRange(inputs, context))
         return { };
 
     EncodedFunctionTables tables;
-    tables.functions = bytesOf(encodeFunctions(inputs, loops));
+    tables.functions = encodeFunctions(inputs);
     tables.closureWords = bytesOf(encodeClosureWords(inputs, context));
     runTasksInParallel(loops, {
-        [&] { tables.functionStarts = encodeFunctionStarts(layout.bodyStarts); },
+        [&] { tables.functionStarts = FunctionStarts::encode(layout.bodyStarts.span()); },
         [&] { tables.codeGranules = bytesOf(encodeCodeGranules(layout)); },
         [&] { tables.methodTable = bytesOf(encodeMethodTable(inputs, context)); },
     });
@@ -289,7 +358,7 @@ std::optional<uint32_t> Image::imageFunctionFromClosureWord(FunctionID id) const
     if (!word)
         return std::nullopt;
     CodeLocation entry = locate(std::bit_cast<const void*>(ClosureWord::addressOf(word, std::bit_cast<uintptr_t>(code().data()))));
-    if (entry.kind != CodeKind::Function || function(entry.function).function() != id.index())
+    if (entry.kind != CodeKind::Function || rootFunctionOf(entry.function) != id)
         return std::nullopt;
     return entry.function;
 }
@@ -304,18 +373,18 @@ std::optional<uint32_t> Image::imageFunctionOf(FunctionID id) const
         return imageFunctionFromClosureWord(id);
     std::call_once(m_didSortFunctionsByID, [&] {
         for (uint32_t function = 0; function < header().counts.functions; ++function) {
-            if (!hasClosureWord(this->function(function).function()))
+            if (!hasClosureWord(rootFunctionOf(function).index()))
                 m_functionsByID.append(function);
         }
         AOT::sort(m_functionsByID, { }, [&](uint32_t function) {
-            return this->function(function).function();
+            return rootFunctionOf(function).index();
         });
     });
     std::span<const uint32_t> functionsByID = m_functionsByID.span();
     auto found = std::ranges::lower_bound(functionsByID, id.index(), { }, [&](uint32_t function) -> uint32_t {
-        return this->function(function).function();
+        return rootFunctionOf(function).index();
     });
-    if (found == functionsByID.end() || function(*found).function() != id.index())
+    if (found == functionsByID.end() || rootFunctionOf(*found) != id)
         return std::nullopt;
     return *found;
 }
@@ -325,8 +394,30 @@ std::span<const uint32_t> Image::frameMapWords(uint32_t function) const
     const ImageFunction& record = this->function(function);
     if (!record.has(ImageFunctionFlag::HasFrameMaps))
         return { };
-    SideTableParts parts = SideTableParts::read(record, section<uint8_t>(ImageSection::SideTables).data());
+    SideTableParts parts = SideTableParts::read(record, section<uint8_t>(ImageSection::SideTables));
     return section<uint32_t>(ImageSection::FrameMaps).subspan(parts.firstFrameMapWord, parts.numberOfFrameMapWords);
+}
+
+std::span<const uint32_t> Image::frameMapWordsAt(const void* returnAddress) const
+{
+    std::span<const uint32_t> maps = section<uint32_t>(ImageSection::FrameMaps);
+    uint64_t offset = std::bit_cast<uintptr_t>(returnAddress) - std::bit_cast<uintptr_t>(m_code);
+    if (!offset || offset > header().codeSize)
+        return { };
+    ASSERT(offset <= std::numeric_limits<uint32_t>::max());
+    std::atomic<uint64_t>& entry = m_frameMapCache[static_cast<uint32_t>(offset) * 0x9e3779b1u >> (32 - frameMapCacheBits)];
+    uint64_t cached = entry.load(std::memory_order_relaxed);
+    if (cached >> 32 == offset) [[likely]]
+        return maps.subspan(static_cast<uint32_t>(cached));
+    CodeLocation where = locate(static_cast<const uint8_t*>(returnAddress) - 1);
+    if (where.kind != CodeKind::Function)
+        return { };
+    std::span<const uint32_t> words = frameMapWords(where.function);
+    if (words.empty())
+        return { };
+    uint32_t firstWord = static_cast<uint32_t>(words.data() - maps.data());
+    entry.store(offset << 32 | firstWord, std::memory_order_relaxed);
+    return maps.subspan(firstWord);
 }
 
 } } // namespace JSC::AOT

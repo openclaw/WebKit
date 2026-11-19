@@ -28,15 +28,19 @@ using Wire::ImageForm;
 using Wire::OutputOptions;
 using Wire::ReferenceWidth;
 using Wire::ReportSet;
+using Wire::FaultInjection;
 using Wire::TestingSwitch;
 
 template<typename Flags>
 constexpr bool hasFlag(Flags set, Flags flag)
 {
-    return static_cast<uint32_t>(set) & static_cast<uint32_t>(flag);
+    using Word = std::underlying_type_t<Flags>;
+    return static_cast<Word>(set) & static_cast<Word>(flag);
 }
 
-enum class DrawnFor : uint8_t { BlockFrequency, LoopMark, ExpectedType, OtherExpectedType, StepOfGuessesThatFail, NodeOfLink, CopyInLine, ParameterGuard, LoopBuiltTwice, PlaceInFrontOfLoop, GuessOutsideLoops };
+static_assert(hasFlag(allMembersOf<TestingSwitch>.back(), allMembersOf<TestingSwitch>.back()));
+
+enum class DrawnFor : uint8_t { BlockFrequency, LoopMark, ExpectedType, OtherExpectedType, StepOfGuessesThatFail, NodeOfLink, CopyInLine, ParameterGuard, LoopBuiltTwice, PlaceInFrontOfLoop, GuessOutsideLoops, WalkMode, ResultInParts, MisstatedFactPosition };
 
 constexpr uint32_t drawBySeed(uint32_t seed, DrawnFor question, uint32_t first, uint32_t second)
 {
@@ -50,9 +54,9 @@ constexpr uint32_t drawBySeed(uint32_t seed, DrawnFor question, uint32_t first, 
 }
 
 #if defined(BUN_HARDENED)
-constexpr bool runsOnlyCodeOfImage = true;
+constexpr bool isHardenedBuild = true;
 #else
-constexpr bool runsOnlyCodeOfImage = false;
+constexpr bool isHardenedBuild = false;
 #endif
 
 constexpr ImageForm imageFormOfThisRuntime()
@@ -98,31 +102,27 @@ struct CompileOptions {
     RecordedOptions recorded;
     std::array<uint8_t, 16> executableIdentity { };
     std::array<uint64_t, 8> removedFeatures { };
-    std::array<uint64_t, 8> featuresKeptOnlyWhenNamed { };
+    std::array<uint64_t, 8> featuresRetainedByName { };
     double sizeClassProgression { 0 };
     unsigned threadCount { 1 };
     CompileAction action { CompileAction::Compile };
+    bool verifiesCode { false };
     bool verifiesMachineCode { false };
-    bool asksWhetherFlowOfLinkIsClosed { false };
-    bool walksLastWalksOfLoopsAlone { false };
-    bool walksLoopsThatFitAgain { false };
-    bool asksWhetherLinkFindsLessFromMore { false };
-#if ASSERT_ENABLED || ASAN_ENABLED
-    bool verifiesAfterEveryStage { false };
-    bool verifiesProgram { false };
-    bool validatesReferences { false };
-    bool validatesReferenceGuards { false };
-#else
-    static constexpr bool verifiesAfterEveryStage = false;
-    static constexpr bool verifiesProgram = false;
-    static constexpr bool validatesReferences = false;
-    static constexpr bool validatesReferenceGuards = false;
-#endif
+    bool checksFlowFixpoint { false };
+    bool replaysFinalLoopVisits { false };
+    bool repeatsFittingLoopVisits { false };
+    bool checksFlowMonotonicity { false };
     ReportSet reports { };
     TestingSwitch testing { };
-    uint32_t rowThatSaysLess { 0 };
-    uint32_t seedOfShuffles { 0 };
-    uint32_t periodOfGuessesThatFail { 0 };
+    FaultInjection injectedFaults { };
+    uint32_t understatedEffects { 0 };
+    uint32_t shuffleSeed { 0 };
+    uint32_t speculationFailurePeriod { 0 };
+    uint32_t forcedWalkMode { 0 };
+    uint32_t forcedWalkModePeriod { 0 };
+    uint32_t loopVisitAbortPeriod { 0 };
+    uint32_t loopVisitAbortPhase { 0 };
+    uint32_t misstatedFact { 0 };
     ExcludedCode excludedCode { };
     OutputOptions output { };
     LoggingOptions logging;
@@ -133,12 +133,13 @@ struct CompileOptions {
     bool excludesHostEvaluatedText() const { return hasFlag(excludedCode, ExcludedCode::HostEvaluatedText); }
     bool excludesForeignCalls() const { return hasFlag(excludedCode, ExcludedCode::ForeignCalls); }
     bool excludesForeignCallsOfUnseenCode() const { return hasFlag(excludedCode, ExcludedCode::ForeignCallsOfUnseenCode); }
-    bool excludesCodeOutsideImage() const { return runsOnlyCodeOfImage || hasFlag(excludedCode, ExcludedCode::CodeOutsideImage); }
+    bool excludesCodeOutsideImage() const { return isHardenedBuild || hasFlag(excludedCode, ExcludedCode::CodeOutsideImage); }
     bool excludesLibraryText() const { return hasFlag(excludedCode, ExcludedCode::LibraryText); }
     bool excludesFeaturesNamedAtRunTime() const { return hasFlag(excludedCode, ExcludedCode::FeaturesNamedAtRunTime); }
     bool obfuscates() const { return hasFlag(output, OutputOptions::Obfuscate); }
     bool hidesFunctionNames() const { return obfuscates() && !hasFlag(output, OutputOptions::KeepsFunctionNames); }
     bool runsInSeveralRealms() const { return hasFlag(output, OutputOptions::RunsInSeveralRealms); }
+    bool recordsOrder() const { return hasFlag(output, OutputOptions::RecordsOrder); }
 
     JS_EXPORT_PRIVATE static CompileOptions fromWire(const Wire::CompileOptions&, Diagnostics&);
 };

@@ -37,15 +37,16 @@ void didChangeBarrierThreshold(VM&, unsigned threshold, bool mutatorShouldBeFenc
 void willAnalyzeHeap(VM&);
 void willCollectForExhaustedCage(VM&);
 void didFindNoRoomWhereCollectionMayRun(VM&);
-String nameOfCompiledCallee(JSCell*);
-bool standsForModuleInHeapSnapshots(JSCell*);
+String compiledCalleeName(JSCell*);
+bool representsModuleInHeapSnapshot(JSCell*);
 [[noreturn]] void crashOnCellVisitMismatch(VM&, const JSCell*);
-std::span<const uint32_t> offsetsOfNarrowReferences(const Structure*);
+std::span<const uint32_t> narrowReferenceOffsets(const Structure*);
 
 } // namespace HeapHooks
 
 JS_EXPORT_PRIVATE WTF::Vector<std::unique_ptr<MarkingConstraint>> createMarkingConstraints(VM&);
 JS_EXPORT_PRIVATE void initializeCollectorWords(VM&, Instance&);
+JS_EXPORT_PRIVATE void setBarrierThreshold(Instance&, unsigned threshold);
 
 class MutatorMarkStackLayout final : public MarkStackArray {
 public:
@@ -56,8 +57,8 @@ public:
 #if ASSERT_ENABLED
     static constexpr ptrdiff_t offsetOfTopInSegment = OBJECT_OFFSETOF(Segment, m_top);
 #endif
-    static ptrdiff_t offsetOfTop() { return OBJECT_OFFSETOF(MutatorMarkStackLayout, m_top); }
-    static ptrdiff_t offsetOfHeadSegment() { return OBJECT_OFFSETOF(MutatorMarkStackLayout, m_segments); }
+    static constexpr ptrdiff_t offsetOfTop() { return OBJECT_OFFSETOF(MutatorMarkStackLayout, m_top); }
+    static constexpr ptrdiff_t offsetOfHeadSegment() { return OBJECT_OFFSETOF(MutatorMarkStackLayout, m_segments); }
     static Segment* headSegmentOf(MarkStackArray& stack) { return static_cast<MutatorMarkStackLayout&>(stack).m_segments.head(); }
 };
 

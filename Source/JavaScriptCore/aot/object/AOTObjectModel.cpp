@@ -12,12 +12,15 @@
 #include "AOTBuiltinTable.h"
 #include "AOTBuiltinTableBindings.h"
 #include "AOTCellFormat.h"
+#include "AOTCheckedSpan.h"
 #include "AOTClosure.h"
 #include "AOTCompiledCallee.h"
 #include "AOTFieldTable.h"
+#include "AOTFunctionTables.h"
 #include "AOTHeapCacheRegistry.h"
 #include "AOTHeapHooks.h"
 #include "AOTImage.h"
+#include "AOTInliningAcrossFiles.h"
 #include "AOTInstance.h"
 #include "AOTInterpreterSlowPaths.h"
 #include "AOTModuleNamespace.h"
@@ -39,11 +42,9 @@
 #include "PropertyName.h"
 #include "SlotVisitorInlines.h"
 #include "Symbol.h"
-#include "WeakGCMapInlines.h"
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <tuple>
 #include <wtf/BitSet.h>
 #include <wtf/Hasher.h>
 #include <wtf/StdLibExtras.h>
@@ -143,7 +144,10 @@ static bool numberHasType(const RuntimeType& type, double number)
     if (kind != PrimitiveSet::Integer)
         return true;
     auto range = type.integerRange();
-    return !range || (number >= static_cast<double>(range->first) && number <= static_cast<double>(range->second));
+    if (!range)
+        return true;
+    int64_t integer = static_cast<int64_t>(number);
+    return integer >= range->first && integer <= range->second;
 }
 
 static bool stringHasType(const State& state, const RuntimeType& type, JSString* value)
@@ -191,14 +195,14 @@ static bool isInstanceOfBuiltinClass(JSCell* cell, BuiltinClassID id)
 RuntimeLayoutTable::RuntimeLayoutTable(State& state)
     : m_state(state)
     , m_tables(state.tables)
-    , m_cachedFields(state.tableArena.allocate<CachedField>(numberOfCachedFields))
+    , m_cachedFields(state.tableArena.allocate<CachedField>(maxCachedFields))
 {
     state.instance.shapeSets = m_tables.shapeSetBits().data();
 }
 
 RuntimeLayoutTable::~RuntimeLayoutTable()
 {
-    for (auto& cached : std::span { m_cachedFields, numberOfCachedFields }) {
+    for (auto& cached : cachedFields()) {
         if (cached.name)
             cached.name->deref();
     }
@@ -208,16 +212,36 @@ const FieldData* RuntimeLayoutTable::field(VM& vm, const LayoutData& layout, Uni
 {
     if (name->isSymbol() && !layout.hasFieldsWithSymbolKeys && !static_cast<SymbolImpl*>(name)->isPrivate())
         return nullptr;
-    CachedField& cached = m_cachedFields[(layout.shape * 0x9e3779b1u ^ static_cast<uint32_t>(std::bit_cast<uintptr_t>(name) >> 4)) % numberOfCachedFields];
+    CachedField& cached = placeOfCachedField(layout.shape, name);
     if (cached.shape == layout.shape && cached.name == name) [[likely]]
         return cached.field;
+    if (!name->isSymbol() && !identifiersOf(m_state.instance).numberOf(name))
+        return nullptr;
     const FieldData* found = findField(vm, layout, name);
     ASSERT(!found || !parseIndex(PropertyName(name)));
     name->ref();
     if (cached.name)
         cached.name->deref();
     cached = { layout.shape, name, found };
+    if (++m_fieldsCachedSinceGrowth > m_maskOfCachedFields / 2 && m_maskOfCachedFields + 1 < maxCachedFields) [[unlikely]]
+        growCachedFields();
     return found;
+}
+
+NEVER_INLINE void RuntimeLayoutTable::growCachedFields()
+{
+    Vector<CachedField> previous(cachedFields());
+    zeroSpan(cachedFields());
+    m_maskOfCachedFields = std::min(4 * m_maskOfCachedFields + 3, maxCachedFields - 1);
+    m_fieldsCachedSinceGrowth = 0;
+    for (const CachedField& cached : previous) {
+        if (!cached.name)
+            continue;
+        CachedField& place = placeOfCachedField(cached.shape, cached.name);
+        if (place.name)
+            place.name->deref();
+        place = cached;
+    }
 }
 
 const FieldData* RuntimeLayoutTable::findField(VM& vm, const LayoutData& layout, UniquedStringImpl* name)
@@ -289,12 +313,12 @@ UniquedStringImpl* RuntimeLayoutTable::nameOf(VM& vm, const FieldData& field)
 
 bool RuntimeLayoutTable::hasSymbolKey(const FieldData& field) const
 {
-    return keyKindOf(textOf(m_state).identifier(field.name).kind()) == FieldKeyKind::Symbol;
+    return keyKindOf(textOf(m_state).kindOfIdentifier(field.name)) == FieldKeyKind::Symbol;
 }
 
 bool RuntimeLayoutTable::hasStringKey(const FieldData& field) const
 {
-    return keyKindOf(textOf(m_state).identifier(field.name).kind()) == FieldKeyKind::String && !field.isPrivate();
+    return keyKindOf(textOf(m_state).kindOfIdentifier(field.name)) == FieldKeyKind::String && !field.isPrivate();
 }
 
 Object* RuntimeLayoutTable::compiledObject(JSValue value) const
@@ -348,12 +372,24 @@ bool RuntimeLayoutTable::objectHasType(const RuntimeType& type, JSCell* cell) co
     return closureNumber && isOfThisRealm(cell) && type.listsClosureNumber(*closureNumber);
 }
 
+bool RuntimeLayoutTable::slotTakesHalf(const FieldData& field, const JSCell* getterOrSetter)
+{
+    if (!field.takesAccessorsOfLibraryAlone() || !getterOrSetter)
+        return true;
+    std::optional<FunctionID> function = functionOf(getterOrSetter);
+    return function && functionKindData(*function).isInRuntimeModule;
+}
+
 std::optional<AcceptedValue> RuntimeLayoutTable::accept(const FieldData& field, JSValue value) const
 {
     if (field.isAccessor()) {
         if (!value || !value.isCell() || value.asCell()->type() != GetterSetterType)
             return std::nullopt;
-        if (!valueHasType(typeOf(field), uncheckedDowncast<GetterSetter>(value.asCell())->getter()))
+        auto* accessor = uncheckedDowncast<GetterSetter>(value.asCell());
+        bool getterIsNotLaidYet = field.getterIsProven && !(field.flags & fieldIsNotConfigurable) && accessor->isGetterNull();
+        if (!getterIsNotLaidYet && !valueHasType(typeOf(field), accessor->getter()))
+            return std::nullopt;
+        if (!slotTakesHalf(field, accessor->isGetterNull() ? nullptr : accessor->getter()) || !slotTakesHalf(field, accessor->isSetterNull() ? nullptr : accessor->setter()))
             return std::nullopt;
         return AcceptedValue(value);
     }
@@ -402,32 +438,43 @@ static_assert(ConservativeRoots::findsStructuresOfFrameCells);
 struct StructureTable::VariantMaps {
     WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED(VariantMaps);
 
-    using Key = std::tuple<uint32_t, JSObject*, Structure*, uint32_t>;
+    struct FiledVariant {
+        uint32_t hash { 0 };
+        StructureID structure;
+    };
 
     static constexpr uint32_t keyMayBePrototype = 1u << 31;
     static constexpr uint32_t keyHasUnnamedExtraProperties = 1u << 30;
-    static constexpr uint32_t keyHasOtherPrototype = 1u << 29;
+    static constexpr uint32_t keyHasSpareWordBit = 1u << 28;
     static constexpr unsigned recentIndexBits = 7;
     static constexpr unsigned requestedIndexBits = 12;
 
-    static Key keyOf(const Variant& variant)
+    static uint32_t hashOf(const Variant& variant)
     {
         uint32_t shapeAndFlags = variant.layout->shape;
-        RELEASE_ASSERT(shapeAndFlags < keyHasOtherPrototype);
+        RELEASE_ASSERT(shapeAndFlags < keyHasSpareWordBit);
         if (variant.mayBePrototype)
             shapeAndFlags |= keyMayBePrototype;
         if (variant.hasExtraProperties && !variant.extraPropertiesStructure)
             shapeAndFlags |= keyHasUnnamedExtraProperties;
-        if (variant.hasOtherPrototype)
-            shapeAndFlags |= keyHasOtherPrototype;
-        return { shapeAndFlags, variant.prototype.getObject(), variant.extraPropertiesStructure, variant.outOfLineKeyOrder ? 1 | computeHash(*variant.outOfLineKeyOrder) : 0 };
+        if (variant.hasSpareWord)
+            shapeAndFlags |= keyHasSpareWordBit;
+        uint32_t keyOrder = variant.outOfLineKeyOrder ? 1 | computeHash(*variant.outOfLineKeyOrder) : 0;
+        uint64_t prototypeAndExtraProperties = std::bit_cast<uintptr_t>(variant.prototype.getObject()) ^ std::rotl(static_cast<uint64_t>(std::bit_cast<uintptr_t>(variant.extraPropertiesStructure)), 32);
+        uint32_t hash = WTF::intHash(static_cast<uint64_t>((static_cast<uint64_t>(shapeAndFlags) << 32 | keyOrder) ^ prototypeAndExtraProperties * 0x9e3779b97f4a7c15ull));
+        return std::max(hash, 1u);
     }
 
     static bool describes(const Variant& variant, const CompiledStructure& structure)
     {
+        return structure.hasOtherPrototype() == variant.hasOtherPrototype && describesWithOtherPrototype(variant, structure);
+    }
+
+    static bool describesWithOtherPrototype(const Variant& variant, const CompiledStructure& structure)
+    {
         if (structure.layout().shape != variant.layout->shape || structure.storedPrototype() != variant.prototype)
             return false;
-        if (structure.hasOtherPrototype() != variant.hasOtherPrototype || structure.mayBePrototype() != variant.mayBePrototype)
+        if (structure.mayBePrototype() != variant.mayBePrototype || structure.reportsReplacements() != variant.reportsReplacements || structure.hasSpareWord() != variant.hasSpareWord)
             return false;
         if (structure.hasExtraProperties() != variant.hasExtraProperties || structure.extraPropertiesStructure() != variant.extraPropertiesStructure)
             return false;
@@ -444,11 +491,6 @@ struct StructureTable::VariantMaps {
         if (countOf(outOfLineOrderWordFor(asked.size())) && held.size() > asked.size())
             held = held.first(asked.size());
         return equalSpans(held, asked);
-    }
-
-    explicit VariantMaps(VM& vm)
-        : structures(vm)
-    {
     }
 
     static CompiledStructure* decode(StructureID id) { return WTF::opaque(uncheckedDowncast<CompiledStructure>(id.decode())); }
@@ -469,29 +511,137 @@ struct StructureTable::VariantMaps {
         recentByExtraProperties[recentIndex(variant)] = structure.id();
     }
 
+    size_t firstPlaceOf(uint32_t hash) const { return hash & (filed.size() - 1); }
+    size_t placeBehind(size_t place) const { return (place + 1) & (filed.size() - 1); }
+
+    CompiledStructure* find(const Variant& variant, uint32_t hash) const
+    {
+        if (filed.isEmpty())
+            return nullptr;
+        for (size_t place = firstPlaceOf(hash); filed[place].hash; place = placeBehind(place)) {
+            if (filed[place].hash != hash || !filed[place].structure)
+                continue;
+            CompiledStructure* structure = decode(filed[place].structure);
+            if (describes(variant, *structure))
+                return structure;
+        }
+        return nullptr;
+    }
+
+    CompiledStructure* findPreferringPristine(const Variant& variant, uint32_t hash) const
+    {
+        if (filed.isEmpty())
+            return nullptr;
+        CompiledStructure* found = nullptr;
+        for (size_t place = firstPlaceOf(hash); filed[place].hash; place = placeBehind(place)) {
+            if (filed[place].hash != hash || !filed[place].structure)
+                continue;
+            CompiledStructure* structure = decode(filed[place].structure);
+            if (!describesWithOtherPrototype(variant, *structure))
+                continue;
+            if (!structure->hasOtherPrototype())
+                return structure;
+            found = structure;
+        }
+        return found;
+    }
+
+    void file(const Variant& variant, uint32_t hash, StructureID structure)
+    {
+        if (4 * (numberOfUsedSlots + 1) > 3 * filed.size())
+            makeRoom();
+        filedSinceCollection.append({ hash, structure });
+        FiledVariant* free = nullptr;
+        size_t place = firstPlaceOf(hash);
+        for (; filed[place].hash; place = placeBehind(place)) {
+            FiledVariant& taken = filed[place];
+            if (!taken.structure) {
+                if (!free)
+                    free = &taken;
+                continue;
+            }
+            if (taken.hash == hash && describes(variant, *decode(taken.structure))) {
+                taken.structure = structure;
+                return;
+            }
+        }
+        if (!free) {
+            free = &filed[place];
+            ++numberOfUsedSlots;
+        }
+        *free = { hash, structure };
+    }
+
+    void makeRoom()
+    {
+        constexpr size_t fewestPlaces = 64;
+        size_t numberAlive = std::ranges::count_if(filed, [](const FiledVariant& variant) {
+            return !!variant.structure;
+        });
+        size_t size = std::max(fewestPlaces, 2 * numberAlive >= filed.size() ? 2 * filed.size() : filed.size());
+        Vector<FiledVariant> previous = std::exchange(filed, Vector<FiledVariant>(FillWith { }, size, FiledVariant { }));
+        numberOfUsedSlots = numberAlive;
+        for (const FiledVariant& variant : previous) {
+            if (!variant.structure)
+                continue;
+            size_t place = firstPlaceOf(variant.hash);
+            while (filed[place].hash)
+                place = placeBehind(place);
+            filed[place] = variant;
+        }
+    }
+
+    void forgetDead(VM& vm, CollectionScope scope)
+    {
+        auto isDead = [&](StructureID id) {
+            return !vm.heap.isMarked(id.decode());
+        };
+        if (scope == CollectionScope::Eden) {
+            for (const FiledVariant& young : filedSinceCollection) {
+                if (!young.hash || !isDead(young.structure))
+                    continue;
+                for (size_t place = firstPlaceOf(young.hash); filed[place].hash; place = placeBehind(place)) {
+                    if (filed[place].structure == young.structure) {
+                        filed[place].structure = { };
+                        break;
+                    }
+                }
+            }
+        } else {
+            for (FiledVariant& variant : filed) {
+                if (variant.structure && isDead(variant.structure))
+                    variant.structure = { };
+            }
+        }
+        filedSinceCollection.shrink(0);
+        usualOfLivingPrototypes.removeAllMatching(isDead);
+    }
+
     template<typename Visitor>
     void visitRoots(Visitor& visitor)
     {
         if (visitor.collectionScope() == CollectionScope::Eden)
             return;
-        for (StructureID id : listed) {
+        auto visit = [&](StructureID id) {
             CompiledStructure* variant = decode(id);
             if (visitor.isMarked(variant) || variant->hasOutOfLineKeyOrder())
-                continue;
+                return;
             JSObject* prototype = variant->storedPrototype().getObject();
             Structure* named = variant->extraPropertiesStructure();
             if ((!prototype || visitor.isMarked(prototype)) && (!named || visitor.isMarked(named)))
                 visitor.appendUnbarriered(variant);
+        };
+        for (const FiledVariant& variant : filed) {
+            if (variant.structure)
+                visit(variant.structure);
         }
+        for (StructureID id : usualOfLivingPrototypes)
+            visit(id);
     }
 
-    struct FiledVariant {
-        Key key;
-        StructureID id;
-    };
-
-    WeakGCMap<Key, CompiledStructure> structures;
-    Vector<StructureID> listed;
+    Vector<FiledVariant> filed;
+    size_t numberOfUsedSlots { 0 };
+    Vector<StructureID> usualOfLivingPrototypes;
     Vector<FiledVariant> filedSinceCollection;
     std::array<StructureID, 1u << recentIndexBits> recentByExtraProperties { };
     WTF::BitSet<1u << requestedIndexBits> requestedExtraPropertiesStructures;
@@ -510,17 +660,22 @@ StructureTable::StructureTable(State& state)
     : m_state(state)
     , m_tables(state.tables)
     , m_structures(state.tableArena.allocate<uint32_t>(state.tables.firstEnvironmentShape))
-    , m_variants(makeUnique<VariantMaps>(*state.instance.vm))
+    , m_variants(makeUnique<VariantMaps>())
     , m_writtenStructures(asBytes(usualStructureIDs()), structuresRegionShift)
     , m_writtenRecords(allocateAllocationSiteRecords(state), recordsRegionShift)
 {
     m_environmentShapes.tables = &m_tables;
+    m_shapesThatLiveWhilePrototypesLive.ensureSize(m_tables.firstEnvironmentShape);
+    m_weakShapes.ensureSize(m_tables.firstEnvironmentShape);
+    m_allocationsThatMadeObjects.ensureSize(m_tables.allocations().size());
+    m_shapesWithGrownCells.ensureSize(m_tables.firstEnvironmentShape);
     static_assert(OBJECT_OFFSETOF(AllocatorWithoutRoom, freeList) == LocalAllocator::offsetOfFreeList());
     *state.instance.objects.emptyAllocationSite() = emptyAllocationSiteRecord();
     state.caches->add(CacheKind::StrongRoots, "structures of layouts"_s, *this, RootVolatility::GreyedByExecution);
     state.caches->add(CacheKind::WeakByKey, "structures of layouts that have ended"_s, *this);
     state.caches->add(CacheKind::StrongRoots, "variants of the structures of layouts"_s, *m_variants);
     state.caches->addClearedEachCollection("recent structures by extra properties"_s, asWritableBytes(std::span { m_variants->recentByExtraProperties }));
+    state.caches->addClearedEachCollection("recent structures with a spare word"_s, asWritableBytes(std::span { m_recentGrownStructures }));
     state.instance.objects.prototypeTransitions = state.tableArena.allocate<PrototypeTransition>(2 * numberOfPrototypeTransitions);
     state.caches->addClearedEachCollection("prototype transitions"_s, asWritableBytes(std::span { state.instance.objects.prototypeTransitions, 2 * numberOfPrototypeTransitions }));
     state.instance.objects.copiesWithNames = state.tableArena.allocate<uint8_t>(sizeOfCopiesWithNames);
@@ -538,17 +693,25 @@ std::span<AllocationSiteRecord> StructureTable::allocationSiteRecords() const
 template<typename Appender>
 ALWAYS_INLINE void StructureTable::visitUsualStructures(Appender& appender, size_t begin, size_t end)
 {
-    RememberedSlotSet::forEachEntryInRegion(usualStructureIDs(), begin, end, [&](uint32_t structureID) ALWAYS_INLINE_LAMBDA {
-        if (structureID)
+    std::span<uint32_t> structureIDs = usualStructureIDs();
+    RememberedSlotSet::forEachEntryInRegion(structureIDs, begin, end, [&](uint32_t& structureID) ALWAYS_INLINE_LAMBDA {
+        size_t shape = &structureID - structureIDs.data();
+        if (structureID && !m_shapesThatLiveWhilePrototypesLive.quickGet(shape) && !m_weakShapes.quickGet(shape))
             appender.appendUnbarriered(std::bit_cast<StructureID>(structureID).decode());
     });
+}
+
+ALWAYS_INLINE_INTO_OTHER_FILES bool StructureTable::livesWhilePrototypeLives(const AllocationSiteRecord& record) const
+{
+    uint32_t shape = shapeOf(shapeWordWithoutMark(static_cast<uint32_t>(record.orderAndShapeWords >> 32)));
+    return shape < m_tables.firstEnvironmentShape && m_shapesThatLiveWhilePrototypesLive.quickGet(shape);
 }
 
 template<typename Appender>
 ALWAYS_INLINE void StructureTable::visitRecords(Appender& appender, size_t begin, size_t end)
 {
     RememberedSlotSet::forEachEntryInRegion(allocationSiteRecords(), begin, end, [&](const AllocationSiteRecord& record) ALWAYS_INLINE_LAMBDA {
-        if (uint32_t structureID = static_cast<uint32_t>(record.header))
+        if (uint32_t structureID = static_cast<uint32_t>(record.header); structureID && !livesWhilePrototypeLives(record))
             appender.appendUnbarriered(std::bit_cast<StructureID>(structureID).decode());
     });
 }
@@ -583,11 +746,11 @@ void StructureTable::visitRoots(Visitor& visitor)
     if (visitor.collectionScope() != CollectionScope::Eden)
         return;
     for (const VariantMaps::FiledVariant& filed : m_variants->filedSinceCollection) {
-        CompiledStructure* variant = VariantMaps::decode(filed.id);
+        CompiledStructure* variant = VariantMaps::decode(filed.structure);
         if (variant->hasOutOfLineKeyOrder())
             continue;
         JSObject* prototype = variant->storedPrototype().getObject();
-        if (!variant->hasOtherPrototype() || !prototype || visitor.isMarked(prototype))
+        if (!prototype || visitor.isMarked(prototype))
             visitor.appendUnbarriered(variant);
     }
 }
@@ -595,20 +758,58 @@ void StructureTable::visitRoots(Visitor& visitor)
 template void StructureTable::visitRoots(AbstractSlotVisitor&);
 template void StructureTable::visitRoots(SlotVisitor&);
 
-size_t StructureTable::removeDeadEntries(VM& vm, CollectionScope)
+size_t StructureTable::removeDeadEntries(VM& vm, CollectionScope scope)
 {
     {
         Locker locker { m_state.caches->lock() };
-        for (const VariantMaps::FiledVariant& filed : m_variants->filedSinceCollection) {
-            if (!vm.heap.isMarked(filed.id.decode()) && !m_variants->structures.get(filed.key))
-                m_variants->structures.remove(filed.key);
-        }
-        m_variants->filedSinceCollection.shrink(0);
-        m_variants->listed.removeAllMatching([&](StructureID id) {
-            return !vm.heap.isMarked(id.decode());
-        });
+        m_variants->forgetDead(vm, scope);
     }
+    disarmDeadGrownCells(vm);
+    forgetStructuresThatDied(vm, scope);
     return 0;
+}
+
+void StructureTable::forgetStructuresThatDied(VM& vm, CollectionScope scope)
+{
+    auto isDead = [&](uint32_t structureID) {
+        return structureID && !vm.heap.isMarked(std::bit_cast<StructureID>(structureID).decode());
+    };
+    bool isEden = scope == CollectionScope::Eden;
+    auto forgetDead = [&](std::span<const uint32_t> shapes) {
+        for (uint32_t shape : shapes) {
+            if (isDead(m_structures[shape]))
+                m_structures[shape] = 0;
+        }
+    };
+    if (isEden)
+        forgetDead(m_shapesGivenStructuresSinceCollection);
+    else {
+        forgetDead(m_listOfShapesThatLiveWhilePrototypesLive);
+        forgetDead(m_listOfWeakShapes);
+    }
+    for (AllocationSiteRecord* record : isEden ? m_recordsGivenStructuresSinceCollection : m_listOfRecordsThatLiveWhilePrototypesLive) {
+        if (isDead(static_cast<uint32_t>(record->header)))
+            *record = emptyAllocationSiteRecord();
+    }
+    m_shapesGivenStructuresSinceCollection.shrink(0);
+    m_recordsGivenStructuresSinceCollection.shrink(0);
+}
+
+bool StructureTable::noteWhetherLivesWhilePrototypeLives(const LayoutData& layout)
+{
+    if (!livesWhilePrototypeLives(layout))
+        return false;
+    if (!m_shapesThatLiveWhilePrototypesLive.quickSet(layout.shape))
+        m_listOfShapesThatLiveWhilePrototypesLive.append(layout.shape);
+    return true;
+}
+
+void StructureTable::didNameStructureThatLivesWhilePrototypeLives(AllocationSiteRecord& record)
+{
+    size_t number = m_state.instance.objects.emptyAllocationSite() - &record;
+    if (!m_recordsThatLiveWhilePrototypesLive.set(number))
+        m_listOfRecordsThatLiveWhilePrototypesLive.append(&record);
+    m_recordsGivenStructuresSinceCollection.append(&record);
 }
 
 enum class AllocatedCellKind : uint8_t { Object, Closure, Environment };
@@ -646,14 +847,14 @@ Structure* StructureTable::structure(VM& vm, uint32_t shape)
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-ALWAYS_INLINE CompiledStructure* StructureTable::usualStructureIfExists(uint32_t shape) const
+ALWAYS_INLINE_INTO_OTHER_FILES CompiledStructure* StructureTable::usualStructureIfExists(uint32_t shape) const
 {
     RELEASE_ASSERT(shape < m_tables.firstEnvironmentShape);
     uint32_t known = m_structures[shape];
     return known ? VariantMaps::decode(std::bit_cast<StructureID>(known)) : nullptr;
 }
 
-ALWAYS_INLINE StructureTable::Variant StructureTable::usualVariantOf(VM& vm, const LayoutData& layout)
+ALWAYS_INLINE_INTO_OTHER_FILES StructureTable::Variant StructureTable::usualVariantOf(VM& vm, const LayoutData& layout)
 {
     JSGlobalObject* realm = m_state.instance.globalObject;
     Variant usual { .realm = realm, .prototype = realm->objectPrototype(), .layout = &layout };
@@ -677,7 +878,7 @@ ALWAYS_INLINE StructureTable::Variant StructureTable::usualVariantOf(VM& vm, con
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-ALWAYS_INLINE CompiledStructure* StructureTable::create(VM& vm, const LayoutData& layout, const Variant& variant)
+ALWAYS_INLINE_INTO_OTHER_FILES CompiledStructure* StructureTable::create(VM& vm, const LayoutData& layout, Variant& variant)
 {
     JSGlobalObject* realm = m_state.instance.globalObject;
     CompiledStructure*& templateStructure = m_templateStructures[variant.hasOtherPrototype];
@@ -687,21 +888,34 @@ ALWAYS_INLINE CompiledStructure* StructureTable::create(VM& vm, const LayoutData
     }
     if (JSObject* object = variant.prototype.getObject(); object && !object->structure()->mayBePrototype())
         object->didBecomePrototype(vm);
-    countEvent(vm, RuntimeCounterID::CompiledStructuresMade);
+    countEvent(vm, RuntimeCounterID::CompiledStructuresCreated);
     ++m_numberOfStructuresMade;
-    RELEASE_ASSERT(!variant.hasExtraProperties || !layout.extraPropertiesSlot() == !!variant.heldExtraProperties);
+    RELEASE_ASSERT(!variant.hasSpareWord || !layout.hasExtraPropertiesSlot);
+    RELEASE_ASSERT(!variant.hasExtraProperties || !(layout.hasExtraPropertiesSlot || variant.hasSpareWord) == !!variant.heldExtraProperties);
     RELEASE_ASSERT(!variant.heldExtraProperties || (variant.hasExtraProperties && !variant.extraPropertiesStructure));
-    if (variant.realm == realm)
-        return CompiledStructure::createForObject(vm, *templateStructure, variant);
-    Variant parameters = variant;
-    parameters.realm = realm;
-    return CompiledStructure::createForObject(vm, *templateStructure, parameters);
+    variant.realm = realm;
+    CompiledStructure* structure = CompiledStructure::createForObject(vm, *templateStructure, variant);
+    bool hasNonConfigurableField = variant.hasExtraProperties && std::ranges::any_of(layout.fields(), [](const FieldData& field) {
+        return field.attributes() & PropertyAttribute::DontDelete;
+    });
+    if (variant.hasExtraProperties && !hasNonConfigurableField)
+        structure->setHasOnlyConfigurableFields();
+    return structure;
 }
 
-ALWAYS_INLINE CompiledStructure* StructureTable::createUsual(VM& vm, const LayoutData& layout, const Variant& usual)
+ALWAYS_INLINE_INTO_OTHER_FILES CompiledStructure* StructureTable::createUsual(VM& vm, const LayoutData& layout, Variant& usual)
 {
     CompiledStructure* created = create(vm, layout, usual);
     uint32_t& known = m_structures[layout.shape];
+    if (m_weakShapes.quickGet(layout.shape)) {
+        Locker locker { m_state.caches->lock() };
+        m_shapesGivenStructuresSinceCollection.append(layout.shape);
+    } else if (noteWhetherLivesWhilePrototypeLives(layout)) {
+        Locker locker { m_state.caches->lock() };
+        m_shapesGivenStructuresSinceCollection.append(layout.shape);
+        m_variants->filedSinceCollection.append({ 0, created->id() });
+        m_variants->usualOfLivingPrototypes.append(created->id());
+    }
     known = created->id().bits();
     m_writtenStructures.record(&known);
     if (!m_shapeHasStructure.set(layout.shape))
@@ -711,13 +925,35 @@ ALWAYS_INLINE CompiledStructure* StructureTable::createUsual(VM& vm, const Layou
     return created;
 }
 
-ALWAYS_INLINE CompiledStructure* StructureTable::usualStructure(VM& vm, uint32_t shape)
+ALWAYS_INLINE_INTO_OTHER_FILES CompiledStructure* StructureTable::usualStructure(VM& vm, uint32_t shape)
 {
+    holdUsualStructure(shape);
     if (CompiledStructure* known = usualStructureIfExists(shape))
         return known;
     RELEASE_ASSERT(m_tables.hasLayoutForShape(shape));
     const LayoutData& layout = m_tables.layoutForShape(shape);
-    return createUsual(vm, layout, usualVariantOf(vm, layout));
+    Variant usual = usualVariantOf(vm, layout);
+    return createUsual(vm, layout, usual);
+}
+
+void StructureTable::holdUsualStructure(uint32_t shape)
+{
+    if (!m_weakShapes.quickGet(shape)) [[likely]]
+        return;
+    m_weakShapes.quickClear(shape);
+    if (m_structures[shape])
+        m_writtenStructures.record(&m_structures[shape]);
+}
+
+CompiledStructure* StructureTable::structureForFirstObject(VM& vm, uint32_t shape)
+{
+    if (CompiledStructure* known = usualStructureIfExists(shape))
+        return known;
+    const LayoutData& layout = m_tables.layoutForShape(shape);
+    if (!m_weakShapes.quickSet(shape))
+        m_listOfWeakShapes.append(shape);
+    Variant usual = usualVariantOf(vm, layout);
+    return createUsual(vm, layout, usual);
 }
 
 CompiledStructure* StructureTable::objectStructure(VM& vm, uint32_t shape)
@@ -728,7 +964,8 @@ CompiledStructure* StructureTable::objectStructure(VM& vm, uint32_t shape)
 CompiledStructure* StructureTable::objectStructure(VM& vm, uint32_t shape, JSValue prototype)
 {
     RELEASE_ASSERT(m_tables.hasLayoutForShape(shape));
-    return findOrCreate(vm, Variant { .prototype = prototype, .layout = &m_tables.layoutForShape(shape) });
+    Variant variant { .prototype = prototype, .layout = &m_tables.layoutForShape(shape) };
+    return findOrCreate(vm, variant);
 }
 
 StructureTable::Variant StructureTable::variantOf(const CompiledStructure& structure)
@@ -738,6 +975,8 @@ StructureTable::Variant StructureTable::variantOf(const CompiledStructure& struc
         .layout = &structure.layout(),
         .hasOtherPrototype = structure.hasOtherPrototype(),
         .mayBePrototype = structure.mayBePrototype(),
+        .reportsReplacements = structure.reportsReplacements(),
+        .hasSpareWord = structure.hasSpareWord(),
     };
     if (structure.hasExtraProperties()) {
         variant.hasExtraProperties = true;
@@ -763,48 +1002,62 @@ CompiledStructure* StructureTable::find(const Variant& variant) const
         return nullptr;
     if (CompiledStructure* usual = usualStructureIfExists(variant.layout->shape); usual && VariantMaps::describes(variant, *usual))
         return usual;
-    CompiledStructure* found = m_variants->structures.get(VariantMaps::keyOf(variant));
-    if (!found || !VariantMaps::describes(variant, *found))
+    CompiledStructure* found = m_variants->find(variant, VariantMaps::hashOf(variant));
+    if (!found)
         return nullptr;
     if (variant.outOfLineKeyOrder)
         found->didFindKeyOrderAgain();
     return found;
 }
 
-CompiledStructure* StructureTable::findOrCreate(VM& vm, const Variant& requested)
+CompiledStructure* StructureTable::findOrCreate(VM& vm, Variant& variant)
 {
     // outOfLineKeyOrder may point into a Structure that nothing else keeps alive.
     // A collection that is put off runs at the next poll or allocation, not when this returns: this frame and the caller's hold Variants,
     // and an empty std::optional leaves its payload unwritten, so the conservative scan would keep whatever stale pointers lie there alive.
     DeferGCForAWhile deferGC(vm);
-    const LayoutData& layout = *requested.layout;
+    const LayoutData& layout = *variant.layout;
+    holdUsualStructure(layout.shape);
     CompiledStructure* usualStructure = usualStructureIfExists(layout.shape);
     RELEASE_ASSERT(m_tables.hasLayoutForShape(layout.shape));
-    Variant usual = usualStructure ? variantOf(*usualStructure) : usualVariantOf(vm, layout);
-    Variant variant = requested;
-    bool mayBeFiled = usual.prototype == variant.prototype || !m_state.objects->classes.takeWordThatNothingHasAskedBelow(variant.prototype);
-    if (!variant.hasOtherPrototype && !usual.hasOtherPrototype && usual.prototype != variant.prototype) {
-        if (CompiledStructure* existing = mayBeFiled ? find(variant) : nullptr)
-            return existing;
-        JSObject* firstAbove = variant.prototype.getObject();
-        variant.hasOtherPrototype = true;
-        if (CompiledStructure* existing = mayBeFiled ? find(variant) : nullptr)
-            return existing;
-        variant.hasOtherPrototype = !firstAbove || !m_state.objects->classes.takesObjectsLaidBelowPrototype(vm, layout, firstAbove);
+    JSValue usualPrototype;
+    bool usualHasOtherPrototype;
+    if (usualStructure) {
+        usualPrototype = usualStructure->storedPrototype();
+        usualHasOtherPrototype = usualStructure->hasOtherPrototype();
+    } else {
+        Variant usual = usualVariantOf(vm, layout);
+        usualPrototype = usual.prototype;
+        usualHasOtherPrototype = usual.hasOtherPrototype;
     }
-    variant.hasOtherPrototype |= usual.hasOtherPrototype;
-    if (CompiledStructure* existing = mayBeFiled ? find(variant) : nullptr)
+    bool isListedVariant = isListed(variant);
+    bool mayBeFiled = (usualPrototype == variant.prototype || !m_state.objects->classes.takeWordThatNothingHasAskedBelow(variant.prototype)) && isListedVariant;
+    uint32_t hash = isListedVariant ? VariantMaps::hashOf(variant) : 0;
+    CompiledStructure* existing = nullptr;
+    if (!variant.hasOtherPrototype && !usualHasOtherPrototype && usualPrototype != variant.prototype) {
+        if (mayBeFiled)
+            existing = m_variants->findPreferringPristine(variant, hash);
+        JSObject* firstAbove = variant.prototype.getObject();
+        if (!existing)
+            variant.hasOtherPrototype = !firstAbove || !m_state.objects->classes.takesObjectsLaidBelowPrototype(vm, layout, firstAbove);
+    } else {
+        variant.hasOtherPrototype |= usualHasOtherPrototype;
+        if (mayBeFiled)
+            existing = usualStructure && VariantMaps::describes(variant, *usualStructure) ? usualStructure : m_variants->find(variant, hash);
+    }
+    if (existing) {
+        if (variant.outOfLineKeyOrder && existing != usualStructure)
+            existing->didFindKeyOrderAgain();
         return existing;
-    ASSERT(layout.shape == usual.layout->shape);
-    if (!variant.mayBePrototype && !variant.hasExtraProperties && !variant.outOfLineKeyOrder && variant.prototype == usual.prototype && variant.hasOtherPrototype == usual.hasOtherPrototype)
+    }
+    if (!variant.mayBePrototype && !variant.hasExtraProperties && !variant.hasSpareWord && !variant.outOfLineKeyOrder && variant.prototype == usualPrototype && variant.hasOtherPrototype == usualHasOtherPrototype) {
+        Variant usual = usualStructure ? variantOf(*usualStructure) : usualVariantOf(vm, layout);
         return createUsual(vm, layout, usual);
+    }
     CompiledStructure* created = create(vm, layout, variant);
-    if (isListed(variant)) {
-        VariantMaps::Key key = VariantMaps::keyOf(variant);
-        m_variants->structures.set(key, created);
+    if (isListedVariant) {
         Locker locker { m_state.caches->lock() };
-        m_variants->filedSinceCollection.append({ key, created->id() });
-        m_variants->listed.append(created->id());
+        m_variants->file(variant, hash, created->id());
     }
     if (variant.hasOtherPrototype && layout.isClass())
         m_state.objects->classes.didChangeInstancePrototype(vm, layout, variant.prototype);
@@ -827,6 +1080,8 @@ CompiledStructure* StructureTable::withPrototype(VM& vm, const CompiledStructure
     variant.prototype = prototype;
     CompiledStructure* structure = findOrCreate(vm, variant);
     constexpr uint32_t pristineBitInBlob = IsPristine << 16;
+    if (current.layout().marksOtherPrototypes && structure->isPristine())
+        return structure;
     if (structure->isPristine() && structure->typeInfoBlob() == (current.typeInfoBlob() | pristineBitInBlob) && !current.mayBePrototype() && !belongsToOneObject(variant))
         recent = { encodedPrototype, before, structure->id().bits() };
     else if (!structure->isPristine() && structure->typeInfoBlob() == current.typeInfoBlob() && !current.mayBePrototype() && !belongsToOneObject(variant))
@@ -838,6 +1093,14 @@ CompiledStructure* StructureTable::asPrototype(VM& vm, const CompiledStructure& 
 {
     Variant variant = variantWithKeyOrderOf(current);
     variant.mayBePrototype = true;
+    return findOrCreate(vm, variant);
+}
+
+CompiledStructure* StructureTable::withReportedReplacements(VM& vm, const CompiledStructure& current)
+{
+    ASSERT(current.mayBePrototype());
+    Variant variant = variantWithKeyOrderOf(current);
+    variant.reportsReplacements = true;
     return findOrCreate(vm, variant);
 }
 
@@ -892,6 +1155,59 @@ CompiledStructure* StructureTable::holdingExtraProperties(VM& vm, const Compiled
     return findOrCreate(vm, variant);
 }
 
+CompiledStructure* StructureTable::withoutHeldStructure(VM& vm, const CompiledStructure& current)
+{
+    ASSERT(current.heldStructure());
+    Variant variant = variantWithKeyOrderOf(current);
+    return findOrCreate(vm, variant);
+}
+
+static uint32_t sizeWithSpareWord(const LayoutData& layout)
+{
+    return WTF::roundUpToMultipleOf<MarkedSpace::sizeStep>(layout.size + static_cast<uint32_t>(sizeof(uint64_t)));
+}
+
+void StructureTable::growFutureCells(const LayoutData& layout)
+{
+    if (layout.kind() != LayoutKind::Instance || m_shapesWithGrownCells.quickSet(layout.shape))
+        return;
+    for (AllocationSiteRecord& record : std::span { m_state.instance.objects.emptyAllocationSite() - m_numberOfAllocationSiteRecords, m_numberOfAllocationSiteRecords }) {
+        if (record.header && shapeOf(shapeWordWithoutMark(static_cast<uint32_t>(record.orderAndShapeWords >> 32))) == layout.shape)
+            record.allocator = grownCellAllocator(record);
+    }
+}
+
+void* StructureTable::grownCellAllocator(AllocationSiteRecord& record)
+{
+    static_assert(OBJECT_OFFSETOF(GrownCells, freeList) == LocalAllocator::offsetOfFreeList());
+    std::unique_ptr<GrownCells>& grown = m_grownCells.add(&record, nullptr).iterator->value;
+    if (!grown)
+        grown = makeUnique<GrownCells>();
+    grown->allocatorAndMark = 0;
+    return grown.get();
+}
+
+void StructureTable::disarmDeadGrownCells(VM& vm)
+{
+    for (auto& grown : m_grownCells.values()) {
+        if (grown->allocatorAndMark && !vm.heap.isMarked(std::bit_cast<StructureID>(static_cast<uint32_t>(grown->record.header)).decode()))
+            grown->allocatorAndMark = 0;
+    }
+}
+
+CompiledStructure* StructureTable::withSpareWord(VM& vm, const CompiledStructure& current)
+{
+    ASSERT(!current.extraPropertiesSlot() && !current.hasExtraProperties());
+    GrownStructure& recent = m_recentGrownStructures[grownStructureSlot(current.id())];
+    if (recent.before == current.id())
+        return VariantMaps::decode(recent.after);
+    Variant variant = variantWithKeyOrderOf(current);
+    variant.hasSpareWord = true;
+    CompiledStructure* grown = findOrCreate(vm, variant);
+    recent = { current.id(), grown->id() };
+    return grown;
+}
+
 CompiledStructure* StructureTable::withOutOfLineKeyOrder(VM& vm, const CompiledStructure& current, std::span<const uint16_t> entries, HeldKeyOrder heldKeyOrder)
 {
     Variant variant = variantOf(current);
@@ -921,10 +1237,10 @@ const StructureTable::StepOfKeyOrder* StructureTable::findStepOfKeyOrder(Structu
 {
     if (!m_stepsOfKeyOrders)
         return nullptr;
-    uint32_t fieldAndKind = field << 1 | static_cast<uint32_t>(kind);
+    uint32_t fieldAndKind = field << 2 | static_cast<uint32_t>(kind);
     size_t newer = placeOfStep(before, orderAndCountBefore, fieldAndKind);
     for (size_t place : { newer, newer + 1 }) {
-        const StepOfKeyOrder& step = (*m_stepsOfKeyOrders)[place];
+        const StepOfKeyOrder& step = m_stepsOfKeyOrders[place];
         if (step.before == before && step.orderAndCountBefore == orderAndCountBefore && step.fieldAndKind == fieldAndKind)
             return &step;
     }
@@ -934,34 +1250,77 @@ const StructureTable::StepOfKeyOrder* StructureTable::findStepOfKeyOrder(Structu
 void StructureTable::rememberStepOfKeyOrder(StructureID before, uint32_t orderAndCountBefore, uint16_t field, KindOfStep kind, StructureID after, uint32_t orderAndCountAfter)
 {
     if (!m_stepsOfKeyOrders) {
-        m_stepsOfKeyOrders = makeUniqueWithoutFastMallocCheck<StepsOfKeyOrders>();
-        m_stepsOfKeyOrders->fill({ });
-        m_state.caches->addClearedEachCollection("steps of key orders"_s, asWritableBytes(std::span { *m_stepsOfKeyOrders }));
+        m_stepsOfKeyOrders = static_cast<StepOfKeyOrder*>(m_state.pages.allocate(sizeof(StepOfKeyOrder) << logMaxSteps));
+        m_state.caches->addClearedEachCollection("steps of key orders"_s, asWritableBytes(std::span { m_stepsOfKeyOrders, size_t { 1 } << logMaxSteps }));
     }
-    uint32_t fieldAndKind = field << 1 | static_cast<uint32_t>(kind);
-    size_t newer = placeOfStep(before, orderAndCountBefore, fieldAndKind);
-    (*m_stepsOfKeyOrders)[newer + 1] = (*m_stepsOfKeyOrders)[newer];
-    (*m_stepsOfKeyOrders)[newer] = { before, orderAndCountBefore, fieldAndKind, after, orderAndCountAfter };
+    putKeyOrderStep({ before, orderAndCountBefore, field << 2 | static_cast<uint32_t>(kind), after, orderAndCountAfter });
+    if (++m_stepsPutSinceGrowth > 1u << m_logNumberOfSteps >> 1 && m_logNumberOfSteps < logMaxSteps) [[unlikely]]
+        growKeyOrderSteps();
 }
 
-static uint64_t orderAndShapeWordsFor(const AllocationData& allocation)
+void StructureTable::putKeyOrderStep(const StepOfKeyOrder& step)
+{
+    size_t newer = placeOfStep(step.before, step.orderAndCountBefore, step.fieldAndKind);
+    m_stepsOfKeyOrders[newer + 1] = m_stepsOfKeyOrders[newer];
+    m_stepsOfKeyOrders[newer] = step;
+}
+
+NEVER_INLINE void StructureTable::growKeyOrderSteps()
+{
+    std::span used { m_stepsOfKeyOrders, size_t { 1 } << m_logNumberOfSteps };
+    Vector<StepOfKeyOrder> previous(used);
+    std::ranges::fill(used, StepOfKeyOrder { });
+    m_logNumberOfSteps += 2;
+    static_assert(!((logMaxSteps - logInitialSteps) % 2));
+    m_stepsPutSinceGrowth = 0;
+    for (size_t index = previous.size(); index--;) {
+        if (previous[index].before)
+            putKeyOrderStep(previous[index]);
+    }
+}
+
+JSCellButterfly* StructureTable::findKeysOfOrderWithoutNumber(StructureID structure, uint32_t count, KeyListKind kind) const
+{
+    if (!m_keysOfOrdersWithoutNumber)
+        return nullptr;
+    uint32_t countAndKind = count << 2 | static_cast<uint32_t>(kind);
+    const KeysOfOrderWithoutNumber& kept = m_keysOfOrdersWithoutNumber[placeOfKeys(structure, countAndKind)];
+    return kept.structure == structure && kept.countAndKind == countAndKind ? kept.list : nullptr;
+}
+
+void StructureTable::rememberKeysOfOrderWithoutNumber(StructureID structure, uint32_t count, KeyListKind kind, JSCellButterfly* list)
+{
+    if (!m_keysOfOrdersWithoutNumber) {
+        m_keysOfOrdersWithoutNumber = static_cast<KeysOfOrderWithoutNumber*>(m_state.pages.allocate(numberOfKeyListsRemembered * sizeof(KeysOfOrderWithoutNumber)));
+        m_state.caches->addClearedEachCollection("keys of orders without a number"_s, asWritableBytes(std::span { m_keysOfOrdersWithoutNumber, numberOfKeyListsRemembered }));
+    }
+    uint32_t countAndKind = count << 2 | static_cast<uint32_t>(kind);
+    m_keysOfOrdersWithoutNumber[placeOfKeys(structure, countAndKind)] = { structure, countAndKind, list };
+}
+
+static bool marksInstances(const ProgramTables& tables, uint32_t shape, const Structure* structure)
+{
+    return shape < tables.firstEnvironmentShape && structure->isPristine() && tables.layoutForShape(shape).marksOtherPrototypes;
+}
+
+static uint64_t orderAndShapeWordsFor(const AllocationData& allocation, bool bearsMark)
 {
     uint32_t shapeWord = shapeWordOf(allocation.shape);
-    return static_cast<uint64_t>(allocation.isBornUnfinished ? shapeWord & ~shapeWordIsUnmarked : shapeWord) << 32 | allocation.orderWord();
+    return static_cast<uint64_t>(allocation.isBornUnfinished || bearsMark ? shapeWord & ~shapeWordIsUnmarked : shapeWord) << 32 | allocation.orderWord();
 }
 
 static bool fillsSameRecord(const ProgramTables& tables, uint32_t first, uint32_t second)
 {
-    const AllocationData& a = tables.allocations()[first];
-    const AllocationData& b = tables.allocations()[second];
+    const AllocationData a = tables.allocations()[first];
+    const AllocationData b = tables.allocations()[second];
     return a.shape == b.shape && a.orderWord() == b.orderWord() && a.size() == b.size() && a.isBornUnfinished == b.isBornUnfinished && tables.constructorOfAllocation(first) == tables.constructorOfAllocation(second);
 }
 
 AllocationSiteRecord* StructureTable::recordOfSameAllocation(uint32_t number) const
 {
-    std::span<const AllocationData> allocations = m_tables.allocations();
+    const AllocationTable allocations = m_tables.allocations();
     const ObjectWords& words = m_state.instance.objects;
-    const AllocationData& allocation = allocations[number];
+    const AllocationData allocation = allocations[number];
     auto recordOf = [&](uint32_t other) -> AllocationSiteRecord* {
         AllocationSiteRecord* record = words.allocationSite(other);
         return record && fillsSameRecord(m_tables, other, number) ? record : nullptr;
@@ -977,7 +1336,7 @@ AllocationSiteRecord* StructureTable::recordOfSameAllocation(uint32_t number) co
     return nullptr;
 }
 
-ALWAYS_INLINE AllocationSiteRecord& StructureTable::ensureRecord(uint32_t number, uint32_t shape)
+ALWAYS_INLINE_INTO_OTHER_FILES AllocationSiteRecord& StructureTable::ensureRecord(uint32_t number, uint32_t shape)
 {
     ObjectWords& words = m_state.instance.objects;
     if (AllocationSiteRecord* record = words.allocationSite(number))
@@ -994,12 +1353,12 @@ ALWAYS_INLINE AllocationSiteRecord& StructureTable::ensureRecord(uint32_t number
 
 AllocationSiteRecord& StructureTable::ensureRecord(uint32_t number)
 {
-    return ensureRecord(number, m_tables.allocations()[number].shape);
+    return ensureRecord(number, m_tables.allocations().checkedAt(number).shape);
 }
 
 AllocationSiteRecord& StructureTable::fillAllocationSite(VM& vm, uint32_t number)
 {
-    const AllocationData& allocation = m_tables.allocations()[number];
+    const AllocationData allocation = m_tables.allocations().checkedAt(number);
     AllocationSiteRecord& record = ensureRecord(number, allocation.shape);
     if (record.header)
         return record;
@@ -1010,6 +1369,8 @@ AllocationSiteRecord& StructureTable::fillAllocationSite(VM& vm, uint32_t number
         ObjectModel& objects = *m_state.objects;
         FunctionID function(m_tables.constructorOfAllocation(number));
         JSCell* constructor = objects.closures.closureIfCreated(function);
+        if (objects.classes.isMarkOfEvaluationThatDied(constructor))
+            constructor = nullptr;
         if (!constructor && objects.closures.hasSingletonClosure(function)) {
             const LayoutData& constructedClass = *objects.classes.classConstructedBy(function);
             if (!constructedClass.createsPrototypeBeforeClassObject || !objects.classes.classPrototypeOfInstances(vm, constructedClass))
@@ -1020,30 +1381,41 @@ AllocationSiteRecord& StructureTable::fillAllocationSite(VM& vm, uint32_t number
     }
     if (!structure)
         structure = kind == AllocatedCellKind::Object ? usualStructure(vm, allocation.shape) : this->structure(vm, allocation.shape);
+    if (kind == AllocatedCellKind::Object)
+        m_state.objects->classes.holdMethodsStoredFirst(vm, m_tables.layoutForShape(allocation.shape), structure->storedPrototype());
     CompleteSubspace& space = kind == AllocatedCellKind::Object ? vm.cellSpace() : *vm.heap.aotClosureSpace<SubspaceAccess::OnMainThread>();
     void* allocator = space.allocatorFor(allocation.size(), AllocatorForMode::EnsureAllocator).localAllocator();
+    if (kind == AllocatedCellKind::Object && allocation.size() <= MarkedSpace::preciseCutoff)
+        m_state.instance.objects.cellAllocators[roundUpToMultipleOf<MarkedSpace::sizeStep>(allocation.size()) / MarkedSpace::sizeStep] = allocator;
     record = AllocationSiteRecord {
         .header = kind == AllocatedCellKind::Environment ? Environment::headerFor(structure, allocation.shape) : cellHeaderFor(structure),
-        .orderAndShapeWords = orderAndShapeWordsFor(allocation),
-        .allocator = allocator ? allocator : &m_allocatorWithoutRoom,
-        .prototype = kind == AllocatedCellKind::Object ? static_cast<uint64_t>(JSValue::encode(structure->storedPrototype())) : 0,
+        .orderAndShapeWords = orderAndShapeWordsFor(allocation, kind == AllocatedCellKind::Object && marksInstances(m_tables, allocation.shape, structure)),
+        .allocator = kind == AllocatedCellKind::Object && m_shapesWithGrownCells.quickGet(allocation.shape) ? grownCellAllocator(record) : allocator ? allocator : &m_allocatorWithoutRoom,
+        .prototype = kind == AllocatedCellKind::Object && !m_tables.layoutForShape(allocation.shape).impossibleMutations().contains(ObjectMutation::ConstructDirectly) ? static_cast<uint64_t>(JSValue::encode(structure->storedPrototype())) : 0,
     };
     m_writtenRecords.record(&record);
+    if (kind == AllocatedCellKind::Object && noteWhetherLivesWhilePrototypeLives(m_tables.layoutForShape(allocation.shape)))
+        didNameStructureThatLivesWhilePrototypeLives(record);
     return record;
 }
 
 void StructureTable::predictStructure(VM&, uint32_t number, CompiledStructure* structure)
 {
-    const AllocationData& allocation = m_tables.allocations()[number];
-    if (!allocation.isConstructed || structure->layout().shape != allocation.shape || structure->layout().evaluation() == EvaluationState::ProvenOnce)
+    const AllocationData allocation = m_tables.allocations()[number];
+    if (!allocation.isConstructed || structure->layout().shape != allocation.shape || structure->layout().evaluation() == EvaluationState::ProvenOnce || structure->hasSpareWord())
         return;
     CompiledStructure* usual = usualStructureIfExists(allocation.shape);
     AllocationSiteRecord* record = m_state.instance.objects.allocationSite(number);
     if (!usual || !record || !usual->hasOtherPrototype() || structureIDOf(number) != usual->id())
         return;
     record->header = cellHeaderFor(structure);
+    record->orderAndShapeWords = orderAndShapeWordsFor(allocation, marksInstances(m_tables, allocation.shape, structure));
     record->prototype = static_cast<uint64_t>(JSValue::encode(structure->storedPrototype()));
+    if (auto grown = m_grownCells.find(record); grown != m_grownCells.end())
+        grown->value->allocatorAndMark = 0;
     m_writtenRecords.record(record);
+    if (noteWhetherLivesWhilePrototypeLives(structure->layout()))
+        didNameStructureThatLivesWhilePrototypeLives(*record);
 }
 
 std::optional<StructureID> StructureTable::structureIDOf(uint32_t number) const
@@ -1075,25 +1447,41 @@ void StructureTable::forgetStructuresOf(const LayoutData& classLayout)
 
 static Structure* structureOf(const AllocationSiteRecord& record)
 {
-    return std::bit_cast<StructureID>(static_cast<uint32_t>(record.header)).decode();
+    return WTF::opaque(std::bit_cast<StructureID>(static_cast<uint32_t>(record.header)).decode());
 }
 
-ALWAYS_INLINE AllocationSiteRecord& StructureTable::filledRecord(VM& vm, uint32_t number)
+bool StructureTable::takeFirstObjectOf(uint32_t number)
+{
+    const AllocationData allocation = m_tables.allocations().checkedAt(number);
+    if (allocation.isConstructed || allocatedCellKindOf(m_tables, allocation.shape) != AllocatedCellKind::Object || m_tables.layoutForShape(allocation.shape).kind() != LayoutKind::Record)
+        return false;
+    return !m_allocationsThatMadeObjects.quickSet(number);
+}
+
+ALWAYS_INLINE_INTO_OTHER_FILES AllocationSiteRecord StructureTable::recordForObject(VM& vm, uint32_t number)
 {
     AllocationSiteRecord* record = m_state.instance.objects.allocationSite(number);
     if (record && record->header) [[likely]]
         return *record;
-    return fillAllocationSite(vm, number);
+    if (!takeFirstObjectOf(number))
+        return fillAllocationSite(vm, number);
+    const AllocationData allocation = m_tables.allocations()[number];
+    AllocationSiteRecord result = emptyAllocationSiteRecord();
+    Structure* structure = structureForFirstObject(vm, allocation.shape);
+    result.header = cellHeaderFor(structure);
+    result.orderAndShapeWords = orderAndShapeWordsFor(allocation, allocatedCellKindOf(m_tables, allocation.shape) == AllocatedCellKind::Object && marksInstances(m_tables, allocation.shape, structure));
+    return result;
 }
 
 JSCell* StructureTable::allocate(VM& vm, uint32_t number)
 {
-    Structure* structure = structureOf(filledRecord(vm, number));
-    const AllocationData& allocation = m_tables.allocations()[number];
+    Structure* structure = structureOf(recordForObject(vm, number));
+    const AllocationData allocation = m_tables.allocations()[number];
     switch (allocatedCellKindOf(m_tables, allocation.shape)) {
     case AllocatedCellKind::Object: {
         Object* object = Object::create(vm, structure, m_tables.layoutForShape(allocation.shape), allocation.size(), allocation.orderWord());
         object->setIsInBirth(allocation.isBornUnfinished);
+        ensureStillAliveHere(structure);
         return object;
     }
     case AllocatedCellKind::Closure:
@@ -1107,16 +1495,33 @@ JSCell* StructureTable::allocate(VM& vm, uint32_t number)
 JSCell* StructureTable::allocateAsCompiledCodeDoes(VM& vm, uint32_t number)
 {
     static_assert(offsetOfOrderWord == sizeof(JSCell) && offsetOfShapeWord == offsetOfOrderWord + sizeof(uint32_t) && sizeof(JSCell) == sizeof(uint64_t));
-    const AllocationData& allocation = m_tables.allocations()[number];
+    const AllocationData allocation = m_tables.allocations()[number];
     if (allocation.shape >= m_tables.firstEnvironmentShape)
         return allocate(vm, number);
-    const AllocationSiteRecord record = filledRecord(vm, number);
+    const AllocationSiteRecord record = recordForObject(vm, number);
     Structure* structure = structureOf(record);
-    auto* words = static_cast<uint64_t*>(vm.cellSpace().allocate(vm, allocation.size(), nullptr, AllocationFailureMode::Assert));
-    words[0] = record.header;
+    Structure* structureOfCell = structure;
+    size_t size = allocation.size();
+    if (m_shapesWithGrownCells.quickGet(allocation.shape)) [[unlikely]] {
+        const LayoutData& layout = m_tables.layoutForShape(allocation.shape);
+        if (size == layout.size) {
+            structureOfCell = WTF::opaque(withSpareWord(vm, *uncheckedDowncast<CompiledStructure>(structure)));
+            size = sizeWithSpareWord(layout);
+            AllocationSiteRecord* site = m_state.instance.objects.allocationSite(number);
+            LocalAllocator* allocator = vm.cellSpace().allocatorFor(size, AllocatorForMode::EnsureAllocator).localAllocator();
+            auto grown = site && site->header == record.header && allocator ? m_grownCells.find(site) : m_grownCells.end();
+            if (grown != m_grownCells.end()) {
+                grown->value->record = { cellHeaderFor(structureOfCell), record.orderAndShapeWords, nullptr, record.prototype };
+                grown->value->allocatorAndMark = std::bit_cast<uintptr_t>(allocator) | GrownCells::isArmed;
+            }
+        }
+    }
+    auto* words = static_cast<uint64_t*>(vm.cellSpace().allocate(vm, size, nullptr, AllocationFailureMode::Assert));
+    words[0] = structureOfCell == structure ? record.header : cellHeaderFor(structureOfCell);
     words[1] = record.orderAndShapeWords;
-    zeroSpan(std::span { reinterpret_cast<uint8_t*>(words + 2), allocation.size() - 2 * sizeof(uint64_t) });
+    zeroSpan(std::span { reinterpret_cast<uint8_t*>(words + 2), size - 2 * sizeof(uint64_t) });
     ensureStillAliveHere(structure);
+    ensureStillAliveHere(structureOfCell);
     return reinterpret_cast<JSCell*>(words);
 }
 
@@ -1175,6 +1580,8 @@ void CompiledStructure::initializeForObject(const ObjectParameters& parameters)
 
     if (std::optional<SlotData> slot = m_layout->extraPropertiesSlot())
         m_extraPropertiesSlot = *slot;
+    else if (parameters.hasSpareWord)
+        m_extraPropertiesSlot = SlotData::create(m_layout->size, hiddenReferenceRepresentation(parameters.realm->aotInstance()->options().useWideReferences()));
     if (std::optional<SlotData> slot = m_layout->extensionSlot())
         m_extensionSlot = *slot;
 
@@ -1192,11 +1599,13 @@ void CompiledStructure::initializeForObject(const ObjectParameters& parameters)
     if (parameters.outOfLineKeyOrder) {
         m_flags.add(Flag::HasOutOfLineKeyOrder);
         if (parameters.hasExtraProperties)
-            m_heldKeyOrder.add(HeldKeyOrder::IsBesideExtraProperties);
+            m_furtherFlags.add(FurtherFlag::HasKeyOrderWithExtraProperties);
     }
     if (!parameters.hasOtherPrototype && !parameters.hasExtraProperties && parameters.prototype == JSValue(parameters.realm->objectPrototype()))
         m_flags.add(Flag::HasOnlyFieldsBelowObjectPrototype);
     setMayBePrototype(parameters.mayBePrototype);
+    if (parameters.reportsReplacements)
+        m_furtherFlags.add(FurtherFlag::ReportsReplacements);
     if (holdsListedFields())
         return;
 
@@ -1211,7 +1620,7 @@ void CompiledStructure::initializeForObject(const ObjectParameters& parameters)
         if (parameters.keysNamedByOrder) {
             ASSERT(parameters.outOfLineKeyOrder);
             rareData->keysNamedByOrder = Vector<RefPtr<UniquedStringImpl>>(*parameters.keysNamedByOrder);
-            m_heldKeyOrder.add(HeldKeyOrder::IsOfOneObject);
+            m_furtherFlags.add(FurtherFlag::HasKeyOrderOfOneObject);
         }
         rareData->heldExtraProperties.setWithoutWriteBarrier(parameters.heldExtraProperties);
     }
@@ -1229,6 +1638,12 @@ void CompiledStructure::initializeForObject(const ObjectParameters& parameters)
         RELEASE_ASSERT(cellSize < endOfExtraPropertiesCellSizes);
         m_extraKeysAndCellSize = { unknownNumberOfExtraKeys, cellSize };
     }
+}
+
+void CompiledStructure::setHeldStructure(VM& vm, Structure* structure) const
+{
+    ASSERT(heldExtraProperties() && heldExtraProperties()->structure() == structure && !structure->isDictionary());
+    const_cast<RareData*>(rareData())->heldStructure.set(vm, this, structure);
 }
 
 static CompiledStructure* finishCreationOfObjectStructure(VM& vm, CompiledStructure* structure)
@@ -1272,8 +1687,11 @@ void CompiledStructure::visitAdditionalChildren(JSCell* cell, Visitor& visitor)
     CompiledStructure* structure = uncheckedDowncast<CompiledStructure>(uncheckedDowncast<Structure>(cell));
     if (Structure* named = structure->extraPropertiesStructure())
         visitor.appendUnbarriered(named);
-    if (const RareData* rareData = structure->rareData())
+    if (const RareData* rareData = structure->rareData()) {
         visitor.append(rareData->heldExtraProperties);
+        if (Structure* listed = rareData->heldStructure.get())
+            visitor.appendUnbarriered(listed);
+    }
     visitor.append(structure->m_successorByPrivateName);
 }
 

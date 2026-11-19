@@ -20,6 +20,11 @@ constexpr StubKey callValueWithoutThis(unsigned count, CallPosition position = C
 constexpr StubKey callValueCell(unsigned count, CallPosition position = CallPosition::Ordinary) { return StubKey(StubFamily::CallValueCell).withCount(count).withForm(static_cast<uint8_t>(position)); }
 constexpr StubKey callValueCellWithoutThis(unsigned count, CallPosition position = CallPosition::Ordinary) { return StubKey(StubFamily::CallValueCellWithoutThis).withCount(count).withForm(static_cast<uint8_t>(position)); }
 constexpr StubKey callValueFunctionOfEngine(unsigned count, CallPosition position = CallPosition::Ordinary) { return StubKey(StubFamily::CallValueFunctionOfEngine).withCount(count).withForm(static_cast<uint8_t>(position)); }
+constexpr unsigned formOfDelegatedCallValue = descriptorOf(StubFamily::CallValue).numberOfForms - 1;
+constexpr unsigned numberOfCallValueCopies = formOfDelegatedCallValue - 1;
+constexpr bool isCallValueCopy(StubKey key) { return key.form() > static_cast<uint8_t>(CallPosition::Tail); }
+constexpr StubKey callValueCopy(StubKey ordinary, unsigned copy) { return ordinary.withForm(copy ? static_cast<uint8_t>(CallPosition::Tail) + copy : static_cast<uint8_t>(CallPosition::Ordinary)); }
+constexpr StubKey callValueDelegated(StubKey ordinary) { return ordinary.withForm(static_cast<uint8_t>(formOfDelegatedCallValue)); }
 constexpr unsigned numberOfSetsOfLentArguments = 3;
 constexpr StubKey callValueLending(unsigned count, unsigned lentArguments, CallPosition position = CallPosition::Ordinary) { return lentArguments ? StubKey(StubFamily::CallValueLending).withCount(count).withForm(static_cast<uint8_t>(lentArguments - 1 + numberOfSetsOfLentArguments * static_cast<unsigned>(position))) : callValue(count, position); }
 constexpr StubKey callValueWithCount(CallPosition position = CallPosition::Ordinary) { return StubKey(StubFamily::CallValueWithCount).withForm(static_cast<uint8_t>(position)); }
@@ -28,7 +33,6 @@ constexpr StubKey callNotClosureWithCount(CallPosition position = CallPosition::
 constexpr StubKey callBoundFunction(CallPosition position = CallPosition::Ordinary) { return StubKey(StubFamily::CallBoundFunction).withForm(static_cast<uint8_t>(position)); }
 constexpr StubKey constructValue(ConstructSyntax syntax) { return StubKey(StubFamily::ConstructValue).withForm(static_cast<uint8_t>(syntax)); }
 constexpr StubKey resolveCallValue(unsigned count) { return StubKey(StubFamily::ResolveCallValue).withCount(std::min(count, numberOfArgumentGPRs + 1)); }
-constexpr StubKey callResolvedValue() { return StubKey(StubFamily::CallResolvedValue); }
 constexpr StubKey callEngineCallee() { return StubKey(StubFamily::CallEngineCallee); }
 constexpr StubKey callEngineFunction() { return StubKey(StubFamily::CallEngineFunction); }
 

@@ -1511,6 +1511,9 @@ end
 # in t1. May also trigger prologue entry OSR.
 macro prologue(osrSlowPath, traceSlowPath)
     # Set up the call frame and check if we should OSR.
+    if RETURN_ADDRESS_SIGNING
+        tagReturnAddress sp
+    end
     preserveCallerPCAndCFR()
 
     if TRACING
@@ -2110,9 +2113,7 @@ if ARM64E
     global _returnFromLLIntTrampoline
     _returnFromLLIntTrampoline:
         ret
-end
 
-if ARM64E or RETURN_ADDRESS_SIGNING
     global _jsTrampolineProgramPrologue
     _jsTrampolineProgramPrologue:
         tagReturnAddress sp
@@ -2329,7 +2330,9 @@ end
 include LowLevelInterpreter64
 
 if AOT
+    beginSigningLinkRegister
     include LowLevelInterpreterAOT
+    endSigningLinkRegister
 end
 
 
@@ -2622,6 +2625,10 @@ end
 
 llintOpWithMetadata(op_call_varargs, OpCallVarargs, macro (size, get, dispatch, metadata, return)
     doCallVarargs(op_call_varargs, size, get, OpCallVarargs, m_valueProfile, m_dst, dispatch, metadata, _llint_slow_path_size_frame_for_varargs, _llint_slow_path_call_varargs, prepareForRegularCall, invokeForRegularCall, prepareForSlowRegularCall, dispatchAfterRegularCall)
+end)
+
+llintOpWithMetadata(op_call_varargs_with_spread, OpCallVarargsWithSpread, macro (size, get, dispatch, metadata, return)
+    doCallVarargs(op_call_varargs_with_spread, size, get, OpCallVarargsWithSpread, m_valueProfile, m_dst, dispatch, metadata, _llint_slow_path_size_frame_for_varargs_with_spread, _llint_slow_path_call_varargs_with_spread, prepareForRegularCall, invokeForRegularCall, prepareForSlowRegularCall, dispatchAfterRegularCall)
 end)
 
 llintOpWithMetadata(op_tail_call_varargs, OpTailCallVarargs, macro (size, get, dispatch, metadata, return)
