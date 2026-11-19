@@ -777,6 +777,8 @@ void run(const TestConfig* config)
     RUN(testPhiFoldInBlockReachedOnlyByRetreatingEdge(true));
     RUN(testPhiFoldConstantInBlockReachedOnlyByRetreatingEdge(false));
     RUN(testPhiFoldConstantInBlockReachedOnlyByRetreatingEdge(true));
+    RUN(testPhiFoldInputFromMergedBlock(false));
+    RUN(testPhiFoldInputFromMergedBlock(true));
     RUN(testPhiFoldDeadLoopHeaderEnteredFromRoot());
     RUN(testPhiFoldLoopPhiTrivialAfterLatch());
     RUN(testBranchNotEqualFoldPtr(42));
@@ -1568,6 +1570,8 @@ void run(const TestConfig* config)
         RUN(testVectorRelaxedDotI8x16I7x16());
         RUN(testVectorRelaxedDotI8x16I7x16Add());
         RUN(testVectorDotProductSplatOne());
+        RUN(testVectorReplaceLaneOfZeroWithLoad());
+        RUN(testVectorDotProductSum());
         RUN(testVectorShrZipToExtend());
         RUN(testVectorShrZipToExtendI32());
         RUN(testVectorShrZipToExtendI64());
@@ -1675,6 +1679,8 @@ int main(int argc, char** argv)
     WTF::initializeMainThread();
     JSC::initialize([] {
         JSC::Options::useJITCage() = false;
+        // A disassembly covers the whole allocation, whose end is not written where branches were compacted.
+        JSC::Options::zeroExecutableMemoryOnFree() = true;
     });
 
 #if ENABLE(JIT_OPERATION_VALIDATION)

@@ -22,7 +22,7 @@ flags PrimitiveSet { | engine Undefined Null False True Integer WholeNumber Frac
 flags TypeFlags { HasIntegers AnyObject AnyFunction }
 enum ContentsSlot { Element Key Value }
 enum ArrayStorage { Other Int32 Double Contiguous }
-flags PristineAspects { | engine Storage Names AsCreated Dense NamesKeptBelow Prototype CellAlone }
+flags PristineAspects { | engine Storage Names AsCreated Dense InheritedNamesKept Prototype CellAlone }
 
 record Type wire customEngine customText {
     primitives: Primitives flags: TypeFlags opaque: OpaqueKind? environment: Layout? minimum: Int64 maximum: Int64
@@ -40,18 +40,14 @@ enum TypeSiteKind (logWord: Text) {
     SetElement("element") PromiseValue("element") CallResult("call-result") PropertyRead("property") Assertion("cast")
 }
 record TypeSite wire { module: Module(Referrer) position: UInt32 kind: TypeSiteKind text: String? | engine function: Function(Dispatch)? }
-flags PositionFlags { IsInt32Promise IsFromCompiler IsExpected OmitsNull OmitsUndefined IsDeclaredByDependency IsClaim }
+flags PositionFlags { IsInt32Promise IsFromCompiler IsExpected OmitsNull OmitsUndefined IsDeclaredByDependency IsClaim IsVariableOfModule }
 record DeclaredType wire handwrittenStruct { type: Type site: TypeSite? flags: PositionFlags }
 
-enum IllTypedCause abi {
-    None Unclassified FromLooseType Assertion SuppressedError DeclarationWithoutBody OutsideData LayoutOutsideFamily MemberWithoutSlot
-    NativeWritesOperand UnseenWriter UnseenCaller UnprovenCallee
-    OtherThis CalledByEngine ContainerWriterUnseen ElementMayBeAbsent ScopeOpenedByEval ReadBeforeInitialized
-}
+enum IllTypedCause { None FromLooseType Assertion DeclarationWithoutBody UnprovenCallee }
 enum CastResolution { | engine Unresolved Nothing Upcast Check Assume }
 record TailCast wire { declared: DeclaredType | engine resolution: CastResolution }
 
-flags ExpectedResultFlags { IsRowsOfQuery }
+flags ExpectedResultFlags { IsRowsOfQuery IsMadeByParser }
 record ExpectedResult wire { type: Type layouts: Span<Layout> flags: ExpectedResultFlags }
 
 list bytes : Byte

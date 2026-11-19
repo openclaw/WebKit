@@ -246,12 +246,14 @@ void RegExp::finishCreationFromImage(VM& vm, const AOT::ImageRegExp& record)
     uint32_t index = AOT::RegExpRecords(*vm.aotState().image).idOf(record).index();
     m_imageRecordNumber = index + 1 < imageRecordIsFoundByPattern ? index + 1 : imageRecordIsFoundByPattern;
     if (!record.isLiteral)
-        AOT::countEvent(vm, AOT::RuntimeCounterID::RegExpPredictedTextsCreated);
+        AOT::countEvent(vm, AOT::RuntimeCounterID::PredictedRegExpsCreated);
     if (record.form() == AOT::RegExpRecordForm::NoMetadata)
         return;
 
     m_numSubpatterns = record.numSubpatterns;
-    m_minimumSize = record.minimumSize;
+    // Without code the first use compiles the pattern to bytecode, which can fail. compile() sets the minimum size once that has succeeded, so no subject is rejected before.
+    if (record.form() != AOT::RegExpRecordForm::NoCode)
+        m_minimumSize = record.minimumSize;
     m_specificPattern = record.specificPattern();
     if (record.form() == AOT::RegExpRecordForm::Atom) {
         m_atom = AOT::regExpAtomOf(vm, record);
@@ -440,7 +442,7 @@ static Yarr::PatternAnalysis patternAnalysisFor(VM& vm)
     // validateRegExpFlatProgram lets a shell that runs no compiled program test the flat program.
     bool isPerformed = vm.hasCompiledCode() || Options::validateRegExpFlatProgram();
 #if ENABLE(AOT)
-    // Where nothing compiles a pattern as for an image, the JIT takes the pattern as it is written.
+    // The analysis is needed only where patterns are compiled for an image.
     isPerformed |= Options::useRegExpImageMode();
 #endif
     return isPerformed ? Yarr::PatternAnalysis::Performed : Yarr::PatternAnalysis::Skipped;
@@ -448,7 +450,12 @@ static Yarr::PatternAnalysis patternAnalysisFor(VM& vm)
 
 static std::unique_ptr<Yarr::BytecodePattern> byteCodeCompilePattern(VM* vm, Yarr::YarrPattern& pattern, const String& source, Yarr::ErrorCode& errorCode)
 {
-    return Yarr::byteCompile(pattern, &vm->m_regExpAllocator, errorCode, &vm->m_regExpAllocatorLock, source);
+    auto bytecode = Yarr::byteCompile(pattern, &vm->m_regExpAllocator, errorCode, &vm->m_regExpAllocatorLock, source);
+#if ENABLE(AOT)
+    if (bytecode && bytecode->m_flatProgram && bytecode->m_flatProgram->precedingUnits)
+        AOT::countEvent(*vm, AOT::RuntimeCounterID::RegExpsSearchedByPrecedingUnit);
+#endif
+    return bytecode;
 }
 
 #if ENABLE(AOT)
@@ -467,12 +474,12 @@ void RegExp::countBytecodeCompilation(VM& vm, BytecodeIsFor purpose) const
     if (!vm.hasCompiledCode()) [[likely]]
         return;
     if (purpose == BytecodeIsFor::LongSearch) {
-        AOT::countEvent(vm, AOT::RuntimeCounterID::RegExpsPreparedForLongSearches);
+        AOT::countEvent(vm, AOT::RuntimeCounterID::RegExpsCompiledForLongSearches);
         return;
     }
     AOT::countEvent(vm, AOT::RuntimeCounterID::RegExpsCompiledToBytecode);
     if (const AOT::ImageRegExp* record = imageRecord())
-        AOT::countEvent(vm, record->isLiteral ? AOT::RuntimeCounterID::RegExpLiteralsCompiledToBytecode : AOT::RuntimeCounterID::RegExpPredictedTextsCompiledToBytecode);
+        AOT::countEvent(vm, record->isLiteral ? AOT::RuntimeCounterID::RegExpLiteralsCompiledToBytecode : AOT::RuntimeCounterID::PredictedRegExpsCompiledToBytecode);
 }
 #endif
 
@@ -519,7 +526,7 @@ bool RegExp::takeCodeFromImage(VM& vm)
         return false;
     if (!hasCode())
         vm.regExpCache()->addToStrongCache(this);
-    AOT::countEvent(vm, record->isLiteral ? AOT::RuntimeCounterID::RegExpLiteralsGivenCode : AOT::RuntimeCounterID::RegExpPredictedTextsGivenCode);
+    AOT::countEvent(vm, record->isLiteral ? AOT::RuntimeCounterID::RegExpLiteralsGivenCode : AOT::RuntimeCounterID::PredictedRegExpsGivenCode);
     auto entrypoints = AOT::regExpEntrypointsOf(vm, *record);
     ensureRegExpJITCode().setCodeFromImage(entrypoints.for8Bit, record->hasCodeFor8BitSubjectsAlone ? nullptr : entrypoints.for16Bit);
     m_state = ImageCode;
@@ -547,7 +554,7 @@ int RegExp::matchWithImageCode(JSGlobalObject* nullOrGlobalObject, VM& vm, Strin
         RELEASE_ASSERT(imageRecord()->hasCodeFor8BitSubjectsAlone);
         std::span<const char16_t> wide = s.span16();
         if (!WTF::charactersAreAllLatin1(wide)) {
-            AOT::countEvent(vm, AOT::RuntimeCounterID::RegExpWideSubjectsRefused);
+            AOT::countEvent(vm, AOT::RuntimeCounterID::RegExp16BitSubjectsRejected);
             return -1;
         }
         AOT::countEvent(vm, AOT::RuntimeCounterID::RegExpSubjectsNarrowed);
@@ -571,9 +578,9 @@ int RegExp::matchWithImageCode(JSGlobalObject* nullOrGlobalObject, VM& vm, Strin
         return -1;
     }
     if (isLongSearch)
-        AOT::countEvent(vm, AOT::RuntimeCounterID::RegExpLongSearchesHandedOver);
+        AOT::countEvent(vm, AOT::RuntimeCounterID::RegExpLongSearchesInterpreted);
     else {
-        AOT::countEvent(vm, AOT::RuntimeCounterID::RegExpImageCodeGaveUp);
+        AOT::countEvent(vm, AOT::RuntimeCounterID::RegExpCompiledCodeFailures);
         countInterpretedMatch(vm);
     }
     Yarr::MatchingContextHolder regExpContext(vm, this, Yarr::MatchFrom::VMThread);
@@ -1159,7 +1166,7 @@ static inline String escapePattern(const String& pattern, std::span<const Charac
             previousCharacterWasBackslash = ch == '\\';
     }
 
-    return result.toString();
+    return WTF::move(result).toString();
 }
 
 String RegExp::escapedPattern(const String& pattern)

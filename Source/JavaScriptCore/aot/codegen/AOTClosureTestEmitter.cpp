@@ -8,6 +8,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBuildContext.h"
 #include "AOTClosureWord.h"
 #include "AOTEntryEmitter.h"
 #include "AOTFunctionTables.h"
@@ -42,6 +43,11 @@ FunctionKindData ClosureTestEmitter::closureKindOf(FunctionID function) const
 bool ClosureTestEmitter::closureWordNames(FunctionID function) const
 {
     return hasOneInstance() && closureKindOf(function).isSlim && conventions().exists(conventions().closureEntryOf(function));
+}
+
+bool ClosureTestEmitter::cellTypeTellsFullClosures(FunctionID function) const
+{
+    return hasOneInstance() && (isClassConstructorOf(m_program.at(function).kind) || !closureKindOf(function).isInRuntimeModule);
 }
 
 void ClosureTestEmitter::branchOnIsChangedClosureWithNumber(CellPointer cell, bool isSlim, uint32_t mentionOfClosureNumber, BranchTargets targets)
@@ -92,6 +98,13 @@ void ClosureTestEmitter::branchOnClosureTest(CellPointer cell, FunctionID functi
         m_out.branch(hasMutableCellType(cell, SlimClosureWithPropertiesType).value(), rareEdge(hasOtherStructure), targets.notTaken);
 
         m_out.appendToContinuation(hasOtherStructure);
+    } else if (cellTypeTellsFullClosures(function)) {
+        LBasicBlock isFullClosure = newBlock();
+        m_out.branch(hasCellType(cell, CompiledClosureType).value(), normalEdge(isFullClosure), targets.notTaken);
+
+        m_out.appendTo(isFullClosure);
+        branch(hasClosureWordOf(cell, isSlim, function), targets);
+        return;
     } else {
         LBasicBlock hasInitialStructure = newBlock();
         m_out.branch(hasClosureStructure(cell, function).value(), normalEdge(hasInitialStructure), rareEdge(hasOtherStructure));
@@ -102,6 +115,21 @@ void ClosureTestEmitter::branchOnClosureTest(CellPointer cell, FunctionID functi
         m_out.appendTo(hasOtherStructure);
     }
     branchOnIsChangedClosureWithNumber(cell, isSlim, m_mentions.add(NumberSpace::ClosureFunction, function), targets);
+}
+
+void ClosureTestEmitter::branchOnChangedClosure(CellPointer cell, std::span<const ClosureCase> cases, BlockEdge otherwise)
+{
+    LBasicBlock isChanged = newBlock();
+    m_out.branch(hasMutableCellType(cell, SlimClosureWithPropertiesType).value(), rareEdge(isChanged), otherwise);
+
+    m_out.appendTo(isChanged);
+    Word32 number = numberOfChangedClosure(cell);
+    for (const ClosureCase& closureCase : cases) {
+        LBasicBlock next = newBlock();
+        m_out.branch(equal(number, closureNumberOf(closureCase.function)).value(), closureCase.target, normalEdge(next));
+        m_out.appendToContinuation(next);
+    }
+    m_out.jump(otherwise);
 }
 
 Condition ClosureTestEmitter::isClosureOfAny(CellPointer cell, std::span<const FunctionID> functions)
@@ -147,7 +175,7 @@ void ClosureTestEmitter::branchOnClosureNumberInRuns(Word32 closureNumber, std::
             m_out.branch(below(closureNumber, closureNumberOf(run.first, addend)).value(), targets.notTaken, normalEdge(isNotBelowRun));
             m_out.appendToContinuation(isNotBelowRun);
         }
-        takeIf(belowOrEqual(closureNumber, closureNumberOf(run.last, addend)), isLastRun);
+        takeIf(belowOrEqual(closureNumber, closureNumberOf(run.last, addend + AOT::hasFlag(build().options().injectedFaults, Wire::FaultInjection::OverstateClosureNumberRuns))), isLastRun);
     }
 }
 
@@ -161,12 +189,14 @@ void ClosureTestEmitter::branchOnIsClosureOfAny(CellPointer cell, std::span<cons
     Vector<InitialStructure, 4> structures;
     bool hasSlimMember = false;
     bool hasFullMember = false;
+    bool typeTellsFullClosures = true;
     for (FunctionID function : functions) {
         if (!conventions().exists(conventions().closureEntryOf(function)))
             continue;
         members.append(function);
         FunctionKindData kind = closureKindOf(function);
         (kind.isSlim ? hasSlimMember : hasFullMember) = true;
+        typeTellsFullClosures &= kind.isSlim || cellTypeTellsFullClosures(function);
         ptrdiff_t offsetOfHeader = offsetOfClosureHeader(kind);
         bool isListed = structures.containsIf([&](const InitialStructure& listed) {
             return listed.offsetOfHeader == offsetOfHeader;
@@ -198,7 +228,13 @@ void ClosureTestEmitter::branchOnIsClosureOfAny(CellPointer cell, std::span<cons
             return structure.isSlim;
         });
     }
-    size_t formsAsCreatedLeft = markerTellsSlimClosures + structures.size();
+    typeTellsFullClosures &= hasFullMember;
+    if (typeTellsFullClosures) {
+        structures.removeAllMatching([](const InitialStructure& structure) {
+            return !structure.isSlim;
+        });
+    }
+    size_t formsAsCreatedLeft = markerTellsSlimClosures + structures.size() + typeTellsFullClosures;
 
     Join<Word32> closureNumber(m_out);
     auto closureNumberIn = [&](const Machine::AbstractHeap& word) {
@@ -233,19 +269,29 @@ void ClosureTestEmitter::branchOnIsClosureOfAny(CellPointer cell, std::span<cons
             });
         }
     }
-    LBasicBlock isChangedClosure = newBlock();
-    if (hasFullMember) {
-        LBasicBlock isNoFunctionObject = newBlock();
-        m_out.branch(hasCellType(cell, CompiledClosureType).value(), rareEdge(isChangedClosure), normalEdge(isNoFunctionObject));
-        m_out.appendToContinuation(isNoFunctionObject);
+    if (typeTellsFullClosures) {
+        addForm(hasCellType(cell, CompiledClosureType), edgeBehindFormAsCreated(), [&] {
+            return closureNumberIn(m_heaps.AOTClosure_entry);
+        });
     }
-    if (hasSlimMember)
-        m_out.branch(hasMutableCellType(cell, SlimClosureWithPropertiesType).value(), rareEdge(isChangedClosure), targets.notTaken);
-    else
-        m_out.jump(targets.notTaken);
+    bool typeLeavesFullClosures = hasFullMember && !typeTellsFullClosures;
+    if (typeLeavesFullClosures || hasSlimMember) {
+        LBasicBlock isChangedClosure = newBlock();
+        if (typeLeavesFullClosures) {
+            LBasicBlock isNoFunctionObject = newBlock();
+            m_out.branch(hasCellType(cell, CompiledClosureType).value(), rareEdge(isChangedClosure), normalEdge(isNoFunctionObject));
+            m_out.appendToContinuation(isNoFunctionObject);
+        }
+        if (hasSlimMember)
+            m_out.branch(hasMutableCellType(cell, SlimClosureWithPropertiesType).value(), rareEdge(isChangedClosure), targets.notTaken);
+        else
+            m_out.jump(targets.notTaken);
 
-    m_out.appendTo(isChangedClosure);
-    closureNumber.add(numberOfChangedClosure(cell));
+        m_out.appendTo(isChangedClosure);
+        closureNumber.add(numberOfChangedClosure(cell));
+    } else
+        m_out.jump(targets.notTaken);
+    build().statistics().count(StatisticID::ClosureChecksByNumberRanges);
     branchOnClosureNumberInRuns(closureNumber.finish(), runs.span(), 0, true, targets);
 }
 
@@ -260,6 +306,7 @@ uint32_t ClosureTestEmitter::mentionOfUpperHalfOfClosureWordOf(FunctionID functi
     ClosureWord::Flags flags = closureWordFlags(closureKindOf(function));
     flags.borrowedArguments = entry.borrowedArguments;
     flags.endsItsTailCalls = entry.endsItsTailCalls;
+    flags.returnsCapture = entry.returnsCapture;
     return m_mentions.add(NumberSpace::ClosureFunction, function, static_cast<int32_t>(ClosureWord::encodeUpperHalf(entry.numberOfParameters, 0, flags)));
 }
 
@@ -270,7 +317,11 @@ Word32 ClosureTestEmitter::upperHalfOfClosureWordOf(FunctionID function)
 
 std::optional<uint32_t> ClosureTestEmitter::mentionOfUpperHalfThatNames(FunctionID function)
 {
-    if (!closureWordNames(function))
+    if (!conventions().exists(conventions().closureEntryOf(function)))
+        return std::nullopt;
+    if (!closureKindOf(function).isSlim)
+        return m_mentions.add(NumberSpace::ClosureFunction, function, static_cast<int32_t>(closureWordMarker));
+    if (!hasOneInstance())
         return std::nullopt;
     return mentionOfUpperHalfOfClosureWordOf(function);
 }
@@ -301,7 +352,12 @@ CellPointer ClosureTestEmitter::closureIfCreated(FunctionID function)
     Word32 entry = closureTableEntry(function);
     Condition isNotCreated = isZero(entry);
     CellPointer none(m_out.constInt64(0));
-    return select(isNotCreated, none, decode(NarrowReference(add(entry, 1).value())));
+    return select(isNotCreated, none, closureInTableEntry(entry));
+}
+
+CellPointer ClosureTestEmitter::closureInTableEntry(Word32 entry)
+{
+    return decode(NarrowReference(add(entry, 1).value()));
 }
 
 Word32 ClosureTestEmitter::closureTableEntry(FunctionID function)

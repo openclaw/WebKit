@@ -7,6 +7,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
 #include "AOTCodeTemplates.h"
 #include "AOTDiagnostics.h"
 #include "AOTImageBuilder.h"
@@ -14,7 +15,6 @@
 #include "AOTWasmInterface.h"
 #include <array>
 #include <expected>
-#include <wtf/BitVector.h>
 #include <wtf/Noncopyable.h>
 
 namespace JSC {
@@ -40,9 +40,15 @@ struct WasmFunctionCode {
     Vector<Wasm::HandlerInImage> handlers;
     BitVector directCallees;
     Wasm::SavedRegistersInImage savedRegisters { 0, 0, 0 };
+    Vector<Wasm::FramelessRangeInImage> framelessRanges;
     uint16_t savedRegistersIndex { 0 };
     bool usesVectors { false };
     bool dependsOnFlavor { false };
+    bool isOptimized { false };
+    unsigned threadedJumps { 0 };
+    unsigned firstStateTests { 0 };
+    uint32_t directEntry { 0 };
+    uint32_t directEntryWithZero { 0 };
 };
 
 struct WasmJSEntrypointCode {

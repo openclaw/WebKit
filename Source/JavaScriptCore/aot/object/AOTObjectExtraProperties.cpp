@@ -65,8 +65,10 @@ static CompiledStructure* structureForNewExtraProperties(VM& vm, Object& object,
 {
     StructureTable& structures = object.state().objects->structures;
     const CompiledStructure& current = object.compiledStructure();
-    if (!current.extraPropertiesSlot())
+    if (!current.extraPropertiesSlot()) {
+        structures.growFutureCells(current.layout());
         return structures.holdingExtraProperties(vm, current, extra);
+    }
     CompiledStructure* structure = namesStructure ? structures.withExtraProperties(vm, current, extra->structure()) : structures.existingWithExtraProperties(current, *extra->structure());
     return structure ? structure : structures.withExtraProperties(vm, current, nullptr);
 }
@@ -289,7 +291,7 @@ static JSCellButterfly* bindStar(VM& vm, State& state, JSGlobalObject* realm, St
     }
 
     uint32_t orderAndCount = star.orderAndCountOfSource();
-    std::span<const uint16_t> entriesOfSource = state.objects->keyOrders.entriesInOrder(layout, orderOf(orderAndCount)).first(countOf(orderAndCount));
+    std::span<const uint16_t> entriesOfSource = state.objects->keyOrders.entriesListedBy(layout, orderAndCount);
     JSCellButterfly* bindings = JSCellButterfly::create(vm, CopyOnWriteArrayWithContiguous, static_cast<unsigned>(2 * (entriesOfSource.size() + bindingsOfSource.size())));
 
     unsigned end = 0;
@@ -464,7 +466,7 @@ static bool canGetPendingStars(const Object& target)
 
 static bool orderListsField(State& state, const LayoutData& layout, uint32_t orderAndCount, const FieldData& field)
 {
-    std::span<const uint16_t> listed = state.objects->keyOrders.entriesInOrder(layout, orderOf(orderAndCount)).first(countOf(orderAndCount));
+    std::span<const uint16_t> listed = state.objects->keyOrders.entriesListedBy(layout, orderAndCount);
     uint16_t index = layout.indexOf(field);
     if (index < listed.size() && listed[index] == index)
         return true;
@@ -697,7 +699,7 @@ static void forEachNameOfSourceOfStar(VM& vm, State& state, Star star, const Inv
         functor(namesOfStars->keyOfEntry(static_cast<unsigned>(index) + 1));
     };
     uint32_t orderAndCount = star.orderAndCountOfSource();
-    std::span<const uint16_t> entries = state.objects->keyOrders.entriesInOrder(layout, orderOf(orderAndCount)).first(countOf(orderAndCount));
+    std::span<const uint16_t> entries = state.objects->keyOrders.entriesListedBy(layout, orderAndCount);
     size_t next = Object::forEachPositionedKey(entries, layout.numberOfFields, numberOfNamesOfStars, [&](uint16_t index) {
         const FieldData& field = layout.fields()[index];
         if (!field.isPrivate() && !(field.flags & fieldIsNotEnumerable) && layouts.hasStringKey(field))
@@ -802,7 +804,7 @@ std::optional<Object*> sourceOfPendingBinding(VM& vm, const Object& target, Uniq
     return findBindingOfStars(vm, target.state(), last, target.layout(), name).holderOfField;
 }
 
-JSObject* extraPropertiesIfMade(const Object& object)
+JSObject* extraPropertiesIfCreated(const Object& object)
 {
     if (!object.hasExtraProperties())
         return nullptr;
@@ -839,13 +841,13 @@ void Object::adoptExtraProperties(VM& vm, JSObject* filled)
 void Object::setExtraProperties(VM& vm, JSObject* extra, CompiledStructure* withExtraProperties)
 {
     ASSERT(!hasExtraProperties() && withExtraProperties->hasExtraProperties());
-    ASSERT(layout().extraPropertiesSlot() || withExtraProperties->heldExtraProperties() == extra);
+    ASSERT(withExtraProperties->extraPropertiesSlot() || withExtraProperties->heldExtraProperties() == extra);
     vm.mutatorFence();
     writeExtraPropertiesWord(*this, extra);
     vm.mutatorFence();
     at<uint32_t>(offsetOfOrderWord) |= orderWordHasExtraProperties;
     vm.mutatorFence();
-    JSCell::setStructure(vm, withExtraProperties);
+    setVariantOfStructure(vm, withExtraProperties);
     vm.writeBarrier(this, extra);
 }
 
@@ -858,7 +860,7 @@ bool Object::tryCreateExtraPropertiesOfNewObject(VM& vm, std::span<const ExtraPr
 {
     ASSERT(!hasExtraProperties() && !hasFlagsInOrderWord());
     const LayoutData& layout = this->layout();
-    if (!layout.extraPropertiesSlot() || layout.impossibleMutations().contains(ObjectMutation::AddProperty))
+    if (!compiledStructure().extraPropertiesSlot() || layout.impossibleMutations().contains(ObjectMutation::AddProperty))
         return false;
     for (auto& property : inOrder)
         willAddExtraProperty(vm, property.name);
@@ -873,6 +875,11 @@ void Object::didChangeExtraProperties(VM& vm)
     if (!extra)
         return;
     const CompiledStructure& current = compiledStructure();
+    if (Structure* listed = current.heldStructure()) [[unlikely]] {
+        if (listed != extra->structure())
+            setVariantOfStructure(vm, state().objects->structures.withoutHeldStructure(vm, current));
+        return;
+    }
     StructureID namedStructureID = current.extraPropertiesStructureID();
     if (namedStructureID == extra->structureID())
         return;
@@ -882,7 +889,7 @@ void Object::didChangeExtraProperties(VM& vm)
     CompiledStructure* updatedStructure = structures.existingWithExtraProperties(current, *extra->structure());
     if (!updatedStructure && !namedStructureID)
         return;
-    JSCell::setStructure(vm, updatedStructure ? updatedStructure : structures.withExtraProperties(vm, current, nullptr));
+    setVariantOfStructure(vm, updatedStructure ? updatedStructure : structures.withExtraProperties(vm, current, nullptr));
 }
 
 void Object::ensureStructureForExtraProperties(VM& vm)
@@ -895,13 +902,68 @@ void Object::ensureStructureForExtraProperties(VM& vm)
     if (wasDictionary && !extra->structure()->isDictionary())
         didChangeOwnProperties(vm, *this, VM::StructureChainIntegrityEvent::Change, nullptr);
     const CompiledStructure& current = compiledStructure();
+    if (current.heldExtraProperties()) [[unlikely]] {
+        didChangeExtraProperties(vm);
+        tryNameHeldStructure(vm);
+        return;
+    }
     if (current.extraPropertiesStructureID() == extra->structureID())
         return;
     CompiledStructure* updatedStructure = state().objects->structures.withExtraProperties(vm, current, extra->structure());
     if (updatedStructure == &current)
         return;
-    JSCell::setStructure(vm, updatedStructure);
+    setVariantOfStructure(vm, updatedStructure);
     state().propertyCaches->forgetFieldExits();
+    if (!wasDictionary)
+        state().propertyCaches->forgetAddedExtraProperties();
+}
+
+static bool isFilledAsTable(Structure* structure)
+{
+    return structure->isDictionary() || structure->hasBeenFlattenedBefore();
+}
+
+void Object::finishFillingExtraProperties(VM& vm)
+{
+    JSObject* extra = extraProperties();
+    if (!extra || extra->type() != FinalObjectType || !isFilledAsTable(extra->structure())) [[likely]]
+        return;
+    Structure* structure = extra->structure();
+    if (structure->isUncacheableDictionary() || structure->mayBePrototype() || structure->inlineSize() + structure->outOfLineSize() > static_cast<unsigned>(Structure::s_maxTransitionLength))
+        return;
+    const CompiledStructure& current = compiledStructure();
+    if (current.mayBePrototype() || current.heldExtraProperties() || isInFrame())
+        return;
+    uint32_t numberOfNames = 0;
+    structure->forEachProperty(vm, [&](const auto&) {
+        ++numberOfNames;
+        return true;
+    });
+    if (numberOfNames != numberOfSlotsForMaxOffset(structure->maxOffset(), structure->inlineCapacity()))
+        return;
+    DeferGC deferGC(vm);
+    if (structure->isDictionary())
+        structure->flattenDictionaryStructure(vm, extra);
+    didFinishFilling(structure);
+    if (current.extraPropertiesStructureID() != structure->id())
+        setVariantOfStructure(vm, state().objects->structures.withExtraProperties(vm, current, structure));
+    if (hasKeyOrderOfItsOwn())
+        tryLeaveKeyOrderOfItsOwn(vm, state());
+}
+
+bool Object::tryNameHeldStructure(VM& vm)
+{
+    const CompiledStructure& current = compiledStructure();
+    JSObject* held = current.heldExtraProperties();
+    if (!held || held->type() != FinalObjectType)
+        return false;
+    Structure* structure = held->structure();
+    if (Structure* named = current.heldStructure())
+        return named == structure;
+    if (structure->isDictionary() || !structure->propertyAccessesAreCacheable() || !structure->propertyAccessesAreCacheableForAbsence())
+        return false;
+    current.setHeldStructure(vm, structure);
+    return true;
 }
 
 bool Object::ensureStructureForExtraPropertiesIfNeeded(VM& vm, JSCell* cell)
@@ -930,6 +992,10 @@ Object::ExtraPropertyStoreResult Object::tryStoreExtraProperty(VM& vm, PropertyN
         if (attributes & (PropertyAttribute::ReadOnly | PropertyAttribute::AccessorOrCustomAccessorOrValue) || (isDefinition && attributes))
             return { };
         extra->putDirectOffset(vm, offset, value);
+        if (structure()->mayBePrototype() && compiledStructure().reportsReplacements()) [[unlikely]] {
+            countEvent(vm, RuntimeCounterID::ValuesReplacedOnCompiledPrototypes);
+            didChangeOwnProperties(vm, *this, VM::StructureChainIntegrityEvent::Change, name.uid());
+        }
         return { ExtraPropertyStore::Replaced, offset };
     }
     if (isNotExtensible())
@@ -937,11 +1003,14 @@ Object::ExtraPropertyStoreResult Object::tryStoreExtraProperty(VM& vm, PropertyN
     JSGlobalObject* realm = structure()->realm();
     if (!isDefinition && !storeCreatesOwnProperty(realm, structure(), this, name.uid(), isMadeAtRunTime ? StoredName::IsNotSpelledByProgram : StoredName::MayBeSpelledByProgram))
         return { };
-    willAddExtraProperty(vm, name, !isMadeAtRunTime);
+    if (!mayAddExtraProperty(vm, name, !isMadeAtRunTime))
+        return { };
     bool hadNone = !extra;
     if (hadNone)
         extra = constructEmptyObject(vm, Instance::of(realm)->realm.emptyExtraPropertiesStructure);
     StructureID structureBefore = extra->structureID();
+    if (flags.contains(ExtraPropertyStoreFlag::BeginsDictionary))
+        extra->convertToDictionary(vm);
     PutPropertySlot slot(extra);
     extra->putDirect(vm, name, value, slot);
     if (hadNone)
@@ -952,6 +1021,15 @@ Object::ExtraPropertyStoreResult Object::tryStoreExtraProperty(VM& vm, PropertyN
         didChangeExtraProperties(vm);
     didChangeOwnProperties(vm, *this, VM::StructureChainIntegrityEvent::Add, name.uid());
     return { ExtraPropertyStore::Added, slot.cachedOffset() };
+}
+
+bool Object::mayAddExtraProperty(VM& vm, PropertyName name, bool isSpelledByProgram)
+{
+    if (!name.isPrivateName() && !admitsMutation(vm, *this, ObjectMutation::AddProperty))
+        return false;
+    if (isSpelledByProgram)
+        state().objects->classes.didShadowMember(layout(), name.uid());
+    return true;
 }
 
 void Object::willAddExtraProperty(VM& vm, PropertyName name, bool isSpelledByProgram)

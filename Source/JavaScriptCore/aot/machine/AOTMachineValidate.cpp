@@ -8,15 +8,23 @@
 
 #if ENABLE(AOT)
 
+#include "AOTDominatorJumps.h"
 #include "AOTMachine.h"
 #include "AOTMachineTarget.h"
 #include <algorithm>
 #include <limits>
 #include <utility>
+#include <wtf/BitVector.h>
+#include <wtf/HashMap.h>
+#include <wtf/Vector.h>
 
 namespace JSC { namespace AOT { namespace Machine {
 
 namespace {
+
+#if COMPILER(CLANG)
+#pragma clang attribute push(__attribute__((minsize)), apply_to = function)
+#endif
 
 class MachineValidator {
     WTF_MAKE_NONCOPYABLE(MachineValidator);
@@ -41,17 +49,17 @@ private:
         unsigned nextSuccessor;
     };
 
-    bool fail(const Operation* = nullptr);
-    bool failAtEndOf(const Block*);
+    bool fail(const Operation* = nullptr, PlaceOfCheck = PlaceOfCheck::here());
+    bool failAtEndOf(const Block*, PlaceOfCheck = PlaceOfCheck::here());
 
-    bool isInProcedure(const Operation*) const;
+    ALWAYS_INLINE bool isInProcedure(const Operation*) const;
     bool isInProcedure(const Block*) const;
     static std::span<Operation* const> listHolding(const Block*, Opcode);
     bool listsItsOwnOperations(const Block*, std::span<Operation* const>);
 
     bool findWhatIsLeft();
     bool isLeft(const Block* block) const { return !m_isBehindBlockPasses || m_blockIsLeft.get(block->index()); }
-    bool isLeft(const Operation* operation) const { return !m_isBehindBlockPasses || !operation->owner() || m_operationIsLeft.get(operation->index()); }
+    ALWAYS_INLINE bool isLeft(const Operation* operation) const { return !m_isBehindBlockPasses || !operation->owner() || m_operationIsLeft.get(operation->index()); }
 
     bool checkMembership();
     bool checkEdges();
@@ -61,7 +69,7 @@ private:
     bool checkDominance();
 
     static bool terminatorHasExpectedSuccessorCount(const Block*);
-    bool hasLegalChildren(const Operation*) const;
+    bool hasLegalChildren(const Operation*, std::span<Operation* const> children) const;
     bool hasLegalPosition(const Operation*) const;
     bool hasLegalTypes(const Operation*) const;
     bool hasLegalAddress(const Operation*) const;
@@ -129,18 +137,18 @@ bool MachineValidator::findWhatIsLeft()
     return true;
 }
 
-bool MachineValidator::fail(const Operation* operation)
+bool MachineValidator::fail(const Operation* operation, PlaceOfCheck check)
 {
-    m_proc.fail(FailureKind::MalformedProcedure, operation);
+    m_proc.fail(FailureKind::MalformedProcedure, operation, check);
     return false;
 }
 
-bool MachineValidator::failAtEndOf(const Block* block)
+bool MachineValidator::failAtEndOf(const Block* block, PlaceOfCheck check)
 {
-    return fail(block->isEmpty() ? nullptr : block->last());
+    return fail(block->isEmpty() ? nullptr : block->last(), check);
 }
 
-bool MachineValidator::isInProcedure(const Operation* operation) const
+ALWAYS_INLINE bool MachineValidator::isInProcedure(const Operation* operation) const
 {
     return operation && operation->index() < m_proc.numberOfOperations() && m_proc.operationAt(operation->index()) == operation;
 }
@@ -280,15 +288,15 @@ bool MachineValidator::checkTerminators()
     return true;
 }
 
-bool MachineValidator::hasLegalChildren(const Operation* operation) const
+bool MachineValidator::hasLegalChildren(const Operation* operation, std::span<Operation* const> children) const
 {
     Opcode opcode = operation->opcode();
-    unsigned numberOfChildren = operation->numChildren();
+    unsigned numberOfChildren = children.size();
     uint8_t numberWanted = descriptionOf(opcode).numberOfChildren;
     if (numberWanted != variableChildren ? numberOfChildren != numberWanted : opcode == Return && numberOfChildren > 1)
         return false;
 
-    for (const Operation* child : operation->children()) {
+    for (const Operation* child : children) {
         if (!isInProcedure(child))
             return false;
         if (opcode == Extract ? !child->type().isTuple() : !child->type().isNumeric())
@@ -350,7 +358,7 @@ bool MachineValidator::isLegalConstraint(const ValueRep& constraint, Type type, 
     case ValueRep::StackArgument:
         return true;
     case ValueRep::Register:
-        return type.isFloat() ? constraint.isFPR() : constraint.isGPR();
+        return type.isInNumberRegister() ? constraint.isFPR() : constraint.isGPR();
     case ValueRep::Stack:
     case ValueRep::Constant:
         return false;
@@ -363,6 +371,8 @@ bool MachineValidator::isLegalPatch(const PatchOperation* patch) const
     Type type = patch->type();
     unsigned numberOfChildren = patch->numChildren();
     if (patch->opcode() == Check && (type != Void || !numberOfChildren || !patch->child(0)->type().isInt()))
+        return false;
+    if (patch->failsWhenPredicateIsZero() && (patch->opcode() != Check || !isComparison(patch->child(0)->opcode()) || patch->child(0)->child(0)->type().isInt()))
         return false;
     if (!hasLegalTupleIndex(type))
         return false;
@@ -429,7 +439,7 @@ bool MachineValidator::hasLegalTypes(const Operation* operation) const
         return type == Int64 && space != SymbolSpace::Number && space != SymbolSpace::InstanceWord;
     }
     case NumberOf:
-        return type == Int32 && operation->symbol().space == SymbolSpace::Number;
+        return (type == Int32 || type == Int64) && operation->symbol().space == SymbolSpace::Number;
     case InstanceAddressOf:
         return type == Int64 && operation->symbol().space == SymbolSpace::InstanceWord;
     case ArgumentReg:
@@ -451,6 +461,7 @@ bool MachineValidator::hasLegalTypes(const Operation* operation) const
     case Shl:
     case SShr:
     case ZShr:
+    case RotR:
         return type.isInt() && type == typeOfChild(0) && typeOfChild(1) == Int32;
     case Clz:
     case PopCount:
@@ -465,7 +476,7 @@ bool MachineValidator::hasLegalTypes(const Operation* operation) const
     case FMax:
         return type.isFloat() && type == typeOfChild(0) && type == typeOfChild(1);
     case BitwiseCast:
-        return type.isNumeric() && type.isInt() != typeOfChild(0).isInt() && widthOf(type) == widthOf(typeOfChild(0));
+        return type.isNumeric() && !type.isVector() && type.isInt() != typeOfChild(0).isInt() && widthOf(type) == widthOf(typeOfChild(0));
     case SExt8:
     case SExt16:
         return type == Int32 && typeOfChild(0) == Int32;
@@ -557,7 +568,7 @@ bool MachineValidator::hasInstructionOnTarget(const Operation* operation)
     if (!operation->type().isInt())
         return true;
 #if CPU(X86_64)
-    if (opcode == Shl || opcode == SShr || opcode == ZShr)
+    if (opcode == Shl || opcode == SShr || opcode == ZShr || opcode == RotR)
         return operation->child(1)->hasInt32();
     return opcode != Div && opcode != UDiv && opcode != Mod && opcode != UMod && opcode != MulHigh && opcode != UMulHigh;
 #else
@@ -575,13 +586,17 @@ bool MachineValidator::checkOperations()
         const Operation* operation = m_proc.operationAt(index);
         if (!isLeft(operation))
             continue;
-        if (!hasLegalChildren(operation) || !hasLegalPosition(operation) || !hasLegalTypes(operation) || !hasLegalFlags(operation) || !hasInstructionOnTarget(operation))
+        std::span<Operation* const> children = operation->children();
+        if (!hasLegalChildren(operation, children) || !hasLegalPosition(operation) || !hasLegalTypes(operation) || !hasLegalFlags(operation) || !hasInstructionOnTarget(operation))
             return fail(operation);
         if (countsChildrenAtFirstUse(operation->opcode()) && !operation->useCount())
             continue;
-        for (const Operation* child : operation->children()) {
+        for (unsigned childIndex = 0; childIndex < children.size(); ++childIndex) {
+            const Operation* child = children[childIndex];
             ++numberOfUses[child->index()];
             if (operation->opcode() != Trunc && !child->has(OperationFlag::UpperHalfIsRead))
+                return fail(operation);
+            if (!readsZeroExtendedWord(operation->opcode(), childIndex) && !child->has(OperationFlag::HasOpaqueReader))
                 return fail(operation);
         }
     }
@@ -629,6 +644,10 @@ bool MachineValidator::checkUpsilons()
     return true;
 }
 
+#if COMPILER(CLANG)
+#pragma clang attribute pop
+#endif
+
 void MachineValidator::computeDominators()
 {
     m_placeOf.fill(m_arena, m_proc.numberOfBlocks(), notReached);
@@ -667,6 +686,11 @@ void MachineValidator::computeDominators()
     dominator[0] = 0;
     for (const Entrypoint& entrypoint : m_proc.entrypoints())
         dominator[m_placeOf[entrypoint.block->index()]] = 0;
+    DominatorJumps jumps(numberReached + 1);
+    auto above = [&](uint32_t place, uint32_t limit) {
+        uint32_t jump = jumps.from(place);
+        return jump >= limit ? jump : dominator[place];
+    };
 
     ArenaVector<uint32_t> lastMergeAt;
     lastMergeAt.fill(m_arena, numberReached + 1, 0);
@@ -675,13 +699,13 @@ void MachineValidator::computeDominators()
         while (common != from) {
             if (common > from) {
                 lastMergeAt[common] = merge;
-                common = dominator[common];
+                common = above(common, from);
                 continue;
             }
             if (lastMergeAt[from] == merge)
                 break;
             lastMergeAt[from] = merge;
-            from = dominator[from];
+            from = above(from, common);
         }
         return common;
     };
@@ -710,7 +734,7 @@ void MachineValidator::computeDominators()
     }
 
     bool changed = true;
-    while (changed) {
+    for (bool isFirstRound = true; changed; isFirstRound = false) {
         changed = false;
         for (uint32_t place = 1; place <= numberReached; ++place) {
             uint32_t next = notReached;
@@ -721,8 +745,14 @@ void MachineValidator::computeDominators()
                     continue;
                 next = next == notReached ? from : intersect(next, from);
             }
-            changed |= next != dominator[place];
-            dominator[place] = next;
+            if (next != dominator[place]) {
+                changed = true;
+                dominator[place] = next;
+                if (!isFirstRound)
+                    jumps.stop();
+            }
+            if (isFirstRound)
+                jumps.set(place, next);
         }
     }
 
@@ -754,6 +784,8 @@ bool MachineValidator::checkDominance()
 {
     computeDominators();
 
+    const Block* lastUserBlock = nullptr;
+    const Block* lastDominator = nullptr;
     for (uint32_t index = 0; index < m_proc.numberOfOperations(); ++index) {
         const Operation* user = m_proc.operationAt(index);
         const Block* block = user->owner();
@@ -771,8 +803,12 @@ bool MachineValidator::checkDominance()
                     return fail(user);
                 continue;
             }
+            if (home == lastDominator && block == lastUserBlock)
+                continue;
             if (isReached && !dominates(home, block))
                 return fail(user);
+            lastUserBlock = block;
+            lastDominator = home;
         }
     }
     return true;
@@ -788,6 +824,113 @@ bool validate(Procedure& procedure)
 bool validateBehindBlockPasses(Procedure& procedure)
 {
     return MachineValidator(procedure, true).run();
+}
+
+bool checkVectorsAcrossCalls(Procedure& procedure)
+{
+    uint32_t numberOfBlocks = procedure.numberOfBlocks();
+    RegisterMask numberRegisters = 0;
+    for (unsigned index = 0; index <= Reg::maxIndex(); ++index) {
+        if (Reg reg = Reg::fromIndex(index); reg.isFPR())
+            numberRegisters |= maskOf(reg);
+    }
+    auto endsVectors = [&](const Operation* operation) {
+        const PatchOperation* patch = operation->as<PatchOperation>();
+        if (!patch || operation->opcode() == Check)
+            return false;
+        RegisterMask clobbered = patch->lateClobberedMask() & numberRegisters;
+        if (isARM64() && clobbered)
+            return true;
+        return (patch->effects.exitsSideways || patch->effects.mayCollect) && clobbered != numberRegisters;
+    };
+    struct PlaceInBlock {
+        uint32_t block { 0 };
+        uint32_t firstPlaceBehind { 0 };
+    };
+    struct Use {
+        uint32_t vector;
+        PlaceInBlock place;
+    };
+    HashMap<uint32_t, PlaceInBlock, DefaultHash<uint32_t>, WTF::UnsignedWithZeroKeyHashTraits<uint32_t>> definitions;
+    Vector<Use> uses;
+    Vector<uint32_t> endsOfVectors;
+    Vector<uint32_t> firstEndOfBlock;
+    Vector<uint32_t> firstPredecessorOfBlock(FillWith { }, numberOfBlocks + 1, 0u);
+    for (uint32_t index = 0; index < numberOfBlocks; ++index) {
+        const Block* block = procedure.blockAt(index);
+        firstEndOfBlock.append(endsOfVectors.size());
+        for (const Edge& edge : block->successors())
+            ++firstPredecessorOfBlock[edge.block()->index()];
+        auto noteUses = [&](const Operation* operation, uint32_t place) {
+            for (const Operation* child : operation->children()) {
+                if (child->type().isVector())
+                    uses.append({ static_cast<uint32_t>(child->index()), { index, place } });
+            }
+        };
+        for (const Operation* phi : block->phis()) {
+            if (phi->type().isVector())
+                definitions.add(phi->index(), PlaceInBlock { index, 0 });
+        }
+        for (uint32_t place = 0; place < block->size(); ++place) {
+            const Operation* operation = block->at(place);
+            if (operation->type().isVector())
+                definitions.add(operation->index(), PlaceInBlock { index, place + 1 });
+            if (endsVectors(operation))
+                endsOfVectors.append(place);
+            noteUses(operation, place);
+        }
+        for (const Operation* upsilon : block->upsilons())
+            noteUses(upsilon, block->size());
+    }
+    firstEndOfBlock.append(endsOfVectors.size());
+    if (uses.isEmpty() || endsOfVectors.isEmpty())
+        return true;
+    uint32_t numberOfEdges = 0;
+    for (uint32_t& first : firstPredecessorOfBlock)
+        first = std::exchange(numberOfEdges, numberOfEdges + first);
+    Vector<uint32_t> predecessors(FillWith { }, numberOfEdges, 0u);
+    Vector<uint32_t> nextPredecessor = firstPredecessorOfBlock;
+    for (uint32_t index = 0; index < numberOfBlocks; ++index) {
+        for (const Edge& edge : procedure.blockAt(index)->successors())
+            predecessors[nextPredecessor[edge.block()->index()]++] = index;
+    }
+    auto holdsNoEnd = [&](uint32_t block, uint32_t begin, uint32_t end) {
+        auto last = endsOfVectors.begin() + firstEndOfBlock[block + 1];
+        auto found = std::lower_bound(endsOfVectors.begin() + firstEndOfBlock[block], last, begin);
+        if (found == last || *found >= end)
+            return true;
+        procedure.fail(FailureKind::MalformedProcedure, procedure.blockAt(block)->at(*found));
+        return false;
+    };
+    std::ranges::sort(uses, { }, &Use::vector);
+    Vector<uint32_t> vectorLookedAtLast(FillWith { }, numberOfBlocks, std::numeric_limits<uint32_t>::max());
+    Vector<uint32_t, 16> blocksWhereItIsLiveAtHead;
+    for (const Use& use : uses) {
+        auto found = definitions.find(use.vector);
+        PlaceInBlock definition = found == definitions.end() ? PlaceInBlock { numberOfBlocks, 0 } : found->value;
+        if (definition.block == use.place.block && definition.firstPlaceBehind <= use.place.firstPlaceBehind) {
+            if (!holdsNoEnd(use.place.block, definition.firstPlaceBehind, use.place.firstPlaceBehind))
+                return false;
+            continue;
+        }
+        if (!holdsNoEnd(use.place.block, 0, use.place.firstPlaceBehind))
+            return false;
+        blocksWhereItIsLiveAtHead.append(use.place.block);
+        while (!blocksWhereItIsLiveAtHead.isEmpty()) {
+            uint32_t block = blocksWhereItIsLiveAtHead.takeLast();
+            for (uint32_t place = firstPredecessorOfBlock[block]; place < firstPredecessorOfBlock[block + 1]; ++place) {
+                uint32_t predecessor = predecessors[place];
+                if (std::exchange(vectorLookedAtLast[predecessor], use.vector) == use.vector)
+                    continue;
+                bool isMadeThere = predecessor == definition.block;
+                if (!holdsNoEnd(predecessor, isMadeThere ? definition.firstPlaceBehind : 0, procedure.blockAt(predecessor)->size()))
+                    return false;
+                if (!isMadeThere)
+                    blocksWhereItIsLiveAtHead.append(predecessor);
+            }
+        }
+    }
+    return true;
 }
 
 bool checkThatDefinitionsDominateUses(Procedure& procedure)

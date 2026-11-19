@@ -16,11 +16,14 @@
 #include "AOTControlEmitter.h"
 #include "AOTConvention.h"
 #include "AOTHintEmitter.h"
+#include "AOTInliningAcrossFiles.h"
 #include "AOTMachineFrame.h"
 #include "AOTStackCheckEmitter.h"
+#include "AOTStubsBoxedCalls.h"
 #include "AOTStubsCallFrames.h"
 #include "AOTStubsCallLists.h"
 #include "AOTStubsCalls.h"
+#include "AOTStubsCoroutines.h"
 #include "AOTStubsValues.h"
 #include "AOTTypeArena.h"
 #include "AOTTypeTestEmitter.h"
@@ -133,7 +136,7 @@ void CallEmitter::didEmitTailCall()
         m_records.frame.needsStackCheckForTailCalls = true;
 }
 
-const ArgumentLocations& CallEmitter::ownLocations()
+ALWAYS_INLINE_INTO_OTHER_FILES const ArgumentLocations& CallEmitter::ownLocations()
 {
     if (!m_ownLocations)
         m_ownLocations = conventions().locationsOf(m_program, m_unit);
@@ -260,8 +263,12 @@ void CallEmitter::callFromArgumentListFrame(const CallTarget& target, const Plac
         AllowMacroScratchRegisterUsage allowScratch(jit);
         RELEASE_ASSERT(params.frameIsSetUp());
         Machine::emitCalleeSaveRestore(jit, params.frame());
-        emitMoveStackWordsToArgumentListFrame(jit, numberOfWords, spilledBytes);
         emitMoveAddressOf(jit, *records, destination);
+        if (numberOfWords && numberOfWords <= StubKey::maxCount) {
+            records->stubCalls.tailCall(jit, AOT::callFromArgumentListFrameWithWords(numberOfWords, spilledBytes));
+            return;
+        }
+        emitMoveStackWordsToArgumentListFrame(jit, numberOfWords, spilledBytes);
         records->stubCalls.tailCall(jit, AOT::callFromArgumentListFrame());
     });
 }
@@ -284,7 +291,7 @@ void CallEmitter::requireCallable(const OperationContext& context, Boxed callee,
     LBasicBlock mayNotBeCallable = newBlock();
     LBasicBlock continuation = newBlock();
     branchUnless(isCell(callee), mayNotBeCallable);
-    Condition isKnownToBeCallable = closures.hasFunctionCellType(unboxCell(callee));
+    Condition isKnownToBeCallable = closures.isSlimClosureAsCreated(unboxCell(callee));
     m_out.branch(isKnownToBeCallable.value(), normalEdge(continuation), rareEdge(mayNotBeCallable));
 
     m_out.appendTo(mayNotBeCallable);
@@ -359,21 +366,49 @@ void CallEmitter::requireForwardedCallCanBeMade(const ValueContext& value, Boxed
 void CallEmitter::tailCallValue(const ValueContext& value, const ValueCall& call)
 {
     RELEASE_ASSERT(!call.lentArguments);
-    requireCallableBeforeTailCall(value, call.callee, call.thisValue);
-
     Vector<LValue, 8> values;
     for (Boxed argument : call.arguments)
         values.append(argument.value());
+    if (call.methodMayBeUnread) {
+        RELEASE_ASSERT(call.methodOfBuiltinClass && !mayForwardCallToReceiver(value.value()));
+        LBasicBlock wasRead = newBlock();
+        LBasicBlock leaves = newBlock();
+        branch(isNotEmpty(call.callee), { rareEdge(wasRead), normalEdge(leaves) });
+        m_out.appendTo(wasRead);
+        requireCallableBeforeTailCall(value, call.callee, call.thisValue);
+        m_out.jump(leaves);
+        m_out.appendTo(leaves);
+        ConventionCall unread { .stub = callMethodThatMayBeUnreadInTailPosition(*call.methodOfBuiltinClass, static_cast<unsigned>(values.size())), .callee = call.callee.value(), .thisValue = call.thisValue.value(), .arguments = values.span() };
+        emitTailCall(value, CallTarget::stub(unread.stub, std::nullopt), placeConventionArguments(unread));
+        return;
+    }
+    requireCallableBeforeTailCall(value, call.callee, call.thisValue);
+    bool calleeIsCell = call.calleeIsCell || !mayForwardCallToReceiver(value.value());
 
+    if (call.methodOfBuiltinClass && calleeIsCell && !emitter<AccessEmitter>().wasMethodTried(value->calleeOperand()) && servesCallsByName(*call.methodOfBuiltinClass, static_cast<unsigned>(values.size())) && cellTypesOfReceiversOf(*call.methodOfBuiltinClass)) {
+        ConventionCall method { .stub = callMethodThatMayBeUnreadInTailPosition(*call.methodOfBuiltinClass, static_cast<unsigned>(values.size())), .callee = call.callee.value(), .thisValue = call.thisValue.value(), .arguments = values.span() };
+        emitTailCall(value, CallTarget::stub(method.stub, std::nullopt), placeConventionArguments(method));
+        return;
+    }
     ConventionCall conventionCall { .callee = call.callee.value(), .thisValue = call.thisValue.value(), .arguments = values.span() };
     LValue countOperand = nullptr;
-    chooseStubThatCallsValue(conventionCall, countOperand, call.calleeIsCell);
+    chooseStubThatCallsValue(conventionCall, countOperand, calleeIsCell);
     tailCallByConvention(value, conventionCall);
 }
 
 void ControlEmitter::generateReturn(const TerminatorContext& terminator)
 {
     ValueID value = terminator->valueOperand();
+    const Block& block = m_code.at(terminator.block());
+    if (value && (generator().asyncResultReturnedByStub(block) == value || generator().bodyEnteredAfterNewPromise(block) == value)) {
+        generator().generateReturnedCall(terminator, value);
+        return;
+    }
+    if (value && generator().fulfilledPromiseReturnedByStub(block) == value) {
+        std::span<const ValueID> values = m_code.valuesOf(block);
+        emitter<CallEmitter>().returnFulfilledPromise(in<Boxed>(operationAt(values[values.size() - 2]).valueOperand()));
+        return;
+    }
     unsigned numberOfResults = conventions().numberOfResults(m_unit);
     Vector<Operand, 4> operands;
     if (!value) {
@@ -398,6 +433,112 @@ void ControlEmitter::generateReturn(const TerminatorContext& terminator)
 void ControlEmitter::generateReturnCall(const TerminatorContext& terminator)
 {
     generator().generateReturnedCall(terminator, terminator->callOperand());
+}
+
+static RegistersSavedInAsyncFrame registersSavedIn(const Machine::Frame& frame)
+{
+    const RegisterAtOffsetList& saves = frame.calleeSaveRegisterAtOffsetList();
+    const size_t numberOfSaves = saves.registerCount();
+    auto isInItsSlot = [&](size_t index) {
+        return saves.at(index).offset() == -static_cast<ptrdiff_t>((numberOfSaves - index) * sizeof(CPURegister));
+    };
+    for (size_t index = 0; index < numberOfSaves; ++index)
+        RELEASE_ASSERT(isInItsSlot(index));
+#if CPU(X86_64)
+    switch (numberOfSaves) {
+    case 0:
+        return RegistersSavedInAsyncFrame::None;
+    case 1:
+        RELEASE_ASSERT(saves.at(0).reg() == Reg(X86Registers::ebx) || saves.at(0).reg() == Reg(X86Registers::r15));
+        return saves.at(0).reg() == Reg(X86Registers::ebx) ? RegistersSavedInAsyncFrame::RBX : RegistersSavedInAsyncFrame::R15;
+    case 2:
+        RELEASE_ASSERT(saves.at(0).reg() == Reg(X86Registers::ebx) && saves.at(1).reg() == Reg(X86Registers::r15));
+        return RegistersSavedInAsyncFrame::Both;
+    }
+#endif
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+std::optional<unsigned> CallEmitter::findArgumentForPromiseBefore(CodeUnit body)
+{
+    const CallingConventions& conventions = this->conventions();
+    if (!isX86_64() || conventions.spillsArgumentRegisters(m_unit) || conventions.savesRegistersOfCallers(m_unit) || conventions.stackWordsReservedByCallersOf(m_program, body))
+        return std::nullopt;
+    ArgumentLocations locations = conventions.locationsOf(m_program, body);
+    if (locations.numberOfStackArguments || !hasCompatibleResults(locations.results.span(), ownLocations().results.span()))
+        return std::nullopt;
+    auto findArgument = [](Reg reg) -> std::optional<unsigned> {
+        for (unsigned argument = 0; argument < registersOfNewPromiseBeforeBody; ++argument) {
+            if (reg == Reg(directArgumentGPR(argument)))
+                return argument;
+        }
+        return std::nullopt;
+    };
+    std::optional<unsigned> argumentOfPromise;
+    for (const ArgumentLocation& location : locations.parameters) {
+        argumentOfPromise = std::nullopt;
+        if (location.kind != ArgumentLocation::Kind::GPR)
+            continue;
+        argumentOfPromise = findArgument(location.reg);
+        if (!argumentOfPromise)
+            return std::nullopt;
+    }
+    return argumentOfPromise;
+}
+
+void CallEmitter::enterBodyAfterNewPromise(const ValueContext& value, CodeUnit body, const ArgumentLocations& locations)
+{
+    std::span<const ValueID> ids = value->argumentsOperands();
+    RELEASE_ASSERT(ids.size() == locations.parameters.size());
+    Vector<Operand, 8> arguments;
+    for (size_t index = 0; index + 1 < ids.size(); ++index)
+        arguments.append(locations.parameters[index].kind == ArgumentLocation::Kind::None ? Operand { } : generator().getIn(ids[index], locations.parameters[index].representation));
+    arguments.append(Operand { });
+    const StubKey stub = newPromiseBeforeBody(*findArgumentForPromiseBefore(body));
+    leaveAfterFrameTeardown(placeArguments(body, locations, arguments.span()).inRegisters.span(), { }, [records = &m_records, stub, body](CCallHelpers& jit) {
+        records->stubCalls.callWithoutReturnSite(jit, stub);
+        records->stubCalls.jumpToFunction(jit, body, primaryEntry);
+    });
+}
+
+void CallEmitter::returnFulfilledPromise(Boxed value)
+{
+    const StubKey stub = AOT::returnFulfilledPromise();
+    const Machine::ConstrainedValue operand(value.value(), Machine::ValueRep::reg(signatureOf(stub).operands[0]));
+    leaveAfterFrameTeardown(singleElementSpan(operand), { }, [records = &m_records, stub](CCallHelpers& jit) {
+        records->stubCalls.tailCall(jit, stub);
+    });
+}
+
+void CallEmitter::returnAsyncResult(Boxed promise, Boxed result)
+{
+    const AsyncResult returned = isUndefinedConstant(result.value()) ? AsyncResult::Undefined : AsyncResult::Any;
+    const StubSignature signature = signatureOf(returnAsyncResultInTailPosition(RegistersSavedInAsyncFrame::None, returned));
+    Machine::PatchOperation* patchpoint = m_out.patchpoint(Machine::Void);
+    patchpoint->append(promise.value(), Machine::ValueRep::reg(signature.operands[0]));
+    if (returned != AsyncResult::Undefined)
+        patchpoint->append(result.value(), Machine::ValueRep::reg(signature.operands[1]));
+    patchpoint->clobber(RegisterSet::macroClobberedGPRs());
+    patchpoint->effects.terminal = true;
+    patchpoint->setNeedsFrameRecord(true);
+    if (signature.filledOutOfResultInFront)
+        patchpoint->setRegisterThatCalleeFillsOutOfResult(signature.filledOutOfResultInFront);
+    patchpoint->setGenerator([records = &m_records, returned](CCallHelpers& jit, const Machine::PatchParameters& params) {
+        AllowMacroScratchRegisterUsage allowScratch(jit);
+        RegistersSavedInAsyncFrame saved = RegistersSavedInAsyncFrame::None;
+        if (!params.frameIsSetUp())
+            jit.emitFunctionPrologue();
+        else if (!params.frame().hasFrameRecord() || params.frame().savesLieAtBottom()) {
+            Machine::emitFrameTeardown(jit, params.frame());
+            jit.emitFunctionPrologue();
+        } else
+            saved = registersSavedIn(params.frame());
+        const StubKey stub = returnAsyncResultInTailPosition(saved, returned);
+        if (params.value()->leavesMoveOutOfResultToCallee())
+            records->stubCalls.emitPrecedingTailCall(jit, stub);
+        else
+            records->stubCalls.tailCall(jit, stub);
+    });
 }
 
 void CallEmitter::returnValues(const TerminatorContext&, std::span<const Operand> operands)

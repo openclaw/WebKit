@@ -21,6 +21,8 @@
 #include <algorithm>
 #include <limits>
 #include <span>
+#include <utility>
+#include <wtf/BitVector.h>
 #include <wtf/HashMap.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/StringPrintStream.h>
@@ -35,7 +37,7 @@ namespace {
 struct CodeReportFormTotal {
     uint64_t count { 0 };
     uint64_t bytes { 0 };
-    uint64_t countThatDiffersFromSchema { 0 };
+    uint64_t schemaMismatchCount { 0 };
 };
 
 using CodeReportFormTotals = UncheckedKeyHashMap<uint64_t, CodeReportFormTotal, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>>;
@@ -113,7 +115,7 @@ static CodeReportFormTotals sumCodeReportBytesByForm(const LinkedFunctions& unit
                 CodeReportFormTotal& total = totals.add(keyOfCodeReportForm(entry), CodeReportFormTotal { }).iterator->value;
                 total.count += entry.count;
                 total.bytes += entry.bytes;
-                total.countThatDiffersFromSchema += entry.countThatDiffersFromSchema;
+                total.schemaMismatchCount += entry.schemaMismatchCount;
             }
         }
     });
@@ -124,7 +126,7 @@ static CodeReportFormTotals sumCodeReportBytesByForm(const LinkedFunctions& unit
             CodeReportFormTotal& total = totals.add(key, CodeReportFormTotal { }).iterator->value;
             total.count += totalOfThread.count;
             total.bytes += totalOfThread.bytes;
-            total.countThatDiffersFromSchema += totalOfThread.countThatDiffersFromSchema;
+            total.schemaMismatchCount += totalOfThread.schemaMismatchCount;
         }
     }
     return totals;
@@ -168,8 +170,8 @@ static void writeCodeReportBytesByForm(const LinkedFunctions& units, BuildContex
             name.print(" (not named in the schema)");
         }
         const CodeReportFormTotal& total = totals.find(key)->value;
-        if (row.isNamed && total.countThatDiffersFromSchema)
-            name.print(" (the code of ", total.countThatDiffersFromSchema, " shows another form)");
+        if (row.isNamed && total.schemaMismatchCount)
+            name.print(" (the code of ", total.schemaMismatchCount, " shows another form)");
         if (row.place != Typed::Place::Anywhere && row.place != Typed::Place::Loop)
             name.print(" (the design lets a loop alone pick a form)");
         ASCIICString text = name.toASCIICString();
@@ -186,6 +188,44 @@ static void writeCodeReportBytesByForm(const LinkedFunctions& units, BuildContex
         context.diagnostics().add(InternalError { .kind = InternalErrorKind::OpcodeWithoutCode, .detail = makeString("emitters say forms that the schema does not name: "_s, formsThatAreNotNamed.toString()) });
 }
 
+static BitVector findStringsWithTextInImage(const Typed::Program& program, const ImageNumbers& numbers)
+{
+    BitVector strings(program.strings.size());
+    for (Typed::StringID string : numbers.stringsInOrderOfText())
+        strings.quickSet(string.index());
+    for (Typed::StringID string : numbers.stringNumbers().coded())
+        strings.quickSet(string.index());
+    return strings;
+}
+
+static void writeInlinedStrings(const Typed::Program& program, const BuiltImage& built, CompileOutput& output)
+{
+    Vector<std::span<const uint8_t>> inlined;
+    for (size_t position = 0; position < built.functions.size(); ++position) {
+        const MeasurementsOfCode& measurements = *built.functions[position].measurements;
+        uint32_t begin = 0;
+        for (uint32_t end : measurements.endsOfInlinedStrings) {
+            inlined.append(measurements.bytesOfInlinedStrings.subspan(begin, end - begin));
+            begin = end;
+        }
+    }
+    AOT::sort(inlined, [](std::span<const uint8_t> a, std::span<const uint8_t> b) {
+        return std::ranges::lexicographical_compare(a, b);
+    });
+
+    BitVector stored = findStringsWithTextInImage(program, *built.numbers);
+    Vector<Wire::InlinedStringRecord> records;
+    std::span<const uint8_t> previous;
+    for (std::span<const uint8_t> string : inlined) {
+        if (equalSpans(std::exchange(previous, string), string))
+            continue;
+        Typed::StringID id = program.strings.find(string);
+        if (!id || !stored.get(id.index()))
+            records.append(Wire::InlinedStringRecord { .text = output.appendText(string) });
+    }
+    output.setRecords(Wire::ResultSection::InlinedStrings, records.span());
+}
+
 void writeCodeReportSections(const Typed::Program& program, const BuiltImage& built, BuildContext& context, CompileOutput& output)
 {
     if (built.image.isEmpty())
@@ -198,6 +238,8 @@ void writeCodeReportSections(const Typed::Program& program, const BuiltImage& bu
         writeCodeReportBytesByForm(built.functions, context, output);
     if (hasFlag(reports, ReportSet::Symbols))
         output.setSection(Wire::ResultSection::Symbols, encodeSymbols(program, built, context));
+    if (hasFlag(reports, ReportSet::InlinedStrings))
+        writeInlinedStrings(program, built, output);
 }
 
 } } // namespace JSC::AOT

@@ -13,9 +13,12 @@
 #include "AOTClassGuards.h"
 #include "AOTIRProgram.h"
 #include "AOTInstanceLayout.h"
+#include "AOTObjectWords.h"
 #include "AOTPlan.h"
+#include "AOTPropertyCachesWords.h"
 #include "AOTSort.h"
 #include "AOTStringUses.h"
+#include "AOTStartOrder.h"
 #include "AOTThreads.h"
 #include <algorithm>
 #include <functional>
@@ -54,7 +57,9 @@ public:
             && placeData()
             && placeCellsOfLiterals()
             && placeArrayProfiles()
+            && placeRowsOfReads()
             && placeEnvironmentsHandedBack()
+            && placeSubclassStructures()
             && placeMethodTable()
             && finish();
     }
@@ -84,6 +89,7 @@ private:
         ZeroWord4,
         ZeroWord2,
         ZeroWord1,
+        ViewWithMirror,
     };
 
     struct Bucket {
@@ -93,12 +99,12 @@ private:
     };
 
     static constexpr unsigned numberOfFilledWordKinds = 9;
-    static constexpr unsigned numberOfWordKinds = 16;
+    static constexpr unsigned numberOfWordKinds = 17;
     static constexpr unsigned wordSize = sizeof(uint64_t);
     static constexpr unsigned bitsPerByte = 8;
     static constexpr uint32_t noBucket = UINT32_MAX;
 
-    static_assert(static_cast<unsigned>(WordKind::ZeroValue) == numberOfFilledWordKinds && static_cast<unsigned>(WordKind::ZeroWord1) + 1 == numberOfWordKinds);
+    static_assert(static_cast<unsigned>(WordKind::ZeroValue) == numberOfFilledWordKinds && static_cast<unsigned>(WordKind::ViewWithMirror) + 1 == numberOfWordKinds);
     static_assert(!traitsOf(SlotRepresentation::JSValue).absentBits);
     static_assert(!traitsOf(SlotRepresentation::OptionalCell32).absentBits && !traitsOf(SlotRepresentation::OptionalBoolean).absentBits);
     static_assert(widthOf(SlotRepresentation::JSValue) == wordSize && widthOf(SlotRepresentation::OptionalInt64) == wordSize && widthOf(SlotRepresentation::OptionalDouble) == wordSize);
@@ -127,8 +133,15 @@ private:
         }
     }
 
+    static unsigned widthOfVariable(const PlannedVariable& planned)
+    {
+        return planned.hasViewMirror ? Typed::viewMirrorVariableSize : widthOf(planned.representation);
+    }
+
     static WordKind kindOfWord(const PlannedVariable& planned)
     {
+        if (planned.hasViewMirror)
+            return WordKind::ViewWithMirror;
         if (!planned.initialWord)
             return kindOfZeroWord(planned);
         bool startsUndefined = planned.initialWord == traitsOf(planned.representation).undefinedBits;
@@ -212,7 +225,9 @@ private:
         m_statics.regExpLiteralCellOffsets = withoutOffsets(m_mentions.keys(NumberSpace::RegExpLiteralCell).size());
         m_statics.templateObjectCellOffsets = withoutOffsets(m_mentions.keys(NumberSpace::TemplateObjectCell).size());
         m_statics.arrayProfileOffsets = withoutOffsets(m_mentions.keys(NumberSpace::ArrayProfile).size());
+        m_statics.readGroupCacheOffsets = withoutOffsets(m_mentions.keys(NumberSpace::ReadGroupCache).size());
         m_statics.environmentHandedBackOffsets = withoutOffsets(m_program.layouts.size());
+        m_statics.subclassStructuresOffsets = withoutOffsets(m_program.layouts.size());
         m_statics.classGuardBits = Vector<uint32_t>(FillWith { }, m_program.layouts.size() * numberOfClassSides, noClassGuardBit);
     }
 
@@ -220,7 +235,7 @@ private:
     {
         for (Bucket& bucket : buckets) {
             if (bucket.size)
-                bucket.nextOffset = allocate(bucket.size, bucket.width);
+                bucket.nextOffset = allocate(bucket.size, std::min(bucket.width, wordSize));
         }
     }
 
@@ -233,6 +248,15 @@ private:
         return first;
     }
 
+    uint32_t placeOfFirstRowOfClassGuardCounts() const
+    {
+        const NumberedKeys& guards = m_mentions.keys(NumberSpace::ClassGuard);
+        uint32_t first = placeOfFirstClassGuardCount();
+        while (first && isRowOfClassGuardCountsKey(guards.keyAt(first - 1)))
+            --first;
+        return first;
+    }
+
     void placeClassGuardCounts()
     {
         struct CountToPlace {
@@ -241,14 +265,18 @@ private:
         };
         const NumberedKeys& guards = m_mentions.keys(NumberSpace::ClassGuard);
         uint32_t firstCount = placeOfFirstClassGuardCount();
+        auto isCountedFromFirst = [&](std::span<const uint32_t> guard) {
+            if (askerOfClassGuardKey(guard) == AskerOfClassGuardOfName::AssignedMember)
+                return true;
+            LayoutID classLayout(guard[0]);
+            ClassSide side = sideOfClassGuardKey(guard);
+            bool isCountedWhereGuardsBegin = side == ClassSide::Prototype && isClassGuardOfNamesKey(guard) && guardsOfNamesAwaitBeginningOf(m_program, m_plan, classLayout);
+            return m_plan.hasClassRecord(classLayout) && !m_plan.bitsOfClassGuardsAreClearWhileTheyHold(classLayout, side) && !isCountedWhereGuardsBegin;
+        };
         Vector<CountToPlace> counts(guards.size() - firstCount, [&](size_t index) {
             CountToPlace count { 0, static_cast<uint32_t>(index) };
             forEachGuardInClassGuardCountKey(guards.keyAt(firstCount + index), [&](std::span<const uint32_t> guard) {
-                LayoutID classLayout(guard[0]);
-                ClassSide side = sideOfClassGuardKey(guard);
-                bool isCountedWhereGuardsBegin = side == ClassSide::Prototype && isClassGuardOfNamesKey(guard) && guardsOfNamesAwaitBeginningOf(m_program, m_plan, classLayout);
-                if (m_plan.hasClassRecord(classLayout) && !m_plan.bitsOfClassGuardsAreClearWhileTheyHold(classLayout, side) && !isCountedWhereGuardsBegin)
-                    ++count.firstValue;
+                count.firstValue += isCountedFromFirst(guard);
             });
             return count;
         });
@@ -260,6 +288,22 @@ private:
             uint32_t offset = allocate(sizeof(uint32_t), sizeof(uint32_t));
             m_offsetsOfClassGuardCounts[count.index] = offset;
             m_statics.classGuardCounts.append({ offset, count.firstValue });
+        }
+
+        for (uint32_t place = placeOfFirstRowOfClassGuardCounts(); place < firstCount; ++place) {
+            uint32_t width = 0;
+            forEachSlotInRowOfClassGuardCountsKey(guards.keyAt(place), [&](uint32_t, std::span<const uint32_t>) {
+                ++width;
+            });
+            uint32_t offset = allocate(width * sizeof(uint32_t), sizeof(uint32_t));
+            m_offsetsOfRowsOfClassGuardCounts.append(offset);
+            forEachSlotInRowOfClassGuardCountsKey(guards.keyAt(place), [&](uint32_t slot, std::span<const uint32_t> guardsOfSlot) {
+                uint32_t firstValue = guardsOfSlot.empty();
+                forEachGuardInSlotOfRowOfClassGuardCounts(guardsOfSlot, [&](std::span<const uint32_t> guard) {
+                    firstValue += isCountedFromFirst(guard);
+                });
+                m_statics.classGuardCounts.append({ offset + slot * static_cast<uint32_t>(sizeof(uint32_t)), firstValue });
+            });
         }
     }
 
@@ -290,6 +334,16 @@ private:
                 });
             }
         });
+        uint32_t firstRow = placeOfFirstRowOfClassGuardCounts();
+        for (uint32_t place = firstRow; place < firstCount; ++place) {
+            forEachSlotInRowOfClassGuardCountsKey(guards.keyAt(place), [&](uint32_t slot, std::span<const uint32_t> guardsOfSlot) {
+                forEachGuardInSlotOfRowOfClassGuardCounts(guardsOfSlot, [&](std::span<const uint32_t> guard) {
+                    std::optional<uint32_t> placeOfGuard = guards.find(guard);
+                    RELEASE_ASSERT(placeOfGuard && *placeOfGuard < firstRow);
+                    m_statics.guardsOfClassGuardCounts.append({ m_statics.bitsOfClassGuards[*placeOfGuard], m_offsetsOfRowsOfClassGuardCounts[place - firstRow] + slot * static_cast<uint32_t>(sizeof(uint32_t)) });
+                });
+            });
+        }
         parallelSort(m_context.parallelLoops(), m_statics.guardsOfClassGuardCounts.mutableSpan(), std::less<PlacedGuardOfClassGuardCount> { });
     }
 
@@ -313,7 +367,7 @@ private:
         for (uint32_t index = 0; index < m_statics.variables.size(); ++index) {
             if (bucketOfVariable[index] == noBucket)
                 continue;
-            unsigned width = widthOf(m_statics.variables[index].plan.representation);
+            unsigned width = widthOfVariable(m_statics.variables[index].plan);
             Bucket& bucket = buckets[bucketOfVariable[index]];
             RELEASE_ASSERT(!bucket.size || bucket.width == width);
             bucket.width = width;
@@ -325,17 +379,37 @@ private:
         placeClassGuardCounts();
         placeBuckets(allBuckets.subspan(numberOfFilledWordKinds));
 
-        for (uint32_t index = 0; index < m_statics.variables.size(); ++index) {
-            if (bucketOfVariable[index] == noBucket)
-                continue;
+        Vector<uint32_t> views;
+        auto place = [&](uint32_t index) {
             PlacedVariable& placed = m_statics.variables[index];
             Bucket& bucket = buckets[bucketOfVariable[index]];
             placed.offset = std::exchange(bucket.nextOffset, bucket.nextOffset + bucket.width);
             SlotTraits traits = traitsOf(placed.plan.representation);
             if (!traits.holdsCell || traits.isNarrowReference)
-                continue;
-            RELEASE_ASSERT(bucket.width == wordSize && !(placed.offset % wordSize));
+                return;
+            RELEASE_ASSERT(bucket.width == widthOfVariable(placed.plan) && !(placed.offset % wordSize));
             m_statics.roots.append(placed.offset);
+        };
+        for (uint32_t index = 0; index < m_statics.variables.size(); ++index) {
+            if (bucketOfVariable[index] == static_cast<uint32_t>(WordKind::ViewWithMirror))
+                views.append(index);
+            else if (bucketOfVariable[index] != noBucket)
+                place(index);
+        }
+        auto numberOfGroup = [&](uint32_t index) {
+            VariableID first = m_statics.variables[index].plan.firstViewOfBuffer;
+            return first ? first.index() + 1 : 0;
+        };
+        AOT::stableSort(views, { }, numberOfGroup);
+        for (uint32_t number = 0; number < views.size(); ++number) {
+            bool beginsRange = !number || numberOfGroup(views[number - 1]) != numberOfGroup(views[number]);
+            place(views[number]);
+            uint32_t offset = m_statics.variables[views[number]].offset;
+            if (!number && numberOfGroup(views[number]))
+                m_statics.variablesWithViewMirror.append({ offset, 0 });
+            if (beginsRange)
+                m_statics.variablesWithViewMirror.append({ offset, 0 });
+            m_statics.variablesWithViewMirror.last().size += Typed::viewMirrorVariableSize;
         }
         return fitsWithin(m_limit);
     }
@@ -348,7 +422,7 @@ private:
             if (!m_plan.hasModuleValue(module))
                 continue;
             const Typed::Module& record = m_program.modules[index];
-            if ((record.kind == ModuleKind::SourceText || record.kind == ModuleKind::Data) && !isNamedByCode.get(index) && !m_plan.hasRequireCacheValue(module) && !Typed::isFaceOfCommonJSFile(m_program, record))
+            if ((record.kind == ModuleKind::SourceText || record.kind == ModuleKind::Data) && !isNamedByCode.get(index) && !m_plan.hasRequireCacheValue(module) && !Typed::isCommonJSFacade(m_program, record))
                 continue;
             uint32_t offset = allocateRoot();
             m_statics.moduleValueOffsets[index] = offset;
@@ -365,13 +439,13 @@ private:
         const NumberedKeys& guards = m_mentions.keys(NumberSpace::ClassGuard);
         if (!guards.size())
             return true;
-        uint32_t firstCount = placeOfFirstClassGuardCount();
-        for (uint32_t index = 0; index < firstCount; ++index) {
+        uint32_t firstRow = placeOfFirstRowOfClassGuardCounts();
+        for (uint32_t index = 0; index < firstRow; ++index) {
             std::span<const uint32_t> key = guards.keyAt(index);
             RELEASE_ASSERT(key.size() >= 2 && !(key.size() % 2));
             AskerOfClassGuardOfName asker = askerOfClassGuardKey(key);
             ClassSide side = sideOfClassGuardKey(key);
-            RELEASE_ASSERT(asker == AskerOfClassGuardOfName::Reads || (key.size() == 4 && side == ClassSide::Prototype && asker <= AskerOfClassGuardOfName::ReadsBehindLookAtObject));
+            RELEASE_ASSERT(asker == AskerOfClassGuardOfName::Reads || (key.size() == 4 && side == ClassSide::Prototype && asker <= AskerOfClassGuardOfName::AssignedMember));
             LayoutID classLayout(key[0]);
             if (!m_plan.hasClassRecord(classLayout)) {
                 m_context.diagnostics().add(InternalError {
@@ -380,18 +454,20 @@ private:
                     .detail = "code tests a guard of a class that has no record, so nothing would ever end the guard"_s,
                 });
             }
-            uint32_t bit = allocate(1, 1) * bitsPerByte;
+            uint32_t bit = (asker == AskerOfClassGuardOfName::AssignedMember ? allocate(wordSize, wordSize) : allocate(1, 1)) * bitsPerByte;
             m_statics.bitsOfClassGuards.append(bit);
             if (key.size() == 2) {
                 m_statics.classGuardBits[classLayout.index() * numberOfClassSides + key[1]] = bit;
                 continue;
             }
-            Vector<PlacedClassGuardOfName>& list = key.size() == 4 ? m_statics.classGuardsOfNames : m_statics.namesOfClassGuardsOfSeveralNames;
+            Vector<PlacedClassGuardOfName>& list = asker == AskerOfClassGuardOfName::AssignedMember ? m_statics.guardsOfAssignedMembers : key.size() == 4 ? m_statics.classGuardsOfNames : m_statics.namesOfClassGuardsOfSeveralNames;
             for (std::span<const uint32_t> names = key.subspan(2); !names.empty(); names = names.subspan(2)) {
                 RELEASE_ASSERT(names[0] == static_cast<uint32_t>(NumberSpace::Name) || names[0] == static_cast<uint32_t>(NumberSpace::NameOfText));
                 list.append(PlacedClassGuardOfName { classLayout, side, static_cast<NumberSpace>(names[0]), names[1], bit, asker });
             }
         }
+        for (uint32_t offset : m_offsetsOfRowsOfClassGuardCounts)
+            m_statics.bitsOfClassGuards.append(offset * bitsPerByte);
         for (uint32_t offset : m_offsetsOfClassGuardCounts)
             m_statics.bitsOfClassGuards.append(offset * bitsPerByte);
         listGuardsOfClassGuardCounts();
@@ -450,6 +526,19 @@ private:
         return true;
     }
 
+    bool placeRowsOfReads()
+    {
+        if (m_statics.readGroupCacheOffsets.isEmpty())
+            return true;
+        uint32_t first = alignToWord();
+        for (uint32_t& offset : m_statics.readGroupCacheOffsets)
+            offset = allocate(WTF::roundUpToMultipleOf<wordSize>(sizeof(ReadGroupCache)), wordSize);
+        if (!fitsWithin(m_limit))
+            return false;
+        m_statics.clearedEachCollection.append({ first, static_cast<uint32_t>(m_end - first) });
+        return true;
+    }
+
     bool placeEnvironmentsHandedBack()
     {
         const BitVector& layouts = m_mentions.byID(NumberSpace::EnvironmentHandedBack).isMentioned;
@@ -462,6 +551,13 @@ private:
             return false;
         m_statics.clearedEachCollection.append({ first, static_cast<uint32_t>(m_end - first) });
         return true;
+    }
+
+    bool placeSubclassStructures()
+    {
+        for (size_t layout : m_mentions.byID(NumberSpace::HeirLookedAt).isMentioned)
+            m_statics.subclassStructuresOffsets[layout] = allocate(StructuresOfHeir::sizeWithDisplacementsOfFields(m_program.layouts[layout].fields.size()), alignof(StructuresOfHeir));
+        return fitsWithin(m_limit);
     }
 
     bool placeMethodTable()
@@ -549,6 +645,7 @@ private:
     PlacedStatics m_statics;
     Vector<uint32_t> m_originsOfMethodSelectors;
     Vector<uint32_t> m_offsetsOfClassGuardCounts;
+    Vector<uint32_t> m_offsetsOfRowsOfClassGuardCounts;
     uint32_t m_sizeOfMethodTable { 0 };
     uint64_t m_end { 0 };
 };
@@ -565,11 +662,14 @@ void ImageNumbersBuilder::numberSites()
     numbers.m_siteCaches = mentions.takeKeys(NumberSpace::SiteCache);
     const NumberedKeys& sites = numbers.m_siteCaches;
     numbers.m_numbersOfSites.resize(sites.size() + 1);
+    const Typed::BitVector& keysWithColumn = inputs.plan.slots().keysWithColumn();
     uint64_t numberOfNumbersOfSites = 0;
-    for (uint32_t place = 0; place < sites.size(); ++place) {
+    Vector<uint32_t> placesInStartOrder = listSitesInStartOrder(inputs, context.startRanks(), sites);
+    for (uint32_t index = 0; index < sites.size(); ++index) {
+        uint32_t place = placesInStartOrder.isEmpty() ? index : placesInStartOrder[index];
         std::span<const uint32_t> key = sites.keyAt(place);
         numbers.m_numbersOfSites[place] = static_cast<uint32_t>(numberOfNumbersOfSites);
-        numberOfNumbersOfSites += ImageNumbers::isPlaceWithSiteAnswers(key) && !inputs.plan.slots().hasColumn(ImageNumbers::nameOfSite(key)) ? 2 : 1;
+        numberOfNumbersOfSites += ImageNumbers::isPlaceWithSiteAnswers(key) && !keysWithColumn.get(ImageNumbers::nameOfSite(key).index()) ? InstanceLayout::numbersOfSiteWhoseNameStandsBehind : 1;
     }
     numbers.m_numbersOfSites[sites.size()] = static_cast<uint32_t>(std::min<uint64_t>(numberOfNumbersOfSites, UINT32_MAX));
 }
@@ -583,6 +683,7 @@ void ImageNumbersBuilder::layOutStatics()
     numbers.m_regExpLiteralCells = mentions.takeKeys(NumberSpace::RegExpLiteralCell);
     numbers.m_templateObjectCells = mentions.takeKeys(NumberSpace::TemplateObjectCell);
     numbers.m_arrayProfiles = mentions.takeKeys(NumberSpace::ArrayProfile);
+    numbers.m_readGroupCaches = mentions.takeKeys(NumberSpace::ReadGroupCache);
     numbers.m_classGuards = mentions.takeKeys(NumberSpace::ClassGuard);
 
     if (!fits)

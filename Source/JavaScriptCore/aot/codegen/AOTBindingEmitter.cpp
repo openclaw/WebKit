@@ -75,7 +75,7 @@ void BindingEmitter::generateGetModuleVariable(const ValueContext& value)
 {
     VariableID variable = value->variable();
     PlannedVariable planned = m_plan.variable(variable);
-    if (value->givesWordAsItLies()) {
+    if (value->returnsRawSlot()) {
         if (planned.hasWordInStatics())
             define(value, emitter<StaticsEmitter>().loadVariable(variable));
         else if (m_plan.hasClosureCell(planned.function))
@@ -121,7 +121,7 @@ void BindingEmitter::generatePutModuleVariable(const ValueContext& value)
     VariableID variable = value->variable();
     switch (m_plan.variable(variable).storage) {
     case VariableStorage::Statics:
-        emitter<StaticsEmitter>().storeVariable(variable, get(value->valueOperand()));
+        emitter<StaticsEmitter>().storeVariable(variable, get(value->valueOperand()), typeOf(value->valueOperand()), m_code.writesWhatTurnHasMade(value.id()));
         return;
     case VariableStorage::ClosureTable:
         fail(value, InternalErrorKind::SlotAccessNotPlaced);
@@ -138,10 +138,22 @@ void BindingEmitter::generateGetStaticFieldOrAbsent(const ValueContext& value)
         failAndDefineZero(value, InternalErrorKind::SlotAccessNotPlaced);
         return;
     }
-    CellPointer classObject = in<CellPointer>(value->classObjectOperand());
-    Boxed word = emitter<SlotEmitter>().load(statics.addressOfStaticField(variable), SlotRepresentation::JSValue).as<Boxed>();
-    Condition isBare(m_out.isNull(loadField<Pointer>(classObject, m_heaps.JSObject_butterfly).value()));
-    define(value, select(isBare, word, boxedConstant(JSValue())));
+    if (value->findsProperty()) {
+        Operand held = emitter<SlotEmitter>().load(statics.addressOfStaticField(variable), SlotRepresentation::JSValue);
+        LBasicBlock liesInVariable = newBlock();
+        LBasicBlock isProperty = newBlock();
+        OperandJoin join(m_out, Representation::JSValue);
+        branch(Condition(m_out.isZero64(held.as<Boxed>().value())), { rareEdge(isProperty), normalEdge(liesInVariable) });
+
+        m_out.appendTo(liesInVariable);
+        join.add(held);
+
+        m_out.appendTo(isProperty);
+        join.add(callOperation<Boxed>(value, RuntimeOperation::MovedStaticField, { in<CellPointer>(value->classObjectOperand()), identifierNumber(value->key()) }));
+        define(value, join.finish());
+        return;
+    }
+    define(value, emitter<SlotEmitter>().load(statics.addressOfStaticField(variable), SlotRepresentation::JSValue));
 }
 
 void BindingEmitter::generatePutStaticField(const ValueContext& value)
@@ -152,7 +164,7 @@ void BindingEmitter::generatePutStaticField(const ValueContext& value)
         fail(value, InternalErrorKind::SlotAccessNotPlaced);
         return;
     }
-    statics.storeStaticField(variable, in<Boxed>(value->valueOperand()));
+    statics.storeStaticField(variable, in<Boxed>(value->valueOperand()), typeOf(value->valueOperand()), m_code.writesWhatTurnHasMade(value.id()));
 }
 
 void BindingEmitter::generateGetEnvironmentField(const ValueContext& value)
@@ -173,7 +185,7 @@ void BindingEmitter::generateGetEnvironmentField(const ValueContext& value)
         return;
     }
     CellPointer environment = in<CellPointer>(value->environmentOperand());
-    emitter<HintEmitter>().stopWhereLifeHasEnded(value, environment);
+    emitter<HintEmitter>().crashIfLifetimeEnded(value, environment);
     define(value, emitter<SlotEmitter>().loadSlot(environment, slot, MemoryLocation::environmentField(layout, field)));
 }
 
@@ -182,18 +194,21 @@ void BindingEmitter::generatePutEnvironmentField(const ValueContext& value)
     LayoutID layout = value->layout();
     uint32_t field = value->field();
     const PlacedSlot& slot = m_plan.slot(layout, field);
-    if (endsWayAtEnvironmentThatIsNeverMade(layout))
+    if (endsWayAtEnvironmentThatIsNeverMade(layout)) {
+        m_generator.noteThatOwnerIsRememberedBehind(value.id());
         return;
+    }
     if (!isPlacedInEnvironment(slot)) {
         fail(value, InternalErrorKind::SlotAccessNotPlaced);
         return;
     }
     if (VariableID variable = m_plan.promotedEnvironments().variableOf(layout, field)) {
-        emitter<StaticsEmitter>().storeFieldOfEnvironment(variable, layout, field, get(value->valueOperand()), typeOf(value->valueOperand()));
+        emitter<StaticsEmitter>().storeFieldOfEnvironment(variable, layout, field, get(value->valueOperand()), typeOf(value->valueOperand()), m_code.writesWhatTurnHasMade(value.id()));
+        m_generator.noteThatOwnerIsRememberedBehind(value.id());
         return;
     }
     CellPointer environment = in<CellPointer>(value->environmentOperand());
-    emitter<HintEmitter>().stopWhereLifeHasEnded(value, environment);
+    emitter<HintEmitter>().crashIfLifetimeEnded(value, environment);
     ValueID storedValue = value->valueOperand();
     Operand stored = get(storedValue);
     emitter<SlotEmitter>().storeSlot(environment, slot, MemoryLocation::environmentField(layout, field), stored);

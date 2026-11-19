@@ -139,6 +139,10 @@ the existing lazy entry and teardown boundaries without allocating heap storage.
 The Linux x64 artifact build makes both VM entry targets dependencies of `jsc`
 and requires both native executables to pass before accepting the artifact.
 
+## Matched upstream sync (2026-11-19)
+
+- Merge upstream `0befb64c5f30ae5af5137f31c1ebd4f7c3f908d4`, pinned by Bun upstream `ca7729d01a30856c5f613886057a8d45d7c21a74`, preserving both commit histories. Keep the fork's namespace views, async context, callsite positions, worker collection and buffer accounting across the new engine APIs. Qualification compares lane recipes with this exact upstream revision and retains the original history floor. Native engine and paired Bun qualification are pending; existing published pins stay unchanged.
+
 ## Matched upstream sync (2026-11-01)
 
 - Merge upstream `4d45755fed4aeef19e95beb90d3d0c884a2812bd`, pinned by Bun upstream `3f3a9ff87cdccf3d32d7ec6b648c664eddaae840`, with both histories intact. Admit its matching lane and Docker recipes while preserving the fork fixes, history floor, and 21 native variants. Native engine and paired Bun qualification are pending.

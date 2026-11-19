@@ -56,14 +56,8 @@ void storeField(StubAssembler& jit, const FieldStoreRegisters& r, FieldStoreEnd 
     using ClassOfSlot = AcceptedKindOfValue::ClassOfSlot;
     RELEASE_ASSERT(!rememberStore || (end == FieldStoreEnd::ReturnAfterBarrier && typeTest != FieldTypeTest::HasPassed));
     std::array<JumpList, 4> storedInSlotOfClass;
-    auto branchIfStoreIsRemembered = [&](ClassOfSlot classOfSlot) {
-        if (typeTest == FieldTypeTest::IsEmitted) {
-            storedInSlotOfClass[static_cast<size_t>(classOfSlot)].append(jit.jump());
-            return;
-        }
-        Jump wouldPushAnotherOut = branchIfEveryPlaceWasFiledFromSlots(jit);
+    auto goOnToRememberStore = [&](ClassOfSlot classOfSlot) {
         storedInSlotOfClass[static_cast<size_t>(classOfSlot)].append(jit.jump());
-        wouldPushAnotherOut.link(&jit);
     };
     RELEASE_ASSERT(noOverlap(r.field.object, r.field.address, r.field.representation, r.value, r.type, r.scratch, r.secondScratch, instanceGPR));
     RELEASE_ASSERT((end == FieldStoreEnd::JoinList) == !!stored);
@@ -86,16 +80,17 @@ void storeField(StubAssembler& jit, const FieldStoreRegisters& r, FieldStoreEnd 
             jit.returnToCaller();
         }
     };
-    auto branchIfSlotIsAbsent = [&](const SlotTraits& traits) {
-        switch (traits.width) {
+    auto branchIfSlotIsAbsent = [&](SlotRepresentation representation) {
+        const uint64_t bits = bitsBeforeCreation(representation);
+        switch (widthOf(representation)) {
         case 1:
-            return jit.branch8(CCallHelpers::Equal, slot, TrustedImm32(static_cast<int32_t>(traits.absentBits)));
+            return jit.branch8(CCallHelpers::Equal, slot, TrustedImm32(static_cast<int32_t>(bits)));
         case 4:
-            return jit.branch32(CCallHelpers::Equal, slot, TrustedImm32(static_cast<int32_t>(traits.absentBits)));
+            return jit.branch32(CCallHelpers::Equal, slot, TrustedImm32(static_cast<int32_t>(bits)));
         case 8:
-            if (!traits.absentBits)
+            if (!bits)
                 return jit.branchTest64(CCallHelpers::Zero, slot);
-            return jit.branch64(CCallHelpers::Equal, slot, TrustedImm64(static_cast<int64_t>(traits.absentBits)));
+            return jit.branch64(CCallHelpers::Equal, slot, TrustedImm64(static_cast<int64_t>(bits)));
         }
         RELEASE_ASSERT_NOT_REACHED();
     };
@@ -127,8 +122,9 @@ void storeField(StubAssembler& jit, const FieldStoreRegisters& r, FieldStoreEnd 
             Jump isOtherValue = jit.branch64(CCallHelpers::NotEqual, value, TrustedImm32(marker.encodedValue));
             storeBits(traits.width, marker.bits);
             if (remembered)
-                branchIfStoreIsRemembered(*remembered);
-            didStore(StoredValue::IsNotCell);
+                goOnToRememberStore(*remembered);
+            else
+                didStore(StoredValue::IsNotCell);
             isOtherValue.link(&jit);
         }
         exits.cannot.append(jit.jump());
@@ -157,8 +153,7 @@ void storeField(StubAssembler& jit, const FieldStoreRegisters& r, FieldStoreEnd 
             jit.store32(r.scratch, slot);
         } else
             jit.store64(value, slot);
-        branchIfStoreIsRemembered(classOfSlot);
-        didStore(StoredValue::IsCell);
+        goOnToRememberStore(classOfSlot);
 
         isNotCell.link(&jit);
         storeUndefinedOrNull(traits, classOfSlot);
@@ -272,14 +267,15 @@ void storeField(StubAssembler& jit, const FieldStoreRegisters& r, FieldStoreEnd 
     };
     auto storeWithRepresentation = [&](SlotRepresentation representation) {
         const SlotTraits traits = traitsOf(representation);
-        if (end == FieldStoreEnd::ReturnAfterBarrier && traits.hasAbsent)
-            exits.wasAbsent.append(branchIfSlotIsAbsent(traits));
+        if (end == FieldStoreEnd::ReturnAfterBarrier && mayBeCreatedByStore(representation))
+            exits.wasAbsent.append(branchIfSlotIsAbsent(representation));
         switch (traits.valueKind) {
         case SlotValueKind::Boxed:
             jit.store64(value, slot);
             if (rememberStore) {
                 RELEASE_ASSERT(representation == SlotRepresentation::JSValue);
-                branchIfStoreIsRemembered(ClassOfSlot::JSValue);
+                goOnToRememberStore(ClassOfSlot::JSValue);
+                return;
             }
             didStore(StoredValue::MayBeCell);
             return;
@@ -368,7 +364,7 @@ void storeField(StubAssembler& jit, const FieldStoreRegisters& r, FieldStoreEnd 
         typeIsNotAccepted.link(&jit);
         unpackRepresentation();
         jumpIfSlotHoldsValueAsMarker(isAdmitted);
-        branchOnFieldPresence(jit, r.field, r.scratch, exits.cannot, exits.wasAbsentAndIsNotAccepted);
+        branchOnFieldPresence(jit, r.field, r.scratch, exits.cannot, exits.wasAbsentAndIsNotAccepted, exits.cannot);
         return;
     }
     RELEASE_ASSERT_NOT_REACHED();

@@ -8,7 +8,9 @@
 
 #if ENABLE(AOT)
 
+#include "AOTArrayAllocationProfile.h"
 #include "AOTBuiltinFamilyState.h"
+#include "AOTClassTable.h"
 #include "AOTClosure.h"
 #include "AOTCompiledCall.h"
 #include "AOTCompiledCallee.h"
@@ -25,6 +27,7 @@
 #include "AOTOperationData.h"
 #include "AOTOperationScope.h"
 #include "AOTRuntimeFunctions.h"
+#include "AOTRuntimeHooks.h"
 #include "AOTRuntimeTable.h"
 #include "AOTState.h"
 #include "AOTStubsCallAdapters.h"
@@ -46,6 +49,7 @@
 #include "JSCellButterfly.h"
 #include "JSFunction.h"
 #include "LLIntThunks.h"
+#include "ObjectConstructor.h"
 #include "OwedOutOfMemoryError.h"
 #include "ProtoCallFrameInlines.h"
 #include "VMEntryRecord.h"
@@ -194,6 +198,7 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTSetMappedArgument, void, (Instance
 {
     DirectArguments* object = checkedMappedArguments(arguments, index, Entry::operationAOTSetMappedArgument);
     object->argument(DirectArgumentsOffset(index)).set(*instance->vm, object, JSValue::decode(value));
+    instance->vm->writeBarrier(object);
 }
 
 void throwNotAFunctionError(JSGlobalObject* globalObject, ThrowScope& scope, JSValue callee)
@@ -203,7 +208,7 @@ void throwNotAFunctionError(JSGlobalObject* globalObject, ThrowScope& scope, JSV
 
 static StringView nameOfCalleeAtCallSite(VM& vm)
 {
-    const void* returnAddress = CompiledFrameIterator::findReturnAddressInFunctionAtTop(vm);
+    const void* returnAddress = CompiledFrameIterator::topFrameReturnAddress(vm);
     if (!returnAddress)
         return { };
     std::optional<FaultSite> site = Image::current()->faultSiteAt(static_cast<const uint8_t*>(returnAddress) - sizeOfNearCall);
@@ -221,6 +226,16 @@ static bool fitsOnStack(VM& vm, uint64_t length)
     return length <= maxArguments && vm.ensureJSStackCapacityFor(static_cast<Register*>(currentStackPointer()) - length);
 }
 
+static JSArrayBufferView* numericViewOrNull(JSObject* object)
+{
+    return object->type() >= Int8ArrayType && object->type() <= Float64ArrayType ? uncheckedDowncast<JSArrayBufferView>(object) : nullptr;
+}
+
+static bool hasOwnKindLength(VM& vm, JSArrayBufferView* view)
+{
+    return view->getPrototypeDirect() == view->realm()->typedArrayPrototype(typedArrayType(view->type())) && view->structure()->tryMarkPristine(vm);
+}
+
 static bool appendArrayLike(JSGlobalObject* globalObject, VM& vm, MarkedArgumentBuffer& arguments, JSValue list)
 {
     auto scope = DECLARE_THROW_SCOPE(vm);
@@ -234,11 +249,14 @@ static bool appendArrayLike(JSGlobalObject* globalObject, VM& vm, MarkedArgument
     auto* mapped = dynamicDowncast<DirectArguments>(object);
     if (mapped && mapped->overrodeThings())
         mapped = nullptr;
+    JSArrayBufferView* view = numericViewOrNull(object);
     uint64_t length;
     if (auto* array = dynamicDowncast<JSArray>(object)) [[likely]]
         length = array->length();
     else if (mapped)
         length = mapped->internalLength();
+    else if (view && hasOwnKindLength(vm, view))
+        length = view->isOutOfBounds() ? 0 : view->length();
     else {
         length = toLength(globalObject, object);
         RETURN_IF_EXCEPTION(scope, false);
@@ -250,6 +268,10 @@ static bool appendArrayLike(JSGlobalObject* globalObject, VM& vm, MarkedArgument
     if (mapped) {
         for (uint32_t index = 0; index < length; ++index)
             arguments.append(mapped->getIndexQuickly(index));
+    } else if (view && arguments.isEmpty() && !view->isOutOfBounds() && length <= view->length()) {
+        arguments.fill(vm, length, [&](JSValue* numbers) {
+            copyNumbersOfView(view, std::bit_cast<EncodedJSValue*>(numbers), length);
+        });
     } else {
         for (uint64_t index = 0; index < length; ++index) {
             arguments.append(object->getIndex(globalObject, index));
@@ -263,10 +285,91 @@ static bool appendArrayLike(JSGlobalObject* globalObject, VM& vm, MarkedArgument
     return true;
 }
 
+static bool isNativeConstructor(JSValue parent)
+{
+    JSObject* object = parent.getObject();
+    if (!object)
+        return false;
+    if (object->type() == InternalFunctionType)
+        return true;
+    return object->type() == JSFunctionType && uncheckedDowncast<JSFunction>(object)->isHostFunction() && !object->inherits<JSBoundFunction>();
+}
+
+class SuperCallScope {
+    WTF_MAKE_NONCOPYABLE(SuperCallScope);
+public:
+    SuperCallScope(VM& vm, JSValue parent, JSValue newTarget)
+        : m_state(vm.aotState())
+    {
+        m_state.newTargetOfSuperCall = nullptr;
+        if (!isNativeConstructor(parent) || !newTarget.isCell())
+            return;
+        m_state.parentOfSuperCall = parent.asCell();
+        m_state.newTargetOfSuperCall = newTarget.asCell();
+    }
+
+    ~SuperCallScope() { m_state.newTargetOfSuperCall = nullptr; }
+
+private:
+    VMState& m_state;
+};
+
+static JSValue createArrayOfHeir(JSGlobalObject* globalObject, VM& vm, JSObject* newTarget, unsigned length)
+{
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    Structure* structure = globalObject->arrayStructureForIndexingTypeDuringAllocation(globalObject, ArrayWithUndecided, newTarget);
+    RETURN_IF_EXCEPTION(scope, { });
+    auto* classObject = dynamicDowncast<JSFunction>(newTarget);
+    Instance* instance = classObject ? Instance::owning(classObject) : nullptr;
+    State* state = instance ? instance->state : nullptr;
+    JSArray* array = state && state->objects ? state->objects->classes.tryCreateArrayOfHeir(vm, newTarget, structure, length) : JSArray::tryCreate(vm, structure, length);
+    if (!array) [[unlikely]] {
+        throwOutOfMemoryError(globalObject, scope);
+        return { };
+    }
+    return array;
+}
+
+static void fillSubclassArray(JSGlobalObject* globalObject, VM& vm, JSArray* array, const ArgList& values)
+{
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    IndexingType shape = array->indexingType() & IndexingShapeMask;
+    Butterfly* butterfly = array->butterfly();
+    unsigned count = values.size();
+    bool holdsInt32s = true;
+    bool holdsNumbers = true;
+    for (unsigned index = 0; index < count; ++index) {
+        JSValue value = values.at(index);
+        holdsInt32s &= value.isInt32();
+        holdsNumbers &= value.isNumber() && value.asNumber() == value.asNumber();
+    }
+    if (shape == ContiguousShape || (shape == Int32Shape && holdsInt32s)) {
+        RELEASE_ASSERT(count <= butterfly->vectorLength());
+        for (unsigned index = 0; index < count; ++index)
+            butterfly->contiguous().at(array, index).setWithoutWriteBarrier(values.at(index));
+        vm.mutatorFence();
+        return;
+    }
+    if (shape == DoubleShape && holdsNumbers) {
+        RELEASE_ASSERT(count <= butterfly->vectorLength());
+        for (unsigned index = 0; index < count; ++index)
+            butterfly->contiguousDouble().at(array, index) = values.at(index).asNumber();
+        vm.mutatorFence();
+        return;
+    }
+    for (unsigned index = 0; index < count; ++index) {
+        array->putDirectIndex(globalObject, index, values.at(index));
+        RETURN_IF_EXCEPTION(scope, void());
+    }
+}
+
 template<bool isParent>
 static JSValue constructValue(JSGlobalObject* globalObject, VM& vm, JSValue callee, JSValue newTarget, const ArgList& arguments)
 {
     auto scope = DECLARE_THROW_SCOPE(vm);
+    std::optional<SuperCallScope> superCall;
+    if constexpr (isParent)
+        superCall.emplace(vm, callee, newTarget);
     auto constructData = JSC::getConstructData(callee);
     if (constructData.type == CallData::Type::None) {
         if (auto* function = dynamicDowncast<JSFunction>(callee); function && function->isHostFunction()) {
@@ -277,13 +380,32 @@ static JSValue constructValue(JSGlobalObject* globalObject, VM& vm, JSValue call
         throwException(globalObject, scope, isParent ? createParentNotAConstructorError(globalObject, callee) : createNotAConstructorError(globalObject, callee, nameOfCalleeAtCallSite(vm)));
         return { };
     }
-    if (auto* errorConstructor = isParent ? dynamicDowncast<ErrorConstructor>(callee) : nullptr; errorConstructor && errorConstructor->realm() == globalObject && newTarget.isObject() && newTarget != callee) {
+    if (auto* errorConstructor = dynamicDowncast<ErrorConstructor>(callee); errorConstructor && errorConstructor->realm() == globalObject && newTarget.isObject() && newTarget != callee) {
         Structure* structure = JSC_GET_DERIVED_STRUCTURE(vm, errorStructure, asObject(newTarget), errorConstructor);
         RETURN_IF_EXCEPTION(scope, { });
         RELEASE_AND_RETURN(scope, ErrorInstance::create(globalObject, structure, arguments.at(0), arguments.at(1), nullptr, TypeNothing, ErrorType::Error, true, asObject(newTarget)));
     }
-    if constexpr (isParent)
+    if (isParent && callee == JSValue(globalObject->arrayConstructor()) && newTarget.isObject() && newTarget != callee) {
+        if (arguments.size() > maxHoleArrayCapacity)
+            RELEASE_AND_RETURN(scope, constructArray(globalObject, static_cast<JSC::ArrayAllocationProfile*>(nullptr), arguments, newTarget));
+        if (arguments.size() > 1) {
+            JSValue array = createArrayOfHeir(globalObject, vm, asObject(newTarget), arguments.size());
+            RETURN_IF_EXCEPTION(scope, { });
+            scope.release();
+            fillSubclassArray(globalObject, vm, asArray(array), arguments);
+            return array;
+        }
+        JSValue given = arguments.isEmpty() ? jsNumber(0) : arguments.at(0);
+        if (given.isUInt32AsAnyInt() && given.asUInt32AsAnyInt() <= maxHoleArrayCapacity)
+            RELEASE_AND_RETURN(scope, createArrayOfHeir(globalObject, vm, asObject(newTarget), given.asUInt32AsAnyInt()));
+    }
+    if constexpr (isParent) {
+        if (callee == globalObject->objectConstructor() && newTarget.isObject() && newTarget != callee) {
+            if (JSObject* object = Instance::of(globalObject)->state->objects->classes.tryCreateInstanceBelowObject(vm, asObject(callee), asObject(newTarget)))
+                RELEASE_AND_RETURN(scope, object);
+        }
         RELEASE_AND_RETURN(scope, JSC::construct(globalObject, callee, constructData, arguments, newTarget));
+    }
     RELEASE_AND_RETURN(scope, constructAllowingPrimitiveResult(globalObject, callee, constructData, arguments, newTarget));
 }
 
@@ -323,6 +445,20 @@ JSC_DEFINE_JIT_OPERATION(operationAOTReadArgumentList, JSCell*, (Instance* insta
     if (!words) [[unlikely]]
         throwOutOfMemoryError(globalObject, scope);
     OPERATION_RETURN(scope, words);
+}
+
+JSC_DEFINE_JIT_OPERATION(operationAOTNewListOfArguments, JSCell*, (Instance* instance, uint32_t count, const EncodedJSValue* words, JSCell* listCell))
+{
+    AOT_OPERATION_BEGIN(instance, Entry::operationAOTNewListOfArguments);
+    JSArray* list = cellArgument<JSArray>(listCell, Entry::operationAOTNewListOfArguments);
+    MarkedArgumentBuffer arguments;
+    for (uint32_t index = 0; index < count; ++index)
+        arguments.append(JSValue::decode(words[index]));
+    JSArray* result = constructArray(globalObject, static_cast<JSC::ArrayAllocationProfile*>(nullptr), arguments);
+    OPERATION_RETURN_IF_EXCEPTION(scope, nullptr);
+    appendElementsOfList(globalObject, result, list);
+    OPERATION_RETURN_IF_EXCEPTION(scope, nullptr);
+    OPERATION_RETURN(scope, result);
 }
 
 static JSArray* tryCopyUnmappedArguments(Instance* instance, JSValue arrayLike)
@@ -371,9 +507,28 @@ static JSArray* tryCopyMappedArguments(Instance* instance, JSValue arrayLike)
     return list;
 }
 
+static JSArray* tryCopyNumbersOfView(Instance* instance, JSValue arrayLike)
+{
+    VM& vm = *instance->vm;
+    JSArrayBufferView* view = arrayLike.isObject() ? numericViewOrNull(asObject(arrayLike)) : nullptr;
+    if (!view || !hasOwnKindLength(vm, view) || view->isOutOfBounds() || instance->globalObject->isHavingABadTime())
+        return nullptr;
+    uint64_t count = view->length();
+    if (!fitsOnStack(vm, count))
+        return nullptr;
+    ObjectInitializationScope initializationScope(vm);
+    JSArray* list = JSArray::tryCreateUninitializedRestricted(initializationScope, instance->globalObject->arrayStructureForIndexingTypeDuringAllocation(ArrayWithContiguous), static_cast<unsigned>(count));
+    if (!list)
+        return nullptr;
+    copyNumbersOfView(view, list->butterfly()->indexingPayload<EncodedJSValue>(), count);
+    return list;
+}
+
 JSC_DEFINE_JIT_OPERATION(operationAOTNewArgumentList, JSCell*, (Instance* instance, EncodedJSValue arrayLike))
 {
     AOT_OPERATION_BEGIN(instance, Entry::operationAOTNewArgumentList);
+    if (JSArray* list = tryCopyNumbersOfView(instance, JSValue::decode(arrayLike)))
+        OPERATION_RETURN(scope, list);
     if (JSArray* list = tryCopyUnmappedArguments(instance, JSValue::decode(arrayLike)))
         OPERATION_RETURN(scope, list);
     if (JSArray* list = tryCopyMappedArguments(instance, JSValue::decode(arrayLike)))
@@ -400,12 +555,18 @@ JSC_DEFINE_JIT_OPERATION(operationAOTConstructWithArray, EncodedJSValue, (Instan
 JSC_DEFINE_JIT_OPERATION(operationAOTSuperConstruct, EncodedJSValue, (Instance* instance, EncodedJSValue parent, EncodedJSValue newTarget, uint32_t count, const EncodedJSValue* argumentValues))
 {
     AOT_OPERATION_BEGIN(instance, Entry::operationAOTSuperConstruct);
-    MarkedArgumentBuffer arguments;
-    fill(arguments, count, argumentValues);
-    if (arguments.hasOverflowed()) [[unlikely]] {
-        throwOutOfMemoryError(globalObject, scope);
-        OPERATION_RETURN(scope, encodedJSValue());
+    if (JSValue::decode(parent) == JSValue(globalObject->arrayConstructor()) && JSValue::decode(newTarget).isCell() && !globalObject->isHavingABadTime()) {
+        JSValue given = !count ? jsNumber(0) : count == 1 ? JSValue::decode(*argumentValues) : jsNumber(count);
+        State* state = instance->state;
+        if (given.isUInt32() && given.asUInt32() <= maxHoleArrayCapacity && state && state->objects) {
+            if (JSArray* array = state->objects->classes.tryCreateRememberedHeir(vm, JSValue::decode(parent).asCell(), JSValue::decode(newTarget).asCell(), given.asUInt32())) {
+                if (count > 1)
+                    fillSubclassArray(globalObject, vm, array, ArgList(const_cast<EncodedJSValue*>(argumentValues), count));
+                OPERATION_RETURN(scope, JSValue::encode(array));
+            }
+        }
     }
+    ArgList arguments(const_cast<EncodedJSValue*>(argumentValues), count);
     OPERATION_RETURN(scope, JSValue::encode(constructValue<true>(globalObject, vm, JSValue::decode(parent), JSValue::decode(newTarget), arguments)));
 }
 
@@ -497,7 +658,7 @@ static ALWAYS_INLINE UGPRPair lookupExceptionHandler(VM& vm, Instance* instance,
     }
     bool isTermination = exception && vm.isTerminationException(exception);
     auto unwind = [&]() ALWAYS_INLINE_LAMBDA {
-        return unwindRunOfThrow(vm, *instance, { callFrame->rawReturnPC(), stackPointerOfCaller(callFrame), callFrame->callerFrame(), callFrame }, vm.topEntryFrame, *vmEntryRecord(vm.topEntryFrame));
+        return unwindRunOfThrow(vm, *instance, { callFrame->rawReturnPC(), callerStackPointer(callFrame), callFrame->callerFrame(), callFrame }, vm.topEntryFrame, *vmEntryRecord(vm.topEntryFrame));
     };
     CompiledUnwindResult found = isTermination ? CompiledUnwindResult { } : unwind();
     bool isHandled = found.status == CompiledUnwindStatus::FoundHandler;
@@ -513,7 +674,7 @@ static ALWAYS_INLINE UGPRPair lookupExceptionHandler(VM& vm, Instance* instance,
         return codeAndFrame;
     bool stackIsUnobserved = false;
     if (!exception && !rethrownException) {
-        if (removeCodePtrTag(frameRecord->callerFrame->rawReturnPC()) == instance->state->returnAddressOfThrowAfterCleanup) {
+        if (frameRecord->callerFrame->returnPCForInspection() == instance->state->returnAddressOfThrowAfterCleanup()) {
             if (uint64_t kept = instance->state->keptByCleanup)
                 rethrownException = exceptionKeptByCleanup(kept, JSValue::decode(exceptions.thrownValue));
         }
@@ -534,9 +695,12 @@ static ALWAYS_INLINE UGPRPair lookupExceptionHandler(VM& vm, Instance* instance,
         RELEASE_ASSERT(thrown);
         auto scope = DECLARE_THROW_SCOPE(vm);
         auto action = Exception::StackCaptureAction::DoNotCaptureStack;
+        // The stack trace may want the site of an earlier throw there. The unwinder below goes by what the stub saved.
+        void* returnPCOfStub = callFrame->rawReturnPC();
         if (!stackIsUnobserved && !rethrownException)
             action = stackCaptureActionOfThrow(vm, *instance, thrown, frameRecord, found.hasLeftRun ? &found : nullptr);
         Exception* thrownException = throwException(instance->globalObject, scope, rethrownException ? thrown : JSValue(Exception::create(vm, thrown, action)));
+        callFrame->setReturnPC(returnPCOfStub);
         if (isHandled && takesException && !needsException) {
             auto topScope = DECLARE_TOP_EXCEPTION_SCOPE(vm);
             exceptions.thrownValue = JSValue::encode(thrownException);
@@ -591,6 +755,11 @@ static NEVER_INLINE JSValue enterWithManyArguments(VM& vm, const CallData& callD
     return JSValue::decode(vmEntryToJavaScript(const_cast<void*>(callData.compiled.entrypoint), &vm, &protoCallFrame));
 }
 
+static ALWAYS_INLINE JSValue loadArgument(const ArgList& args, size_t index)
+{
+    return JSValue::decode(WTF::opaque(JSValue::encode(args.at(index))));
+}
+
 static ALWAYS_INLINE JSValue enterWithArgumentList(VM& vm, const CallData& callData, JSObject* callee, JSValue thisSlot, JSCell* context, const ArgList& args)
 {
     switch (args.size()) {
@@ -599,15 +768,15 @@ static ALWAYS_INLINE JSValue enterWithArgumentList(VM& vm, const CallData& callD
     case 1:
         return enterCompiledCode(vm, callData, callee, thisSlot, context, args.at(0));
     case 2:
-        return enterCompiledCode(vm, callData, callee, thisSlot, context, args.at(0), args.at(1));
+        return enterCompiledCode(vm, callData, callee, thisSlot, context, loadArgument(args, 0), loadArgument(args, 1));
     case 3:
-        return enterCompiledCode(vm, callData, callee, thisSlot, context, args.at(0), args.at(1), args.at(2));
+        return enterCompiledCode(vm, callData, callee, thisSlot, context, loadArgument(args, 0), loadArgument(args, 1), loadArgument(args, 2));
     case 4:
-        return enterCompiledCode(vm, callData, callee, thisSlot, context, args.at(0), args.at(1), args.at(2), args.at(3));
+        return enterCompiledCode(vm, callData, callee, thisSlot, context, loadArgument(args, 0), loadArgument(args, 1), loadArgument(args, 2), loadArgument(args, 3));
     case 5:
-        return enterCompiledCode(vm, callData, callee, thisSlot, context, args.at(0), args.at(1), args.at(2), args.at(3), args.at(4));
+        return enterCompiledCode(vm, callData, callee, thisSlot, context, loadArgument(args, 0), loadArgument(args, 1), loadArgument(args, 2), loadArgument(args, 3), loadArgument(args, 4));
     case 6:
-        return enterCompiledCode(vm, callData, callee, thisSlot, context, args.at(0), args.at(1), args.at(2), args.at(3), args.at(4), args.at(5));
+        return enterCompiledCode(vm, callData, callee, thisSlot, context, loadArgument(args, 0), loadArgument(args, 1), loadArgument(args, 2), loadArgument(args, 3), loadArgument(args, 4), loadArgument(args, 5));
     default:
         return enterWithManyArguments(vm, callData, callee, thisSlot, context, args);
     }

@@ -8,6 +8,8 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
+#include "AOTInliningAcrossFiles.h"
 #include "AOTStronglyConnectedComponents.h"
 #include "AOTTypeNarrowing.h"
 #include "AOTVector.h"
@@ -15,7 +17,6 @@
 #include <optional>
 #include <span>
 #include <utility>
-#include <wtf/BitVector.h>
 #include <wtf/Noncopyable.h>
 #include <wtf/text/MakeString.h>
 
@@ -79,6 +80,10 @@ void FlowGraphOfVerifiedBody::build(const BodyIndex& index)
 }
 
 namespace {
+
+#if COMPILER(CLANG)
+#pragma clang attribute push(__attribute__((minsize)), apply_to = function)
+#endif
 
 struct DifferenceInBodyIndex {
     ASCIILiteral part;
@@ -554,6 +559,10 @@ static void setPlaceOfErrorWithoutBodyIndex(InternalError& error, const Function
         error.operation = nameOf(value.opcode());
     });
 }
+
+#if COMPILER(CLANG)
+#pragma clang attribute pop
+#endif
 
 static uint32_t numberOfCasesListedInBody(const BodyTerminator& terminator)
 {
@@ -1048,7 +1057,7 @@ void BodyVerifier::verifyEdges()
         fail(InternalErrorKind::InvalidHandler, sourceOfEdgeToHandlerBlock, { }, handlerBlockThatEdgeEnters.index());
 }
 
-ALWAYS_INLINE bool BodyVerifier::verifyEdge(const BodyBlock& from, const BodyTerminator& terminator, TakenByTargets takenByTargets, uint32_t targetIndex, BodyTarget target, const BodyBlock& to)
+ALWAYS_INLINE_INTO_OTHER_FILES bool BodyVerifier::verifyEdge(const BodyBlock& from, const BodyTerminator& terminator, TakenByTargets takenByTargets, uint32_t targetIndex, BodyTarget target, const BodyBlock& to)
 {
     if (target.block() == entryBlock) [[unlikely]] {
         fail(InternalErrorKind::EdgeToEntryBlock, from.id());
@@ -1129,7 +1138,7 @@ void BodyVerifier::verifyBlockRole(const BodyBlock& block)
         fail(InternalErrorKind::InvalidBlockRole, block.id(), subject);
 }
 
-ALWAYS_INLINE bool BodyVerifier::verifyTargetCount(const BodyBlock& block, const BodyTerminator& terminator)
+ALWAYS_INLINE_INTO_OTHER_FILES bool BodyVerifier::verifyTargetCount(const BodyBlock& block, const BodyTerminator& terminator)
 {
     std::optional<uint32_t> numberOfFixedTargets = numberOfFixedTargetsOf(terminator.kind());
     uint64_t expectedNumber = numberOfFixedTargets
@@ -1195,6 +1204,9 @@ void BodyVerifier::verifyEntryParameters()
     }
 }
 
+#if COMPILER(CLANG)
+__attribute__((minsize))
+#endif
 void BodyVerifier::verifyIndexAgainstPlainComputation()
 {
     if (!m_comparesIndexWithPlainComputation)

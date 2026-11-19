@@ -10,6 +10,7 @@
 
 #include "AOTSavedFrame.h"
 #include <algorithm>
+#include <array>
 #include <bit>
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
@@ -39,8 +40,47 @@ private:
         Place place { 0 };
         ValueID value { nothing };
     };
+    static constexpr unsigned bitsOfFanOut = 5;
+    static constexpr uint32_t fanOut = 1u << bitsOfFanOut;
+    struct SpillMapBounds {
+        void include(const SpillMapBounds& other)
+        {
+            earliestBegin = std::min(earliestBegin, other.earliestBegin);
+            latestBegin = std::max(latestBegin, other.latestBegin);
+            earliestEnd = std::min(earliestEnd, other.earliestEnd);
+            latestEnd = std::max(latestEnd, other.latestEnd);
+            earliestBeginOfGap = std::min(earliestBeginOfGap, other.earliestBeginOfGap);
+            latestEndOfGap = std::max(latestEndOfGap, other.latestEndOfGap);
+            latestDefinition = std::max(latestDefinition, other.latestDefinition);
+        }
+
+        Position earliestBegin { noPosition };
+        Position latestBegin { 0 };
+        Position earliestEnd { noPosition };
+        Position latestEnd { 0 };
+        Position earliestBeginOfGap { noPosition };
+        Position latestEndOfGap { 0 };
+        Position latestDefinition { 0 };
+    };
+    struct SpillMap {
+        SpillMapBounds bounds;
+    };
+    using SpillMapValues = std::array<ValueID, fanOut>;
+    using SpillMapSubtrees = std::array<const SpillMap*, fanOut>;
+    struct SpillMapLeaf : SpillMap {
+        SpillMapValues values;
+    };
+    struct SpillMapBranch : SpillMap {
+        SpillMapSubtrees subtrees;
+    };
+    struct SpillFlowEdge {
+        Position head { 0 };
+        Position definitionOfLostResults { noPosition };
+    };
     struct Head {
         std::span<Entry> entries;
+        const SpillMap* spills { nullptr };
+        RegisterMask widened { 0 };
         bool isSet { false };
         bool isDirty { false };
     };
@@ -53,9 +93,9 @@ private:
         Interval at;
     };
 
-    bool fail(FailureKind kind, const Operation* operation)
+    bool fail(FailureKind kind, const Operation* operation, PlaceOfCheck check = PlaceOfCheck::here())
     {
-        m_proc.fail(kind, operation);
+        m_proc.fail(kind, operation, check);
         m_failed = true;
         return false;
     }
@@ -79,9 +119,24 @@ private:
     bool forgetWhatSuspensionLoses(const PatchOperation*);
     void clearState();
 
+    static const SpillMapValues& valuesOf(const SpillMap* leaf) { return static_cast<const SpillMapLeaf*>(leaf)->values; }
+    static const SpillMapSubtrees& subtreesOf(const SpillMap* branch) { return static_cast<const SpillMapBranch*>(branch)->subtrees; }
+    static SpillIndex spillsPerSubtreeAt(unsigned level) { return SpillIndex { 1 } << (bitsOfFanOut * level); }
+    const SpillMap* makeSpillMapLeaf(const SpillMapValues&, SpillIndex first);
+    const SpillMap* makeSpillMapBranch(const SpillMapSubtrees&);
+    const SpillMap* withChangedSpills(const SpillMap*, unsigned level, SpillIndex first, std::span<const SpillIndex> changed);
+    const SpillMap* withSpill(const SpillMap*, unsigned level, SpillIndex first, SpillIndex, ValueID);
+    bool isLiveAcrossEdge(SpillIndex, ValueID, const SpillFlowEdge&) const;
+    const SpillMap* filterSpillMap(const SpillFlowEdge&, const SpillMap*, unsigned level, SpillIndex first);
+    const SpillMap* intersectSpillMaps(const SpillMap* map, const SpillMap* other, unsigned level, SpillIndex first);
+    void loadSpillMap(const SpillMap* from, const SpillMap* to, unsigned level, SpillIndex first);
+    void commitChangedSpills();
+    template<typename Functor> void forEachMappedSpill(const SpillMap*, unsigned level, SpillIndex first, const Functor&) const;
+
     bool isInRange(const SpillFacts& facts) const { return facts.begin <= m_now.upper && m_now.lower <= facts.end && !(facts.isInGap(m_now.lower) && facts.isInGap(m_now.upper)); }
     bool isPhiOfOnlySuccessor(const Operation*) const;
     bool beginsBehindExtractsAlone(const SpillFacts&) const;
+    bool isReadByItselfAlone(const Operation* phi) const;
     bool noteSpillRead(SpillIndex, const Operation* reader);
     bool noteSpillWrite(SpillIndex, Width, const Operation* writer);
 
@@ -101,6 +156,8 @@ private:
     unsigned numberOfFusedLoadsBelow(const Operation*) const;
     bool storeBehindDefinition(const Operation*);
     bool checkBranchOnOverflow(const Step&);
+    ALWAYS_INLINE bool isWidened(Place place) const { return (m_markedRegisters >> place & 1) && m_widened[place] == m_state[place]; }
+    void markWidened(Place, ValueID);
     void flowAlong(Block* from, unsigned successorIndex);
 
     Procedure& m_proc;
@@ -125,6 +182,10 @@ private:
     ArenaVector<ValueID> m_onEdge;
     BitSpan m_isTouched;
     ArenaVector<Place> m_touched;
+    const SpillMap* m_spillMap { nullptr };
+    unsigned m_spillMapHeight { 0 };
+    BitSpan m_isSpillChanged;
+    ArenaVector<SpillIndex> m_spillsChanged;
     ArenaVector<ValueID> m_incoming;
 
     Block* m_block { nullptr };
@@ -134,8 +195,9 @@ private:
     uint32_t m_nextSunk { 0 };
     uint32_t m_nextOperation { 0 };
     ArenaVector<WriteOutsideRange> m_writesOutsideRange;
-    bool m_wroteSpillBehindLastExecute { false };
-    const Step* m_stepThatLeftFlags { nullptr };
+    const Step* m_flagSettingStep { nullptr };
+    std::array<ValueID, numberOfRegisters> m_widened;
+    RegisterMask m_markedRegisters { 0 };
     bool m_needsAnotherRound { false };
     bool m_failed { false };
 };
@@ -159,8 +221,11 @@ AllocationChecker::AllocationChecker(Procedure& proc)
     m_firstSpillPlace = numberOfRegisters + static_cast<Place>((proc.callArgAreaSizeInBytes() + sizeof(uint64_t) - 1) / sizeof(uint64_t));
     Place numberOfPlaces = m_firstSpillPlace + static_cast<Place>(m_spills.size());
     m_state.fill(m_arena, numberOfPlaces, nothing);
-    m_onEdge.fill(m_arena, numberOfPlaces, nothing);
-    m_isTouched = BitSpan::create(m_arena, numberOfPlaces);
+    m_onEdge.fill(m_arena, m_firstSpillPlace, nothing);
+    m_isTouched = BitSpan::create(m_arena, m_firstSpillPlace);
+    m_isSpillChanged = BitSpan::create(m_arena, m_spills.size());
+    while (m_spills.size() >> (bitsOfFanOut * (m_spillMapHeight + 1)))
+        ++m_spillMapHeight;
     m_incoming.fill(m_arena, proc.numberOfOperations(), nothing);
     m_heads.grow(m_arena, proc.numberOfBlocks());
     numberValues();
@@ -292,11 +357,221 @@ AllocationChecker::ValueID AllocationChecker::valueIn(Reg reg, const Operation* 
 
 void AllocationChecker::set(Place place, ValueID value)
 {
+    if (place >= m_firstSpillPlace) {
+        if (m_state[place] == value)
+            return;
+        m_state[place] = value;
+        SpillIndex spill = place - m_firstSpillPlace;
+        if (m_isSpillChanged.get(spill))
+            return;
+        m_isSpillChanged.set(spill);
+        m_spillsChanged.append(m_arena, spill);
+        return;
+    }
     m_state[place] = value;
     if (!value || m_isTouched.get(place))
         return;
     m_isTouched.set(place);
     m_touched.append(m_arena, place);
+}
+
+void AllocationChecker::markWidened(Place place, ValueID value)
+{
+    m_widened[place] = value;
+    RegisterMask bit = RegisterMask { 1 } << place;
+    m_markedRegisters = value ? m_markedRegisters | bit : m_markedRegisters & ~bit;
+}
+
+const AllocationChecker::SpillMap* AllocationChecker::makeSpillMapLeaf(const SpillMapValues& values, SpillIndex first)
+{
+    SpillMapBounds bounds;
+    bool hasEntries = false;
+    for (uint32_t index = 0; index < fanOut; ++index) {
+        ValueID value = values[index];
+        if (!value)
+            continue;
+        hasEntries = true;
+        const SpillFacts& facts = m_spills[first + index];
+        SpillMapBounds ofSpill { facts.begin, facts.begin, facts.end, facts.end, noPosition, 0, m_values[value & ~isPointerOfReference].definition };
+        if (facts.hasGap()) {
+            ofSpill.earliestBeginOfGap = facts.beginOfGap;
+            ofSpill.latestEndOfGap = facts.endOfGap;
+        }
+        bounds.include(ofSpill);
+    }
+    if (!hasEntries)
+        return nullptr;
+    SpillMapLeaf* leaf = m_arena.create<SpillMapLeaf>();
+    leaf->bounds = bounds;
+    leaf->values = values;
+    return leaf;
+}
+
+const AllocationChecker::SpillMap* AllocationChecker::makeSpillMapBranch(const SpillMapSubtrees& subtrees)
+{
+    SpillMapBounds bounds;
+    bool hasEntries = false;
+    for (const SpillMap* subtree : subtrees) {
+        if (!subtree)
+            continue;
+        hasEntries = true;
+        bounds.include(subtree->bounds);
+    }
+    if (!hasEntries)
+        return nullptr;
+    SpillMapBranch* branch = m_arena.create<SpillMapBranch>();
+    branch->bounds = bounds;
+    branch->subtrees = subtrees;
+    return branch;
+}
+
+const AllocationChecker::SpillMap* AllocationChecker::withChangedSpills(const SpillMap* map, unsigned level, SpillIndex first, std::span<const SpillIndex> changed)
+{
+    bool differs = false;
+    if (!level) {
+        SpillMapValues values = map ? valuesOf(map) : SpillMapValues { };
+        for (SpillIndex spill : changed) {
+            ValueID value = m_state[m_firstSpillPlace + spill];
+            differs |= values[spill - first] != value;
+            values[spill - first] = value;
+        }
+        return differs ? makeSpillMapLeaf(values, first) : map;
+    }
+    SpillMapSubtrees subtrees = map ? subtreesOf(map) : SpillMapSubtrees { };
+    while (!changed.empty()) {
+        uint32_t subtree = (changed.front() - first) >> (bitsOfFanOut * level);
+        size_t count = 1;
+        while (count < changed.size() && (changed[count] - first) >> (bitsOfFanOut * level) == subtree)
+            ++count;
+        const SpillMap* made = withChangedSpills(subtrees[subtree], level - 1, first + subtree * spillsPerSubtreeAt(level), changed.first(count));
+        differs |= made != subtrees[subtree];
+        subtrees[subtree] = made;
+        changed = changed.subspan(count);
+    }
+    return differs ? makeSpillMapBranch(subtrees) : map;
+}
+
+const AllocationChecker::SpillMap* AllocationChecker::withSpill(const SpillMap* map, unsigned level, SpillIndex first, SpillIndex spill, ValueID value)
+{
+    if (!level) {
+        SpillMapValues values = map ? valuesOf(map) : SpillMapValues { };
+        if (values[spill - first] == value)
+            return map;
+        values[spill - first] = value;
+        return makeSpillMapLeaf(values, first);
+    }
+    SpillMapSubtrees subtrees = map ? subtreesOf(map) : SpillMapSubtrees { };
+    uint32_t subtree = (spill - first) >> (bitsOfFanOut * level);
+    const SpillMap* made = withSpill(subtrees[subtree], level - 1, first + subtree * spillsPerSubtreeAt(level), spill, value);
+    if (made == subtrees[subtree])
+        return map;
+    subtrees[subtree] = made;
+    return makeSpillMapBranch(subtrees);
+}
+
+bool AllocationChecker::isLiveAcrossEdge(SpillIndex spill, ValueID value, const SpillFlowEdge& edge) const
+{
+    Position definition = m_values[value & ~isPointerOfReference].definition;
+    if (definition >= edge.head || definition == edge.definitionOfLostResults)
+        return false;
+    const SpillFacts& facts = m_spills[spill];
+    return facts.begin <= edge.head + 1 && facts.end >= edge.head && !facts.isInGap(edge.head);
+}
+
+const AllocationChecker::SpillMap* AllocationChecker::filterSpillMap(const SpillFlowEdge& edge, const SpillMap* map, unsigned level, SpillIndex first)
+{
+    if (!map)
+        return nullptr;
+    const SpillMapBounds& bounds = map->bounds;
+    if (bounds.latestEnd < edge.head || bounds.earliestBegin > edge.head + 1)
+        return nullptr;
+    if (bounds.latestDefinition < edge.head && bounds.latestDefinition < edge.definitionOfLostResults
+        && bounds.latestBegin <= edge.head + 1 && bounds.earliestEnd >= edge.head
+        && (bounds.earliestBeginOfGap > edge.head || bounds.latestEndOfGap < edge.head))
+        return map;
+
+    bool differs = false;
+    if (!level) {
+        SpillMapValues values = valuesOf(map);
+        for (uint32_t index = 0; index < fanOut; ++index) {
+            if (!values[index] || isLiveAcrossEdge(first + index, values[index], edge))
+                continue;
+            values[index] = nothing;
+            differs = true;
+        }
+        return differs ? makeSpillMapLeaf(values, first) : map;
+    }
+    SpillMapSubtrees subtrees = subtreesOf(map);
+    for (uint32_t subtree = 0; subtree < fanOut; ++subtree) {
+        const SpillMap* kept = filterSpillMap(edge, subtrees[subtree], level - 1, first + subtree * spillsPerSubtreeAt(level));
+        differs |= kept != subtrees[subtree];
+        subtrees[subtree] = kept;
+    }
+    return differs ? makeSpillMapBranch(subtrees) : map;
+}
+
+const AllocationChecker::SpillMap* AllocationChecker::intersectSpillMaps(const SpillMap* map, const SpillMap* other, unsigned level, SpillIndex first)
+{
+    if (map == other || !map)
+        return map;
+    if (!other)
+        return nullptr;
+    bool differs = false;
+    if (!level) {
+        SpillMapValues values = valuesOf(map);
+        for (uint32_t index = 0; index < fanOut; ++index) {
+            if (values[index] == valuesOf(other)[index])
+                continue;
+            differs |= !!values[index];
+            values[index] = nothing;
+        }
+        return differs ? makeSpillMapLeaf(values, first) : map;
+    }
+    SpillMapSubtrees subtrees = subtreesOf(map);
+    for (uint32_t subtree = 0; subtree < fanOut; ++subtree) {
+        const SpillMap* onBoth = intersectSpillMaps(subtrees[subtree], subtreesOf(other)[subtree], level - 1, first + subtree * spillsPerSubtreeAt(level));
+        differs |= onBoth != subtrees[subtree];
+        subtrees[subtree] = onBoth;
+    }
+    return differs ? makeSpillMapBranch(subtrees) : map;
+}
+
+void AllocationChecker::loadSpillMap(const SpillMap* from, const SpillMap* to, unsigned level, SpillIndex first)
+{
+    if (from == to)
+        return;
+    if (!level) {
+        uint32_t count = std::min<uint32_t>(fanOut, static_cast<uint32_t>(m_spills.size()) - first);
+        for (uint32_t index = 0; index < count; ++index)
+            m_state[m_firstSpillPlace + first + index] = to ? valuesOf(to)[index] : nothing;
+        return;
+    }
+    for (uint32_t subtree = 0; subtree < fanOut; ++subtree)
+        loadSpillMap(from ? subtreesOf(from)[subtree] : nullptr, to ? subtreesOf(to)[subtree] : nullptr, level - 1, first + subtree * spillsPerSubtreeAt(level));
+}
+
+void AllocationChecker::commitChangedSpills()
+{
+    if (m_spillsChanged.isEmpty())
+        return;
+    std::sort(m_spillsChanged.begin(), m_spillsChanged.end());
+    m_spillMap = withChangedSpills(m_spillMap, m_spillMapHeight, 0, m_spillsChanged.span());
+    for (SpillIndex spill : m_spillsChanged)
+        m_isSpillChanged.clear(spill);
+    m_spillsChanged.clear();
+}
+
+template<typename Functor>
+void AllocationChecker::forEachMappedSpill(const SpillMap* map, unsigned level, SpillIndex first, const Functor& functor) const
+{
+    if (!map)
+        return;
+    for (uint32_t index = 0; index < fanOut; ++index) {
+        if (level)
+            forEachMappedSpill(subtreesOf(map)[index], level - 1, first + index * spillsPerSubtreeAt(level), functor);
+        else if (valuesOf(map)[index])
+            functor(first + index);
+    }
 }
 
 void AllocationChecker::killRegisters(RegisterMask mask)
@@ -325,8 +600,8 @@ bool AllocationChecker::forgetWhatSuspensionLoses(const PatchOperation* suspensi
         return m_order.latePositionOf(candidate) < m_order.latePositionOf(suspension);
     });
     if (listed == suspensions.end() || *listed != suspension)
-        return fail(FailureKind::SpillSlotLacksItsValue, suspension);
-    const BitSpan& spillsHeld = m_allocation.spillsHeldAt(static_cast<uint32_t>(listed - suspensions.begin()));
+        return fail(FailureKind::WrongValueInSpillSlot, suspension);
+    const BitSpan& liveSpills = m_allocation.liveSpillsAt(static_cast<uint32_t>(listed - suspensions.begin()));
 
     RegisterMask kept = 0;
     if constexpr (SavedFrame::preservedRegister != InvalidGPRReg) {
@@ -335,10 +610,11 @@ bool AllocationChecker::forgetWhatSuspensionLoses(const PatchOperation* suspensi
             kept = maskOf(preserved);
     }
     killRegisters(~kept);
-    for (Place place : m_touched) {
-        if (place >= m_firstSpillPlace && !spillsHeld.get(place - m_firstSpillPlace))
-            m_state[place] = nothing;
-    }
+    commitChangedSpills();
+    forEachMappedSpill(m_spillMap, m_spillMapHeight, 0, [&](SpillIndex spill) {
+        if (!liveSpills.get(spill))
+            set(m_firstSpillPlace + spill, nothing);
+    });
     return true;
 }
 
@@ -371,17 +647,47 @@ bool AllocationChecker::beginsBehindExtractsAlone(const SpillFacts& facts) const
     return true;
 }
 
+bool AllocationChecker::isReadByItselfAlone(const Operation* phi) const
+{
+    Vector<const Operation*, 4> values { phi };
+    auto readsValue = [&](const Operation* operation) {
+        return std::ranges::any_of(operation->children(), [&](const Operation* child) {
+            return values.contains(child);
+        });
+    };
+    for (size_t numberBefore = 0; numberBefore != values.size();) {
+        numberBefore = values.size();
+        for (const Block* block : m_order.blocksInOrder()) {
+            for (const Operation* operation : block->operations()) {
+                if (m_liveness.isFused(operation) && !values.contains(operation) && readsValue(operation))
+                    values.append(operation);
+            }
+            for (const Operation* upsilon : block->upsilons()) {
+                if (values.contains(upsilon->child(0)) && !values.contains(upsilon->phi()) && !m_liveness.isDropped(upsilon->phi()))
+                    values.append(upsilon->phi());
+            }
+        }
+    }
+    for (const Block* block : m_order.blocksInOrder()) {
+        for (const Operation* operation : block->operations()) {
+            if (!m_liveness.isDropped(operation) && !m_liveness.isFused(operation) && readsValue(operation))
+                return false;
+        }
+    }
+    return true;
+}
+
 bool AllocationChecker::noteSpillRead(SpillIndex spill, const Operation* reader)
 {
     const SpillFacts& facts = m_spills[spill];
     if (!isInRange(facts))
-        return fail(FailureKind::SpillSlotLacksItsValue, reader);
+        return fail(FailureKind::WrongValueInSpillSlot, reader);
     for (const WriteOutsideRange& written : m_writesOutsideRange) {
         const SpillFacts& other = m_spills[written.spill];
         bool mayShareItsPlace = other.liesApartFrom(facts);
         bool heldItsValueAtTheWrite = facts.begin <= written.at.upper && written.at.lower <= facts.end;
         if (mayShareItsPlace && heldItsValueAtTheWrite)
-            return fail(FailureKind::SpillSlotLacksItsValue, reader);
+            return fail(FailureKind::WrongValueInSpillSlot, reader);
     }
     return true;
 }
@@ -389,21 +695,20 @@ bool AllocationChecker::noteSpillRead(SpillIndex spill, const Operation* reader)
 bool AllocationChecker::noteSpillWrite(SpillIndex spill, Width width, const Operation* writer)
 {
     const SpillFacts& facts = m_spills[spill];
-    if (bytesForWidth(width) > bytesForWidth(facts.width))
-        return fail(FailureKind::SpillSlotLacksItsValue, writer);
-    m_wroteSpillBehindLastExecute = true;
+    if (bytesForWidth(width) > bytesForWidth(facts.width) || facts.isDeadSlot)
+        return fail(FailureKind::WrongValueInSpillSlot, writer);
     if (isInRange(facts))
         return true;
     bool beginsAtNextOperation = facts.begin == m_now.upper + 1;
     if (!beginsAtNextOperation && !beginsBehindExtractsAlone(facts) && !isPhiOfOnlySuccessor(facts.value))
-        return fail(FailureKind::SpillSlotLacksItsValue, writer);
+        return fail(FailureKind::WrongValueInSpillSlot, writer);
     m_writesOutsideRange.append(m_arena, { spill, m_now });
     return true;
 }
 
 bool AllocationChecker::checkHolds(Location location, const Operation* value, const Operation* reader)
 {
-    FailureKind kind = location.isMemory() ? FailureKind::SpillSlotLacksItsValue : FailureKind::RegisterLacksItsValue;
+    FailureKind kind = location.isMemory() ? FailureKind::WrongValueInSpillSlot : FailureKind::WrongValueInRegister;
     Place place;
     if (!findPlace(location, place))
         return fail(kind, reader);
@@ -434,35 +739,39 @@ bool AllocationChecker::checkLeaf(const Operation* reader, const Operation* user
     switch (location.kind()) {
     case Location::None:
     case Location::Outgoing:
-        return fail(FailureKind::RegisterLacksItsValue, reader);
+        return fail(FailureKind::WrongValueInRegister, reader);
     case Location::Register:
         if (registerMaskOf(location) & m_scratch)
-            return fail(FailureKind::RegisterLacksItsValue, reader);
+            return fail(FailureKind::WrongValueInRegister, reader);
         return checkHolds(location, leaf, reader);
     case Location::Spill:
         ++numberOfMemoryOperands;
-        if (isLeafOfAddress(m_liveness, user, childIndex) || !acceptsMemoryOperand(*user, childIndex))
-            return fail(FailureKind::SpillSlotLacksItsValue, reader);
+        if (isLeafOfAddress(m_liveness, user, childIndex) || (!acceptsMemoryOperand(*user, childIndex) && (childIndex || !acceptsSpilledFirstOperand(*user))))
+            return fail(FailureKind::WrongValueInSpillSlot, reader);
         return checkHolds(location, leaf, reader);
     case Location::InstanceWord: {
         ++numberOfMemoryOperands;
         if (!leaf->isConstant() || !acceptsMemoryOperand(*user, childIndex))
-            return fail(FailureKind::RegisterLacksItsValue, reader);
+            return fail(FailureKind::WrongValueInRegister, reader);
         std::optional<PinnedConstant> pinned = findPinnedConstant(static_cast<uint64_t>(leaf->constantBits()));
         if (!pinned || pinned->reg != instanceGPR || !pinned->offset || *pinned->offset != location.offsetInInstance())
-            return fail(FailureKind::RegisterLacksItsValue, reader);
+            return fail(FailureKind::WrongValueInRegister, reader);
         return true;
     }
     case Location::SlotBytes:
         if (!namesStackSlot(leaf, location.indexOfStackSlot()))
-            return fail(FailureKind::RegisterLacksItsValue, reader);
+            return fail(FailureKind::WrongValueInRegister, reader);
         [[fallthrough]];
     case Location::Immediate:
+        if (location.isImmediate() && leaf->hasNoPosition() && readsConstantInMemory(*user, childIndex, *leaf)) {
+            ++numberOfMemoryOperands;
+            return acceptsMemoryOperand(*user, childIndex) || fail(FailureKind::WrongValueInRegister, reader);
+        }
         if (!leaf->hasNoPosition() || !standsInInstruction(m_liveness, user, childIndex, leaf))
-            return fail(FailureKind::RegisterLacksItsValue, reader);
+            return fail(FailureKind::WrongValueInRegister, reader);
         return true;
     }
-    return fail(FailureKind::RegisterLacksItsValue, reader);
+    return fail(FailureKind::WrongValueInRegister, reader);
 }
 
 bool AllocationChecker::checkSources(const Step& step, RegisterMask& sources)
@@ -484,7 +793,7 @@ bool AllocationChecker::checkSources(const Step& step, RegisterMask& sources)
         if (!isSound)
             return;
         if (numberOfLeaves == maxLeaves) {
-            isSound = fail(FailureKind::RegisterLacksItsValue, operation);
+            isSound = fail(FailureKind::WrongValueInRegister, operation);
             return;
         }
         Location location = step.sources[numberOfLeaves++];
@@ -497,7 +806,7 @@ bool AllocationChecker::checkSources(const Step& step, RegisterMask& sources)
         forEachLeaf(m_liveness, root, checkNextLeaf);
     if (!isSound)
         return false;
-    return numberOfMemoryOperands <= 1 || fail(FailureKind::SpillSlotLacksItsValue, operation);
+    return numberOfMemoryOperands <= 1 || fail(FailureKind::WrongValueInSpillSlot, operation);
 }
 
 bool AllocationChecker::storeBehindDefinition(const Operation* value)
@@ -506,15 +815,17 @@ bool AllocationChecker::storeBehindDefinition(const Operation* value)
     Reg reg = m_allocation.registerAtDefinitionOf(value);
     if (spill == noSpill || !reg.isSet() || m_allocation.isWrittenByEdges(value))
         return true;
-    if (spill < m_spills.size() && m_spills[spill].isStoredAtHeadOfFramedPart)
+    if (spill < m_spills.size() && (m_spills[spill].isStoredAtHeadOfFramedPart || m_spills[spill].isDeadSlot))
         return true;
-    if (spill >= m_spills.size() || reg.index() >= numberOfRegisters || m_spills[spill].value != value || !value->type().isNumeric())
-        return fail(FailureKind::SpillSlotLacksItsValue, value);
+    if (spill >= m_spills.size() || reg.index() >= numberOfRegisters || !value->type().isNumeric())
+        return fail(FailureKind::WrongValueInSpillSlot, value);
+    if (m_spills[spill].value != value && !(m_spills[spill].isSharedByPhis && value->opcode() == Phi))
+        return fail(FailureKind::WrongValueInSpillSlot, value);
     if (!noteSpillWrite(spill, widthOf(value->type()), value))
         return false;
     ValueID id = idOf(value);
     if (!id || m_state[reg.index()] != id)
-        return fail(FailureKind::SpillSlotLacksItsValue, value);
+        return fail(FailureKind::WrongValueInSpillSlot, value);
     set(m_firstSpillPlace + spill, id);
     killSecondScratchGPR();
     return true;
@@ -523,22 +834,22 @@ bool AllocationChecker::storeBehindDefinition(const Operation* value)
 bool AllocationChecker::checkBranchOnOverflow(const Step& step)
 {
     const Operation* branch = step.operation;
-    SumTestedByOverflow test = sumTestedByOverflowOf(m_liveness, branch);
-    const Step* stepOfSum = m_stepThatLeftFlags;
+    OverflowCheckedSum test = overflowCheckedSumOf(m_liveness, branch);
+    const Step* stepOfSum = m_flagSettingStep;
     if (!stepOfSum || stepOfSum->operation != test.sum)
-        return fail(FailureKind::RegisterLacksItsValue, branch);
+        return fail(FailureKind::WrongValueInRegister, branch);
     const Operation* operand = step.other;
     if (!operand)
         return true;
 
     unsigned index = operand == test.left() ? 0 : 1;
     const Operation* otherOperand = index ? test.left() : test.right();
-    if ((index && (operand != test.right() || test.subtracts())) || operand == otherOperand || operand->type() != Int32 || test.isWidenedWhereTestFails)
-        return fail(FailureKind::RegisterLacksItsValue, branch);
+    if ((index && (operand != test.right() || test.subtracts())) || operand == otherOperand || operand->type() != Int32 || test.isWidenedOnFailure)
+        return fail(FailureKind::WrongValueInRegister, branch);
     Location taken = stepOfSum->sources[index];
     Location other = stepOfSum->sources[1 - index];
     if (!taken.isRegister() || taken != stepOfSum->destination)
-        return fail(FailureKind::RegisterLacksItsValue, branch);
+        return fail(FailureKind::WrongValueInRegister, branch);
 
     ValueID held = m_state[taken.reg().index()];
     bool holdsLowHalfOfSum = held == idOf(test.sum);
@@ -547,10 +858,10 @@ bool AllocationChecker::checkBranchOnOverflow(const Step& step)
         holdsLowHalfOfSum = holder->opcode() == Trunc && holder->child(0) == test.sum;
     }
     if (!holdsLowHalfOfSum)
-        return fail(FailureKind::RegisterLacksItsValue, branch);
+        return fail(FailureKind::WrongValueInRegister, branch);
     if (other.isRegister())
         return checkHolds(other, otherOperand, branch);
-    return other.isImmediate() || fail(FailureKind::RegisterLacksItsValue, branch);
+    return other.isImmediate() || fail(FailureKind::WrongValueInRegister, branch);
 }
 
 bool AllocationChecker::executeOperation(const Step& step)
@@ -559,7 +870,7 @@ bool AllocationChecker::executeOperation(const Step& step)
     if (operation->opcode() == Extract) {
         if (step.destination.isSpill()) {
             if (m_allocation.registerAtDefinitionOf(operation).isSet() || step.destination.spillIndex() != m_allocation.spillOf(operation))
-                return fail(FailureKind::SpillSlotLacksItsValue, operation);
+                return fail(FailureKind::WrongValueInSpillSlot, operation);
             m_now = m_behind;
         }
         if (!checkHolds(step.destination, operation, operation))
@@ -571,7 +882,7 @@ bool AllocationChecker::executeOperation(const Step& step)
         if (!checkHolds(Location::reg(operation->argumentReg()), operation, operation))
             return false;
         if (!operation->type().isNumeric() || !(registerMaskOf(step.destination) & m_file.allocatableIn(bankOf(operation->type()))))
-            return fail(FailureKind::RegisterLacksItsValue, operation);
+            return fail(FailureKind::WrongValueInRegister, operation);
         set(step.destination.reg().index(), idOf(operation));
         m_now = m_behind;
         return storeBehindDefinition(operation);
@@ -580,30 +891,30 @@ bool AllocationChecker::executeOperation(const Step& step)
     RegisterMask sources = 0;
     if (!checkSources(step, sources))
         return false;
-    bool goesByOverflow = m_liveness.goesByOverflow(operation);
-    if (goesByOverflow && operation->opcode() == Branch && !checkBranchOnOverflow(step))
+    bool usesOverflowFlag = m_liveness.usesOverflowFlag(operation);
+    if (usesOverflowFlag && operation->opcode() == Branch && !checkBranchOnOverflow(step))
         return false;
-    if (goesByOverflow && operation->opcode() != Branch)
-        m_stepThatLeftFlags = &step;
+    if (usesOverflowFlag && operation->opcode() != Branch)
+        m_flagSettingStep = &step;
     if (operation->opcode() == Return && operation->numChildren() == 1) {
         Reg expected = bankOf(operation->child(0)->type()) == Bank::GP ? Reg(GPRInfo::returnValueGPR) : Reg(FPRInfo::returnValueFPR);
         if (sources != maskOf(expected))
-            return fail(FailureKind::RegisterLacksItsValue, operation);
+            return fail(FailureKind::WrongValueInRegister, operation);
     }
 
     RegisterMask scratch = 0;
     if (step.patchAssignment != UINT32_MAX) {
         if (step.patchAssignment >= m_allocation.numberOfPatchAssignments())
-            return fail(FailureKind::RegisterLacksItsValue, operation);
+            return fail(FailureKind::WrongValueInRegister, operation);
         const PatchAssignment& assignment = m_allocation.patchAssignment(step.patchAssignment);
         scratch = assignment.gpScratch;
         if (assignment.fpScratch)
-            return fail(FailureKind::RegisterLacksItsValue, operation);
+            return fail(FailureKind::WrongValueInRegister, operation);
     }
     if (static_cast<unsigned>(std::popcount(scratch)) != numberOfScratchGPRsOf(m_proc.traits(), *operation)
         || (scratch & ~m_file.allocatableIn(Bank::GP))
         || (scratch & (sources | registerMaskOf(step.destination))))
-        return fail(FailureKind::RegisterLacksItsValue, operation);
+        return fail(FailureKind::WrongValueInRegister, operation);
 
     m_now = m_behind;
     killRegisters(m_scratch | scratch);
@@ -611,8 +922,13 @@ bool AllocationChecker::executeOperation(const Step& step)
     if (type == Void)
         return true;
     if (!type.isNumeric() || !(registerMaskOf(step.destination) & m_file.allocatableIn(bankOf(type))))
-        return fail(FailureKind::RegisterLacksItsValue, operation);
-    set(step.destination.reg().index(), idOf(operation));
+        return fail(FailureKind::WrongValueInRegister, operation);
+    Place destination = step.destination.reg().index();
+    bool staysWidened = step.sources[0] == step.destination && isFreeWhenCoalesced(m_liveness, operation) && isWidened(destination);
+    if (staysWidened && operation->opcode() == ZExt32 && m_liveness.of(operation).has(ValueFlag::UpperHalfIsRead))
+        return fail(FailureKind::UpperHalfIsNotClear, operation);
+    set(destination, idOf(operation));
+    markWidened(destination, staysWidened ? idOf(operation) : nothing);
     return storeBehindDefinition(operation);
 }
 
@@ -650,10 +966,10 @@ bool AllocationChecker::checkOperand(const PatchOperation* patch, unsigned child
     if (!constraint.isReg() && (mask & (m_scratch | patch->earlyClobberedMask())))
         isMet = false;
     if (!isMet)
-        return fail(FailureKind::RegisterLacksItsValue, patch);
+        return fail(FailureKind::WrongValueInRegister, patch);
     if (location.isImmediate()) {
         bool isNeverRead = patch->onlyKeepsChildrenAlive && value->hasNoPosition();
-        return (constraint.isAny() && (value->isConstant() || isNeverRead)) || fail(FailureKind::RegisterLacksItsValue, patch);
+        return (constraint.isAny() && (value->isConstant() || isNeverRead)) || fail(FailureKind::WrongValueInRegister, patch);
     }
     return checkHolds(location, value, patch);
 }
@@ -661,14 +977,14 @@ bool AllocationChecker::checkOperand(const PatchOperation* patch, unsigned child
 bool AllocationChecker::executePatch(const Step& step, const PatchOperation* patch)
 {
     if (step.patchAssignment >= m_allocation.numberOfPatchAssignments())
-        return fail(FailureKind::RegisterLacksItsValue, patch);
+        return fail(FailureKind::WrongValueInRegister, patch);
     const PatchAssignment& assignment = m_allocation.patchAssignment(step.patchAssignment);
     bool isCheck = patch->opcode() == Check;
     bool runsCodeOfGenerator = !isCheck && !patch->onlyKeepsChildrenAlive;
     unsigned numberOfResults = m_proc.resultCount(patch->type());
     unsigned firstOperand = isCheck ? 1 : 0;
     if (patch->numberOfOperands() < firstOperand || assignment.locations.size() != numberOfResults + patch->numberOfOperands() - firstOperand)
-        return fail(FailureKind::RegisterLacksItsValue, patch);
+        return fail(FailureKind::WrongValueInRegister, patch);
     std::span<const Location> locationsOfResults = assignment.locations.first(numberOfResults);
     std::span<const Location> locationsOfOperands = assignment.locations.subspan(numberOfResults);
 
@@ -679,7 +995,7 @@ bool AllocationChecker::executePatch(const Step& step, const PatchOperation* pat
     for (Location location : locationsOfResults) {
         RegisterMask mask = registerMaskOf(location);
         if (mask & results)
-            return fail(FailureKind::RegisterLacksItsValue, patch);
+            return fail(FailureKind::WrongValueInRegister, patch);
         results |= mask;
     }
 
@@ -711,7 +1027,7 @@ bool AllocationChecker::executePatch(const Step& step, const PatchOperation* pat
         || (assignment.gpScratch & ~m_file.allocatableIn(Bank::GP))
         || (assignment.fpScratch & ~m_file.allocatableIn(Bank::FP))
         || (scratch & (operands | results | early | late)))
-        return fail(FailureKind::RegisterLacksItsValue, patch);
+        return fail(FailureKind::WrongValueInRegister, patch);
 
     for (unsigned index = 0; index < numberOfResults; ++index) {
         Location location = locationsOfResults[index];
@@ -742,10 +1058,10 @@ bool AllocationChecker::executePatch(const Step& step, const PatchOperation* pat
         if (mask && ((mask & (m_pinned | m_scratch)) || bankOf(location.reg()) != bankOf(m_proc.resultType(patch->type(), index))))
             isMet = false;
         if (!isMet)
-            return fail(FailureKind::RegisterLacksItsValue, patch);
+            return fail(FailureKind::WrongValueInRegister, patch);
     }
     if (runsCodeOfGenerator && (results & ~assignment.usedRegisters))
-        return fail(FailureKind::RegisterLacksItsValue, patch);
+        return fail(FailureKind::WrongValueInRegister, patch);
 
     m_now = m_behind;
     killRegisters(m_scratch);
@@ -759,7 +1075,7 @@ bool AllocationChecker::executePatch(const Step& step, const PatchOperation* pat
     for (unsigned index = 0; index < numberOfResults; ++index) {
         Place place;
         if (!findPlace(locationsOfResults[index], place))
-            return fail(FailureKind::RegisterLacksItsValue, patch);
+            return fail(FailureKind::WrongValueInRegister, patch);
         set(place, patch->type().isTuple() ? m_firstMember[patch->index()] + index : idOf(patch));
     }
     if (numberOfResults == 1 && !patch->type().isTuple() && locationsOfResults[0].isRegister())
@@ -772,7 +1088,7 @@ bool AllocationChecker::matchNextOperation(const Operation* operation, Position&
     std::span<Operation* const> sunk = m_liveness.sunkInto(m_block);
     if (m_nextSunk < sunk.size()) {
         if (sunk[m_nextSunk++] != operation)
-            return fail(FailureKind::RegisterLacksItsValue, operation);
+            return fail(FailureKind::WrongValueInRegister, operation);
         early = m_head;
         return true;
     }
@@ -781,30 +1097,29 @@ bool AllocationChecker::matchNextOperation(const Operation* operation, Position&
         bool stands = m_liveness.standsInItsBlock(expected);
         if (expected == operation) {
             early = m_order.earlyPositionOf(m_block, m_nextOperation - 1);
-            return stands || fail(FailureKind::RegisterLacksItsValue, operation);
+            return stands || fail(FailureKind::WrongValueInRegister, operation);
         }
         if (stands && !mayLackStep(expected))
-            return fail(FailureKind::RegisterLacksItsValue, expected);
+            return fail(FailureKind::WrongValueInRegister, expected);
     }
-    return fail(FailureKind::RegisterLacksItsValue, operation);
+    return fail(FailureKind::WrongValueInRegister, operation);
 }
 
 bool AllocationChecker::execute(const Step& step)
 {
     const Operation* operation = step.operation;
     if (!operation)
-        return fail(FailureKind::RegisterLacksItsValue, nullptr);
+        return fail(FailureKind::WrongValueInRegister, nullptr);
     if (operation->opcode() == Phi || operation->opcode() == Upsilon)
         return true;
-    if (m_stepThatLeftFlags && operation->opcode() != Trunc && operation != m_block->last())
-        return fail(FailureKind::RegisterLacksItsValue, operation);
+    if (m_flagSettingStep && operation->opcode() != Trunc && operation != m_block->last())
+        return fail(FailureKind::WrongValueInRegister, operation);
     Position early;
     if (!matchNextOperation(operation, early))
         return false;
     bool isSunk = m_liveness.isSunk(operation);
     m_now = { early, isSunk ? early + 1 : early };
     m_behind = { isSunk ? early : early + 1, early + 1 };
-    m_wroteSpillBehindLastExecute = false;
     const PatchOperation* patch = operation->as<PatchOperation>();
     bool isSound = patch ? executePatch(step, patch) : executeOperation(step);
     m_now = m_behind;
@@ -816,19 +1131,23 @@ bool AllocationChecker::transfer(const Step& step)
     RegisterMask toRegister = registerMaskOf(step.destination);
     RegisterMask fromRegister = registerMaskOf(step.sources[0]);
     Place place;
-    if (m_stepThatLeftFlags && step.kind != StepKind::Execute && step.kind != StepKind::Move && step.kind != StepKind::Reload && step.kind != StepKind::Save)
-        return fail(FailureKind::RegisterLacksItsValue, step.operation);
+    if (m_flagSettingStep && step.kind != StepKind::Execute && step.kind != StepKind::Move && step.kind != StepKind::Reload && step.kind != StepKind::Save)
+        return fail(FailureKind::WrongValueInRegister, step.operation);
     switch (step.kind) {
     case StepKind::Execute:
         return execute(step);
-    case StepKind::Move:
+    case StepKind::Move: {
         if (!fromRegister || !(toRegister & (m_allocatable | m_scratch)) || bankOf(step.sources[0].reg()) != bankOf(step.destination.reg()))
-            return fail(FailureKind::RegisterLacksItsValue, step.operation);
-        set(step.destination.reg().index(), narrowed(valueIn(step.sources[0].reg(), step.operation), step.width));
+            return fail(FailureKind::WrongValueInRegister, step.operation);
+        Place destination = step.destination.reg().index();
+        bool staysWidened = step.width == Width64 && isWidened(step.sources[0].reg().index());
+        set(destination, narrowed(valueIn(step.sources[0].reg(), step.operation), step.width));
+        markWidened(destination, staysWidened ? m_state[destination] : nothing);
         return true;
+    }
     case StepKind::Reload: {
         if (!(toRegister & (m_allocatable | m_scratch)) || fromRegister || !findPlace(step.sources[0], place))
-            return fail(FailureKind::RegisterLacksItsValue, step.operation);
+            return fail(FailureKind::WrongValueInRegister, step.operation);
         if (step.sources[0].isSpill() && !noteSpillRead(step.sources[0].spillIndex(), step.operation))
             return false;
         ValueID value = narrowed(m_state[place], step.width);
@@ -838,7 +1157,7 @@ bool AllocationChecker::transfer(const Step& step)
     }
     case StepKind::Save: {
         if (!fromRegister || toRegister || !findPlace(step.destination, place))
-            return fail(FailureKind::SpillSlotLacksItsValue, step.operation);
+            return fail(FailureKind::WrongValueInSpillSlot, step.operation);
         if (step.destination.isSpill() && !noteSpillWrite(step.destination.spillIndex(), step.width, step.operation))
             return false;
         set(place, narrowed(valueIn(step.sources[0].reg(), step.operation), step.width));
@@ -848,13 +1167,13 @@ bool AllocationChecker::transfer(const Step& step)
     case StepKind::Materialize:
         if (!step.operation || !step.operation->hasNoPosition() || !step.operation->type().isNumeric()
             || !(toRegister & (m_allocatable | m_scratch)) || bankOf(step.destination.reg()) != bankOf(step.operation->type()))
-            return fail(FailureKind::RegisterLacksItsValue, step.operation);
+            return fail(FailureKind::WrongValueInRegister, step.operation);
         killRegisters(m_scratchGPRs);
         set(step.destination.reg().index(), idOf(step.operation));
         return true;
     case StepKind::Swap: {
         if (!(toRegister & m_allocatable) || !(fromRegister & m_allocatable) || bankOf(step.sources[0].reg()) != bankOf(step.destination.reg()))
-            return fail(FailureKind::RegisterLacksItsValue, step.operation);
+            return fail(FailureKind::WrongValueInRegister, step.operation);
         ValueID endsInSource = narrowed(m_state[step.destination.reg().index()], step.width);
         ValueID endsInDestination = narrowed(m_state[step.sources[0].reg().index()], step.width);
         set(step.destination.reg().index(), endsInDestination);
@@ -862,25 +1181,14 @@ bool AllocationChecker::transfer(const Step& step)
         killRegisters(m_scratch);
         return true;
     }
-    case StepKind::ClearSpill: {
-        if (!step.destination.isSpill() || !findPlace(step.destination, place))
-            return fail(FailureKind::SpillSlotLacksItsValue, step.operation);
-        const SpillFacts& facts = m_spills[step.destination.spillIndex()];
-        bool standsRightBehindLastRead = m_now.lower == facts.end + 1 && facts.begin <= m_now.upper && !m_wroteSpillBehindLastExecute;
-        if (!isInRange(facts) && !standsRightBehindLastRead)
-            return fail(FailureKind::SpillSlotLacksItsValue, step.operation);
-        set(place, nothing);
-        killSecondScratchGPR();
-        return true;
-    }
     case StepKind::KeepPointer: {
         if (!step.operation || !step.destination.isSpill() || !findPlace(step.destination, place))
-            return fail(FailureKind::SpillSlotLacksItsValue, step.operation);
+            return fail(FailureKind::WrongValueInSpillSlot, step.operation);
         const SpillFacts& facts = m_spills[step.destination.spillIndex()];
         if (!facts.isPointerBesideNarrowReference || facts.value != step.operation)
-            return fail(FailureKind::SpillSlotLacksItsValue, step.operation);
+            return fail(FailureKind::WrongValueInSpillSlot, step.operation);
         if (!fromRegister || (fromRegister & m_scratch))
-            return fail(FailureKind::RegisterLacksItsValue, step.operation);
+            return fail(FailureKind::WrongValueInRegister, step.operation);
         if (!checkHolds(step.sources[0], step.operation, step.operation) || !noteSpillWrite(step.destination.spillIndex(), Width64, step.operation))
             return false;
         killRegisters(m_scratchGPRs);
@@ -888,7 +1196,7 @@ bool AllocationChecker::transfer(const Step& step)
         return true;
     }
     }
-    return fail(FailureKind::RegisterLacksItsValue, step.operation);
+    return fail(FailureKind::WrongValueInRegister, step.operation);
 }
 
 void AllocationChecker::findNextExecute(uint32_t begin, uint32_t end)
@@ -911,7 +1219,7 @@ bool AllocationChecker::runSteps(uint32_t begin, uint32_t end, bool isOnEdge)
         const Step& step = m_allocation.step(index);
         bool isExecute = step.kind == StepKind::Execute;
         if (isExecute && isOnEdge)
-            return fail(FailureKind::RegisterLacksItsValue, step.operation);
+            return fail(FailureKind::WrongValueInRegister, step.operation);
         if (!transfer(step))
             return false;
         if (isExecute)
@@ -928,12 +1236,18 @@ bool AllocationChecker::enter(Block* block)
     m_nextSunk = 0;
     m_nextOperation = 0;
     m_writesOutsideRange.clear();
-    m_wroteSpillBehindLastExecute = false;
-    m_stepThatLeftFlags = nullptr;
+    m_flagSettingStep = nullptr;
 
     clearState();
     for (const Entry& entry : m_heads[block->index()].entries)
         set(entry.place, entry.value);
+    m_markedRegisters = 0;
+    forEachRegister(m_heads[block->index()].widened, [&](Reg reg) {
+        markWidened(reg.index(), m_state[reg.index()]);
+    });
+    commitChangedSpills();
+    loadSpillMap(m_spillMap, m_heads[block->index()].spills, m_spillMapHeight, 0);
+    m_spillMap = m_heads[block->index()].spills;
     if (block->isEntry()) {
         for (Operation* operation : block->operations()) {
             if (operation->opcode() == ArgumentReg && !(maskOf(operation->argumentReg()) & (m_pinned | m_scratch)))
@@ -943,14 +1257,14 @@ bool AllocationChecker::enter(Block* block)
 
     for (const RegisterBinding& binding : m_allocation.registersAtHeadOf(block)) {
         if (!binding.value || binding.reg.index() >= numberOfRegisters || !(maskOf(binding.reg) & m_allocatable))
-            return fail(FailureKind::RegisterLacksItsValue, binding.value);
+            return fail(FailureKind::WrongValueInRegister, binding.value);
         ValueID id = idOf(binding.value);
         if (!id)
-            return fail(FailureKind::RegisterLacksItsValue, binding.value);
+            return fail(FailureKind::WrongValueInRegister, binding.value);
         if (m_state[binding.reg.index()] != id) {
             SpillIndex spill = binding.value->opcode() == Phi ? m_allocation.spillOf(binding.value) : noSpill;
             if (spill >= m_spills.size() || !m_spills[spill].isSharedByPhis)
-                return fail(FailureKind::RegisterLacksItsValue, binding.value);
+                return fail(FailureKind::WrongValueInRegister, binding.value);
         }
     }
 
@@ -963,8 +1277,10 @@ bool AllocationChecker::enter(Block* block)
             continue;
         }
         SpillIndex spill = m_allocation.spillOf(phi);
-        if (spill >= m_spills.size() || m_state[m_firstSpillPlace + spill] != idOf(phi))
-            return fail(FailureKind::SpillSlotLacksItsValue, phi);
+        if (spill < m_spills.size() && m_spills[spill].isDeadSlot)
+            continue;
+        if (spill >= m_spills.size() || (m_state[m_firstSpillPlace + spill] != idOf(phi) && !isReadByItselfAlone(phi)))
+            return fail(FailureKind::WrongValueInSpillSlot, phi);
     }
     m_now.lower = m_head;
     return true;
@@ -991,8 +1307,8 @@ void AllocationChecker::flowAlong(Block* from, unsigned successorIndex)
         const BlockPlace& place = m_order.of(block);
         return m_allocation.isInFramedPart(block) || (place.isRare() && m_allocation.needsFrameIn(place.rareRegion));
     };
-    bool leavesFramedPart = m_allocation.hasFramedPart() && !m_allocation.needsFrameAheadOfFramedPart() && runsInFrame(from) && (!runsInFrame(target) || m_allocation.isHeadOfFramedPart(target));
-    if (leavesFramedPart)
+    bool exitsFramedPart = from->numSuccessors() == 1 && m_allocation.hasFramedPart() && !m_allocation.needsFrameAheadOfFramedPart() && runsInFrame(from) && (!runsInFrame(target) || m_allocation.isHeadOfFramedPart(target));
+    if (exitsFramedPart)
         killed |= m_file.calleeSaved;
 
     for (Place place : m_touched) {
@@ -1002,26 +1318,32 @@ void AllocationChecker::flowAlong(Block* from, unsigned successorIndex)
         Position definition = m_values[value & ~isPointerOfReference].definition;
         if (definition >= head || definition == definitionOfLostResults)
             continue;
-        if (leavesFramedPart && place >= numberOfRegisters)
+        if (exitsFramedPart && place >= numberOfRegisters)
             continue;
         if (place < numberOfRegisters) {
             if (killed >> place & 1)
                 continue;
-        } else if (place < m_firstSpillPlace) {
-            if (target->isLandingPad())
-                continue;
-        } else {
-            const SpillFacts& facts = m_spills[place - m_firstSpillPlace];
-            if (facts.begin > head + 1 || facts.end < head || facts.isInGap(head))
-                continue;
-        }
+        } else if (target->isLandingPad())
+            continue;
         m_onEdge[place] = value;
     }
+    commitChangedSpills();
+    const SpillMap* incomingSpillMap = exitsFramedPart ? nullptr : filterSpillMap({ head, definitionOfLostResults }, m_spillMap, m_spillMapHeight, 0);
 
-    if (from->last()->opcode() == Branch && m_liveness.goesByOverflow(from->last())) {
+    if (from->last()->opcode() == Branch && m_liveness.usesOverflowFlag(from->last())) {
         const Operation* operandTakenBack = m_allocation.step(m_allocation.stepsOf(from).terminator).other;
-        if (operandTakenBack && successorIndex != sumTestedByOverflowOf(m_liveness, from->last()).successorThatPasses)
-            m_onEdge[m_stepThatLeftFlags->destination.reg().index()] = idOf(operandTakenBack);
+        if (operandTakenBack && successorIndex != overflowCheckedSumOf(m_liveness, from->last()).passingSuccessor)
+            m_onEdge[m_flagSettingStep->destination.reg().index()] = idOf(operandTakenBack);
+    }
+    RegisterMask widenedOnEdge = 0;
+    forEachRegister(m_markedRegisters, [&](Reg reg) {
+        if (isWidened(reg.index()) && m_onEdge[reg.index()] == m_state[reg.index()])
+            widenedOnEdge |= maskOf(reg);
+    });
+    if (from->last()->opcode() == Branch && m_liveness.usesOverflowFlag(from->last()) && m_flagSettingStep) {
+        OverflowCheckedSum test = overflowCheckedSumOf(m_liveness, from->last());
+        if (test.isWidenedOnFailure && successorIndex != test.passingSuccessor)
+            widenedOnEdge |= registerMaskOf(m_flagSettingStep->destination);
     }
 
     for (Operation* upsilon : from->upsilons()) {
@@ -1041,9 +1363,8 @@ void AllocationChecker::flowAlong(Block* from, unsigned successorIndex)
         SpillIndex spill = m_allocation.spillOf(phi);
         if (m_liveness.isDropped(phi) || spill >= m_spills.size() || (m_allocation.registerAtDefinitionOf(phi).isSet() && !m_allocation.isWrittenByEdges(phi)))
             continue;
-        Place place = m_firstSpillPlace + spill;
         ValueID incoming = m_incoming[phi->index()];
-        m_onEdge[place] = incoming && m_state[place] == incoming ? idOf(phi) : nothing;
+        incomingSpillMap = withSpill(incomingSpillMap, m_spillMapHeight, 0, spill, incoming && m_state[m_firstSpillPlace + spill] == incoming ? idOf(phi) : nothing);
     }
     for (Operation* upsilon : from->upsilons()) {
         if (Operation* phi = upsilon->phi())
@@ -1062,6 +1383,8 @@ void AllocationChecker::flowAlong(Block* from, unsigned successorIndex)
             if (m_onEdge[place])
                 headOfTarget.entries[next++] = { place, m_onEdge[place] };
         }
+        headOfTarget.spills = incomingSpillMap;
+        headOfTarget.widened = widenedOnEdge;
         headOfTarget.isSet = true;
         hasChanged = true;
     } else {
@@ -1070,8 +1393,11 @@ void AllocationChecker::flowAlong(Block* from, unsigned successorIndex)
             if (m_onEdge[entry.place] == entry.value)
                 headOfTarget.entries[kept++] = entry;
         }
-        hasChanged = kept != headOfTarget.entries.size();
+        const SpillMap* mergedSpillMap = intersectSpillMaps(headOfTarget.spills, incomingSpillMap, m_spillMapHeight, 0);
+        hasChanged = kept != headOfTarget.entries.size() || mergedSpillMap != headOfTarget.spills || (widenedOnEdge & ~headOfTarget.widened);
+        headOfTarget.widened |= widenedOnEdge;
         headOfTarget.entries = headOfTarget.entries.first(kept);
+        headOfTarget.spills = mergedSpillMap;
     }
     for (Place place : m_touched)
         m_onEdge[place] = nothing;
@@ -1091,12 +1417,12 @@ void AllocationChecker::checkBlock(Block* block)
     if (block->isEmpty() || range.begin > range.end || range.end > numberOfSteps
         || range.beginOfEdgeMoves > range.endOfEdgeMoves || range.endOfEdgeMoves > numberOfSteps
         || range.terminator >= numberOfSteps || (hasEdgeMoves && block->numSuccessors() != 1)) {
-        fail(FailureKind::RegisterLacksItsValue, block->isEmpty() ? nullptr : block->last());
+        fail(FailureKind::WrongValueInRegister, block->isEmpty() ? nullptr : block->last());
         return;
     }
     const Step& terminator = m_allocation.step(range.terminator);
     if (terminator.kind != StepKind::Execute || terminator.operation != block->last()) {
-        fail(FailureKind::RegisterLacksItsValue, block->last());
+        fail(FailureKind::WrongValueInRegister, block->last());
         return;
     }
 
@@ -1106,7 +1432,7 @@ void AllocationChecker::checkBlock(Block* block)
         uint32_t begin = m_allocation.headOfFramedPartAbove(block).beginOfSteps;
         uint32_t end = m_allocation.headOfFramedPartAbove(block).endOfSteps;
         if (begin > end || end > numberOfSteps) {
-            fail(FailureKind::SpillSlotLacksItsValue, block->last());
+            fail(FailureKind::WrongValueInSpillSlot, block->last());
             return;
         }
         if (!runSteps(begin, end, true))
@@ -1143,6 +1469,191 @@ bool AllocationChecker::run()
 bool checkAllocation(Procedure& proc)
 {
     AllocationChecker checker(proc);
+    return checker.run();
+}
+
+namespace {
+
+class CheckerOfSavesAtHeads {
+public:
+    explicit CheckerOfSavesAtHeads(Procedure& proc)
+        : m_proc(proc)
+        , m_allocation(proc.allocation())
+        , m_spills(proc.allocation().spills())
+    {
+    }
+
+    bool run();
+
+private:
+    using SetOfSlots = uint32_t;
+    static constexpr SetOfSlots noSlots = 0;
+    static constexpr SetOfSlots notReached = UINT32_MAX;
+
+    bool isAsked(Location location) const { return location.isSpill() && m_spills[location.spillIndex()].isStoredAtHeadOfFramedPart; }
+    bool isHeld(SpillIndex spill) const { return m_takingThatWrote[spill] == m_taking || std::ranges::binary_search(m_sets[m_heldAtHeadOfBlock], spill); }
+
+    ALWAYS_INLINE bool read(Location location, const Operation* reader) { return !isAsked(location) || readAsked(location, reader); }
+    ALWAYS_INLINE void write(Location location)
+    {
+        if (isAsked(location))
+            writeAsked(location);
+    }
+    NEVER_INLINE bool readAsked(Location location, const Operation* reader)
+    {
+        if (isHeld(location.spillIndex()))
+            return true;
+        m_proc.fail(FailureKind::WrongValueInSpillSlot, reader);
+        return false;
+    }
+    NEVER_INLINE void writeAsked(Location location)
+    {
+        if (isHeld(location.spillIndex()))
+            return;
+        m_takingThatWrote[location.spillIndex()] = m_taking;
+        m_writtenInBlock.append(location.spillIndex());
+    }
+
+    bool runsInFrame(const Block* block) const
+    {
+        const BlockPlace& place = m_proc.order().of(block);
+        return m_allocation.isInFramedPart(block) || (place.isRare() && m_allocation.needsFrameIn(place.rareRegion));
+    }
+
+    ALWAYS_INLINE bool take(const Step&);
+    bool takeSteps(uint32_t begin, uint32_t end);
+    bool takeBlock(const Block*);
+    SetOfSlots setHeldBehindBlock();
+    SetOfSlots meet(SetOfSlots, SetOfSlots);
+
+    Procedure& m_proc;
+    const Allocation& m_allocation;
+    std::span<const SpillFacts> m_spills;
+    Vector<Vector<SpillIndex, 4>, 8> m_sets;
+    Vector<SetOfSlots, 64> m_heldAtHeads;
+    Vector<uint32_t, 32> m_takingThatWrote;
+    Vector<SpillIndex, 8> m_writtenInBlock;
+    BitVector m_isToBeTaken;
+    SetOfSlots m_heldAtHeadOfBlock { noSlots };
+    uint32_t m_taking { 0 };
+};
+
+ALWAYS_INLINE bool CheckerOfSavesAtHeads::take(const Step& step)
+{
+    for (Location source : step.sources) {
+        if (!read(source, step.operation))
+            return false;
+    }
+    if (step.patchAssignment != UINT32_MAX) {
+        std::span<const Location> locations = m_allocation.patchAssignment(step.patchAssignment).locations;
+        size_t numberOfResults = std::min<size_t>(m_proc.resultCount(step.operation->type()), locations.size());
+        for (Location operand : locations.subspan(numberOfResults)) {
+            if (!read(operand, step.operation))
+                return false;
+        }
+        for (Location result : locations.first(numberOfResults))
+            write(result);
+    }
+    write(step.destination);
+    return true;
+}
+
+bool CheckerOfSavesAtHeads::takeSteps(uint32_t begin, uint32_t end)
+{
+    for (uint32_t index = begin; index < end; ++index) {
+        if (!take(m_allocation.step(index)))
+            return false;
+    }
+    return true;
+}
+
+bool CheckerOfSavesAtHeads::takeBlock(const Block* block)
+{
+    ++m_taking;
+    m_writtenInBlock.shrink(0);
+    m_heldAtHeadOfBlock = m_heldAtHeads[block->index()];
+    if (m_allocation.isHeadOfFramedPart(block)) {
+        const Allocation::HeadOfFramedPart& head = m_allocation.headOfFramedPartAbove(block);
+        if (!takeSteps(head.beginOfSteps, head.endOfSteps))
+            return false;
+    }
+    const BlockSteps& steps = m_allocation.stepsOf(block);
+    return takeSteps(steps.begin, steps.end) && takeSteps(steps.beginOfEdgeMoves, steps.endOfEdgeMoves) && take(m_allocation.step(steps.terminator));
+}
+
+CheckerOfSavesAtHeads::SetOfSlots CheckerOfSavesAtHeads::setHeldBehindBlock()
+{
+    if (m_writtenInBlock.isEmpty())
+        return m_heldAtHeadOfBlock;
+    std::ranges::sort(m_writtenInBlock);
+    Vector<SpillIndex, 4> held;
+    held.grow(m_sets[m_heldAtHeadOfBlock].size() + m_writtenInBlock.size());
+    std::ranges::merge(m_sets[m_heldAtHeadOfBlock], m_writtenInBlock, held.begin());
+    m_sets.append(WTF::move(held));
+    return m_sets.size() - 1;
+}
+
+CheckerOfSavesAtHeads::SetOfSlots CheckerOfSavesAtHeads::meet(SetOfSlots first, SetOfSlots second)
+{
+    if (first == second)
+        return first;
+    Vector<SpillIndex, 4> heldOnBothWays;
+    heldOnBothWays.grow(std::min(m_sets[first].size(), m_sets[second].size()));
+    heldOnBothWays.shrink(std::ranges::set_intersection(m_sets[first], m_sets[second], heldOnBothWays.begin()).out - heldOnBothWays.begin());
+    if (heldOnBothWays.size() == m_sets[first].size())
+        return first;
+    if (heldOnBothWays.size() == m_sets[second].size())
+        return second;
+    m_sets.append(WTF::move(heldOnBothWays));
+    return m_sets.size() - 1;
+}
+
+bool CheckerOfSavesAtHeads::run()
+{
+    if (std::ranges::none_of(m_spills, [](const SpillFacts& spill) { return spill.isStoredAtHeadOfFramedPart; }))
+        return true;
+
+    m_sets.append(Vector<SpillIndex, 4> { });
+    m_takingThatWrote.fill(0, m_spills.size());
+    m_heldAtHeads.fill(notReached, m_proc.numberOfBlocks());
+    m_isToBeTaken = BitVector(m_proc.numberOfBlocks());
+    for (const Entrypoint& entrypoint : m_proc.entrypoints()) {
+        m_heldAtHeads[entrypoint.block->index()] = noSlots;
+        m_isToBeTaken.quickSet(entrypoint.block->index());
+    }
+
+    bool needsAnotherRound;
+    do {
+        needsAnotherRound = false;
+        for (const Block* block : m_proc.order().blocksInOrder()) {
+            if (!m_isToBeTaken.quickGet(block->index()))
+                continue;
+            m_isToBeTaken.quickClear(block->index());
+            if (!takeBlock(block))
+                return false;
+            SetOfSlots heldBehindBlock = setHeldBehindBlock();
+            for (unsigned index = 0; index < block->numSuccessors(); ++index) {
+                const Block* successor = block->successor(index).block();
+                bool losesFrame = block->numSuccessors() == 1 && runsInFrame(block) && (!runsInFrame(successor) || m_allocation.isHeadOfFramedPart(successor));
+                SetOfSlots arrives = losesFrame ? noSlots : heldBehindBlock;
+                SetOfSlots heldThere = m_heldAtHeads[successor->index()];
+                SetOfSlots meets = heldThere == notReached ? arrives : meet(heldThere, arrives);
+                if (meets == heldThere)
+                    continue;
+                m_heldAtHeads[successor->index()] = meets;
+                m_isToBeTaken.quickSet(successor->index());
+                needsAnotherRound = true;
+            }
+        }
+    } while (needsAnotherRound);
+    return true;
+}
+
+} // anonymous namespace
+
+bool checkSavesAtHeads(Procedure& proc)
+{
+    CheckerOfSavesAtHeads checker(proc);
     return checker.run();
 }
 

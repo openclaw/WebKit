@@ -47,6 +47,8 @@ namespace JSC {
             clear();
         }
 
+        size_t size() const { return m_identifiers.size(); }
+
         template <typename T>
         ALWAYS_INLINE const Identifier& makeIdentifier(VM&, std::span<const T> characters);
         ALWAYS_INLINE const Identifier& makeEmptyIdentifier(VM&);
@@ -188,6 +190,8 @@ namespace JSC {
             return instance;
         }
 
+        std::unique_ptr<IdentifierArena> takeIdentifierArena() { return WTF::move(m_identifierArena); }
+
         IdentifierArena& identifierArena()
         {
             if (!m_identifierArena) [[unlikely]]
@@ -203,7 +207,7 @@ namespace JSC {
             return (size + sizeof(WTF::AllocAlignmentInteger) - 1) & ~(sizeof(WTF::AllocAlignmentInteger) - 1);
         }
 
-        void* LEGACY_NODELETE freeablePool();
+        NODELETE void* freeablePool();
         void allocateFreeablePool();
         void deallocateObjects();
 

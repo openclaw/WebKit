@@ -8,6 +8,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTConversionEmitter.h"
 #include "AOTStringBuilderStorage.h"
 #include "AOTStringEmitter.h"
 #include "AOTStubsStrings.h"
@@ -99,12 +100,16 @@ void StringBuilderEmitter::generateStackStringBuilderBegin(const ValueContext& v
 {
     LValue slot = m_out.lockedStackSlot(sizeof(StackStringBuilder));
     slot->slot()->setIsDeadAtSuspensions(true);
-    Pointer record(slot);
+    storeEmptyRecord(Pointer(slot));
+    define(value, CellPointer(slot));
+}
+
+void StringBuilderEmitter::storeEmptyRecord(Pointer record)
+{
     Pointer buffer = offsetBy(record, OBJECT_OFFSETOF(StackStringBuilder, buffer));
     m_out.storePtr(buffer.value(), recordField(record, OBJECT_OFFSETOF(StackStringBuilder, savedCursor)));
     m_out.storePtr(limitOnStack(record).value(), recordField(record, OBJECT_OFFSETOF(StackStringBuilder, limit)));
     m_out.storePtr(buffer.value(), recordField(record, OBJECT_OFFSETOF(StackStringBuilder, lengthOrigin)));
-    define(value, CellPointer(slot));
 }
 
 void StringBuilderEmitter::generateStackStringBuilderStart(const ValueContext& value)
@@ -135,14 +140,103 @@ void StringBuilderEmitter::generateStackStringBuilderLength(const ValueContext& 
     define(value, Word32(m_out.castToInt32(m_out.sub(in<Pointer>(value->cursorOperand()).value(), lengthOrigin))));
 }
 
+void StringBuilderEmitter::generateStackStringBuilderIsOnStack(const ValueContext& value)
+{
+    Pointer record = recordOf(value);
+    define(value, equal(limitOf(record), limitOnStack(record)));
+}
+
+void StringBuilderEmitter::generateStackStringBuilderEqualsLiteral(const ValueContext& value)
+{
+    StringEmitter& strings = emitter<StringEmitter>();
+    String text = strings.textOf(value->literal());
+    if (text.isEmpty() || !text.containsOnlyLatin1() || text.length() > StackStringBuilder::capacity) {
+        fail(value, InternalErrorKind::OperandTypeMismatch);
+        return;
+    }
+    strings.recordInlined(value->literal());
+    Vector<Latin1Character, StackStringBuilder::capacity> latin1Characters;
+    for (unsigned position = 0; position < text.length(); ++position)
+        latin1Characters.append(static_cast<Latin1Character>(text[position]));
+    std::span<const Latin1Character> characters = latin1Characters.span();
+    Pointer buffer = offsetBy(recordOf(value), OBJECT_OFFSETOF(StackStringBuilder, buffer));
+    std::optional<Integer> difference;
+    size_t width = characters.size() >= 8 ? 8 : characters.size() >= 4 ? 4 : characters.size() >= 2 ? 2 : 1;
+    for (size_t position = 0; position < characters.size(); position += width) {
+        position = std::min(position, characters.size() - width);
+        uint64_t expected = 0;
+        memcpySpan(asMutableByteSpan(expected).first(width), byteCast<uint8_t>(characters.subspan(position, width)));
+        TypedPointer bytes = bytesAt(buffer, position);
+        Integer read = width == 8 ? Integer(m_out.load64(bytes)) : zeroExtended(Word32(width == 4 ? m_out.load32(bytes) : width == 2 ? m_out.load16ZeroExt32(bytes) : m_out.load8ZeroExt32(bytes)));
+        Integer differs(m_out.bitXor(read.value(), m_out.constInt64(static_cast<int64_t>(expected))));
+        difference = difference ? Integer(m_out.bitOr(difference->value(), differs.value())) : differs;
+    }
+    define(value, isZero(*difference));
+}
+
+void StringBuilderEmitter::generateStackStringBuilderToNumber(const ValueContext& value)
+{
+    Pointer buffer = offsetBy(recordOf(value), OBJECT_OFFSETOF(StackStringBuilder, buffer));
+    Number number = callLeaf<Number>(RuntimeOperation::StringToNumber8, { buffer, emitter<StringEmitter>().word32Of(value->lengthOperand()) });
+    define(value, emitter<ConversionEmitter>().inRepresentation(value, number, typeOf(value.id()), value.representation()));
+}
+
+void StringBuilderEmitter::generateStackStringBuilderParseInt(const ValueContext& value)
+{
+    Pointer buffer = offsetBy(recordOf(value), OBJECT_OFFSETOF(StackStringBuilder, buffer));
+    Word32 length = emitter<StringEmitter>().word32Of(value->lengthOperand());
+    Number number = callLeaf<Number>(RuntimeOperation::ParseInt8, { buffer, length, word32(static_cast<int32_t>(value->radix())) });
+    define(value, emitter<ConversionEmitter>().inRepresentation(value, number, typeOf(value.id()), value.representation()));
+}
+
 void StringBuilderEmitter::generateStackStringBuilderToString(const ValueContext& value)
 {
     define(value, callOperation<CellPointer>(value, RuntimeOperation::StackStringBuilderToString, { recordOf(value), in<Pointer>(value->cursorOperand()) }));
 }
 
+Pointer StringBuilderEmitter::bufferOf(Pointer record)
+{
+    return offsetBy(record, OBJECT_OFFSETOF(StackStringBuilder, buffer));
+}
+
+CellPointer StringBuilderEmitter::finishByCall(const OperationContext& context, Pointer record, Pointer cursor)
+{
+    return callOperation<CellPointer>(context, RuntimeOperation::StackStringBuilderFinish, { record, cursor, word32(static_cast<int32_t>(StringBuilderStorage::StringUse::Unknown)) });
+}
+
+bool StringBuilderEmitter::leavesFinishToAppend(BlockID block, ValueID id, const Operation& finish, std::span<const ValueID> operationsBehind)
+{
+    if (m_code.useCountOf(id) != 1 || !m_generator.isInLoop(block))
+        return false;
+    for (ValueID behind : operationsBehind) {
+        const Operation& next = operationAt(behind);
+        if (next.opcode == Opcode::StackStringBuilderAppendString) {
+            if (next.valueOperand() != id || next.builderOperand() == finish.builderOperand())
+                return false;
+            m_finishLeftToAppend = id;
+            return true;
+        }
+        if (next.opcode != Opcode::StackStringBuilderCursor && next.opcode != Opcode::StackStringBuilderStart)
+            return false;
+    }
+    return false;
+}
+
 void StringBuilderEmitter::generateStackStringBuilderFinish(const ValueContext& value)
 {
-    define(value, callOperation<CellPointer>(value, RuntimeOperation::StackStringBuilderFinish, { recordOf(value), in<Pointer>(value->cursorOperand()), word32(static_cast<int32_t>(StringBuilderStorage::StringUse::Unknown)) }));
+    Pointer record = recordOf(value);
+    Pointer cursor = in<Pointer>(value->cursorOperand());
+    if (!m_generator.runsRepeatedly(value.block()) && !m_facts.linked().functionsCalledInLoops.get(m_unit.function.index())) {
+        define(value, finishByCall(value, record, cursor));
+        return;
+    }
+    Pointer buffer = bufferOf(record);
+    Condition holdsOneCharacter = logicalAnd(equal(limitOf(record), limitOnStack(record)), equal(cursor, offsetBy(buffer, 1)));
+    define(value, either<CellPointer>(holdsOneCharacter, [&] {
+        return singleCharacterString(Word32(m_out.load8ZeroExt32(bytesAt(buffer))));
+    }, [&] {
+        return finishByCall(value, record, cursor);
+    }));
 }
 
 void StringBuilderEmitter::generateStackStringBuilderDiscard(const ValueContext& value)
@@ -152,6 +246,7 @@ void StringBuilderEmitter::generateStackStringBuilderDiscard(const ValueContext&
     ifElse(equal(limit, limitOnStack(record)), [] { }, [&] {
         callVoidOperation(value, RuntimeOperation::StackStringBuilderDiscard, { record }, { .isOnRarePath = true, .accessesCollectorState = true });
     });
+    storeEmptyRecord(record);
 }
 
 Pointer StringBuilderEmitter::limitOf(Pointer record)

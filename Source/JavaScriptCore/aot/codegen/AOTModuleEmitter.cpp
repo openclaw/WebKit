@@ -143,12 +143,18 @@ void ModuleEmitter::generateRequireModule(const ValueContext& value)
     ModuleID module = value->module();
     const Module& target = m_program.at(module);
     mentionRequireEdge(value);
-    if (value->ifHeldForImport()) {
-        define(value, callOperation<Boxed>(value, RuntimeOperation::RequireIfHeldForImport, { moduleIndex(module), moduleIndex(value->referrer()) }));
+    if (value->onlyIfImported()) {
+        define(value, callOperation<Boxed>(value, RuntimeOperation::RequireIfImported, { moduleIndex(module), moduleIndex(value->referrer()) }));
+        return;
+    }
+    if (std::optional<Boxed> requirerObject = inOptional<Boxed>(value->requirerObjectOperand())) {
+        CallOptions options;
+        options.calledBuiltin = hostRequireFunctionFor(target);
+        define(value, callOperation<Boxed>(value, RuntimeOperation::RequireModuleWithRequirer, { moduleIndex(module), moduleIndex(value->referrer()), *requirerObject }, options));
         return;
     }
     auto requireInSlowPath = [&](CallOptions options) {
-        options.calledBuiltin = functionOfHostThatRequireCallsFor(target);
+        options.calledBuiltin = hostRequireFunctionFor(target);
         return callOperation<Boxed>(value, RuntimeOperation::RequireModule, { moduleIndex(module), moduleIndex(value->referrer()) }, options);
     };
     bool addsToRequireCache = requireAddsToRequireCache(m_program, value->referrer(), module);
@@ -168,7 +174,11 @@ void ModuleEmitter::generateRequireModule(const ValueContext& value)
 
 void ModuleEmitter::generateRecordRequire(const ValueContext& value)
 {
-    callVoidOperation(value, RuntimeOperation::RecordRequire, { moduleIndex(value->module()), moduleIndex(value->referrer()) });
+    if (std::optional<Boxed> requirerObject = inOptional<Boxed>(value->requirerObjectOperand())) {
+        callVoidOperation(value, RuntimeOperation::RecordRequireWithRequirer, { moduleIndex(value->module()), moduleIndex(value->referrer()), word32(value->fromCreatedRequire()), word32(value->followsLoad()), *requirerObject });
+        return;
+    }
+    callVoidOperation(value, RuntimeOperation::RecordRequire, { moduleIndex(value->module()), moduleIndex(value->referrer()), word32(value->fromCreatedRequire()) });
 }
 
 void ModuleEmitter::generateAreLoaderFunctionsStored(const ValueContext& value)
@@ -183,17 +193,52 @@ void ModuleEmitter::generateWasLoadedSynchronously(const ValueContext& value)
 
 void ModuleEmitter::generateSeesMockOf(const ValueContext& value)
 {
-    defineTest(value, callWithoutSite<Condition>(RuntimeOperation::SeesMockOf, { moduleIndex(value->module()), moduleIndex(value->referrer()) }));
+    defineTest(value, callWithoutSite<Condition>(RuntimeOperation::SeesMockOf, { moduleIndex(value->module()), moduleIndex(value->referrer()), moduleIndex(value->reader()), word32(value->keepingOriginalNames()) }));
+}
+
+void ModuleEmitter::generateIsLinkedBelow(const ValueContext& value)
+{
+    defineTest(value, callWithoutSite<Condition>(RuntimeOperation::IsLinkedBelow, { moduleIndex(value->module()), moduleIndex(value->referrer()) }));
 }
 
 void ModuleEmitter::generateMockSeenBy(const ValueContext& value)
 {
-    define(value, callWithoutSite<Boxed>(RuntimeOperation::MockSeenBy, { moduleIndex(value->module()), moduleIndex(value->referrer()) }));
+    define(value, callWithoutSite<Boxed>(RuntimeOperation::MockSeenBy, { moduleIndex(value->module()), moduleIndex(value->referrer()), moduleIndex(value->reader()) }));
 }
 
 void ModuleEmitter::generateNamespaceSeenBy(const ValueContext& value)
 {
-    define(value, callOperation<Boxed>(value, RuntimeOperation::NamespaceSeenBy, { moduleIndex(value->module()), moduleIndex(value->referrer()) }));
+    define(value, callOperation<Boxed>(value, RuntimeOperation::NamespaceSeenBy, { moduleIndex(value->module()), moduleIndex(value->referrer()), moduleIndex(value->reader()) }));
+}
+
+void ModuleEmitter::generateInstanceNamespace(const ValueContext& value)
+{
+    define(value, callOperation<Boxed>(value, RuntimeOperation::InstanceNamespace, { in<CellPointer>(value->instanceOperand()), moduleIndex(value->module()), word32(static_cast<int32_t>(value->phase())) }));
+}
+
+void ModuleEmitter::generateInstanceImportMeta(const ValueContext& value)
+{
+    define(value, callOperation<Boxed>(value, RuntimeOperation::InstanceImportMeta, { in<CellPointer>(value->instanceOperand()), moduleIndex(value->module()) }));
+}
+
+void ModuleEmitter::generateOriginalArgument(const ValueContext& value)
+{
+    define(value, callWithoutSite<Boxed>(RuntimeOperation::OriginalArgument, { moduleIndex(value->module()), word32(static_cast<int32_t>(value->index())) }));
+}
+
+void ModuleEmitter::generateLinkedMock(const ValueContext& value)
+{
+    define(value, callWithoutSite<Boxed>(RuntimeOperation::LinkedMock, { in<Boxed>(value->wordOperand()) }));
+}
+
+void ModuleEmitter::generateKeepsOriginalNames(const ValueContext& value)
+{
+    defineTest(value, callWithoutSite<Condition>(RuntimeOperation::KeepsOriginalNames, { in<Boxed>(value->wordOperand()) }));
+}
+
+void ModuleEmitter::generateHasNameInMock(const ValueContext& value)
+{
+    defineTest(value, callOperation<Condition>(value, RuntimeOperation::HasNameInMock, { in<Boxed>(value->wordOperand()), identifierNumber(value->key()), word32(value->outsideCycles()) }));
 }
 
 void ModuleEmitter::generateCountExecution(const ValueContext& value)
@@ -223,6 +268,10 @@ void ModuleEmitter::generateImportDynamic(const ValueContext& value)
 
 void ModuleEmitter::generateRequireDynamic(const ValueContext& value)
 {
+    if (std::optional<Boxed> requirerObject = inOptional<Boxed>(value->requirerObjectOperand())) {
+        define(value, callOperation<Boxed>(value, RuntimeOperation::RequireDynamicWithRequirer, { in<Boxed>(value->specifierOperand()), moduleIndex(value->referrer()), *requirerObject }));
+        return;
+    }
     define(value, callOperation<Boxed>(value, RuntimeOperation::RequireDynamic, { in<Boxed>(value->specifierOperand()), moduleIndex(value->referrer()) }));
 }
 
@@ -236,6 +285,12 @@ TypedPointer ModuleEmitter::statusOf(ModuleID module)
     static_assert(sizeof(StoredModuleStatus) == sizeof(uint8_t));
     Pointer statuses = loadImmutablePointer(AOT_INSTANCE_OFFSET(modules.status));
     return m_out.address(m_heaps.entire(AbstractHeap::ExternalState), statuses.value(), module.index());
+}
+
+Condition ModuleEmitter::hasBegun(ModuleID module)
+{
+    static_assert(StoredModuleStatus::InRecord < StoredModuleStatus::Evaluated && StoredModuleStatus::Evaluated < StoredModuleStatus::Evaluating);
+    return above(Word32(m_out.load8ZeroExt32(statusOf(module))), word32(static_cast<int32_t>(StoredModuleStatus::InRecord)));
 }
 
 void ModuleEmitter::generateBeginModuleEvaluation(const ValueContext& value)

@@ -125,10 +125,10 @@ JSC_DEFINE_HOST_FUNCTION(functionProtoFuncSymbolHasInstance, (JSGlobalObject* gl
     JSValue instance = callFrame->argument(0);
 
     // 2. If constructor has a [[BoundTargetFunction]] internal slot, then
-    if (auto* boundFunction = dynamicDowncast<JSBoundFunction>(thisValue)) {
+    if (auto* function = dynamicDowncast<JSFunction>(thisValue); function && !(function->inlineTypeFlags() & ImplementsDefaultHasInstance)) {
         // 2.a. Let boundConstructor be constructor.[[BoundTargetFunction]].
         // 2.b. Return ? InstanceofOperator(instance, boundConstructor).
-        RELEASE_AND_RETURN(scope, JSValue::encode(jsBoolean(boundFunction->targetFunction()->hasInstance(globalObject, instance))));
+        RELEASE_AND_RETURN(scope, JSValue::encode(jsBoolean(function->methodTable()->customHasInstance(function, globalObject, instance))));
     }
 
     // 3. If instance is not an Object, return false.
@@ -206,7 +206,7 @@ JSC_DEFINE_HOST_FUNCTION(functionProtoFuncBind, (JSGlobalObject* globalObject, C
 }
 
 // https://github.com/claudepache/es-legacy-function-reflection/blob/master/spec.md#isallowedreceiverfunctionforcallerandargumentsfunc-expectedrealm (except step 3)
-static ALWAYS_INLINE bool LEGACY_NODELETE isAllowedReceiverFunctionForCallerAndArguments(JSFunction* function)
+NODELETE static ALWAYS_INLINE bool isAllowedReceiverFunctionForCallerAndArguments(JSFunction* function)
 {
     if (function->isHostOrBuiltinFunction())
         return false;
@@ -226,7 +226,7 @@ public:
     {
     }
 
-    JSValue LEGACY_NODELETE result() const { return m_result; }
+    NODELETE JSValue result() const { return m_result; }
 
     IterationStatus operator()(StackVisitor& visitor) const
     {
@@ -293,9 +293,9 @@ public:
     {
     }
 
-    JSValue LEGACY_NODELETE result() const { return m_result; }
+    NODELETE JSValue result() const { return m_result; }
 
-    IterationStatus LEGACY_NODELETE operator()(StackVisitor& visitor) const
+    NODELETE IterationStatus operator()(StackVisitor& visitor) const
     {
         if (!visitor->callee().isCell())
             return IterationStatus::Continue;

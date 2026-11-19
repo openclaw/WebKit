@@ -106,6 +106,8 @@ private:
     uint32_t m_count { 0 };
 };
 
+inline bool CompiledStructure::hasSpareWord() const { return m_extraPropertiesSlot.offset && !m_layout->hasExtraPropertiesSlot; }
+
 class Object final : public JSObject {
 public:
     using Base = JSObject;
@@ -117,7 +119,7 @@ public:
 
     DECLARE_INFO;
     DECLARE_VISIT_CHILDREN;
-    template<typename Visitor> ALWAYS_INLINE static void visitFields(Object*, Visitor&);
+    template<typename Visitor> ALWAYS_INLINE static void visitFields(Object*, const CompiledStructure&, Visitor&);
     static size_t estimatedSize(JSCell*, VM&);
     static void analyzeHeap(JSCell*, HeapAnalyzer&);
 
@@ -139,7 +141,14 @@ public:
     uint32_t shape() const { return shapeOf(shapeWord()); }
     uint64_t orderAndShapeWords() const { return static_cast<uint64_t>(shapeWord()) << 32 | orderWord(); }
     bool bearsMark() const { return perCellBit() || !(shapeWordWithMark() & shapeWordIsUnmarked); }
-    void setIsInBirth(bool isInBirth) { at<uint32_t>(offsetOfShapeWord) = isInBirth && mayBearMark() ? shapeWordWithMark() & ~shapeWordIsUnmarked : shapeWord(); }
+    bool isMarkedByPrototype() const { return (inlineTypeFlags() & IsPristine) && layout().marksOtherPrototypes; }
+    void setIsInBirth(bool isInBirth) { at<uint32_t>(offsetOfShapeWord) = (isInBirth || isMarkedByPrototype()) && mayBearMark() ? shapeWordWithMark() & ~shapeWordIsUnmarked : shapeWord(); }
+    void setVariantOfStructure(VM& vm, Structure* structure)
+    {
+        JSCell::setStructure(vm, structure);
+        if (isMarkedByPrototype()) [[unlikely]]
+            setIsInBirth(true);
+    }
     void setBearsMark(bool bearsMark)
     {
         setPerCellBit(bearsMark);
@@ -195,11 +204,15 @@ public:
     };
     void moveFieldToExtraProperties(VM&, const FieldData&, LeavingProperty, SlotExitReason);
     bool tryRepeat(VM&, const FieldExit&, JSValue);
+    bool tryRepeat(VM&, const FieldReturn&, JSValue);
     bool tryRepeat(VM&, const AddedExtraProperty&, JSValue);
     bool tryDefineAsOnTheLastObject(VM&, PropertyName, const PropertyDescriptor&);
+    bool tryRepeatAccessorDefinition(VM&, JSGlobalObject*, const FieldData*, PropertyName, const PropertyDescriptor&);
+    bool tryRepeatAccessorDefinition(VM&, JSGlobalObject*, const FieldData*, PropertyName, JSObject* getterOrNull, JSObject* setterOrNull, unsigned attributes);
     bool tryMoveFieldBackToSlot(VM&, const FieldData&);
     void deleteField(VM&, const FieldData&);
     bool hasEveryFieldOfBirth() const;
+    bool lacksFieldOfBirth() const;
     bool holdsEveryFieldHeldFilled() const;
     bool mayBearMark() const;
     JS_EXPORT_PRIVATE void tryFinishBirth();
@@ -207,6 +220,7 @@ public:
 
     enum class Integrity : uint8_t { NotExtensible, Sealed, Frozen };
     void setIntegrity(JSGlobalObject*, Integrity);
+    bool tryFreezeFields(VM&);
     bool testIntegrity(VM&, Integrity) const;
     void setPrototypeKeepingShape(VM&, JSValue prototype);
     void setPrototypeAtCreation(VM&, JSValue prototype);
@@ -222,7 +236,8 @@ public:
         LeavingProperty property;
     };
     ExtraPropertyFound findExtraProperty(VM&, PropertyName) const;
-    bool tryAddAbsentExtraProperty(VM&, PropertyName, JSValue valueOrAccessor, unsigned attributes);
+    enum class MemoryOfAddedNames : bool { IsAsked, WasAskedInVain };
+    bool tryAddAbsentExtraProperty(VM&, PropertyName, JSValue valueOrAccessor, unsigned attributes, MemoryOfAddedNames = MemoryOfAddedNames::IsAsked);
     void replaceExtraProperty(VM&, PropertyName, LeavingProperty);
     bool tryDefineAbsentGetterInSlot(VM&, JSGlobalObject*, UniquedStringImpl* name, JSObject* getter, unsigned attributes);
     bool tryDefineAbsentGetterInSlot(VM&, JSGlobalObject*, const FieldData&, UniquedStringImpl* name, JSObject* getter, unsigned attributes);
@@ -251,7 +266,9 @@ public:
     static JSObject* createExtraProperties(JSGlobalObject* realm, std::span<const ExtraProperty> inOrder);
     bool tryCreateExtraPropertiesOfNewObject(VM&, std::span<const ExtraProperty> inOrder);
     void didChangeExtraProperties(VM&);
+    bool tryNameHeldStructure(VM&);
     void ensureStructureForExtraProperties(VM&);
+    void finishFillingExtraProperties(VM&);
     static bool ensureStructureForExtraPropertiesIfNeeded(VM&, JSCell*);
     enum class ExtraPropertyStore : uint8_t { NotHandled, Replaced, Added };
     enum class ExtraPropertyStoreFlag : uint8_t {
@@ -260,6 +277,7 @@ public:
         NamesExtraPropertiesStructure = 4,
         IsKnownToBeAbsent = 8,
         IsMadeAtRunTime = 16,
+        BeginsDictionary = 32,
     };
     struct ExtraPropertyStoreResult {
         ExtraPropertyStore kind { ExtraPropertyStore::NotHandled };
@@ -267,6 +285,7 @@ public:
     };
     ExtraPropertyStoreResult tryStoreExtraProperty(VM&, PropertyName, JSValue, OptionSet<ExtraPropertyStoreFlag>);
     void willAddExtraProperty(VM&, PropertyName, bool isSpelledByProgram = true);
+    [[nodiscard]] bool mayAddExtraProperty(VM&, PropertyName, bool isSpelledByProgram = true);
 
     std::span<const uint16_t> keyOrder(State&) const;
     void forEachKeyInOrder(State& state, const Invocable<void(uint16_t)> auto& functor) const
@@ -294,6 +313,8 @@ public:
     std::optional<uint32_t> numberOfExtraKeysByStructure() const;
     void willCreateField(State&, const FieldData&);
     void didCreateField(State&, const FieldData&, bool withStorage = true);
+    bool tryRepeatCreationAtSlot(State&, uint32_t slotKey);
+    void rememberCreationAtSlot(State&, StructureID before, uint32_t orderAndCountBefore, uint32_t slotKey) const;
     void setKeyOrder(VM&, State&, std::span<const uint16_t> keys);
     bool trySetNumberedKeyOrder(VM&, State&, std::span<const uint16_t> keys);
     struct PlaceOfExtraKey {
@@ -307,6 +328,7 @@ public:
     void didRemoveExtraKey(VM&, State&, const PlaceOfExtraKey&);
     void forgetPlacesOfPositionedKeys(State&);
     void takeKeyOrderOfItsOwn(VM&, State&);
+    bool tryLeaveKeyOrderOfItsOwn(VM&, State&);
 
     bool tryCopyFieldsOf(VM&, const Object& source);
     static Object* tryCreateCopyOfFields(VM&, const Object& source);
@@ -321,7 +343,10 @@ public:
     JSCellButterfly* keysWithExtraProperties(VM&) const;
     JSArray* tryCreateKeysArrayWithExtraProperties(JSGlobalObject*) const;
     JSCellButterfly* keys(VM&, KeyListKind = KeyListKind::Strings) const;
+    JSCellButterfly* enumerableKeys(VM&) const;
     JSPropertyNameEnumerator* propertyNameEnumerator(JSGlobalObject*);
+    static JSPropertyNameEnumerator* enumeratorOfFinalObject(JSGlobalObject*, JSObject*);
+    static bool areEnumeratedNamesFixed(JSGlobalObject*, JSObject*, const JSPropertyNameEnumerator*);
     bool keysDependOnlyOnStructureAndOrderWord() const;
 
     static bool structureGuaranteesAbsence(Structure*, UniquedStringImpl*);
@@ -345,7 +370,7 @@ private:
 };
 static_assert(sizeof(Object) == offsetOfOrderWord);
 
-JSObject* extraPropertiesIfMade(const Object&);
+JSObject* extraPropertiesIfCreated(const Object&);
 
 class Extension {
 public:
@@ -419,7 +444,9 @@ ALWAYS_INLINE auto Object::readInlineUnboxed(const FieldData& field, const Funct
     case SlotRepresentation::JSValue:
         return functor(JSValue::decode(at<EncodedJSValue>(field.slot.offset)));
     case SlotRepresentation::Int32:
-        return functor(at<int32_t>(field.slot.offset));
+        if (int32_t word = at<int32_t>(field.slot.offset); word != absentInt32) [[likely]]
+            return functor(word);
+        return functor(read(field));
     case SlotRepresentation::Double:
         return functor(at<double>(field.slot.offset));
     case SlotRepresentation::Uint8:
@@ -488,10 +515,12 @@ void Object::forEachFieldInKeyOrder(State& state, const Invocable<void(uint16_t)
 }
 
 template<typename Visitor>
-ALWAYS_INLINE void Object::visitFields(Object* object, Visitor& visitor)
+ALWAYS_INLINE void Object::visitFields(Object* object, const CompiledStructure& structure, Visitor& visitor)
 {
-    const LayoutData& layout = object->layout();
+    const LayoutData& layout = structure.layout();
     visitReferences(object, layout, layout.hasExtension(), visitor);
+    if (object->hasExtraProperties() && structure.hasSpareWord()) [[unlikely]]
+        visitReferenceAt(object, *structure.extraPropertiesSlot(), visitor);
 }
 
 } } // namespace JSC::AOT

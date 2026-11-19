@@ -192,7 +192,8 @@ static void testUnderscoreProtoAndIndex(LoadedProgram& program)
     Identifier index = Identifier::from(vm, 0u);
     JSObject* object = constructEmptyObject(realm);
 
-    AOT_TEST_CHECK(isLastingRefusal(readAndClassify(program, object, underscoreProto)));
+    AOT_TEST_CHECK(isInheritedFrom(program, readAndClassify(program, object, underscoreProto), PropertyAnswerKind::Accessor, realm->objectPrototype(), underscoreProto));
+    AOT_TEST_CHECK(isLastingRefusal(readAndClassify(program, constructEmptyObject(vm, realm->nullPrototypeObjectStructure()), underscoreProto)));
     AOT_TEST_CHECK(isLastingRefusal(readAndClassify(program, object, index)));
     AOT_TEST_CHECK(presenceAfterRead(program, object, index) == Presence::Unknown);
 
@@ -277,6 +278,42 @@ static void testOtherPrototype(LoadedProgram& program)
     AOT_TEST_CHECK(isInheritedFrom(program, inherited, PropertyAnswerKind::Value, prototype, label) && dependsOnlyOn(inherited, prototype));
 }
 
+static void testDictionaryOnChain(LoadedProgram& program)
+{
+    VM& vm = program.vm();
+    JSGlobalObject* realm = program.realm();
+    Identifier label = Identifier::fromString(vm, "label"_s);
+    Identifier removed = Identifier::fromString(vm, "removed"_s);
+    Identifier other = Identifier::fromString(vm, "other"_s);
+    JSObject* prototype = constructEmptyObject(realm);
+    prototype->putDirect(vm, removed, jsNumber(1));
+    prototype->putDirect(vm, label, jsNumber(7));
+    prototype->didBecomePrototype(vm);
+    JSObject* object = constructEmptyObject(realm, prototype);
+
+    auto findsBoth = [&] {
+        PropertyAnswer inherited = readAndClassify(program, object, label);
+        PropertyAnswer absent = readAndClassify(program, object, other);
+        return isInheritedFrom(program, inherited, PropertyAnswerKind::Value, prototype, label) && dependsOnlyOn(inherited, prototype) && isAbsent(absent) && dependsOnlyOn(absent, prototype);
+    };
+    for (unsigned times = 0; times < 2; ++times) {
+        prototype->convertToDictionary(vm);
+        AOT_TEST_CHECK(findsBoth() && prototype->structure()->isCacheableDictionary());
+        prototype->flattenDictionaryObject(vm);
+        AOT_TEST_CHECK(findsBoth());
+    }
+
+    prototype->convertToUncacheableDictionary(vm);
+    AOT_TEST_CHECK(findsBoth() && prototype->structure()->isUncacheableDictionary());
+    AOT_TEST_CHECK(presenceAfterRead(program, object, other) == Presence::Absent);
+    AOT_TEST_CHECK(program.state().chainDependents->hasDependents(prototype));
+    AOT_TEST_CHECK(JSCell::deleteProperty(prototype, realm, removed));
+    PropertyOffset offsetBefore = prototype->getDirectOffset(vm, label);
+    prototype->flattenDictionaryObject(vm);
+    AOT_TEST_CHECK(prototype->getDirectOffset(vm, label) != offsetBefore && !program.state().chainDependents->hasDependents(prototype));
+    AOT_TEST_CHECK(findsBoth());
+}
+
 static void testOtherBase(LoadedProgram& program)
 {
     VM& vm = program.vm();
@@ -349,6 +386,37 @@ static JSString* createKeyWithoutAtom(VM& vm)
     JSString* key = jsString(vm, makeString("la"_s, "bel"_s));
     AOT_TEST_CHECK(!key->tryGetValueImpl()->isAtom());
     return key;
+}
+
+static void testLastIndexOfRegExps(LoadedProgram& program)
+{
+    VM& vm = program.vm();
+    Realms& realms = program.realms();
+    const Identifier& lastIndex = vm.propertyNames->lastIndex;
+
+    for (ASCIILiteral source : { "/a/g"_s, "/a/"_s, "new RegExp('a', 'y')"_s, "Object.assign(/a/g, { extra: 1 })"_s, "Object.freeze(/a/g)"_s, "new (class extends RegExp { get lastIndex() { return 7; } })('a')"_s }) {
+        JSObject* regExp = realms.object(program.realm(), source);
+        PropertyAnswer answer = readAndClassify(program, regExp, lastIndex);
+        AOT_TEST_CHECK_FOR_SOURCE(isOwn(answer, PropertyAnswerKind::LastIndexOfRegExp, invalidOffset), source);
+        Slot slot = slotFor(answer, regExp->structure());
+        AOT_TEST_CHECK_FOR_SOURCE(slot.kind == Slot::Kind::ArrayLength && slot.has(Slot::isLastIndexOfRegExp) && !slot.payloadBits(), source);
+    }
+    Slot lengthOfList = slotFor(readAndClassify(program, realms.object(program.realm(), "[1, 2]"_s), vm.propertyNames->length), realms.object(program.realm(), "[1, 2]"_s)->structure());
+    AOT_TEST_CHECK(lengthOfList.kind == Slot::Kind::ArrayLength && !lengthOfList.has(Slot::isLastIndexOfRegExp));
+
+    for (ASCIILiteral source : { "Object.create(/a/g)"_s, "({ lastIndex: 3 })"_s, "({ })"_s, "[1]"_s, "(function () { })"_s })
+        AOT_TEST_CHECK_FOR_SOURCE(readAndClassify(program, realms.object(program.realm(), source), lastIndex).kind != PropertyAnswerKind::LastIndexOfRegExp, source);
+    AOT_TEST_CHECK(readAndClassify(program, realms.object(program.realm(), "/a/g"_s), vm.propertyNames->length).kind != PropertyAnswerKind::LastIndexOfRegExp);
+}
+
+static void testEachPlaceOfAnswersWaitsByStateOfItsOwn()
+{
+    BitVector taken(SiteCacheState::numberOfStates);
+    for (uint32_t place = 0; place < SiteCacheState::numberOfStates; ++place) {
+        uint32_t offset = SiteCacheState::offsetOfStateOf(SiteCacheState::keyOfPlaceOfAnswers(place));
+        AOT_TEST_CHECK(!(offset % sizeof(SiteCacheState)) && offset / sizeof(SiteCacheState) < SiteCacheState::numberOfStates);
+        AOT_TEST_CHECK(!taken.quickSet(offset / sizeof(SiteCacheState)));
+    }
 }
 
 static void testIndexesAreNotNames(LoadedProgram& program)
@@ -839,8 +907,11 @@ std::span<const NativeTest> propertyLookupTests()
         { "property-lookup/underscore-proto-and-index"_s, withProgram<testUnderscoreProtoAndIndex> },
         { "property-lookup/dictionary"_s, withProgram<testDictionary> },
         { "property-lookup/other-prototype"_s, withProgram<testOtherPrototype> },
+        { "property-lookup/dictionary-on-chain"_s, withProgram<testDictionaryOnChain> },
         { "property-lookup/other-base"_s, withProgram<testOtherBase> },
         { "property-lookup/length-of-typed-arrays"_s, withProgram<testLengthOfTypedArrays> },
+        { "property-lookup/last-index-of-regexps"_s, withProgram<testLastIndexOfRegExps> },
+        { "property-lookup/each-place-of-answers-waits-by-a-state-of-its-own"_s, testEachPlaceOfAnswersWaitsByStateOfItsOwn },
         { "property-lookup/indexes-are-not-names"_s, withProgram<testIndexesAreNotNames> },
         { "property-lookup/absence-filter-names-what-stops-stores"_s, withProgram<testAbsenceFilterNamesWhatStopsStores> },
         { "property-lookup/slot-filed-by-number-is-copied-for-keys"_s, withProgram<testSlotFiledByNumberIsCopiedForKeys> },

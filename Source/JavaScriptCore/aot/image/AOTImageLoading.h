@@ -22,11 +22,11 @@ struct ImageFile {
 
 JS_EXPORT_PRIVATE Wire::ImageVerdict useImage(std::span<const uint8_t> image, std::optional<ImageFile>, const std::array<uint8_t, 16>& identity);
 
-#if OS(DARWIN)
+#if OS(DARWIN) || OS(LINUX)
 bool mapPrivateCloneOfImagePages(const Image&, std::span<const uint8_t> pagesOfImage, void* target);
 #endif
 #if OS(LINUX) || OS(FREEBSD)
-int openExecutableThatHolds(const Image&);
+int openExecutableContaining(const Image&);
 #endif
 
 } } // namespace JSC::AOT

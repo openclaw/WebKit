@@ -52,6 +52,10 @@ class ExecutablePool;
 class MacroAssembler;
 class VM;
 
+namespace AOT {
+class ImageAssembler;
+}
+
 namespace Yarr {
 
 class CodeAddressing;
@@ -90,7 +94,7 @@ public:
         m_isValid = false;
     }
 
-    bool LEGACY_NODELETE isEmpty() const { return m_characters.isEmpty(); }
+    NODELETE bool isEmpty() const { return m_characters.isEmpty(); }
     unsigned size() const { return m_characters.size(); }
     char32_t at(unsigned index) const { return m_characters.at(index); }
 
@@ -196,7 +200,7 @@ public:
         }
     }
 
-    void LEGACY_NODELETE setAll()
+    NODELETE void setAll()
     {
         m_count = mapSize;
     }
@@ -477,7 +481,9 @@ struct CodeGenerationRequest {
     std::optional<StringView> sampleString;
     YarrCodeBlock* codeBlock;
     const CodeGenerationPolicy& policy;
-    Function<std::unique_ptr<CodeAddressing>(CCallHelpers&)> createCodeAddressing;
+    Function<std::unique_ptr<CodeAddressing>(AOT::ImageAssembler&)> createCodeAddressing;
+    // Whether the pattern's flat programs remember failed searches. Requests for one pattern share it.
+    std::optional<bool>* remembersFailedSearches { nullptr };
 };
 
 struct CodeGenerationAttempt;

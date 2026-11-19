@@ -27,6 +27,9 @@ public:
     Condition isBeyondBarrierThreshold(CellPointer);
     void fenceAfterInitialization();
     void fenceAfterInitialization(const OperationContext& allocation);
+    void deferFenceToLastFirstStore();
+    void fenceAfterFirstStores(ValueID allocation);
+    void fenceAfterLateStores();
 
 private:
     enum class BarrierDecision : uint8_t { Emit, OwnerIsInFrame, OwnerCannotBeMarked, LaterBarrierCovers, StoresNoCell };
@@ -35,7 +38,6 @@ private:
     bool shouldEmitBarrier(const ValueContext& store, bool mayStoreCell);
     ValueID ownerOperandOf(const Operation& store) const;
     bool ownerIsInFrame(const Operation& store) const;
-    bool liesOnlyInFrames(ValueID owner) const;
     template<typename Functor> void forEachStoredOperand(const Operation& store, const Functor&) const;
     bool storesOnlyStringsOfVM(const Operation& store) const;
     void callBarrierStub(const OperationContext&, StubKey, std::initializer_list<LValue> operands, CallOptions = { });

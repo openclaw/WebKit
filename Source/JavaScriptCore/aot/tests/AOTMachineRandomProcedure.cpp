@@ -35,7 +35,7 @@ struct RandomProgram {
     enum class Kind : uint8_t { Compute, Copy, Swap, Load, Store, Patch, Check, Split, If, Loop, Break, Continue, Switch, Try, Return };
     enum class PatchEffects : uint8_t { Call, WritesLocalState, ReadsEverything, Nothing };
 
-    enum Flag : uint8_t {
+    enum Flag : uint16_t {
         UsesImmediate = 1 << 0,
         ComparesWithImmediate = 1 << 1,
         TestsBits = 1 << 2,
@@ -44,6 +44,8 @@ struct RandomProgram {
         KeepsScope = 1 << 5,
         ReturnsEverything = 1 << 6,
         ScalesSecondOperand = 1 << 7,
+        CombinesOperands = 1 << 8,
+        CombinesOnLeft = 1 << 9,
     };
 
     struct Statement {
@@ -51,7 +53,7 @@ struct RandomProgram {
         Opcode opcode { Nop };
         Opcode relation { Equal };
         Opcode secondRelation { Equal };
-        uint8_t flags { 0 };
+        uint16_t flags { 0 };
         uint8_t destination { 0 };
         std::array<uint8_t, 2> operands { 0, 0 };
         std::array<uint8_t, 2> compared { 0, 0 };
@@ -196,6 +198,7 @@ static uint64_t canonicalRandomBits(TypeKind type, uint64_t bits)
     case Int64:
     case Double:
         return bits;
+    case Vector128:
     case Void:
     case Tuple:
         break;
@@ -226,6 +229,7 @@ static uint64_t bitsOfRandomResult(TypeKind type, uint64_t sum)
         return bitsOfRandomValue(static_cast<float>(number));
     case Double:
         return bitsOfRandomValue(number);
+    case Vector128:
     case Void:
     case Tuple:
         break;
@@ -306,6 +310,10 @@ static uint64_t evaluateRandomOperationOn(Opcode opcode, T left, T right)
     case ZShr:
         if constexpr (isInteger)
             return answer(a >> (b & amountMask));
+        break;
+    case RotR:
+        if constexpr (isInteger)
+            return answer(std::rotr(a, static_cast<int>(b & amountMask)));
         break;
     case Clz:
         if constexpr (isInteger)
@@ -432,6 +440,7 @@ static uint64_t evaluateRandomOperation(Opcode opcode, TypeKind type, uint64_t l
         return evaluateRandomOperationOn<float>(opcode, std::bit_cast<float>(static_cast<uint32_t>(left)), std::bit_cast<float>(static_cast<uint32_t>(right)));
     case Double:
         return evaluateRandomOperationOn<double>(opcode, std::bit_cast<double>(left), std::bit_cast<double>(right));
+    case Vector128:
     case Void:
     case Tuple:
         break;
@@ -611,6 +620,7 @@ static void storeRandomResult(CCallHelpers& jit, const ValueRep& rep, TypeKind t
             jit.storeDouble(number, word);
         return;
     }
+    case Vector128:
     case Void:
     case Tuple:
         break;
@@ -896,6 +906,7 @@ private:
             if (chance(70))
                 return bitsOfRandomValue(numbers[pick(numbers.size())]);
             return bitsOfRandomValue(static_cast<double>(static_cast<int32_t>(m_random.getUint32())) / 8);
+        case Vector128:
         case Void:
         case Tuple:
             break;
@@ -914,6 +925,7 @@ private:
             return bitsOfRandomValue(static_cast<float>(static_cast<int16_t>(bits)) / 4 + 0.125f);
         case Double:
             return bitsOfRandomValue(static_cast<double>(static_cast<int32_t>(bits)) / 16 + 0.03125);
+        case Vector128:
         case Void:
         case Tuple:
             break;
@@ -1025,6 +1037,7 @@ private:
             s.opcode = DoubleToFloat;
             s.operands[0] = variableOf(Double);
             return s;
+        case Vector128:
         case Void:
         case Int64:
         case Tuple:
@@ -1084,6 +1097,49 @@ private:
         s.relation = relationOf(Int32);
     }
 
+    void setCombinedOperands(Statement& s, TypeKind type)
+    {
+        static constexpr std::array readersOfShifts { Add, Sub, BitAnd, BitOr, BitXor };
+        static constexpr std::array shifts { Shl, SShr, ZShr };
+        s.flags |= RandomProgram::CombinesOperands;
+        s.operands[0] = variableOf(type);
+        s.operands[1] = variableOf(type);
+        if (chance(50))
+            s.flags |= RandomProgram::CombinesOnLeft;
+        if (type == Int64 && m_count[Int32] && chance(35)) {
+            s.operands[1] = variableOf(Int32);
+            s.secondRelation = chance(50) ? ZExt32 : SExt32;
+            s.opcode = chance(50) ? Select : chance(50) ? Add : Sub;
+            s.relation = relationOf(Int64);
+            s.compared[0] = variableOf(Int64);
+            return;
+        }
+        unsigned roll = pick(100);
+        if (roll < 25) {
+            s.opcode = chance(50) ? Add : Sub;
+            s.secondRelation = Mul;
+            s.compared[0] = variableOf(type);
+            return;
+        }
+
+        s.secondRelation = shifts[pick(shifts.size())];
+        s.flags |= RandomProgram::ComparesWithImmediate;
+        s.comparedImmediate = pick(type == Int32 ? 34 : 66);
+        if (roll < 60) {
+            s.opcode = readersOfShifts[pick(readersOfShifts.size())];
+            return;
+        }
+        s.flags |= RandomProgram::UsesImmediate | RandomProgram::CombinesOnLeft;
+        if (roll < 80) {
+            s.opcode = BitAnd;
+            s.immediate = canonicalRandomBits(type, (uint64_t { 1 } << (1 + pick(62))) - (chance(90) ? 1 : 3));
+            return;
+        }
+        s.secondRelation = Shl;
+        s.opcode = chance(50) ? SShr : ZShr;
+        s.immediate = pick(type == Int32 ? 34 : 66);
+    }
+
     void setDivision(Statement& s, TypeKind type)
     {
         static constexpr std::array operations { Div, UDiv, Mod, UMod };
@@ -1120,7 +1176,9 @@ private:
         }
         switch (type) {
         case Int64:
-            if (m_options.withScaledSums && chance(30))
+            if (m_options.withCombinedOperands && chance(40))
+                setCombinedOperands(s, Int64);
+            else if (m_options.withScaledSums && chance(30))
                 setScaledSum(s);
             else if (roll < 55)
                 setBinary(s, integerOperations[pick(integerOperations.size())], Int64);
@@ -1138,7 +1196,9 @@ private:
                 setUnary(s, BitwiseCast, Double);
             return s;
         case Int32:
-            if (roll < 40)
+            if (m_options.withCombinedOperands && chance(40))
+                setCombinedOperands(s, Int32);
+            else if (roll < 40)
                 setBinary(s, integerOperations[pick(integerOperations.size())], Int32);
             else if (roll < 50)
                 setShift(s, Int32);
@@ -1174,6 +1234,7 @@ private:
             else
                 setUnary(s, BitwiseCast, Int32);
             return s;
+        case Vector128:
         case Void:
         case Tuple:
             break;
@@ -1656,6 +1717,7 @@ private:
             return m_out.constFloat(std::bit_cast<float>(static_cast<uint32_t>(bits)));
         case Double:
             return m_out.constDouble(std::bit_cast<double>(bits));
+        case Vector128:
         case Void:
         case Tuple:
             break;
@@ -1673,6 +1735,7 @@ private:
             return m_out.bitwiseCast(m_out.opaque(constant(Int32, bits)), Float);
         case Double:
             return m_out.bitwiseCast(m_out.opaque(constant(Int64, bits)), Double);
+        case Vector128:
         case Void:
         case Tuple:
             break;
@@ -1700,6 +1763,7 @@ private:
             return m_out.zeroExtPtr(m_out.bitCast(value, Int32));
         case Double:
             return m_out.bitCast(value, Int64);
+        case Vector128:
         case Void:
         case Tuple:
             break;
@@ -1742,6 +1806,22 @@ private:
                 index = m_out.unary(s.secondRelation, index);
             LValue sum = m_out.binary(Add, m_current[s.operands[0]], m_out.binary(Shl, index, constant(Int32, s.immediate)));
             return s.opcode == Select ? m_out.select(conditionThatMayFold(s), sum, index) : sum;
+        }
+        if (s.flags & RandomProgram::CombinesOperands) {
+            bool combinesOnLeft = s.flags & RandomProgram::CombinesOnLeft;
+            if (s.secondRelation == ZExt32 || s.secondRelation == SExt32) {
+                LValue extension = m_out.unary(s.secondRelation, m_current[s.operands[1]]);
+                LValue left = combinesOnLeft ? extension : m_current[s.operands[0]];
+                LValue right = combinesOnLeft ? m_current[s.operands[0]] : extension;
+                if (s.opcode == Select)
+                    return m_out.select(m_out.binary(s.relation, left, right), m_current[s.operands[0]], m_current[s.compared[0]]);
+                return m_out.binary(s.opcode, left, right);
+            }
+            auto constantFor = [&](Opcode opcode, uint64_t bits) { return constant(isRandomShift(opcode) ? Int32 : result, bits); };
+            LValue rightOfInner = s.flags & RandomProgram::ComparesWithImmediate ? constantFor(s.secondRelation, s.comparedImmediate) : m_current[s.compared[0]];
+            LValue inner = m_out.binary(s.secondRelation, m_current[s.operands[1]], rightOfInner);
+            LValue other = usesImmediate ? constantFor(s.opcode, s.immediate) : m_current[s.operands[0]];
+            return combinesOnLeft ? m_out.binary(s.opcode, inner, other) : m_out.binary(s.opcode, other, inner);
         }
         if (s.opcode == Select)
             return m_out.select(conditionThatMayFold(s), m_current[s.operands[0]], m_current[s.operands[1]]);
@@ -2141,6 +2221,7 @@ private:
         patch->numGPScratchRegisters = record.numberOfGPScratchRegisters;
         patch->numFPScratchRegisters = record.numberOfFPScratchRegisters;
         patch->setRunsWithoutFrame(record.runsWithoutFrame);
+        patch->setShowsRegistersToCollector(record.runsWithoutFrame);
         patch->setBringsOperandsToTheirRegisters(!(shape->number % 2));
         patch->setGenerator([shape](CCallHelpers& jit, const PatchParameters& params) {
             generateRandomPatch(jit, params, *shape);
@@ -2311,6 +2392,23 @@ private:
             if (s.opcode == Select && !condition(s))
                 return index;
             return m_values[s.operands[0]] + (index << (s.immediate & 63));
+        }
+        if (s.flags & RandomProgram::CombinesOperands) {
+            TypeKind type = typeOf(s.destination);
+            bool combinesOnLeft = s.flags & RandomProgram::CombinesOnLeft;
+            if (s.secondRelation == ZExt32 || s.secondRelation == SExt32) {
+                uint32_t word = static_cast<uint32_t>(m_values[s.operands[1]]);
+                uint64_t extension = s.secondRelation == ZExt32 ? word : static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(word)));
+                uint64_t left = combinesOnLeft ? extension : m_values[s.operands[0]];
+                uint64_t right = combinesOnLeft ? m_values[s.operands[0]] : extension;
+                if (s.opcode == Select)
+                    return m_values[evaluateRandomOperation(s.relation, Int64, left, right) ? s.operands[0] : s.compared[0]];
+                return evaluateRandomOperation(s.opcode, Int64, left, right);
+            }
+            uint64_t rightOfInner = s.flags & RandomProgram::ComparesWithImmediate ? s.comparedImmediate : m_values[s.compared[0]];
+            uint64_t inner = canonicalRandomBits(type, evaluateRandomOperation(s.secondRelation, type, m_values[s.operands[1]], rightOfInner));
+            uint64_t other = usesImmediate ? s.immediate : m_values[s.operands[0]];
+            return canonicalRandomBits(type, evaluateRandomOperation(s.opcode, type, combinesOnLeft ? inner : other, combinesOnLeft ? other : inner));
         }
         if (s.opcode == Select)
             return m_values[s.operands[condition(s) ? 0 : 1]];

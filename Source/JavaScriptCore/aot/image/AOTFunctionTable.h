@@ -26,6 +26,8 @@ class Plan;
 class Program;
 }
 
+struct SharedCode;
+
 struct FrameTable {
     Vector<ImageFrame> frames;
     Vector<uint32_t> frameOf;
@@ -37,8 +39,8 @@ struct FunctionTableInputs {
     const LinkedFunctions& functions;
     const ImageNumbers& numbers;
     const CodeLayout& layout;
+    const SharedCode& sharedCode;
     const CodeIndex& index;
-    std::span<const OptionSet<ImageFunctionFlag>> sideTableFlags;
     std::span<const uint32_t> sideTableOffsets;
     const ProgramTables& programTables;
     bool hasPositions;

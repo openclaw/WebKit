@@ -56,7 +56,7 @@ namespace JSC { namespace AOT {
 
 using namespace Typed;
 
-enum class Subcommand : uint8_t { All, Run, Native, List, Command, Print, Compile, WriteOut, FuzzAllocation };
+enum class Subcommand : uint8_t { All, Run, Native, List, Command, Print, Compile, WriteOut, FuzzAllocation, FuzzExecution };
 
 struct SubcommandEntry {
     ASCIILiteral name;
@@ -77,6 +77,7 @@ static constexpr ASCIILiteral commandFlags[] { programOfTagFlag };
 static constexpr ASCIILiteral printFlags[] { wireFlag, programOfTagFlag };
 static constexpr ASCIILiteral compileFlags[] { "--output"_s, programOfTagFlag };
 static constexpr ASCIILiteral fuzzAllocationFlags[] { "--seed"_s, "--count"_s, "--blocks"_s, "--show"_s };
+static constexpr ASCIILiteral fuzzExecutionFlags[] { "--seed"_s, "--count"_s, "--checked"_s, "--unchecked"_s, "--show"_s };
 
 static constexpr SubcommandEntry subcommandEntries[] {
     { "all"_s, Subcommand::All, { }, "<folder>"_s },
@@ -88,6 +89,7 @@ static constexpr SubcommandEntry subcommandEntries[] {
     { "compile"_s, Subcommand::Compile, compileFlags, "<program> --output=<image> { option word | statistic } [mechanisms=<list>] [--program-of-tag]"_s },
     { "write-out"_s, Subcommand::WriteOut, { }, "<file>"_s },
     { "fuzz-allocation"_s, Subcommand::FuzzAllocation, fuzzAllocationFlags, "[--seed=<n>] [--count=<n>] [--blocks=<n>] [--show=<seed>]"_s },
+    { "fuzz-execution"_s, Subcommand::FuzzExecution, fuzzExecutionFlags, "[--seed=<n>] [--count=<n>] [--checked] [--unchecked] [--show=<seed>]"_s },
 };
 
 static const SubcommandEntry* findSubcommand(StringView name)
@@ -182,10 +184,7 @@ static std::optional<CommandLine> takeJSCOptions(std::span<char*> arguments, std
 static int reportTestResults(PrintStream& out, const NativeTestSummary& nativeTests, const TestRunSummary& files)
 {
     unsigned failed = nativeTests.failed + files.failed;
-    out.print(nativeTests.passed + files.passed, " passed, ", failed, " failed, ", nativeTests.todo + files.todo, " todo");
-    if (nativeTests.leftOut)
-        out.print(", ", nativeTests.leftOut, " left out: they need entries of Bun, and this program has the table of the stand-in host");
-    out.println();
+    out.println(nativeTests.passed + files.passed, " passed, ", failed, " failed, ", nativeTests.todo + files.todo, " todo");
     return failed ? exitCodeForFailure : exitCodeForSuccess;
 }
 
@@ -303,7 +302,7 @@ static int runNativeSubcommand(std::span<const String> arguments, const ChildPro
     FilePrintStream out(stdout, FilePrintStream::Borrow);
     NativeTestSummary summary = runNativeTests(request, out);
     int exitCode = reportTestResults(out, summary, { });
-    if (!summary.passed && !summary.failed && !summary.todo && !summary.leftOut && hasFilter && request.part.count == 1)
+    if (!summary.passed && !summary.failed && !summary.todo && hasFilter && request.part.count == 1)
         return reportError(exitCodeForFailure, "testaot: no native test matches ", request.filter);
     return exitCode;
 }
@@ -363,13 +362,13 @@ static void listRowsOfEffects(PrintStream& out)
         printParts(row, !effects.mayRunOtherCode(), !effects.mayThrowByRule(), !!Typed::lanesNotWrittenInEffectsNet(effects), !effects.mayCollect);
     };
     for (Typed::Opcode opcode : allMembersOf<Typed::Opcode>)
-        printEffects(Typed::firstRowOfOperationsInEffectsNet + static_cast<unsigned>(opcode), Typed::declaredBoundOf(opcode));
+        printEffects(Typed::firstOperationRowInEffectsNet + static_cast<unsigned>(opcode), Typed::declaredBoundOf(opcode));
     for (unsigned entry = 0; entry < numberOfEntries; ++entry) {
         if (runtimeOperationOf(static_cast<AOT::Entry>(entry)))
-            printEffects(Typed::firstRowOfRuntimeOperationsInEffectsNet + entry, effectsOf(static_cast<AOT::Entry>(entry)));
+            printEffects(Typed::firstRuntimeOperationRowInEffectsNet + entry, effectsOf(static_cast<AOT::Entry>(entry)));
     }
     for (unsigned family = 0; family < numberOfStubFamilies; ++family)
-        print("any"_s, Typed::firstRowOfStubsInEffectsNet + family);
+        print("any"_s, Typed::firstStubRowInEffectsNet + family);
     const BuiltinTable& table = BuiltinTable::singleton();
     for (unsigned builtin = 1; builtin < table.builtinCount(); ++builtin) {
         bool runsNoOtherCode = false;
@@ -385,7 +384,7 @@ static void listRowsOfEffects(PrintStream& out)
             throwsNothing |= !overload.throws();
             doesNotCollect |= overload.effects.capability == BuiltinCapability::None;
         }
-        printParts(Typed::firstRowOfBuiltinsInEffectsNet + builtin, runsNoOtherCode, throwsNothing, leavesHeapsAlone, doesNotCollect);
+        printParts(Typed::firstBuiltinRowInEffectsNet + builtin, runsNoOtherCode, throwsNothing, leavesHeapsAlone, doesNotCollect);
     }
 }
 
@@ -466,7 +465,7 @@ int main(int argc, char** argv)
         if (!parsedCommandLine)
             return exitCodeForInvalidCommandLine;
         if (JSC::Options::aotImagePath()) {
-            JSC::Options::useSharedArrayBuffer() = true;
+            JSC::Options::alwaysUseSharedArrayBuffer() = true;
             JSC::Options::useTemporal() = true;
             JSC::Options::useExplicitResourceManagement() = true;
             for (const String& option : parsedCommandLine->jscOptions)
@@ -528,6 +527,8 @@ int main(int argc, char** argv)
         return runWriteOutSubcommand(arguments);
     case Subcommand::FuzzAllocation:
         return runFuzzAllocationSubcommand(arguments);
+    case Subcommand::FuzzExecution:
+        return runFuzzExecutionSubcommand(arguments);
     }
     RELEASE_ASSERT_NOT_REACHED();
 }

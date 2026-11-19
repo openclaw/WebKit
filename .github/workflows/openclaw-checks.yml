@@ -157,6 +157,7 @@ jobs:
           echo '83de8839f3fb0d9caf982a0435da3fa8c4fbe2c817dfec99def310dc7e6a8404  '"$tools/cmake.sh" | sha256sum -c -
           sh "$tools/cmake.sh" --skip-license --prefix="$tools/cmake"
           rustup toolchain install nightly-2026-09-15 --profile minimal --component rust-src
+          rustup toolchain install nightly-2026-11-14 --profile minimal --component rust-src
           echo 'RUSTUP_TOOLCHAIN=nightly-2026-09-15' >> "$GITHUB_ENV"
           echo "$tools/llvm/bin" >> "$GITHUB_PATH"
           echo "$tools/cmake/bin" >> "$GITHUB_PATH"

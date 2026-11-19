@@ -110,6 +110,78 @@ static ComparedNumbers comparedNumbersOf(const Test& test)
     return { left, InvalidFPRReg, areFloats };
 }
 
+template<int width>
+static void compareWithUInt12(CCallHelpers& jit, GPRReg left, int64_t constant)
+{
+    uint64_t magnitude = constant < 0 ? uint64_t { 0 } - static_cast<uint64_t>(constant) : static_cast<uint64_t>(constant);
+    int shift = magnitude & ~uint64_t { 0xfff } ? 12 : 0;
+    RELEASE_ASSERT(!(magnitude & ~(uint64_t { 0xfff } << shift)));
+    UInt12 immediate(static_cast<int>(magnitude >> shift));
+    if (constant < 0)
+        jit.m_assembler.cmn<width>(left, immediate, shift);
+    else
+        jit.m_assembler.cmp<width>(left, immediate, shift);
+}
+
+static void compareWithExtendedWord(CCallHelpers& jit, const Test& test)
+{
+    ASSERT(test.kind == Test::CompareIntegers && test.width == Width64 && test.extensionOfRight != IndexExtension::None);
+    ARM64Assembler::ExtendType type = test.extensionOfRight == IndexExtension::ZeroExtend32 ? ARM64Assembler::UXTW : ARM64Assembler::SXTW;
+    jit.m_assembler.cmp<64>(gprOfComparisonOperand(test.left), gprOfComparisonOperand(test.right), type, 0);
+}
+
+static std::optional<ConstantComparison> constantComparisonOfTest(const Test& test)
+{
+    if (test.kind != Test::CompareIntegers || !test.right.isImmediate())
+        return std::nullopt;
+    std::optional<ConstantComparison> found = findConstantComparison(test.relation, test.width, test.rightConstant);
+    RELEASE_ASSERT(found);
+    return found;
+}
+
+static ARM64Assembler::Condition setFlagsForConstantComparison(CCallHelpers& jit, const Test& test, const ConstantComparison& comparison)
+{
+    bool is32 = test.width == Width32;
+    GPRReg left = gprOfComparisonOperand(test.left);
+    if (comparison.kind != ConstantComparison::HighBits) {
+        if (is32)
+            compareWithUInt12<32>(jit, left, comparison.constant);
+        else
+            compareWithUInt12<64>(jit, left, comparison.constant);
+        if (comparison.kind == ConstantComparison::Overflow)
+            return comparison.holdsOnOverflow ? ARM64Assembler::ConditionVS : ARM64Assembler::ConditionVC;
+        return static_cast<ARM64Assembler::Condition>(*conditionsOfComparison(comparison.relation).ofIntegers);
+    }
+
+    bool isSigned = comparison.relation == LessThan || comparison.relation == GreaterEqual;
+    ARM64Assembler::ShiftType shift = isSigned ? ARM64Assembler::ASR : ARM64Assembler::LSR;
+    if (is32)
+        jit.m_assembler.cmp<32>(ARM64Registers::zr, left, shift, comparison.shift);
+    else
+        jit.m_assembler.cmp<64>(ARM64Registers::zr, left, shift, comparison.shift);
+    switch (comparison.relation) {
+    case LessThan:
+        return ARM64Assembler::ConditionGE;
+    case GreaterEqual:
+        return ARM64Assembler::ConditionLT;
+    case Below:
+        return ARM64Assembler::ConditionEQ;
+    case AboveEqual:
+        return ARM64Assembler::ConditionNE;
+    default:
+        break;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+static MacroAssembler::Jump jumpOnFlags(CCallHelpers& jit, ARM64Assembler::Condition condition)
+{
+    jit.m_assembler.b_cond(condition);
+    AssemblerLabel label = jit.m_assembler.labelIgnoringWatchpoints();
+    jit.m_assembler.nop();
+    return MacroAssembler::Jump(label, ARM64Assembler::JumpCondition, condition);
+}
+
 static MacroAssembler::Jump branchOnComparedIntegers(CCallHelpers& jit, MacroAssembler::RelationalCondition condition, const Test& test)
 {
     bool is32 = test.width == Width32;
@@ -152,7 +224,15 @@ static MacroAssembler::Jump branchOnComparedNumbers(CCallHelpers& jit, MacroAsse
 
 static MacroAssembler::RelationalCondition setFlagsForTestOfIntegers(CCallHelpers& jit, const Test& test)
 {
+    std::optional<ConstantComparison> comparison = constantComparisonOfTest(test);
+    if (comparison && (comparison->kind != ConstantComparison::Immediate || comparison->relation != test.relation))
+        return static_cast<MacroAssembler::RelationalCondition>(setFlagsForConstantComparison(jit, test, *comparison));
+
     MacroAssembler::RelationalCondition condition = relationalConditionOfTest(test);
+    if (test.extensionOfRight != IndexExtension::None) {
+        compareWithExtendedWord(jit, test);
+        return condition;
+    }
     bool asksForEquality = condition == MacroAssembler::Equal || condition == MacroAssembler::NotEqual;
     bool testsBits = test.kind == Test::TestBits;
     bool is32 = test.width == Width32;
@@ -255,7 +335,8 @@ static Test testOfUnfusedComparison(const Encoder& encoder, const Step& step)
     const Operation* comparison = step.operation;
     const Operation* left = comparison->child(0);
     const Operation* right = comparison->child(1);
-    RELEASE_ASSERT(!encoder.m_liveness.isFused(left) && !encoder.m_liveness.isFused(right));
+    for (const Operation* operand : { left, right })
+        RELEASE_ASSERT(!encoder.m_liveness.isFused(operand) || operand->opcode() == Trunc || namesWord(operand));
 
     LeafCursor leaves(step);
     Location leftLocation = leaves.take();
@@ -277,7 +358,18 @@ MacroAssembler::JumpList Encoder::branchOn(const Test& test, bool whenItHolds)
     MacroAssembler::JumpList jumps;
     switch (test.kind) {
     case Test::CompareIntegers: {
+        std::optional<ConstantComparison> comparison = constantComparisonOfTest(test);
+        if (comparison && (comparison->kind != ConstantComparison::Immediate || comparison->relation != test.relation)) {
+            ARM64Assembler::Condition condition = setFlagsForConstantComparison(m_jit, test, *comparison);
+            jumps.append(jumpOnFlags(m_jit, whenItHolds ? condition : ARM64Assembler::invert(condition)));
+            return jumps;
+        }
         MacroAssembler::RelationalCondition condition = relationalConditionOfTest(test);
+        if (test.extensionOfRight != IndexExtension::None) {
+            compareWithExtendedWord(m_jit, test);
+            jumps.append(jumpOnFlags(m_jit, static_cast<ARM64Assembler::Condition>(whenItHolds ? condition : MacroAssembler::invert(condition))));
+            return jumps;
+        }
         jumps.append(branchOnComparedIntegers(m_jit, whenItHolds ? condition : MacroAssembler::invert(condition), test));
         return jumps;
     }
@@ -319,7 +411,8 @@ void Encoder::encodeSelect(const Step& step)
     ASSERT(step.kind == StepKind::Execute);
     const Operation* select = step.operation;
     ASSERT(select->opcode() == Select);
-    RELEASE_ASSERT(!m_liveness.isFused(select->child(1)) && !m_liveness.isFused(select->child(2)));
+    for (unsigned index : { 1u, 2u })
+        RELEASE_ASSERT(!m_liveness.isFused(select->child(index)) || select->child(index)->opcode() == Trunc || namesWord(select->child(index)));
 
     LeafCursor leaves(step);
     Test test = resolveTest(select, leaves);
@@ -328,14 +421,32 @@ void Encoder::encodeSelect(const Step& step)
 
     AllowMacroScratchRegisterUsage allowScratch(m_jit);
     switch (select->type().kind()) {
+    case Int64: {
+        bool holdsRarely = isEndOfExactIntegers(select->child(1));
+        GPRReg destination = gprOfComparisonOperand(step.destination);
+        GPRReg rare = gprOfComparisonOperand(holdsRarely ? whenNotZero : whenZero);
+        if (test.kind != Test::CompareNumbers && holdsRarely != isEndOfExactIntegers(select->child(2)) && rare != destination && placeOf(m_block).loop != noLoop) {
+            MacroAssembler::RelationalCondition condition = setFlagsForTestOfIntegers(m_jit, test);
+            MacroAssembler::Jump isRare = m_jit.branchOnFlags(holdsRarely ? condition : MacroAssembler::invert(condition));
+            m_jit.move(gprOfComparisonOperand(holdsRarely ? whenZero : whenNotZero), destination);
+            auto moveRareArm = [rare, destination, isRare, done = m_jit.label()](CCallHelpers& jit) {
+                isRare.link(&jit);
+                jit.move(rare, destination);
+                jit.jump().linkTo(done, &jit);
+            };
+            addLatePath(m_arena.create<LatePathOf<decltype(moveRareArm)>>(moveRareArm));
+            return;
+        }
+        [[fallthrough]];
+    }
     case Int32:
-    case Int64:
         selectIntegerOnTest(m_jit, test, gprOfComparisonOperand(whenNotZero), gprOfComparisonOperand(whenZero), gprOfComparisonOperand(step.destination));
         return;
     case Float:
     case Double:
         selectNumberOnTest(m_jit, test, fprOfComparisonOperand(whenNotZero), fprOfComparisonOperand(whenZero), fprOfComparisonOperand(step.destination));
         return;
+    case Vector128:
     case Void:
     case Tuple:
         break;

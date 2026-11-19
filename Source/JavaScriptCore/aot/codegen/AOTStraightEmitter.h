@@ -7,6 +7,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
 #include "AOTBodyIndex.h"
 #include "AOTCodeGenerator.h"
 #include "AOTCodeRecords.h"
@@ -78,12 +79,18 @@ public:
     StraightEmitter(BuildContext&, TypeArena&, const CodeGenerationInputs&, CodeUnit, const BodyIndex&, CodeRecords&, Machine::Arena&);
 
     static bool covers(const CodeGenerationInputs&, CodeUnit, const BodyIndex&);
+    static bool isResumeBody(const CodeGenerationInputs&, CodeUnit);
 
     uint32_t numberOfSlots() const { return m_numberOfSlots; }
-    bool entersUnits() const { return m_entersUnits; }
+    bool entersUnits() const { return m_entersUnits || m_generatorFrame; }
+    bool resumesGenerator() const { return !!m_generatorFrame; }
     uint32_t wordsOfScratchArea() const { return m_wordsOfScratchArea; }
     void generate(CCallHelpers&, const ArgumentLocations&, unsigned bytesBelowFrameRecord);
     bool hasFailed() const { return m_hasFailed; }
+    uint32_t numberOfRawSlotsOfScopesRead() const { return m_numberOfRawSlotsOfScopesRead; }
+    uint32_t numberOfNumbersToldByTheirWord() const { return m_numberOfNumbersToldByTheirWord; }
+    uint32_t numberOfReadsThatAskTheirSite() const { return m_numberOfReadsThatAskTheirSite; }
+    void countReadThatAsksItsSite() { ++m_numberOfReadsThatAskTheirSite; }
     Opcode opcodeThatFailed() const { return m_opcodeThatFailed; }
 
     BuildContext& build() { return m_build; }
@@ -104,6 +111,11 @@ public:
     CodeRecords& records() { return m_records; }
     MentionList& mentions() { return m_records.mentions; }
     RelocationRecorder& relocations() { return m_records.relocations; }
+    void recordInlined(std::span<const uint8_t> programString)
+    {
+        if (m_records.inlinedStrings.areRecorded()) [[unlikely]]
+            m_records.inlinedStrings.append(programString);
+    }
     BodyBlock currentBlock() const { return m_block; }
     bool isNeverEntered(BlockID block) const { return !m_blocksNeverEntered.empty() && std::ranges::binary_search(m_blocksNeverEntered, block); }
 
@@ -189,11 +201,13 @@ public:
     static std::optional<StraightTest> testOfWordAlone(TypeID);
     void testType(GPRReg boxed, TypeID tested, GPRReg zeroOrOne);
     void trapUnlessOfType(ValueID, TypeID tested, ProofSource, Origin);
+    void trapOnFalseProof(GPRReg boxed, TypeID tested, ProofSource, Origin);
 
     void loadSlot(GPRReg cell, const PlacedSlot&, GPRReg boxedResult);
     void storeSlot(GPRReg cell, const PlacedSlot&, GPRReg boxed);
     void loadVariable(VariableID, GPRReg boxedResult);
     void storeVariable(VariableID, GPRReg boxed);
+    void storeVariable(VariableID, ValueID);
     void barrierAfterStore(GPRReg owner);
 
     COLD NEVER_INLINE void fail(Opcode);
@@ -231,8 +245,10 @@ public:
     void generateArray(const BodyValue&);
     void generateArrayIntrinsic(const BodyValue&);
     void generateClass(const BodyValue&);
+    bool classRecordCreatesMemberDefinedBy(const BodyValue&);
     void generateCollectionIntrinsic(const BodyValue&);
     void generateEngineIntrinsic(const BodyValue&);
+    void generateYield(const BodyValue&);
     void generateEval(const BodyValue&);
     void generateException(const BodyValue&);
     void generateForIn(const BodyValue&);
@@ -278,22 +294,24 @@ private:
     static constexpr uint32_t mostWordsOfFrame = 512;
 
     void takeParameters(const ArgumentLocations&);
+    void emitResumeDispatch(const ArgumentLocations&);
+    void findResumableBlocks();
+    TypeID testableTypeOfCell(const LinkedCell&);
+    void checkStoredValueProofs(const BodyValue&);
+    void checkScopeReadProof(const BodyValue&);
+    void checkEscapingScopeSlots(uint32_t position, bool isAtTerminator);
+    bool isNeverResumed(BlockID block) const { return m_generatorFrame && !m_blocksAfterYields.quickGet(block.index()) && !m_yieldBlocks.quickGet(block.index()); }
+    CCallHelpers::Address addressOfGeneratorSlot(uint32_t slot) const { return CCallHelpers::Address(GPRInfo::callFrameRegister, -static_cast<int32_t>(sizeof(EncodedJSValue) * (slot + 1))); }
     void generateBlock(BodyBlock);
 
     struct ImportCheck {
         VariableID variable;
         ModuleFailureID failure;
     };
-    struct ListOfImportChecks {
-        uint16_t entry;
-        Vector<ImportCheck, 8> checks;
-    };
     static constexpr uint32_t fewestImportChecksInList = 2;
-    static constexpr uint16_t firstEntryOfListOfImportChecks = 0xf000;
     std::optional<ImportCheck> importCheckIn(BodyBlock) const;
     Vector<ImportCheck, 8> importChecksFrom(BodyBlock) const;
-    void generateImportChecks(BodyBlock first, Vector<ImportCheck, 8>&& checks);
-    void writeListsOfImportChecks();
+    void generateImportChecks(BodyBlock first, std::span<const ImportCheck>);
     void generateOperation(const BodyValue&);
     bool leavesDefinitionToFirstRead(const BodyValue&);
     void generateTerminator(BodyBlock, const BodyTerminator&);
@@ -316,6 +334,7 @@ private:
     bool isCopiedInRegister(ValueID) const;
     std::optional<BodyUser> onlyReader(ValueID) const;
     void findProofsNobodyReads(const BodyTerminator&);
+    void storeValueReadBySeveralArguments(std::span<const StraightArgument>);
     void bringAll(std::span<const StraightArgument>, NOESCAPE const Invocable<GPRReg(size_t)> auto& registerOf, ArgumentMoves* leftToThunk = nullptr);
     bool leavesArgumentsToThunk(StubKey, const StraightCallOptions&) const;
     void branchOnCondition(ValueID condition, bool jumpsIfTrue, BlockID);
@@ -334,6 +353,16 @@ private:
     BodyBlock m_block;
     static constexpr uint32_t slotWasGivenBack = std::numeric_limits<uint32_t>::max();
 
+    static constexpr uint32_t generatorFrameSlot = 0;
+    static constexpr uint32_t sentValueSlot = 1;
+    static constexpr uint32_t resumeModeSlot = 2;
+    static constexpr uint32_t foundValueSlot = 3;
+    static constexpr uint32_t numberOfGeneratorSlots = 4;
+
+    std::optional<GeneratorFrameLayout> m_generatorFrame;
+    BitVector m_blocksAfterYields;
+    BitVector m_yieldBlocks;
+    CCallHelpers::JumpList m_resumeJumps;
     Vector<uint32_t, 128> m_roots;
     Vector<uint32_t, 128> m_slots;
     Vector<uint32_t, 16> m_freeSlots;
@@ -345,7 +374,6 @@ private:
     Vector<CCallHelpers::Label, 32> m_labels;
     Vector<JumpToBlock, 32> m_jumps;
     Vector<LandingPad, 4> m_landingPads;
-    Vector<ListOfImportChecks, 1> m_listsOfImportChecks;
     uint32_t m_landingPadOfBlockPlusOne { 0 };
     ValueID m_valueInRegister;
     ValueID m_valueTakenOutOfRegister;
@@ -363,6 +391,9 @@ private:
     std::span<const BlockID> m_blocksNeverEntered;
     uint32_t m_wordsOfScratchArea { 0 };
     bool m_hasFailed { false };
+    uint32_t m_numberOfRawSlotsOfScopesRead { 0 };
+    uint32_t m_numberOfNumbersToldByTheirWord { 0 };
+    uint32_t m_numberOfReadsThatAskTheirSite { 0 };
     Opcode m_opcodeThatFailed { Opcode::Undefined };
 };
 

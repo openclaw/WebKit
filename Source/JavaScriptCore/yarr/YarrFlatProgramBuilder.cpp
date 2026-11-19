@@ -119,6 +119,8 @@ public:
             computeStartScan(alternatives.span().first(count));
         findStepsAndRunsAtStart();
         findStartPair();
+        if (!m_countsTurns)
+            findPrecedingUnits(alternatives.span().first(count));
         computeDirtyCaptureRanges();
 
         if (!program->text.isEmpty()) {
@@ -185,6 +187,21 @@ private:
         found.units.shrinkToFit();
         found.texts.shrinkToFit();
         m_program->wholeTexts = WTF::move(found);
+        auto& slots = m_program->wholeTextSlots;
+        slots.fill({ }, mask + 2 + m_program->wholeTexts->texts.size());
+        for (auto [begin, length] : m_program->wholeTexts->texts) {
+            const char16_t* units = m_program->wholeTexts->units.span().data() + begin;
+            unsigned place = FlatProgram::WholeTexts::placeOf(length, units[0], units[length - 1]);
+            unsigned bit = place % FlatProgram::numberOfWholeTextBits;
+            m_program->wholeTextBits[bit / 64] |= 1ull << (bit % 64);
+            unsigned slot = place & mask;
+            while (slots[slot].length)
+                ++slot;
+            slots[slot] = { length, units };
+        }
+        m_program->firstWholeTextSlot = slots.span().data();
+        m_program->wholeTextSlotMask = mask;
+        m_program->maxWholeTextLength = m_program->wholeTexts->greatestLength;
     }
 
     static bool holdsSingleCodeUnits(const CharacterClass& characterClass)
@@ -1238,6 +1255,186 @@ private:
         }
     }
 
+    using PrecedingUnits = FlatProgram::PrecedingUnits;
+
+    static PrecedingUnits anyPrecedingUnits()
+    {
+        PrecedingUnits any;
+        any.latin1.fill(~0ull);
+        any.mayBeWide = true;
+        any.mayBeAbsent = true;
+        return any;
+    }
+
+    static void addAll(PrecedingUnits& units, const PrecedingUnits& other)
+    {
+        for (unsigned i = 0; i < units.latin1.size(); ++i)
+            units.latin1[i] |= other.latin1[i];
+        units.mayBeWide |= other.mayBeWide;
+        units.mayBeAbsent |= other.mayBeAbsent;
+    }
+
+    static void keepOnly(PrecedingUnits& units, const PrecedingUnits& other)
+    {
+        for (unsigned i = 0; i < units.latin1.size(); ++i)
+            units.latin1[i] &= other.latin1[i];
+        units.mayBeWide &= other.mayBeWide;
+        units.mayBeAbsent &= other.mayBeAbsent;
+    }
+
+    std::optional<PrecedingUnits> unitsMatchedBy(const PatternTerm& term) const
+    {
+        if (term.type != PatternTerm::Type::PatternCharacter && term.type != PatternTerm::Type::CharacterClass)
+            return std::nullopt;
+        PrecedingUnits units;
+        auto set = latin1Bits(term.m_matchedSet, units.mayBeWide);
+        if (!set)
+            return std::nullopt;
+        units.latin1 = set->bits;
+        return units;
+    }
+
+    PrecedingUnits unitsAtLineStart() const
+    {
+        PrecedingUnits units;
+        Vector<CharacterRange> wideRanges;
+        units.latin1 = buildCharacterSetBits(*m_pattern.newlineCharacterClass(), false, wideRanges).bits;
+        units.mayBeWide = true;
+        units.mayBeAbsent = true;
+        return units;
+    }
+
+    static PrecedingUnits unitsAtInputStart()
+    {
+        PrecedingUnits units;
+        units.mayBeAbsent = true;
+        return units;
+    }
+
+    // The last code unit that a lookbehind reads.
+    PrecedingUnits lastUnits(Alternatives alternatives, unsigned& termsLeftToVisit) const
+    {
+        PrecedingUnits units;
+        for (auto& alternative : alternatives)
+            addAll(units, lastUnits(*alternative, termsLeftToVisit));
+        return units;
+    }
+
+    PrecedingUnits lastUnits(const PatternAlternative& alternative, unsigned& termsLeftToVisit) const
+    {
+        PrecedingUnits units;
+        for (const PatternTerm& term : alternative.m_terms.span() | std::views::reverse) {
+            if (!termsLeftToVisit)
+                return anyPrecedingUnits();
+            --termsLeftToVisit;
+            switch (term.type) {
+            case PatternTerm::Type::AssertionBOL:
+                addAll(units, term.multiline() ? unitsAtLineStart() : unitsAtInputStart());
+                return units;
+            case PatternTerm::Type::AssertionEOL:
+            case PatternTerm::Type::AssertionWordBoundary:
+            case PatternTerm::Type::ParentheticalAssertion:
+            case PatternTerm::Type::NumberedForwardReference:
+            case PatternTerm::Type::NamedForwardReference:
+                break;
+            case PatternTerm::Type::PatternCharacter:
+            case PatternTerm::Type::CharacterClass: {
+                if (!term.quantityMaxCount)
+                    break;
+                auto matched = unitsMatchedBy(term);
+                if (!matched)
+                    return anyPrecedingUnits();
+                addAll(units, *matched);
+                if (term.quantityType == QuantifierType::FixedCount)
+                    return units;
+                break;
+            }
+            case PatternTerm::Type::ParenthesesSubpattern:
+                if (!term.quantityMaxCount)
+                    break;
+                addAll(units, lastUnits(term.parentheses.disjunction->m_alternatives.span(), termsLeftToVisit));
+                if (term.quantityMinCount)
+                    return units;
+                break;
+            case PatternTerm::Type::NumberedBackReference:
+            case PatternTerm::Type::NamedBackReference:
+            case PatternTerm::Type::DotStarEnclosure:
+                return anyPrecedingUnits();
+            }
+        }
+        return anyPrecedingUnits();
+    }
+
+    PrecedingUnits precedingUnitsOf(Alternatives alternatives, unsigned& termsLeftToVisit) const
+    {
+        PrecedingUnits units;
+        for (auto& alternative : alternatives)
+            addAll(units, precedingUnitsOf(*alternative, termsLeftToVisit));
+        return units;
+    }
+
+    PrecedingUnits precedingUnitsOf(const PatternAlternative& alternative, unsigned& termsLeftToVisit) const
+    {
+        PrecedingUnits units = anyPrecedingUnits();
+        for (const PatternTerm& term : alternative.m_terms) {
+            if (!termsLeftToVisit)
+                return units;
+            --termsLeftToVisit;
+            switch (term.type) {
+            case PatternTerm::Type::AssertionBOL:
+                keepOnly(units, term.multiline() ? unitsAtLineStart() : unitsAtInputStart());
+                break;
+            case PatternTerm::Type::ParentheticalAssertion: {
+                Alternatives asserted = term.parentheses.disjunction->m_alternatives.span();
+                if (!term.invert()) {
+                    keepOnly(units, term.matchDirection() == Forward ? precedingUnitsOf(asserted, termsLeftToVisit) : lastUnits(asserted, termsLeftToVisit));
+                    break;
+                }
+                if (term.matchDirection() == Forward)
+                    break;
+                for (auto& excluded : asserted) {
+                    auto matched = excluded->m_terms.size() == 1 ? unitsMatchedBy(excluded->m_terms[0]) : std::nullopt;
+                    if (!matched || excluded->m_terms[0].quantityType != QuantifierType::FixedCount || excluded->m_terms[0].quantityMaxCount != 1)
+                        continue;
+                    for (unsigned i = 0; i < units.latin1.size(); ++i)
+                        units.latin1[i] &= ~matched->latin1[i];
+                }
+                break;
+            }
+            case PatternTerm::Type::AssertionEOL:
+            case PatternTerm::Type::AssertionWordBoundary:
+            case PatternTerm::Type::NumberedForwardReference:
+            case PatternTerm::Type::NamedForwardReference:
+                break;
+            case PatternTerm::Type::ParenthesesSubpattern:
+                if (term.quantityMinCount && term.matchDirection() == Forward)
+                    keepOnly(units, precedingUnitsOf(term.parentheses.disjunction->m_alternatives.span(), termsLeftToVisit));
+                return units;
+            case PatternTerm::Type::PatternCharacter:
+            case PatternTerm::Type::CharacterClass:
+            case PatternTerm::Type::NumberedBackReference:
+            case PatternTerm::Type::NamedBackReference:
+            case PatternTerm::Type::DotStarEnclosure:
+                return units;
+            }
+        }
+        return units;
+    }
+
+    void findPrecedingUnits(Alternatives alternatives)
+    {
+        // A search that skips starts assumes that an attempt was made one position before the one it begins at.
+        if (m_program->triesOnlyOnce || m_program->skipsStartsBehindFailedRuns)
+            return;
+        unsigned termsLeftToVisit = maxTermsVisitedForStartTable;
+        PrecedingUnits units = precedingUnitsOf(alternatives, termsLeftToVisit);
+        if (units == anyPrecedingUnits())
+            return;
+        m_program->precedingUnits = units;
+        if (m_program->startScan == FlatStartScan::None)
+            m_program->startScan = FlatStartScan::PrecedingUnitOnly;
+    }
+
     void computeStartScan(Alternatives alternatives)
     {
         if (m_program->triesOnlyOnce)
@@ -1252,14 +1449,20 @@ private:
         // The analysis knows what a lookahead lets through.
         FirstSetBits first;
         bool firstMayBeWide = false;
-        bool knowsFirst = start.depth;
+        bool knowsFirst = true;
         for (auto& alternative : alternatives) {
             auto known = knowsFirst ? firstBits(*alternative, firstMayBeWide) : std::nullopt;
             knowsFirst = known && !known->atEnd;
             if (knowsFirst)
                 addAll(first, *known);
         }
-        if (knowsFirst) {
+        if (knowsFirst && !start.depth) {
+            // A match that may be empty begins before a code unit that its lookaheads accept.
+            start.depth = 1;
+            start.at[0] = first;
+            start.mayBeWide[0] = firstMayBeWide;
+            start.hasSeveralWideStarts = true;
+        } else if (knowsFirst) {
             for (unsigned i = 0; i < first.bits.size(); ++i)
                 start.at[0].bits[i] &= first.bits[i];
             start.mayBeWide[0] &= firstMayBeWide;
@@ -2464,7 +2667,7 @@ size_t FlatProgram::estimatedSizeInBytes() const
 {
     return ops.capacity() * sizeof(FlatOp) + characterSets.capacity() * sizeof(CharacterSetBits) + firstSets.capacity() * sizeof(FirstSetBits)
         + dispatchClasses.capacity() * sizeof(uint16_t) + dispatchEntries.capacity() * sizeof(uint32_t)
-        + wideRanges.capacity() * sizeof(CharacterRange) + text.capacity() + wideText.capacity() * sizeof(char16_t)
+        + wideRanges.capacity() * sizeof(CharacterRange) + text.capacity() + wideText.capacity() * sizeof(char16_t) + wholeTextSlots.capacity() * sizeof(WholeTextSlot)
         + turnsThatMayTakeNothing.capacity() * sizeof(TurnThatMayTakeNothing) + loopsThatCountTurns.capacity() * sizeof(LoopThatCountsTurns) + aroundMemoRow.capacity() * sizeof(AroundMemoRow)
         + referencedGroups.capacity() * sizeof(uint32_t)
         + (programThatFindsEndsOfRuns ? sizeof(FlatProgram) + programThatFindsEndsOfRuns->estimatedSizeInBytes() : 0);
@@ -2522,16 +2725,13 @@ std::expected<std::unique_ptr<FlatProgram>, FlatProgramDecline> compileFlatProgr
     return program;
 }
 
-bool hasFlatProgramsThatRememberFailedSearches(StringView patternString, OptionSet<Flags> flags)
+bool hasFlatProgramsThatRememberFailedSearches(const YarrPattern& analyzed, StringView patternString)
 {
-    ErrorCode errorCode { ErrorCode::NoError };
-    YarrPattern analyzed(patternString, flags, errorCode, ExecutionMode::IncludeSubpatterns, PatternAnalysis::Performed);
-    if (hasError(errorCode))
-        return false;
     auto fast = compileFlatProgram(analyzed);
     if (!fast || !(*fast)->jitCountsTurns)
         return false;
-    YarrPattern asWritten(patternString, flags, errorCode, ExecutionMode::IncludeSubpatterns, PatternAnalysis::Skipped);
+    ErrorCode errorCode { ErrorCode::NoError };
+    YarrPattern asWritten(patternString, analyzed.m_flags, errorCode, ExecutionMode::IncludeSubpatterns, PatternAnalysis::Skipped);
     if (hasError(errorCode))
         return false;
     auto counting = compileFlatProgram(asWritten, FlatProgramForm::CountsTurns);

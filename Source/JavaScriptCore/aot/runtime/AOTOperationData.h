@@ -8,6 +8,8 @@
 #if ENABLE(AOT)
 
 #include "AOTLayoutData.h"
+#include "AOTPrefetchStep.h"
+#include "AOTPrimitives.h"
 #include "AOTRecordTypes.h"
 #include "AOTSlotRepresentation.h"
 #include "AOTVarint.h"
@@ -267,6 +269,7 @@ static_assert(sizeof(DataNodeHeader) == 8 && isImageRecord<DataNodeHeader>);
 
 struct DataRequest {
     static constexpr uint32_t noSharedStorage = UINT32_MAX;
+    static constexpr uint32_t rootHasOwnStorage = UINT32_MAX - 1;
 
     uint32_t root;
     uint32_t sharedStorageOffset;
@@ -294,6 +297,28 @@ struct TemplateObjectRequest {
     Part parts[];
 };
 static_assert(sizeof(TemplateObjectRequest) == 4);
+
+struct ImportChecksRequest {
+    struct Check {
+        uint32_t offsetInStatics;
+        uint32_t failure;
+    };
+
+    uint32_t count;
+    Check checks[];
+};
+static_assert(sizeof(ImportChecksRequest) == 4 && sizeof(ImportChecksRequest::Check) == 8);
+
+struct PrefetchRequest {
+    struct Step {
+        uint32_t name;
+        PrefetchStep step;
+    };
+
+    uint32_t count;
+    Step steps[];
+};
+static_assert(sizeof(PrefetchRequest) == 4 && sizeof(PrefetchRequest::Step) == 8);
 
 constexpr bool isAssignableBinding(EvalBindingKind kind)
 {
@@ -345,7 +370,8 @@ struct PropertyDescriptorBits {
     uint32_t isConfigurable : 1;
     uint32_t hasGet : 1;
     uint32_t hasSet : 1;
-    uint32_t unused : 23;
+    uint32_t isOfPropertyMap : 1;
+    uint32_t unused : 22;
 };
 static_assert(sizeof(PropertyDescriptorBits) == 4);
 
@@ -401,12 +427,31 @@ struct WrittenNativeResult {
 
     uint32_t kinds : numberOfKinds;
     uint32_t constructs : 1;
-    uint32_t builtin : 23;
+    uint32_t builtin : 22;
+    uint32_t writesLengths : 1;
 
-    static constexpr uint32_t encode(uint32_t kinds, bool constructs, uint32_t builtin) { return kinds | static_cast<uint32_t>(constructs) << numberOfKinds | builtin << (numberOfKinds + 1); }
+    static constexpr uint32_t encode(uint32_t kinds, bool constructs, uint32_t builtin, bool writesLengths = false) { return kinds | static_cast<uint32_t>(constructs) << numberOfKinds | builtin << (numberOfKinds + 1) | static_cast<uint32_t>(writesLengths) << 31; }
     static WrittenNativeResult decode(uint32_t word) { return std::bit_cast<WrittenNativeResult>(word); }
 };
 static_assert(sizeof(WrittenNativeResult) == 4);
+
+enum class HostResult : uint8_t { Boolean, String, Symbol, Object, Array };
+
+constexpr uint32_t kindsOfHostResult(HostResult result)
+{
+    switch (result) {
+    case HostResult::Boolean:
+        return WrittenNativeResult::booleanKind;
+    case HostResult::String:
+        return WrittenNativeResult::stringKind;
+    case HostResult::Symbol:
+        return WrittenNativeResult::symbolKind;
+    case HostResult::Object:
+    case HostResult::Array:
+        return WrittenNativeResult::objectKind;
+    }
+    RELEASE_ASSERT_NOT_REACHED_UNDER_CONSTEXPR_CONTEXT();
+}
 
 enum class ThrowKind : uint8_t {
     NullishRead,
@@ -425,9 +470,33 @@ enum class ThrowSiteSource : uint32_t {
     FaultSite,
 };
 
+struct FalseProofWord {
+    static constexpr unsigned sourceBits = 4;
+    static constexpr uint32_t primitivesMask = (1u << 10) - 1;
+    static constexpr uint32_t objectBit = 1u << 10;
+    static constexpr uint32_t stringLiteralBit = 1u << 11;
+    static constexpr uint32_t symbolLiteralBit = 1u << 12;
+    static constexpr uint32_t everyBit = (1u << 13) - 1;
+    static_assert(Typed::Primitive::All == primitivesMask);
+
+    static constexpr uint32_t summarize(uint16_t primitives, bool hasObjects)
+    {
+        uint32_t summary = primitives & primitivesMask;
+        if ((primitives & Typed::Primitive::AnyString) == Typed::Primitive::LiteralString)
+            summary |= stringLiteralBit;
+        if ((primitives & Typed::Primitive::AnySymbol) == Typed::Primitive::LiteralSymbol)
+            summary |= symbolLiteralBit;
+        return summary | (hasObjects ? objectBit : 0);
+    }
+    static constexpr uint32_t encode(uint32_t source, uint32_t expectedType) { return source | expectedType << sourceBits; }
+    static constexpr uint32_t sourceOf(uint32_t a) { return a & ((1u << sourceBits) - 1); }
+    static constexpr uint32_t expectedTypeOf(uint32_t a) { return a >> sourceBits; }
+};
+
 struct ThrowSiteWord {
     static constexpr uint32_t none = UINT32_MAX;
-    static constexpr uint32_t narrowNone = (1u << 17) - 1;
+    static constexpr unsigned narrowABits = 17;
+    static constexpr uint32_t narrowNone = (1u << narrowABits) - 1;
     static constexpr uint32_t maxNarrowA = narrowNone - 1;
     static constexpr unsigned numberOfRegistersPerBank = 32;
 #if CPU(X86_64)
@@ -444,7 +513,16 @@ struct ThrowSiteWord {
     static constexpr size_t sizeOfWordBehindCall = sizeof(uint32_t);
 #endif
 
-    uint32_t narrowA() const { return a == narrowNone ? none : a; }
+    static constexpr Typed::Representation runtimeErrorRepresentation = Typed::Representation::RawWord;
+
+    bool isUninitializedBinding() const { return static_cast<ThrowKind>(kind) == ThrowKind::UninitializedBinding; }
+    uint32_t narrowA() const
+    {
+        if (isUninitializedBinding() && calleeIsReadFromReceiver)
+            return registerNumber << narrowABits | a;
+        return a == narrowNone ? none : a;
+    }
+    bool throwsRuntimeError() const { return static_cast<ThrowKind>(kind) == ThrowKind::ErrorWithMessage && static_cast<Typed::Representation>(representation) == runtimeErrorRepresentation; }
     bool stopsAtFalseProof() const { return static_cast<ThrowKind>(kind) == ThrowKind::ErrorWithMessage && calleeIsReadFromReceiver; }
     bool isCallSite() const { return static_cast<ThrowKind>(kind) == ThrowKind::NotAFunction && static_cast<Typed::Representation>(representation) == Typed::Representation::Void; }
     bool differsOnlyInRegisterNumber(ThrowSiteWord other) const
@@ -456,10 +534,15 @@ struct ThrowSiteWord {
     {
         auto word = std::bit_cast<ThrowSiteWord>(firstWord);
         RELEASE_ASSERT(word.hasWideA && !word.a);
-        if (a > maxNarrowA)
-            return std::nullopt;
+        if (a > maxNarrowA) {
+            uint32_t above = a >> narrowABits;
+            if (!word.isUninitializedBinding() || word.calleeIsReadFromReceiver || !above || above >= numberOfRegistersPerBank)
+                return std::nullopt;
+            word.registerNumber = above;
+            word.calleeIsReadFromReceiver = true;
+        }
         word.hasWideA = false;
-        word.a = a;
+        word.a = a & narrowNone;
         return std::bit_cast<uint32_t>(word);
     }
     static constexpr uint64_t inRegister(uint32_t firstWord, uint32_t wideA) { return firstWord | static_cast<uint64_t>(wideA) << 32; }
@@ -470,7 +553,7 @@ struct ThrowSiteWord {
     uint32_t hasWideA : 1;
     uint32_t hasB : 1;
     uint32_t calleeIsReadFromReceiver : 1;
-    uint32_t a : 17;
+    uint32_t a : narrowABits;
 };
 static_assert(sizeof(ThrowSiteWord) == 4);
 static_assert(static_cast<unsigned>(ThrowKind::NullishUpdate) < 1u << 3 && numberOfEnumerators<Typed::Representation> <= 1u << 4);
@@ -481,6 +564,7 @@ static_assert(static_cast<unsigned>(ThrowKind::NullishUpdate) < 1u << 3 && numbe
     v(staticsRoots, StaticsRange) \
     v(staticsNarrowRoots, StaticsRange) \
     v(staticsClearedEachCollection, StaticsRange) \
+    v(variablesWithViewMirror, StaticsRange) \
     v(functionVariables, FunctionVariableData) \
     v(namedVariables, uint8_t) \
     v(identifiersByHash, uint32_t) \
@@ -493,6 +577,7 @@ static_assert(static_cast<unsigned>(ThrowKind::NullishUpdate) < 1u << 3 && numbe
     v(eagerBuiltinCells, uint32_t) \
     v(constantAndUnlockedBuiltinMembers, uint32_t) \
     v(namesTakenForAbsent, uint32_t) \
+    v(lockedAbsentNames, uint64_t) \
     v(globalBindings, uint32_t) \
     v(entryPoints, uint32_t)
 

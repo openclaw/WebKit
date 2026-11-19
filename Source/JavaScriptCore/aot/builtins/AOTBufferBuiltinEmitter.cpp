@@ -17,6 +17,7 @@
 #include "AOTElementAccessEmitter.h"
 #include "AOTResultRules.h"
 #include "AOTSlotEmitter.h"
+#include "AOTThrowEmitter.h"
 #include "AOTTruthinessEmitter.h"
 #include "AOTTypeArena.h"
 #include "AOTTypedArrayKinds.h"
@@ -43,6 +44,27 @@ void BufferBuiltinEmitter::generateDataViewByteLength(const InlineCall& call)
     finish(call, length, Range { 1, maxByteLengthOfBuffer });
 }
 
+void BufferBuiltinEmitter::generateArrayBufferIsView(const InlineCall& call)
+{
+    ValueID argument = call.argumentOrNull(0);
+    if (!argument || !typeOf(argument).hasObjects()) {
+        finishInlineCall(call, boolean(false));
+        return;
+    }
+    LBasicBlock isCellCase = newBlock();
+    LBasicBlock isNotCell = newBlock();
+    Join<Condition> join(m_out);
+    Boxed value = in<Boxed>(argument);
+    branch(isCell(value), { normalEdge(isCellCase), normalEdge(isNotCell) });
+
+    m_out.appendTo(isCellCase);
+    join.add(hasCellTypeIn(unboxCell(value), { static_cast<JSType>(FirstTypedArrayType), static_cast<JSType>(LastTypedArrayType) }));
+
+    m_out.appendTo(isNotCell);
+    join.add(boolean(false));
+    finishInlineCall(call, join.finish());
+}
+
 void BufferBuiltinEmitter::generateArrayBufferByteLength(const InlineCall& call)
 {
     CellPointer cell = cellOperand(call.receiver());
@@ -60,7 +82,9 @@ void BufferBuiltinEmitter::generateDataViewGet(const InlineCall& call)
     ByteOrder order = byteOrderOf(call, 1, size);
     CellPointer view = cellOperand(call.receiver());
     Integer offset = offsetOrElse(call.argument(0), miss);
-    Pointer address = findBytes(view, offset, mayBeNegative(call.argument(0)), size, miss);
+    if (size > 1)
+        continueWhereIsNotNegative(call, call.argument(0), offset, miss);
+    Pointer address = findBytes(view, offset, size, miss);
     Operand loaded = loadBytes(call.context(), address, elements, order);
     ensureStillAliveHere(view);
     finish(call, loaded, types().at(elementTypeOf(elements)));
@@ -84,7 +108,9 @@ void BufferBuiltinEmitter::generateDataViewSet(const InlineCall& call)
         stored = int32Operand(value);
     else
         stored = emitter<ConversionEmitter>().toInt32(numberOperand(value));
-    Pointer address = findBytes(view, offset, mayBeNegative(call.argument(0)), size, miss);
+    if (size > 1)
+        continueWhereIsNotNegative(call, call.argument(0), offset, miss);
+    Pointer address = findBytes(view, offset, size, miss);
     storeBytes(address, elements, stored, order);
     ensureStillAliveHere(view);
     finishWithUndefined(call);
@@ -94,15 +120,14 @@ void BufferBuiltinEmitter::generateBufferCopy(const InlineCall& call)
 {
     ArrayBufferViewBuiltinEmitter& views = emitter<ArrayBufferViewBuiltinEmitter>();
     LBasicBlock miss = missBlockOf(call);
-    CellPointer source = cellOperand(call.receiver());
-    CellPointer target = cellOperand(call.argument(0));
+    CellPointer source = views.askedAnewWherePositionsAreTested(cellOperand(call.receiver()));
+    CellPointer target = views.askedAnewWherePositionsAreTested(cellOperand(call.argument(0)));
     auto positionOr = [&](unsigned argumentIndex, Integer otherwise) {
         ValueID id = call.argumentOrNull(argumentIndex);
         if (!id)
             return otherwise;
         Integer position = offsetOrElse(id, miss);
-        if (mayBeNegative(id))
-            branchUnless(greaterThanOrEqual(position, 0), miss);
+        continueWhereIsNotNegative(call, id, position, miss);
         return position;
     };
     auto byteLengthOf = [&](CellPointer view, ValueID id) {
@@ -148,10 +173,17 @@ BufferBuiltinEmitter::ByteOrder BufferBuiltinEmitter::byteOrderOf(const InlineCa
     return { std::nullopt, emitter<TruthinessEmitter>().isTruthy(call.context(), get(argument), type) };
 }
 
-bool BufferBuiltinEmitter::mayBeNegative(ValueID id) const
+void BufferBuiltinEmitter::continueWhereIsNotNegative(const InlineCall& call, ValueID id, Integer position, LBasicBlock otherwise)
 {
+    if (position.value()->hasInt() && position.value()->asInt() >= 0)
+        return;
     Type type = typeOf(id);
-    return !type.isInteger() || type.integers.minimum < 0;
+    if (!type.isInteger() || type.integers.minimum < 0)
+        branchUnless(greaterThanOrEqual(position, integer(0)), otherwise);
+    else if (emitter<ElementAccessEmitter>().checksBounds())
+        emitter<ThrowEmitter>().requireOrCrash(call.context(), greaterThanOrEqual(position, integer(0)), std::nullopt, ProofSource::RememberedFact);
+    else
+        build().statistics().count(StatisticID::RangeChecksRemoved);
 }
 
 Integer BufferBuiltinEmitter::offsetOrElse(ValueID id, LBasicBlock otherwise)
@@ -166,15 +198,13 @@ Integer BufferBuiltinEmitter::offsetOrElse(ValueID id, LBasicBlock otherwise)
 
 Pointer BufferBuiltinEmitter::vectorHoldingElement(CellPointer view, Integer index, LBasicBlock otherwise)
 {
-    TypedArrayElements elements = emitter<ElementAccessEmitter>().typedArrayElementsOf(view, otherwise);
+    TypedArrayElements elements = emitter<ElementAccessEmitter>().typedArrayElementsOf(emitter<ArrayBufferViewBuiltinEmitter>().askedAnewWherePositionsAreTested(view), otherwise);
     branchUnless(below(index, elements.length), otherwise);
     return elements.vector;
 }
 
-Pointer BufferBuiltinEmitter::findBytes(CellPointer view, Integer offset, bool mayBeNegative, unsigned size, LBasicBlock otherwise)
+Pointer BufferBuiltinEmitter::findBytes(CellPointer view, Integer offset, unsigned size, LBasicBlock otherwise)
 {
-    if (size > 1 && mayBeNegative)
-        branchUnless(greaterThanOrEqual(offset, integer(0)), otherwise);
     Pointer vector = vectorHoldingElement(view, add(offset, integer(size - 1)), otherwise);
     return offsetBy(vector, offset, 0);
 }
@@ -212,7 +242,7 @@ LValue BufferBuiltinEmitter::inByteOrder(LValue bits, unsigned size, const ByteO
     return order.isLittle ? swapped : m_out.select(order.isLittleAtRunTime.value(), bits, swapped);
 }
 
-Operand BufferBuiltinEmitter::loadBytes(const OperationContext& context, Pointer address, TypedArrayType elements, const ByteOrder& order)
+Operand BufferBuiltinEmitter::loadBytes(const OperationContext& context, Pointer address, TypedArrayType elements, const ByteOrder& order, NaNBits bitsOfNaN)
 {
     TypedPointer pointer(m_heaps.TypedArrayProperties, address.value());
     unsigned size = elementSize(elements);
@@ -253,7 +283,7 @@ Operand BufferBuiltinEmitter::loadBytes(const OperationContext& context, Pointer
     }
     if (isBigInt(elements))
         return newBigInt(context, element.as<Integer>(), elements == TypeBigInt64);
-    if (isFloat(elements))
+    if (isFloat(elements) && bitsOfNaN == NaNBits::Purified)
         return emitter<ConversionEmitter>().purified(element.as<Number>());
     return element;
 }
@@ -376,7 +406,9 @@ void BufferBuiltinEmitter::generateBufferAccess(const InlineCall& call)
     if (isWrite)
         stored = valueToStoreOrElse(call.argument(0), *elements, miss);
     Integer offset = offsetArgument ? offsetOrElse(offsetArgument, miss) : integer(0);
-    Pointer address = findBytes(view, offset, offsetArgument && mayBeNegative(offsetArgument), size, miss);
+    if (size > 1 && offsetArgument)
+        continueWhereIsNotNegative(call, offsetArgument, offset, miss);
+    Pointer address = findBytes(view, offset, size, miss);
     if (isWrite) {
         storeBytes(address, *elements, stored, order);
         ensureStillAliveHere(view);

@@ -33,6 +33,7 @@ constexpr bool readsFrameRecordOfCaller(StubFamily family)
 {
     switch (family) {
     case StubFamily::ReturnAsyncResult:
+    case StubFamily::ReturnAsyncResultInTailPosition:
     case StubFamily::AwaitBySavingFrame:
     case StubFamily::SuspendGenerator:
     case StubFamily::StepAsyncGenerator:
@@ -47,7 +48,7 @@ enum class CallPosition : uint8_t { Ordinary, Tail };
 
 class StubKey {
 public:
-    static constexpr unsigned maxNumberOfForms = 64;
+    static constexpr unsigned maxNumberOfForms = 128;
     static constexpr unsigned maxCount = 63;
 
     constexpr StubKey() = default;
@@ -119,9 +120,9 @@ private:
     static constexpr unsigned countShift = callerFrameShift + callerFrameWidth;
     static constexpr unsigned countWidth = 6;
     static constexpr unsigned formShift = countShift + countWidth;
-    static constexpr unsigned formWidth = 6;
+    static constexpr unsigned formWidth = 7;
     static constexpr unsigned familyShift = formShift + formWidth;
-    static constexpr unsigned familyWidth = 10;
+    static constexpr unsigned familyWidth = 9;
 
     static_assert(familyShift + familyWidth == 64);
     static_assert(numberOfStubFamilies < (1u << familyWidth) - 1);

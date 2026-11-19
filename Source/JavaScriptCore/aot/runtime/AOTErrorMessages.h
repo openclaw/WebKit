@@ -8,6 +8,7 @@
 #if ENABLE(AOT)
 
 #include "AOTBuiltinIDTypes.h"
+#include "AOTRecordTypes.h"
 #include "JSCJSValue.h"
 #include <span>
 #include <wtf/text/WTFString.h>
@@ -27,11 +28,12 @@ enum class LoaderChange : uint8_t {
     ReplaceLoaderFunction,
     TakeOutOfRequireCache,
     StoreUnderNameOfModuleInRequireCache,
-    RunFileAgain,
-    HandTextToCompile,
+    EvaluateModuleAgain,
+    PassSourceToCompile,
 };
 
-JS_EXPORT_PRIVATE String quotedTextOfFailedExpression(VM&);
+JS_EXPORT_PRIVATE String failedExpressionSource(VM&);
+JS_EXPORT_PRIVATE String primitiveKindForErrorMessage(JSValue);
 
 JSObject* createNotAnObjectError(JSGlobalObject*, JSValue base, StringView member);
 JSObject* createNotAnObjectError(JSGlobalObject*, JSValue base, const Identifier& member);
@@ -53,13 +55,16 @@ JSObject* createBuiltinModulesUnavailableError(JSGlobalObject*);
 JSObject* createNativeBindingsUnavailableError(JSGlobalObject*);
 JSObject* createBuiltinWithoutPathError(JSGlobalObject*);
 JSObject* createBuiltinNotCompiledError(JSGlobalObject*, const String& builtin);
+JSObject* createBuiltinBehindTargetOfEventNotCompiledError(JSGlobalObject*, const String& builtin);
 JSObject* createBuiltinFunctionNotCompiledError(JSGlobalObject*, const String& functionName);
 JSObject* createBuiltinsNotCompiledError(JSGlobalObject*, std::span<const String> builtins);
 JSObject* createExternalModuleNotLoadedError(JSGlobalObject*, const String& path);
 JSObject* createLoadByNameRefusedError(JSGlobalObject*, StringView name, ASCIILiteral code);
-JSObject* createFileOfImageRefusedError(JSGlobalObject*, StringView path, ASCIILiteral code);
+JSObject* createCompiledModuleAccessError(JSGlobalObject*, StringView path, ASCIILiteral code);
+JSObject* createFormNotHeldError(JSGlobalObject*, StringView path, ASCIILiteral type);
+JSObject* createExportNotHandedOutError(JSGlobalObject*, StringView path, StringView name);
 JSObject* createModuleInOtherRealmError(JSGlobalObject*, StringView path);
-JSObject* createLoaderChangeRefusedError(JSGlobalObject*, LoaderChange, StringView changed);
+JSObject* createLoaderChangeError(JSGlobalObject*, LoaderChange, StringView changed);
 JSObject* createEntryOfRequireCacheRefusedError(JSGlobalObject*, StringView path);
 JSObject* createComparisonOfPrivateFieldRefusedError(JSGlobalObject*, const String& field);
 JSObject* createModuleMissingAtBuildError(JSGlobalObject*, const String& specifier, const String& importer, ASCIILiteral code);
@@ -72,8 +77,11 @@ String functionNotCompiledMessage(const String& path, unsigned line);
 String functionNotCompiledMessage();
 String memberOfLockedBuiltin(BuiltinID holder, UniquedStringImpl* key);
 String assignmentToLockedBuiltinMessage(const String& property);
+String changeThatCompiledCodeRulesOutMessage(ObjectMutation);
+String changeThatCompiledCodeRulesOutMessage(ASCIILiteral change);
 String deletionFromLockedBuiltinMessage(const String& property);
 String assignmentThatBuildDidNotSeeMessage(const String& property);
+String moduleObjectRefusedMessage(StringView path);
 String callOfBuiltinChangedBeforeFirstUseMessage(const String& property);
 enum class LockedIn : bool { Executable, TestRun };
 bool isWrittenByFileOfProduct(VM&);
@@ -82,9 +90,10 @@ String deletionFromLockedBuiltinMessage(VM&, BuiltinID holder, UniquedStringImpl
 String assignmentToFoldedMemberMessage(const String& property, LockedIn);
 String deletionOfFoldedMemberMessage(const String& property, LockedIn);
 String assignmentToNameThatBuiltinFunctionInheritsMessage(UniquedStringImpl*);
+String deletionOfInheritedNameMessage(UniquedStringImpl*);
 String prototypeChangeOfLockedBuiltinMessage(const String& holder, LockedIn = LockedIn::Executable);
-String spyOnExportRefusedMessage(UniquedStringImpl* name, const String& path, LockedIn, const String& callerOutsideBuild);
-String mockOfModuleRefusedMessage(const String& path, LockedIn, const String& callerOutsideBuild);
+String makeSpyOnExportErrorMessage(UniquedStringImpl* name, const String& path, LockedIn, const String& uncompiledCaller);
+String makeMockModuleErrorMessage(const String& path, LockedIn, const String& uncompiledCaller);
 
 } } // namespace JSC::AOT
 

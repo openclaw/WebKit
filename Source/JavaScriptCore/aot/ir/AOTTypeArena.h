@@ -21,28 +21,33 @@ namespace JSC { namespace AOT { namespace Typed {
 enum class DeclaredParts : uint8_t { FromEither, FromSecond };
 
 enum class AnswerKeptInArena : uint8_t {
-    FirstOfWalk = 0,
-    CellsOfFieldArm = 57,
-    ObjectSetOfList = 61,
-    NumberOfLayoutList = 62,
-    LayoutSetOfList = 63,
-    FirstOfAppliedReads = 64,
-    FirstOfAppliedWrites = 72,
-    TypeInCells = 78,
-    TypeFound = 79,
-    ReadOrAssignmentRunsNoCodeOnLayouts = 80,
-    LayoutsAreFoundByShapeTest = 81,
-    ReadRunsNoCodeOnLayoutsOfObjects = 82,
-    NumberOfObjectList = 84,
-    FieldsOfSlotRead = 85,
-    TypeInFilledSlot = 101,
-    TestOfGuess = 102,
-    TypeHeldUnderName = 104,
-    ShapesOfLayouts = 105,
-    PartWhoseClassesHaveGuards = 106,
-    PartOfWrittenSetThatFactoriesFill = 107,
-    PartThatHasNameAsked = 108,
-    ConstantMemberOfBuiltin = 109,
+    FirstOfWalk,
+    LastOfWalk = FirstOfWalk + 54,
+    ObjectSetOfList,
+    NumberOfLayoutList,
+    LayoutSetOfList,
+    NumberOfObjectList,
+    TypeInFilledSlot,
+    TestOfGuess,
+    LayoutsOfGuessTest,
+    ShapesOfLayouts,
+    PartWhoseClassesHaveGuards,
+    PartWithInheritedMembers,
+    PartOfWrittenSetThatFactoriesFill,
+    PartThatHasNameAsked,
+    ConstantMemberOfBuiltin,
+    RecordsThatFileWrites,
+    WrittenRecordCoverage,
+    UnitMayMentionFunctions,
+    LiteralsWithoutNames,
+    ReadFindsFieldWithoutWrittenType,
+    LayoutsThatStayWithCompiledCode,
+    FieldOfLayoutsIsStable,
+    DeclaredFieldOfLayoutsIsStable,
+    TypeHeldOfSlots,
+    ResultOfBuiltinCall,
+    FitInBuiltinType,
+    NumberOfAnswers,
 };
 
 enum class MakerOfType : uint8_t {
@@ -64,6 +69,7 @@ enum class MakerOfType : uint8_t {
 
 inline constexpr uint32_t bitsOfOperationInTypeMemo = 8;
 inline constexpr uint8_t firstQuestionFromOutsideInTypeMemo = 128;
+static_assert(static_cast<unsigned>(AnswerKeptInArena::NumberOfAnswers) <= firstQuestionFromOutsideInTypeMemo);
 
 constexpr bool wordOfTypeMemoLiesInThread(uint32_t bits)
 {
@@ -94,6 +100,15 @@ public:
     const ObjectTable& objects() const { return m_table.objects(); }
     const Program* program() const { return m_table.program(); }
     ArenaKeeps keeps() const { return m_keeps; }
+    struct TypeTakenAtEntry {
+        uint32_t function { UINT32_MAX };
+        uint32_t entryParameter { 0 };
+        uint32_t known { 0 };
+        uint32_t epoch { 0 };
+        TypeID taken;
+    };
+    TypeTakenAtEntry& typeTakenLastAtEntry(uint32_t function, uint32_t entryParameter) LIFETIME_BOUND { return m_typesTakenLastAtEntries[(function * 8 + entryParameter) % m_typesTakenLastAtEntries.size()]; }
+    uint32_t epoch() const { return m_epoch; }
     size_t numberMadeAndKeptToItself() const
     {
         return m_types.size() + m_firstWordOfClassParts.size() + m_propertyKeys.size() + m_madeTexts.size() + m_layoutSets.untyped().numberMadeAndKeptToItself() + m_objectSets.untyped().numberMadeAndKeptToItself()
@@ -101,7 +116,7 @@ public:
     }
 
     Type at(TypeID) const;
-    bool saysNothing(TypeID) const;
+    bool isUninformative(TypeID) const;
     const Type& recordOf(TypeID) const LIFETIME_BOUND;
     SetView<LayoutID, LayoutSetID> at(LayoutSetID set) const { return m_layoutSets.at(set); }
     std::span<const LayoutID> listOf(LayoutSetID set) const { return const_cast<TypeArena&>(*this).m_layoutSets.listOf(set); }
@@ -159,6 +174,7 @@ public:
     TypeID withPrimitives(TypeID, uint16_t added);
     TypeID withoutPrimitives(TypeID, uint16_t removed);
     TypeID wholeKindsAndBuiltinClassesOf(TypeID);
+    TypeID numbersAskedBehindCallOfBuiltin(TypeID);
     TypeID withoutNullish(TypeID type) { return withoutPrimitives(type, Primitive::UndefinedOrNull); }
     TypeID withoutObjects(TypeID);
     TypeID withOnlyObjects(TypeID);
@@ -173,6 +189,7 @@ public:
 
     std::optional<uint32_t> rememberedAnswer(uint8_t question, uint32_t first, uint32_t second);
     void rememberAnswer(uint8_t question, uint32_t first, uint32_t second, uint32_t answer);
+    uint32_t numberOfOperandList(uint32_t list, TypeID lastOperand);
     static constexpr size_t mostWordsOfRound = 4;
     using WordsOfRound = std::array<uint32_t, mostWordsOfRound>;
     struct SetOfRound {
@@ -183,6 +200,9 @@ public:
     SetOfRound setOfRound(ObjectSetID set) { return !set || holdsOneMember(set) ? SetOfRound { set.bits(), false } : setOfRoundOverSeveral(set); }
     std::optional<WordsOfRound> rememberedRound(uint8_t question, size_t numberOfWords, SetOfRound, uint32_t second);
     void rememberRound(uint8_t question, size_t numberOfWords, uint8_t typesAmongWords, SetOfRound, uint32_t second, const WordsOfRound&);
+    static constexpr size_t fewestElementsOfArrayWhoseContentsAreKeptForBuild = 8;
+    std::optional<TypeID> rememberedContentsOfArrayInData(DataID);
+    void rememberContentsOfArrayInData(DataID, TypeID);
 
     TypeID typeMadeBefore(MakerOfType, uint32_t first, uint32_t second) const;
     void noteTypeMade(MakerOfType, uint32_t first, uint32_t second, TypeID made, bool internedNothingInThread);
@@ -253,6 +273,7 @@ private:
 
     TypeTable& m_table;
     const ArenaKeeps m_keeps;
+    std::array<TypeTakenAtEntry, 64> m_typesTakenLastAtEntries;
     bool m_keepsTypesMade { false };
     bool m_someAnythingOfSeedLiesInThread { false };
     uint32_t m_epoch { 1 };
@@ -297,6 +318,10 @@ private:
     mutable Vector<Vector<uint8_t>> m_outgrownBytesOfTexts;
     std::array<TypeID, 16> m_anythingOfSeed { };
     IDPairMemo m_lastingMemo;
+    using NumbersOfOperandLists = HashMap<uint64_t, uint32_t, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>>;
+    uint32_t m_numberOfOperandLists { 0 };
+    NumbersOfOperandLists m_numbersOfOperandLists;
+    NumbersOfOperandLists m_numbersOfOperandListsUntilReset;
     IDListMemo m_unionsOfMany;
     Vector<MemoEntry> m_memoUntilReset;
     Vector<MemoEntry> m_typesMade;
@@ -348,7 +373,7 @@ ALWAYS_INLINE Type TypeArena::at(TypeID id) const
     return recordOf(id);
 }
 
-ALWAYS_INLINE bool TypeArena::saysNothing(TypeID id) const
+ALWAYS_INLINE bool TypeArena::isUninformative(TypeID id) const
 {
     if (!id || isNeverType(id))
         return true;
@@ -367,8 +392,8 @@ inline std::span<const ClassPart> TypeArena::at(ClassPartsID id) const
 
 ALWAYS_INLINE const PropertyKey& TypeArena::at(PropertyKeyID key) const
 {
-    if (key.bits() < m_table.m_numberOfPropertyKeysOnceFrozen) [[likely]]
-        return m_table.propertyKeyOnceFrozenAt(key.bits());
+    if (key.bits() < m_table.m_numberOfPropertyKeysFoundByAddress) [[likely]]
+        return m_table.propertyKeyFoundByAddressAt(key.bits());
     if (liesInThread(key))
         return m_propertyKeys[positionOf(key)];
     return m_table.at(key);

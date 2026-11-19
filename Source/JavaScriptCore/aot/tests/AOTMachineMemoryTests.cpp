@@ -11,6 +11,7 @@
 #include "AOTMachineTarget.h"
 #include "AOTMachineTestSupport.h"
 #include "AOTNativeTest.h"
+#include "AOTSavedFrame.h"
 #include "AOTSlotRepresentation.h"
 #include "AOTStubRegisters.h"
 #include "CPU.h"
@@ -96,6 +97,7 @@ static LValue memoryTestValueOfType(TestProcedure& test, unsigned argument, Type
         return out.bitCast(out.castToInt32(bits), Float);
     case Double:
         return out.bitCast(bits, Double);
+    case Vector128:
     case Void:
     case Tuple:
         break;
@@ -319,7 +321,7 @@ static void testMemoryTableOfImageIsBaseOfIndexedLoad()
     static constexpr uint32_t words[] = { 0x11111111, 0x22222222, 0x33333333, 0x44444444 };
     TestProcedure test;
     Output& out = test.out();
-    LValue table = out.relocatable(SymbolSpace::Constant, out.addConstantData(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(words), sizeof(words)), ConstantKind::BitSetOverKnownShapes));
+    LValue table = out.relocatable(SymbolSpace::Constant, out.addConstantData(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(words), sizeof(words)), ConstantKind::ShapeBitmap));
     LValue element = out.lShr(out.castToInt32(test.argumentGPR(0)), 5);
     LValue extended = out.zeroExtPtr(element);
     LValue shifted = out.shl(extended, 2);
@@ -374,9 +376,13 @@ static void checkAddressWithTwoUsesInMemoryTest(MemoryTestSecondUse secondUse)
     compileOrFail(test);
 
     const Liveness& liveness = test.procedure().liveness();
-    AOT_TEST_CHECK(usedTwice->useCount() == 2);
-    AOT_TEST_CHECK(!liveness.isFused(usedTwice));
-    AOT_TEST_CHECK(liveness.isFused(shifted) == (usedTwice == address) && addsScaledIndex(liveness, address) == (usedTwice == address));
+    if (isX86_64() && secondUse == MemoryTestSecondUse::BySecondAccess)
+        AOT_TEST_CHECK(address->useCount() == 1 && liveness.isFused(address));
+    else {
+        AOT_TEST_CHECK(usedTwice->useCount() == 2);
+        AOT_TEST_CHECK(!liveness.isFused(usedTwice));
+        AOT_TEST_CHECK(liveness.isFused(shifted) == (usedTwice == address) && addsScaledIndex(liveness, address) == (usedTwice == address));
+    }
     AOT_TEST_CHECK(test.call<uint64_t>(bytes.middle(), int64_t { 2 }) == answer);
     bytes.expectSameAs(expected, "an address with two uses");
 }
@@ -403,12 +409,34 @@ static void testMemoryExtensionOfIndexIsFusedWhereRegisterHoldsIt()
         compileOrFail(test);
 
         const Liveness& liveness = test.procedure().liveness();
-        AOT_TEST_CHECK(extended->opcode() == ZExt32 && clearsUpperHalfOfRegister(index->opcode()) == upperHalfIsClear);
+        AOT_TEST_CHECK(extended->opcode() == ZExt32 && clearsUpperHalf(index->opcode()) == upperHalfIsClear);
         AOT_TEST_CHECK(liveness.isFused(address) && liveness.isFused(extended) == (upperHalfIsClear || isARM64()));
 
         uint64_t words[4] = { 10, 11, 12, 13 };
         AOT_TEST_CHECK(test.call<uint64_t>(&words[0], uint64_t { 0xdeadbeef00000001 }) == (upperHalfIsClear ? 12u : 11u));
     }
+}
+
+static void testMemoryAliasedAddresses()
+{
+    TestProcedure test;
+    Output& out = test.out();
+    LValue base = test.argumentGPR(0);
+    LValue other = test.argumentGPR(1);
+    LValue index = out.bitAnd(out.castToInt32(test.argumentGPR(2)), out.constInt32(3));
+    LValue extended = out.zeroExtPtr(index);
+    LValue first = out.load64(out.address(test.heaps().root, out.add(base, out.shl(extended, 3))));
+    LValue second = out.load32(out.address(test.heaps().root, out.add(other, out.shl(extended, 2))));
+    out.ret(out.add(out.add(first, out.zeroExtPtr(second)), extended));
+    compileOrFail(test);
+
+    AOT_TEST_CHECK(extended->opcode() == ZExt32 && extended->useCount() > 1);
+    const Liveness& liveness = test.procedure().liveness();
+    AOT_TEST_CHECK(liveness.isFused(first->child(0)) && liveness.isFused(second->child(0)) && liveness.isFused(extended));
+
+    uint64_t words[4] = { 10, 11, 12, 13 };
+    uint32_t others[4] = { 100, 200, 300, 400 };
+    AOT_TEST_CHECK(test.call<uint64_t>(&words[0], &others[0], uint64_t { 0xdeadbeefdeadbee2 }) == 12 + 300 + 2);
 }
 
 static void testMemoryNumberIsMadeOfLowHalfOfRegister()
@@ -754,10 +782,12 @@ static void testMemoryTrappingLoadNamesItsReference()
     AOT_TEST_CHECK(test.call<uint64_t>(bytes.middle(), int64_t { 2 }) == bytes.read(16, 1));
 }
 
+enum class TrapInMemoryTest : uint8_t { Stays, MayBeHandedOver, IsHandedOver };
+
 template<typename Functor>
-static void checkTrapAheadOfAccessInMemoryTest(bool mayBeHandedOver, const Functor& appendRest)
+static void checkTrapAheadOfAccessInMemoryTest(TrapInMemoryTest expected, const Functor& appendRest, const ProcedureTraits& traits = { })
 {
-    TestProcedure test;
+    TestProcedure test(traits);
     Output& out = test.out();
     LValue base = test.argumentGPR(0);
     LValue otherBase = test.argumentGPR(1);
@@ -769,10 +799,11 @@ static void checkTrapAheadOfAccessInMemoryTest(bool mayBeHandedOver, const Funct
 
     const Liveness& liveness = test.procedure().liveness();
     if (!liveness.isDropped(trappingLoad)) {
+        AOT_TEST_CHECK(expected != TrapInMemoryTest::IsHandedOver);
         checkRecordOfTrapInMemoryTest(test, trappingLoad, trappingLoad);
         return;
     }
-    AOT_TEST_CHECK(mayBeHandedOver);
+    AOT_TEST_CHECK(expected != TrapInMemoryTest::Stays);
     AOT_TEST_CHECK(liveness.standsInItsBlock(access));
     AOT_TEST_CHECK(liveness.of(access).has(ValueFlag::TakesOverTrap));
     AOT_TEST_CHECK(liveness.trapTakenOverBy(access) == trappingLoad);
@@ -781,32 +812,94 @@ static void checkTrapAheadOfAccessInMemoryTest(bool mayBeHandedOver, const Funct
 
 static void testMemoryTrapIsHandedOverOrStays()
 {
-    checkTrapAheadOfAccessInMemoryTest(true, [](Output& out, const AbstractHeap& heap, LValue base, LValue) {
+    checkTrapAheadOfAccessInMemoryTest(TrapInMemoryTest::MayBeHandedOver, [](Output& out, const AbstractHeap& heap, LValue base, LValue) {
         LValue loaded = out.load64(out.address(heap, base, 8));
         out.ret(loaded);
         return loaded;
     });
-    checkTrapAheadOfAccessInMemoryTest(true, [](Output& out, const AbstractHeap& heap, LValue base, LValue otherBase) {
+    checkTrapAheadOfAccessInMemoryTest(TrapInMemoryTest::MayBeHandedOver, [](Output& out, const AbstractHeap& heap, LValue base, LValue otherBase) {
         LValue stored = out.store64(otherBase, out.address(heap, base, 8));
         out.retVoid();
         return stored;
     });
-    checkTrapAheadOfAccessInMemoryTest(false, [](Output& out, const AbstractHeap& heap, LValue base, LValue) {
+    checkTrapAheadOfAccessInMemoryTest(TrapInMemoryTest::Stays, [](Output& out, const AbstractHeap& heap, LValue base, LValue) {
         LValue loaded = out.load64(out.address(heap, base, static_cast<ptrdiff_t>(trapReach()) - 4));
         out.ret(loaded);
         return loaded;
     });
-    checkTrapAheadOfAccessInMemoryTest(false, [](Output& out, const AbstractHeap& heap, LValue, LValue otherBase) {
+    checkTrapAheadOfAccessInMemoryTest(TrapInMemoryTest::Stays, [](Output& out, const AbstractHeap& heap, LValue, LValue otherBase) {
         LValue loaded = out.load64(out.address(heap, otherBase, 8));
         out.ret(loaded);
         return loaded;
     });
-    checkTrapAheadOfAccessInMemoryTest(false, [](Output& out, const AbstractHeap& heap, LValue base, LValue otherBase) {
+    checkTrapAheadOfAccessInMemoryTest(TrapInMemoryTest::Stays, [](Output& out, const AbstractHeap& heap, LValue base, LValue otherBase) {
         out.store64(base, out.address(heap, otherBase));
         LValue loaded = out.load64(out.address(heap, base, 8));
         out.ret(loaded);
         return loaded;
     });
+}
+
+static LValue appendPatchAndLoadBehindTrapInMemoryTest(Output& out, const AbstractHeap& heap, LValue base, LValue operand, const Effects& effects)
+{
+    PatchOperation* patch = out.patch(Int64);
+    patch->appendSomeRegister(operand);
+    patch->resultConstraints = { ValueRep::SomeEarlyRegister };
+    patch->effects = effects;
+    patch->setRunsWithoutFrame(true);
+    patch->setGenerator([](CCallHelpers& jit, const PatchParameters& params) {
+        if (params[1].isFPR())
+            jit.truncateDoubleToInt64(params[1].fpr(), params[0].gpr());
+        else
+            jit.move(params[1].gpr(), params[0].gpr());
+    });
+    LValue loaded = out.load64(out.address(heap, base, 8));
+    out.ret(out.add(out.add(loaded, loaded), patch));
+    return loaded;
+}
+
+static void testMemoryTrapIsHandedOverPastPatchWithoutEffects()
+{
+    checkTrapAheadOfAccessInMemoryTest(TrapInMemoryTest::IsHandedOver, [](Output& out, const AbstractHeap& heap, LValue base, LValue) {
+        return appendPatchAndLoadBehindTrapInMemoryTest(out, heap, base, out.constDouble(2.5), Effects::none());
+    });
+}
+
+enum class PatchBehindTrapInMemoryTest : uint8_t { Reads, Writes, TakesInteger, TakesBase, Suspends };
+
+template<PatchBehindTrapInMemoryTest kind>
+static void testMemoryTrapStaysAheadOfPatch()
+{
+    ProcedureTraits traits;
+    traits.savesFrameOnSuspend = kind == PatchBehindTrapInMemoryTest::Suspends;
+    checkTrapAheadOfAccessInMemoryTest(TrapInMemoryTest::Stays, [&](Output& out, const AbstractHeap& heap, LValue base, LValue otherBase) {
+        if constexpr (kind == PatchBehindTrapInMemoryTest::Suspends) {
+            constexpr GPRReg result = GPRInfo::returnValueGPR;
+            RegisterFile file = registerFileFor(traits);
+            RegisterMask lost = (file.allocatableIn(Bank::GP) | file.allocatableIn(Bank::FP)) & ~maskOf(Reg(result));
+            if constexpr (SavedFrame::preservedRegister != InvalidGPRReg)
+                lost &= ~maskOf(Reg(SavedFrame::preservedRegister));
+            PatchOperation* suspension = out.patch(Int64);
+            suspension->resultConstraints = { ValueRep::reg(result) };
+            suspension->effects = Effects::none();
+            suspension->clobberLate(lost);
+            suspension->setIsSuspension(true);
+            suspension->setGenerator([](CCallHelpers& jit, const PatchParameters&) {
+                jit.move(CCallHelpers::TrustedImm32(0), result);
+            });
+            LValue loaded = out.load64(out.address(heap, base, 8));
+            out.ret(out.add(out.add(loaded, loaded), suspension));
+            return loaded;
+        } else {
+            Effects effects = Effects::none();
+            if constexpr (kind == PatchBehindTrapInMemoryTest::Reads)
+                effects.reads = HeapSet::top();
+            if constexpr (kind == PatchBehindTrapInMemoryTest::Writes)
+                effects.writes = HeapSet::top();
+            LValue operand = kind == PatchBehindTrapInMemoryTest::TakesInteger ? otherBase : kind == PatchBehindTrapInMemoryTest::TakesBase ? base : out.constDouble(2.5);
+            return appendPatchAndLoadBehindTrapInMemoryTest(out, heap, base, operand, effects);
+        }
+    }, traits);
 }
 
 struct MemoryTestStore {
@@ -1234,6 +1327,7 @@ std::span<const NativeTest> machineMemoryTests()
         { "machine/memory/table-of-the-image-is-the-base-of-an-indexed-load"_s, Machine::testMemoryTableOfImageIsBaseOfIndexedLoad },
         { "machine/memory/address-with-two-uses-is-not-fused"_s, Machine::testMemoryAddressWithTwoUsesIsNotFused },
         { "machine/memory/extension-of-an-index-is-fused-where-the-register-holds-it"_s, Machine::testMemoryExtensionOfIndexIsFusedWhereRegisterHoldsIt },
+        { "machine/memory/several-addresses-name-one-word"_s, Machine::testMemoryAliasedAddresses },
         { "machine/memory/number-is-made-of-the-low-half-of-a-register"_s, Machine::testMemoryNumberIsMadeOfLowHalfOfRegister },
         { "machine/memory/comparison-with-a-constant-reads-the-load-where-it-lies"_s, Machine::testMemoryComparisonReadsLoadWhereItLies },
         { "machine/memory/bit-test-reads-the-load-where-it-lies"_s, Machine::testMemoryBitTestReadsLoadWhereItLies },
@@ -1243,6 +1337,12 @@ std::span<const NativeTest> machineMemoryTests()
         { "machine/memory/unused-trapping-load-stays"_s, Machine::testMemoryUnusedTrappingLoadStays },
         { "machine/memory/trapping-load-names-its-reference"_s, Machine::testMemoryTrappingLoadNamesItsReference },
         { "machine/memory/trap-is-handed-over-or-stays"_s, Machine::testMemoryTrapIsHandedOverOrStays },
+        { "machine/memory/trap-is-handed-over-past-a-patch-without-effects"_s, Machine::testMemoryTrapIsHandedOverPastPatchWithoutEffects },
+        { "machine/memory/trap-stays-ahead-of-a-patch-that-reads"_s, Machine::testMemoryTrapStaysAheadOfPatch<Machine::PatchBehindTrapInMemoryTest::Reads> },
+        { "machine/memory/trap-stays-ahead-of-a-patch-that-writes"_s, Machine::testMemoryTrapStaysAheadOfPatch<Machine::PatchBehindTrapInMemoryTest::Writes> },
+        { "machine/memory/trap-stays-ahead-of-a-patch-that-takes-an-integer"_s, Machine::testMemoryTrapStaysAheadOfPatch<Machine::PatchBehindTrapInMemoryTest::TakesInteger> },
+        { "machine/memory/trap-stays-ahead-of-a-patch-that-takes-its-base"_s, Machine::testMemoryTrapStaysAheadOfPatch<Machine::PatchBehindTrapInMemoryTest::TakesBase> },
+        { "machine/memory/trap-stays-ahead-of-a-patch-that-suspends"_s, Machine::testMemoryTrapStaysAheadOfPatch<Machine::PatchBehindTrapInMemoryTest::Suspends> },
         { "machine/memory/neighboring-stores-pair"_s, Machine::testMemoryNeighboringStoresPair },
         { "machine/memory/tested-sum-is-stored-by-the-branch"_s, Machine::testMemoryTestedSumIsStoredByBranch },
         { "machine/memory/low-half-is-left-alone-where-the-whole-word-is-read"_s, Machine::testMemoryLowHalfIsLeftAloneWhereWholeWordIsRead },

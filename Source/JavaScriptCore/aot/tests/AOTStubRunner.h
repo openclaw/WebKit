@@ -9,8 +9,10 @@
 
 #include "AOTBuildContext.h"
 #include "AOTClosureWord.h"
+#include "AOTCompactTable.h"
 #include "AOTCompileOptionWords.h"
 #include "AOTConvention.h"
+#include "AOTHeapHooks.h"
 #include "AOTImageTestSupport.h"
 #include "AOTInstance.h"
 #include "AOTInstanceLayout.h"
@@ -26,6 +28,7 @@
 #include "CallFrame.h"
 #include "JITOperationList.h"
 #include "JITOperationValidation.h"
+#include "JSBigInt.h"
 #include "JSCJSValueInlines.h"
 #include "LinkBuffer.h"
 #include "LocalAllocator.h"
@@ -40,6 +43,8 @@
 #include <optional>
 #include <span>
 #include <wtf/HashFunctions.h>
+#include <wtf/NeverDestroyed.h>
+#include <wtf/StdLibExtras.h>
 
 #if CPU(X86_64) && OS(LINUX)
 #include <signal.h>
@@ -60,8 +65,104 @@ inline constexpr auto markedFPRs = [] {
     return registers;
 }();
 
-template<size_t size>
-struct alignas(16) FakeObject {
+// Memory for cells of tests. A word below minCell32 names no cell, and all cells of a program have one base. A stack may lie in the first megabytes above a base, or on both sides of one.
+class CageMemory {
+    WTF_MAKE_NONCOPYABLE(CageMemory);
+public:
+    static constexpr size_t atomSize = 16;
+    // A test lays the base of structures so far below a structure that the ID of its objects leads to it. Its other cells have the ID 0, which leads to the base.
+    static constexpr size_t emptyBytesBelowCells = 16 * KB;
+
+    explicit CageMemory(size_t sizeOfCells)
+    {
+        constexpr uintptr_t firstOffsetInCage = static_cast<uintptr_t>(minCell32) << cell32Shift;
+        const size_t size = emptyBytesBelowCells + sizeOfCells;
+        m_memory.grow(2 * size + firstOffsetInCage + atomSize);
+        m_start = WTF::roundUpToMultipleOf<atomSize>(std::bit_cast<uintptr_t>(m_memory.mutableSpan().data()));
+        uintptr_t offsetInCage = m_start - cageBase();
+        if (offsetInCage < firstOffsetInCage)
+            m_start += firstOffsetInCage - offsetInCage;
+        else if (offsetInCage + size > MarkedBlockCage::maxSize)
+            m_start += MarkedBlockCage::maxSize - offsetInCage + firstOffsetInCage;
+        zeroSpan(std::span(std::bit_cast<uint8_t*>(m_start), emptyBytesBelowCells));
+        m_start += emptyBytesBelowCells;
+        m_next = m_start;
+        m_end = m_start + sizeOfCells;
+        AOT_TEST_CHECK(m_end <= std::bit_cast<uintptr_t>(m_memory.mutableSpan().data()) + m_memory.size());
+        AOT_TEST_CHECK(MarkedBlockCage::baseOf(std::bit_cast<void*>(m_end - 1)) == cageBase());
+    }
+
+    uintptr_t cageBase() const { return MarkedBlockCage::baseOf(std::bit_cast<void*>(m_start)); }
+
+    uint8_t* allocate(size_t size)
+    {
+        uintptr_t result = m_next;
+        m_next += WTF::roundUpToMultipleOf<atomSize>(size);
+        AOT_TEST_CHECK(m_next <= m_end);
+        zeroSpan(std::span(std::bit_cast<uint8_t*>(result), size));
+        return std::bit_cast<uint8_t*>(result);
+    }
+
+    // Only the newest cell makes room for others.
+    void free(uint8_t* cell, size_t size)
+    {
+        if (std::bit_cast<uintptr_t>(cell) + WTF::roundUpToMultipleOf<atomSize>(size) == m_next)
+            m_next = std::bit_cast<uintptr_t>(cell);
+    }
+
+private:
+    Vector<uint8_t> m_memory;
+    uintptr_t m_start { 0 };
+    uintptr_t m_next { 0 };
+    uintptr_t m_end { 0 };
+};
+
+inline CageMemory& memoryOfFakeObjects()
+{
+    static NeverDestroyed<CageMemory> memory(4 * MB);
+    return memory;
+}
+
+template<size_t numberOfBytes>
+class CageBytes {
+public:
+    CageBytes()
+        : m_data(memoryOfFakeObjects().allocate(numberOfBytes))
+    {
+    }
+
+    CageBytes(const CageBytes& other)
+        : CageBytes()
+    {
+        *this = other;
+    }
+
+    ~CageBytes() { memoryOfFakeObjects().free(m_data, numberOfBytes); }
+
+    CageBytes& operator=(const CageBytes& other)
+    {
+        memmoveSpan(span(), other.span());
+        return *this;
+    }
+
+    uint8_t* data() { return m_data; }
+    const uint8_t* data() const { return m_data; }
+    static constexpr size_t size() { return numberOfBytes; }
+    uint8_t* begin() { return m_data; }
+    uint8_t* end() { return m_data + numberOfBytes; }
+    uint8_t& operator[](size_t index) { return span()[index]; }
+    void fill(uint8_t byte) { memsetSpan(span(), byte); }
+    friend bool operator==(const CageBytes& a, const CageBytes& b) { return equalSpans(a.span(), b.span()); }
+
+private:
+    std::span<uint8_t> span() { return { m_data, numberOfBytes }; }
+    std::span<const uint8_t> span() const { return { m_data, numberOfBytes }; }
+
+    uint8_t* m_data;
+};
+
+template<typename Bytes>
+struct alignas(16) FakeMemory {
     template<typename T> T& at(ptrdiff_t offset) { return *reinterpret_cast<T*>(bytes.data() + offset); }
     uint64_t address() const { return std::bit_cast<uintptr_t>(bytes.data()); }
 
@@ -71,10 +172,22 @@ struct alignas(16) FakeObject {
         at<uint8_t>(JSCell::typeInfoTypeOffset()) = type;
     }
 
-    std::array<uint8_t, size> bytes { };
+    Bytes bytes { };
 };
 
-struct FakeAllocator : FakeObject<sizeof(LocalAllocator)> {
+template<size_t size> using FakeObject = FakeMemory<CageBytes<size>>;
+
+struct FakeBigInt : FakeObject<JSBigInt::offsetOfData() + 4 * sizeof(JSBigInt::Digit)> {
+    explicit FakeBigInt(std::initializer_list<JSBigInt::Digit> digits, bool isNegative = false)
+    {
+        setHeader(0, HeapBigIntType);
+        at<uint8_t>(JSCell::typeInfoFlagsOffset()) = isNegative ? TypeInfoPerCellBit : 0;
+        at<uint32_t>(JSBigInt::offsetOfLength()) = digits.size();
+        std::ranges::copy(digits, &at<JSBigInt::Digit>(JSBigInt::offsetOfData()));
+    }
+};
+
+struct FakeAllocator : FakeMemory<std::array<uint8_t, sizeof(LocalAllocator)>> {
     static constexpr uintptr_t noNextInterval = 1;
 
     explicit FakeAllocator(uint32_t cellSize)
@@ -117,7 +230,7 @@ struct LandedCall {
 struct StubEnvironment {
     static StubEnvironment& of(Instance* instance) { return *reinterpret_cast<StubEnvironment*>(reinterpret_cast<uint8_t*>(instance) - OBJECT_OFFSETOF(StubEnvironment, instance)); }
 
-    static constexpr size_t bytesBelowInstance = WTF::roundUpToMultipleOf<InstanceLayout::granuleBelowInstance>(static_cast<size_t>(std::max({ static_cast<ptrdiff_t>(sizeof(InstancePrefix)), -InstanceLayout::offsetOfKeyedValuePlaces, -Instance::offsetOfBoxedCalls() })));
+    static constexpr size_t bytesBelowInstance = WTF::roundUpToMultipleOf<InstanceLayout::granuleBelowInstance>(static_cast<size_t>(std::max({ static_cast<ptrdiff_t>(sizeof(InstancePrefix)), -InstanceLayout::offsetOfKeyedValuePlaces, -InstanceLayout::offsetOfMissesOfPlaces, -Instance::offsetOfBoxedCalls() })));
 
     std::array<uint8_t, bytesBelowInstance - sizeof(InstancePrefix)> tablesAndUnusedBelowPrefix;
     InstancePrefix prefix;
@@ -139,9 +252,13 @@ struct StubEnvironment {
     uint64_t resultOfRecordedOperation;
     CallRegisterValues call;
     LandedCall landedCall;
+    uint64_t resultOfNextLanding;
+    uint64_t calleeOfEarlierLanding;
+    uint64_t thisValueOfEarlierLanding;
     uint64_t wordsNobodyWrote;
     std::array<AbsenceFilter, AbsenceFilter::numberOfFilters> absenceFilters;
     std::array<uint8_t, MissesOfPairs::numberOfCounters> missesOfPairs;
+    std::array<NameOfText, NameOfText::numberOfEntries> namesOfTexts;
     std::array<uint8_t, 0x2000> emptyStructures;
     std::array<uint8_t, AccessTable::alignment + sizeof(AccessTable)> roomForAccessTable;
 };
@@ -172,10 +289,11 @@ public:
 
     StubRun run(StubKey, std::initializer_list<uint64_t> operands, std::optional<uint32_t> immediate = std::nullopt);
     StubRun runOperationCall(StubKey, std::initializer_list<uint64_t> arguments);
-    StubRun runCall(StubKey, uint64_t callee, uint64_t thisValue, std::initializer_list<uint64_t> arguments);
+    StubRun runCall(StubKey, uint64_t callee, uint64_t thisValue, std::initializer_list<uint64_t> arguments, std::optional<uint32_t> immediate = std::nullopt);
     uint64_t closureWord(unsigned numberOfParameters, ClosureWord::Flags flags = { }) const { return ClosureWord::encode({ distanceOfCompiledFunction, numberOfParameters }, 1, flags); }
     Instance& instance() { return m_environment->instance; }
     void forgetAccessTable() { instance().propertyCaches.accessTable.forgetEverything(); }
+    void rememberNameOfText(const NameOfText& name) { m_environment->namesOfTexts[NameOfText::firstIndexFor(name.first, name.last, static_cast<uint32_t>(name.length))] = name; }
     uint32_t& stringCell(uint32_t number) { return m_environment->stringCells[number]; }
     void* entryOf(StubKey key) const { return addressOf(key); }
 
@@ -184,6 +302,9 @@ public:
     void countCallsOf(Entry entry) { install(entry, countOperationCall); }
     void recordCallsOf(Entry entry) { install(entry, recordOperationCall); }
     void setResultOfRecordedOperation(uint64_t result) { m_environment->resultOfRecordedOperation = result; }
+    void setResultOfNextLanding(uint64_t result) { m_environment->resultOfNextLanding = result; }
+    uint64_t calleeOfEarlierLanding() const { return m_environment->calleeOfEarlierLanding; }
+    uint64_t thisValueOfEarlierLanding() const { return m_environment->thisValueOfEarlierLanding; }
     void countWordsNobodyWroteAtCallsOf(Entry entry) { install(entry, std::bit_cast<UGPRPair (SYSV_ABI *)(Instance*)>(m_landingThatCountsWordsNobodyWrote)); }
     void countWordsNobodyWroteAndLeaveStubAtCallsOf(Entry entry)
     {
@@ -424,6 +545,12 @@ inline MacroAssemblerCodeRef<JSEntryPtrTag> StubRunner::compileStubCaller(const 
 
 inline void StubRunner::emitLandingInCompiledFunction(CCallHelpers& jit)
 {
+    jit.pushToSave(GPRInfo::returnValueGPR);
+    jit.load64(environmentSlot(OBJECT_OFFSETOF(StubEnvironment, landedCall.values.callee)), GPRInfo::returnValueGPR);
+    jit.store64(GPRInfo::returnValueGPR, environmentSlot(OBJECT_OFFSETOF(StubEnvironment, calleeOfEarlierLanding)));
+    jit.load64(environmentSlot(OBJECT_OFFSETOF(StubEnvironment, landedCall.values.thisValue)), GPRInfo::returnValueGPR);
+    jit.store64(GPRInfo::returnValueGPR, environmentSlot(OBJECT_OFFSETOF(StubEnvironment, thisValueOfEarlierLanding)));
+    jit.popToRestore(GPRInfo::returnValueGPR);
     jit.store64(CCallHelpers::TrustedImm32(static_cast<int32_t>(LandedCall::Place::CompiledFunction)), environmentSlot(OBJECT_OFFSETOF(StubEnvironment, landedCall.place)));
     jit.store64(countGPR, environmentSlot(OBJECT_OFFSETOF(StubEnvironment, landedCall.count)));
     jit.store64(calleeGPR, environmentSlot(OBJECT_OFFSETOF(StubEnvironment, landedCall.calleeInRegister)));
@@ -431,7 +558,12 @@ inline void StubRunner::emitLandingInCompiledFunction(CCallHelpers& jit)
     jit.store64(thisGPR, environmentSlot(OBJECT_OFFSETOF(StubEnvironment, landedCall.values.thisValue)));
     for (unsigned i = 0; i < numberOfArgumentGPRs; ++i)
         jit.store64(argumentGPR(i), environmentSlot(OBJECT_OFFSETOF(StubEnvironment, landedCall.values.arguments), i));
-    jit.move(CCallHelpers::TrustedImm64(resultOfCompiledFunction), GPRInfo::returnValueGPR);
+    jit.move(CCallHelpers::TrustedImm64(wordThatNobodyWrote), calleeGPR);
+    jit.move(calleeGPR, thisGPR);
+    for (unsigned i = 0; i < numberOfArgumentGPRs; ++i)
+        jit.move(calleeGPR, argumentGPR(i));
+    jit.load64(environmentSlot(OBJECT_OFFSETOF(StubEnvironment, resultOfNextLanding)), GPRInfo::returnValueGPR);
+    jit.store64(CCallHelpers::TrustedImm32(static_cast<int32_t>(resultOfCompiledFunction)), environmentSlot(OBJECT_OFFSETOF(StubEnvironment, resultOfNextLanding)));
     jit.ret();
 }
 
@@ -485,7 +617,7 @@ inline void StubRunner::emitLandingThatCountsWordsNobodyWrote(CCallHelpers& jit,
 
 inline void StubRunner::compileLandings()
 {
-    CCallHelpers jit;
+    ImageAssembler jit;
     CCallHelpers::Label compiledFunction = jit.label();
     emitLandingInCompiledFunction(jit);
     CCallHelpers::Label engineCallee = jit.label();
@@ -538,20 +670,29 @@ inline StubRunner::StubRunner(const StubOptions& options, std::span<const StubKe
 {
     AOT_TEST_CHECK(m_blob.code.relocations.isEmpty());
     m_environment->runtimeTable.fill(operationPointer(countOperationCall));
+    m_environment->resultOfNextLanding = resultOfCompiledFunction;
     Instance& instance = m_environment->instance;
     instance.runtimeTable = m_environment->runtimeTable.data();
     instance.vm = &m_environment->vm.get();
     instance.numberTag = JSValue::NumberTag;
     instance.notCellMask = JSValue::NotCellMask;
     std::ranges::copy(WTF::intHashSecrets, instance.numbers.hashSecrets);
+    instance.numbers.keyMultiplierOfTables = CompactTable::keyMultiplier;
     instance.propertyCaches.absenceFilters = m_environment->absenceFilters.data();
     instance.propertyCaches.missesOfPairs = m_environment->missesOfPairs.data();
+    instance.propertyCaches.namesOfTexts = m_environment->namesOfTexts.data();
     instance.propertyCaches.accessTable.publish(*std::bit_cast<AccessTable*>(roundUpToMultipleOf<AccessTable::alignment>(std::bit_cast<uintptr_t>(m_environment->roomForAccessTable.data()))));
+    setBarrierThreshold(instance, blackThreshold);
     instance.realm.keysOfPairs = StringKeyCache::noKeysOfPairs();
     instance.prefix().structureIDBase = std::bit_cast<uintptr_t>(m_environment->emptyStructures.data());
     for (SlotHandlerTable table : allSlotHandlerTables) {
         for (Slot::Kind kind : slotKindsWithHandlers)
             instance.slotHandlers()[static_cast<unsigned>(table)][static_cast<unsigned>(kind)] = addressOf(slotHandlerFor(table, kind));
+    }
+    for (AnswerHandlerTable table : allAnswerHandlerTables) {
+        const std::array handlers = answerHandlerKeys(table);
+        for (unsigned bits = 0; bits < handlers.size(); ++bits)
+            instance.slotHandlers()[numberOfSlotHandlerTables + static_cast<unsigned>(table)][bits] = addressOf(handlers[bits]);
     }
     compileLandings();
 }
@@ -592,6 +733,8 @@ inline StubRun StubRunner::run(StubKey key, const StubSignature& signature, std:
     environment.numberOfRecordedCalls = 0;
     environment.recordedArguments = { };
     environment.landedCall = { };
+    environment.calleeOfEarlierLanding = 0;
+    environment.thisValueOfEarlierLanding = 0;
     environment.wordsNobodyWrote = 0;
     environment.numbers = markers;
     std::ranges::copy(operands, environment.operands.begin());
@@ -642,7 +785,7 @@ inline StubRun StubRunner::run(StubKey key, const StubSignature& signature, std:
     return { environment.result, !!environment.numberOfOperationCalls, environment.numberOfRecordedCalls, environment.recordedArguments, environment.landedCall, instructionsInStubs, changedRegisters, leapsInStubs };
 }
 
-inline StubRun StubRunner::runCall(StubKey key, uint64_t callee, uint64_t thisValue, std::initializer_list<uint64_t> arguments)
+inline StubRun StubRunner::runCall(StubKey key, uint64_t callee, uint64_t thisValue, std::initializer_list<uint64_t> arguments, std::optional<uint32_t> immediate)
 {
     const StubSignature& signature = m_catalog.summaryOf(key).signature;
     AOT_TEST_CHECK(signature.usesCallConvention && arguments.size() <= numberOfArgumentGPRs);
@@ -652,7 +795,7 @@ inline StubRun StubRunner::runCall(StubKey key, uint64_t callee, uint64_t thisVa
     call.arguments.fill(unsetArgument);
     std::ranges::copy(arguments, call.arguments.begin());
     if (!signature.numberOfOperands)
-        return run(key, { });
+        return run(key, { }, immediate);
     AOT_TEST_CHECK(signature.numberOfOperands == 1 && signature.operands[0] == Reg(countGPR));
     return run(key, { arguments.size() });
 }

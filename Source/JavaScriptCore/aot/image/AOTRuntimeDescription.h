@@ -24,20 +24,13 @@ struct RuntimeDescription {
         Assertions = 1 << 0,
         AddressSanitizer = 1 << 1,
     };
-    enum class OperatingSystem : uint8_t {
-        Linux,
-        Darwin,
-        Windows,
-        FreeBSD,
-        Other,
-    };
 
     uint64_t magic;
     uint32_t size;
     uint32_t numberOfFacts;
     uint64_t cpuFeatures;
     uint8_t architecture;
-    OperatingSystem operatingSystem;
+    uint8_t platform;
     uint8_t imageForm;
     uint8_t checks;
     uint32_t imageFormatVersion;
@@ -76,7 +69,7 @@ struct RuntimeDifference {
 
 JS_EXPORT_PRIVATE std::span<const uint8_t> descriptionOfThisRuntime();
 JS_EXPORT_PRIVATE std::span<const ASCIILiteral> namesOfRuntimeFacts();
-JS_EXPORT_PRIVATE std::optional<RuntimeDifference> findDifferenceFromThisRuntime(std::span<const uint8_t> other);
+JS_EXPORT_PRIVATE std::optional<RuntimeDifference> findRuntimeDifference(std::span<const uint8_t> other);
 
 } } // namespace JSC::AOT
 

@@ -53,7 +53,7 @@ static constexpr uint32_t linkedRegExpMention = 2;
 template<typename Emit>
 static uint32_t appendRelocated(CodeSketch& sketch, const Emit& emit)
 {
-    CCallHelpers jit;
+    ImageAssembler jit;
     RelocationRecorder recorder(jit, testAssemblerPolicy());
     emit(recorder);
     auto unit = recorder.finalize(LinkBuffer::Profile::FTL, nullptr);
@@ -236,7 +236,7 @@ static size_t expectedTarget(const Steps& steps, const ImageNumbers& numbers, ui
     return 0;
 }
 
-static bool liesInside(const CodeBody& body, const Relocation& relocation)
+static bool fitsInBody(const CodeBody& body, const Relocation& relocation)
 {
     return relocation.offset + MacroAssembler::relocationSize(relocation.kind) <= body.bytes.size();
 }
@@ -249,7 +249,7 @@ static void checkLinkedBody(const Steps& steps, const ImageNumbers& numbers, uin
     Vector<uint8_t> expected(FillWith { }, code.size(), static_cast<uint8_t>(0));
     memcpySpan(expected.mutableSpan().subspan(start), body.bytes.span());
     for (const Relocation& relocation : body.relocations) {
-        if (liesInside(body, relocation))
+        if (fitsInBody(body, relocation))
             AOT_TEST_CHECK(applyRelocation(expected.mutableSpan(), start, relocation, expectedTarget(steps, numbers, position, relocation)));
     }
     AOT_TEST_CHECK(equalSpans(code.subspan(start, body.bytes.size()), expected.span().subspan(start, body.bytes.size())));
@@ -354,7 +354,7 @@ static void testRelocationPastEnd()
     CodeBody& body = steps.functions[0].body;
     Relocation& relocation = body.relocations.last();
     relocation.offset = static_cast<uint32_t>(body.bytes.size() - codeOffsetUnit);
-    AOT_TEST_CHECK(!liesInside(body, relocation));
+    AOT_TEST_CHECK(!fitsInBody(body, relocation));
     Vector<uint8_t> code = link(steps, numbers);
     checkLinkerReported(steps, relocation);
     checkLinkedBodies(steps, numbers, code.span());
@@ -505,6 +505,19 @@ static void testThrowWordsThatNameOneStringShareThunk()
 
     AOT_TEST_CHECK(ThrowSiteWord::withNarrowA(firstThrowWordOfSiteWithName(), ThrowSiteWord::maxNarrowA));
     AOT_TEST_CHECK(!ThrowSiteWord::withNarrowA(firstThrowWordOfSiteWithName(), ThrowSiteWord::narrowNone));
+    AOT_TEST_CHECK(!ThrowSiteWord::withNarrowA(firstThrowWordOfSiteWithName(), ThrowSiteWord::narrowNone + 1));
+
+    ThrowSiteWord binding { };
+    binding.kind = static_cast<uint32_t>(ThrowKind::UninitializedBinding);
+    binding.hasWideA = true;
+    binding.registerNumber = 7;
+    constexpr uint32_t end = ThrowSiteWord::numberOfRegistersPerBank << ThrowSiteWord::narrowABits;
+    for (uint32_t number : { 0u, ThrowSiteWord::maxNarrowA, ThrowSiteWord::narrowNone + 1, 2 * ThrowSiteWord::narrowNone + 1, end - 1 }) {
+        std::optional<uint32_t> narrow = ThrowSiteWord::withNarrowA(std::bit_cast<uint32_t>(binding), number);
+        AOT_TEST_CHECK(narrow && std::bit_cast<ThrowSiteWord>(*narrow).narrowA() == number && std::bit_cast<ThrowSiteWord>(*narrow).isUninitializedBinding());
+    }
+    for (uint32_t number : { ThrowSiteWord::narrowNone, end })
+        AOT_TEST_CHECK(!ThrowSiteWord::withNarrowA(std::bit_cast<uint32_t>(binding), number));
 }
 
 static CompiledCode bodyThatReadsByName(uint32_t function, uint32_t mentionOfName)
@@ -810,7 +823,7 @@ static void testFarInstanceWordsAreReached()
     auto symbol = [](uint32_t index) {
         return CodeSymbol { SymbolSpace::InstanceWord, index };
     };
-    CCallHelpers jit;
+    ImageAssembler jit;
     RelocationRecorder recorder(jit, testAssemblerPolicy());
     recorder.loadInstanceWord(symbol(0), InstanceWordWidth::Word64, instance, sum);
     recorder.moveInstanceAddress(symbol(1), instance, word);

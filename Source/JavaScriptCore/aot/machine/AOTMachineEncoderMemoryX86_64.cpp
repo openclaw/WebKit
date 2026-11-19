@@ -5,6 +5,7 @@
 
 #include "config.h"
 #include "AOTMachineEncoder.h"
+#include "AOTInliningAcrossFiles.h"
 
 #if ENABLE(AOT) && CPU(X86_64)
 
@@ -20,11 +21,11 @@ static bool loadOrStoreMayFault(const Encoder& encoder, const Operation* access)
 static bool loadOrStoreMovesNumber(const Operation* access)
 {
     Type type = isStore(access->opcode()) ? access->child(0)->type() : access->type();
-    return type.isFloat();
+    return type.isInNumberRegister();
 }
 
 template<typename Functor>
-static void withOperandOfLoadOrStore(const AddressForm& form, const Functor& functor)
+static ALWAYS_INLINE void withOperandOfLoadOrStore(const AddressForm& form, const Functor& functor)
 {
     static_assert(!MacroAssembler::TimesOne && MacroAssembler::TimesTwo == 1 && MacroAssembler::TimesFour == 2 && MacroAssembler::TimesEight == 3);
     switch (form.kind) {
@@ -41,14 +42,23 @@ static void withOperandOfLoadOrStore(const AddressForm& form, const Functor& fun
     RELEASE_ASSERT_NOT_REACHED();
 }
 
+static bool onlyFaultsOnEmptyPointer(const Encoder& encoder, const Operation* load, const AddressForm& form)
+{
+    return load->opcode() == Load8Z && load->traps() && encoder.factsOf(load).lastUse == noPosition && form.kind == AddressForm::BaseOffset && form.offset >= 0 && form.offset < static_cast<int32_t>(sizeof(uint64_t));
+}
+
 static ALWAYS_INLINE void emitX86Load(Encoder& encoder, const Operation* load, const AddressForm& form, Reg destination)
 {
     CCallHelpers& jit = encoder.m_jit;
     ASSERT(isLoad(load->opcode()));
     Type type = load->type();
-    bool isNumber = type.isFloat();
+    bool isNumber = type.isInNumberRegister();
     Width width = accessWidthOf(load->opcode(), type);
     ASSERT(destination.isFPR() == isNumber);
+    if (onlyFaultsOnEmptyPointer(encoder, load, form)) {
+        jit.load32(MacroAssembler::Address(form.base), destination.gpr());
+        return;
+    }
     withOperandOfLoadOrStore(form, [&](auto address) ALWAYS_INLINE_LAMBDA {
         switch (width) {
         case Width8:
@@ -78,7 +88,8 @@ static ALWAYS_INLINE void emitX86Load(Encoder& encoder, const Operation* load, c
                 jit.load64(address, destination.gpr());
             return;
         case Width128:
-            break;
+            jit.loadVector(address, destination.fpr());
+            return;
         }
         RELEASE_ASSERT_NOT_REACHED();
     });
@@ -89,7 +100,7 @@ static ALWAYS_INLINE void emitX86StoreOfRegister(Encoder& encoder, const Operati
     CCallHelpers& jit = encoder.m_jit;
     ASSERT(isStore(store->opcode()));
     Type type = inlineChildWithoutCheck(store, 0)->type();
-    bool isNumber = type.isFloat();
+    bool isNumber = type.isInNumberRegister();
     Width width = accessWidthOf(store->opcode(), type);
     ASSERT(source.isFPR() == isNumber);
     withOperandOfLoadOrStore(form, [&](auto address) ALWAYS_INLINE_LAMBDA {
@@ -113,7 +124,8 @@ static ALWAYS_INLINE void emitX86StoreOfRegister(Encoder& encoder, const Operati
                 jit.store64(source.gpr(), address);
             return;
         case Width128:
-            break;
+            jit.storeVector(source.fpr(), address);
+            return;
         }
         RELEASE_ASSERT_NOT_REACHED();
     });
@@ -195,6 +207,15 @@ static bool tryLoadInstanceWordInOneInstruction(Encoder& encoder, const Operatio
     }
     if (load->opcode() == Load8S)
         return false;
+    if (width == Width16) {
+        return encoder.m_relocations.withInstanceWordAsOperand(symbol, instanceGPR, [&](MacroAssembler::Address word) {
+            AddressForm form;
+            form.base = word.base;
+            form.offset = word.offset;
+            emitX86Load(encoder, load, form, destination);
+            return true;
+        });
+    }
     std::optional<InstanceWordWidth> widthOfWord = instanceWordWidthOfLoadOrStore(width);
     if (!widthOfWord)
         return false;
@@ -407,7 +428,7 @@ static void encodeX86StoreInMemory(Encoder& encoder, const Step& step)
         encoder.recordTrappingAccess(store, form, instruction);
 }
 
-void Encoder::encodeLoad(const Step& step)
+ALWAYS_INLINE_INTO_OTHER_FILES void Encoder::encodeLoad(const Step& step)
 {
     const Operation* load = step.operation;
     ASSERT(isLoad(load->opcode()) && !m_liveness.isFused(load));
@@ -433,10 +454,10 @@ void Encoder::encodeLoad(const Step& step)
         recordTrappingAccess(load, form, instruction);
 }
 
-void Encoder::encodeStore(const Step& step)
+ALWAYS_INLINE_INTO_OTHER_FILES void Encoder::encodeStore(const Step& step)
 {
     const Operation* store = step.operation;
-    ASSERT(isStore(store->opcode()) && !m_liveness.isFused(store->child(0)));
+    ASSERT(isStore(store->opcode()) && (!m_liveness.isFused(store->child(0)) || store->child(0)->opcode() == Trunc || namesWord(store->child(0))));
     if (factsOf(store).has(ValueFlag::WorksInMemory)) {
         encodeX86StoreInMemory(*this, step);
         return;
@@ -478,6 +499,7 @@ void Encoder::encodeBranchInMemory(Block* block, const Step& step)
     const Block* fails = block->successor(!update.successorThatStores).block();
     MacroAssembler::Label* labelOfStores = labelOf(stores);
     MacroAssembler::Label* labelOfFails = labelOf(fails);
+    m_mayEndLoop = true;
 
     AllowMacroScratchRegisterUsage allowScratch(m_jit);
     LeafCursor leaves(step);

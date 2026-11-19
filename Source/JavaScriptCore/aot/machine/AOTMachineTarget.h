@@ -46,6 +46,23 @@ struct PinnedConstant {
 };
 JS_EXPORT_PRIVATE std::optional<PinnedConstant> findPinnedConstant(uint64_t bits);
 
+inline constexpr unsigned numberOfHeldConstants = 2;
+inline constexpr unsigned fewestHeldConstantReads = 2;
+
+inline std::optional<unsigned> heldConstantIndex(const Operation& constant)
+{
+    if (!isX86_64() || !constant.hasInt64())
+        return std::nullopt;
+    switch (constant.asInt64()) {
+    case JSValue::NumberTag:
+        return 0;
+    case JSValue::NotCellMask:
+        return 1;
+    default:
+        return std::nullopt;
+    }
+}
+
 JS_EXPORT_PRIVATE std::span<const uint64_t> bitsOfPinnedConstants();
 
 #if CPU(X86_64)
@@ -82,6 +99,16 @@ inline bool x86TargetAddressAcceptsBase(const Operation& access, const Operation
     return distance >= -x86TargetMaxDistanceFromFrameAddress && distance <= x86TargetMaxDistanceFromFrameAddress;
 }
 
+ALWAYS_INLINE bool readsConstantInMemory(const Operation& user, unsigned childIndex, const Operation& constant)
+{
+    if (childIndex != 1)
+        return false;
+    Opcode opcode = user.opcode();
+    if (constant.hasInt())
+        return isComparison(opcode) && opcode != EqualOrUnordered && !isX86TargetImmediate(constant);
+    return constant.hasDouble() && constant.constantBits() >> 32 && (opcode == Add || opcode == Sub || opcode == Mul || opcode == Div);
+}
+
 ALWAYS_INLINE bool acceptsImmediate(const Operation& user, unsigned childIndex, const Operation& constant)
 {
     if (!constant.hasNoPosition())
@@ -94,8 +121,6 @@ ALWAYS_INLINE bool acceptsImmediate(const Operation& user, unsigned childIndex, 
     case BitAnd:
     case BitOr:
     case BitXor:
-    case Equal:
-    case NotEqual:
     case LessThan:
     case GreaterThan:
     case LessEqual:
@@ -107,9 +132,14 @@ ALWAYS_INLINE bool acceptsImmediate(const Operation& user, unsigned childIndex, 
     case EqualOrUnordered:
         return childIndex == 1 && isX86TargetImmediate(constant);
 
+    case Equal:
+    case NotEqual:
+        return childIndex == 1 && (constant.opcode() == NumberOf || isX86TargetImmediate(constant));
+
     case Shl:
     case SShr:
     case ZShr:
+    case RotR:
         return childIndex == 1 && constant.hasInt32();
 
     case Load8Z:
@@ -184,12 +214,35 @@ ALWAYS_INLINE bool acceptsImmediate(const Operation& user, unsigned childIndex, 
     RELEASE_ASSERT_NOT_REACHED();
 }
 #else
+constexpr bool readsConstantInMemory(const Operation&, unsigned, const Operation&) { return false; }
 JS_EXPORT_PRIVATE bool acceptsImmediate(const Operation& user, unsigned childIndex, const Operation& constant);
 #endif
 
 JS_EXPORT_PRIVATE bool isEncodableBitImmediate(Width, int64_t bits);
 
+#if CPU(ARM64)
+struct ConstantComparison {
+    enum Kind : uint8_t {
+        Immediate,
+        Overflow,
+        HighBits,
+    };
+
+    Kind kind;
+    Opcode relation;
+    int64_t constant;
+    unsigned shift { 0 };
+    bool holdsOnOverflow { false };
+};
+std::optional<ConstantComparison> findConstantComparison(Opcode relation, Width, int64_t constant);
+#endif
+
 #if CPU(X86_64)
+ALWAYS_INLINE bool acceptsSpilledFirstOperand(const Operation& user)
+{
+    return (user.opcode() == Add || user.opcode() == Mul) && user.type().isFloat();
+}
+
 ALWAYS_INLINE bool acceptsMemoryOperand(const Operation& user, unsigned childIndex)
 {
     switch (user.opcode()) {
@@ -254,6 +307,7 @@ ALWAYS_INLINE bool acceptsMemoryOperand(const Operation& user, unsigned childInd
     case Shl:
     case SShr:
     case ZShr:
+    case RotR:
     case Clz:
     case PopCount:
     case Abs:
@@ -285,6 +339,7 @@ ALWAYS_INLINE bool acceptsMemoryOperand(const Operation& user, unsigned childInd
     RELEASE_ASSERT_NOT_REACHED();
 }
 #else
+constexpr bool acceptsSpilledFirstOperand(const Operation&) { return false; }
 JS_EXPORT_PRIVATE bool acceptsMemoryOperand(const Operation& user, unsigned childIndex);
 #endif
 
@@ -302,14 +357,36 @@ JS_EXPORT_PRIVATE bool isEncodableIndexedAddress(Width accessWidth, unsigned shi
 JS_EXPORT_PRIVATE bool isEncodableScaledSum(unsigned shift, IndexExtension);
 JS_EXPORT_PRIVATE bool scaledSumAcceptsBase(const Operation& base);
 
+constexpr bool acceptsShiftedOperand(Opcode opcode)
+{
+    return isARM64() && (opcode == Add || opcode == Sub || opcode == BitAnd || opcode == BitOr || opcode == BitXor);
+}
+
+constexpr bool acceptsExtendedOperand(Opcode opcode) { return isARM64() && (opcode == Add || opcode == Sub || isComparison(opcode)); }
+
 constexpr bool resultPrefersRegisterOfFirstChild() { return isX86_64(); }
 constexpr bool resultOverwritesFirstChild(Opcode opcode)
 {
     return opcode == Add || opcode == Sub || opcode == Mul || opcode == Div || opcode == Neg
-        || opcode == BitAnd || opcode == BitOr || opcode == BitXor || opcode == Shl || opcode == SShr || opcode == ZShr;
+        || opcode == BitAnd || opcode == BitOr || opcode == BitXor || opcode == Shl || opcode == SShr || opcode == ZShr || opcode == RotR;
 }
 
-constexpr bool clearsUpperHalfOfRegister(Opcode opcode)
+inline bool hasThreeAddressFormWithConstant(const Operation& operation)
+{
+    switch (operation.opcode()) {
+    case Add:
+    case Mul:
+        return true;
+    case BitAnd:
+        return operation.child(1)->isInt(0xff) || operation.child(1)->isInt(0xffff);
+    case Shl:
+        return operation.child(1)->isInt(1);
+    default:
+        return false;
+    }
+}
+
+constexpr bool clearsUpperHalf(Opcode opcode)
 {
     switch (opcode) {
     case Add:
@@ -324,6 +401,7 @@ constexpr bool clearsUpperHalfOfRegister(Opcode opcode)
     case Shl:
     case SShr:
     case ZShr:
+    case RotR:
     case Clz:
     case PopCount:
     case SExt8:
@@ -352,20 +430,44 @@ constexpr bool clearsUpperHalfOfRegister(Opcode opcode)
     RELEASE_ASSERT_NOT_REACHED_UNDER_CONSTEXPR_CONTEXT();
 }
 
-inline bool handsOnClearUpperHalf(const Operation* value, const Operation* phi)
+inline bool handsOnClearUpperHalf(const Operation* value)
 {
-    return value == phi || (value->hasInt32() ? value->asInt32() >= 0 : clearsUpperHalfOfRegister(value->opcode()));
+    if (value->opcode() == Patch)
+        return static_cast<const PatchOperation*>(value)->clearsUpperHalf();
+    return value->hasInt32() ? value->asInt32() >= 0 : clearsUpperHalf(value->opcode());
 }
 
-inline bool clearsUpperHalfOfRegister(const Operation* value)
+ALWAYS_INLINE void Procedure::noteUpperHalfHandedOn(Operation* upsilon)
 {
-    return value->opcode() == Phi ? !value->has(OperationFlag::UpperHalfMayBeSet) : clearsUpperHalfOfRegister(value->opcode());
+    const Operation* value = upsilon->child(0);
+    Operation* phi = upsilon->phi();
+    if (value->opcode() == Phi) {
+        if (value != phi && value->type() == Int32)
+            m_upsilonsOfWordsBetweenPhis.append(m_arena, upsilon);
+    } else if (!handsOnClearUpperHalf(value))
+        phi->m_flags |= static_cast<uint16_t>(OperationFlag::UpperHalfMayBeSet);
+}
+
+inline bool clearsUpperHalf(const Operation* value)
+{
+    if (value->opcode() == Phi)
+        return !value->has(OperationFlag::UpperHalfMayBeSet);
+    return value->opcode() == Patch ? static_cast<const PatchOperation*>(value)->clearsUpperHalf() : clearsUpperHalf(value->opcode());
+}
+
+ALWAYS_INLINE void Procedure::noteWordName(Operation* extension)
+{
+    if (extension->opcode() == Trunc || clearsUpperHalf(extension->child(0)))
+        m_namesOfWords.append(m_arena, extension);
 }
 
 JS_EXPORT_PRIVATE unsigned numberOfScratchGPRsOf(const ProcedureTraits&, const Operation&);
 
-inline constexpr unsigned minCasesForJumpTable = 4;
-inline constexpr uint64_t maxEntriesOfJumpTablePerCase = 16;
+inline constexpr unsigned minCasesForJumpTable = 7;
+inline constexpr uint64_t maxEntriesOfJumpTablePerCase = 4;
+inline constexpr unsigned minCasesForSwitchWindow = 4;
+inline constexpr uint64_t valuesInSwitchWindow = 64;
+inline constexpr unsigned maxPlacesToldByBitsOfSwitchWindow = 3;
 
 JS_EXPORT_PRIVATE uint32_t trapReach();
 

@@ -51,7 +51,7 @@
       }
     },
     "candidate": {
-      "pin": "dd694cf4c8226ffb24821b6184b1c15ac36c76b7",
+      "pin": "473748f714bee47d452a9796205640865682e722",
       "build": {
         "patch": null,
         "sha256": null,
@@ -62,24 +62,24 @@
         "sha256": "b2909d5022658929a9da477d2db266bdb80b6f416da783bc6ddf625ede07a361",
         "files": {
           "scripts/buildkite.ts": {
-            "before": "cf1999381cf38d34b9892118266614ae2b81a28066d47a455aa15794fb2c1c3e",
-            "after": "a49d5c491cd65f39c2bd35e3ea6cf7fd9f40e52de209417bd9ee5afed5e7ec4a",
-            "base_blob": "401d5e02728b1966552d6a6357076e50f8203ce9",
-            "adapted_blob": "bdc41d6881b43969d053381afed744a1d907e657",
+            "before": "288ddb316060849e4a88f23778cb78dea92d42c4ff2e331fb67aeb0d107b2ae4",
+            "after": "19938558d92d5d56b3da48d0976768f0c86ec9f6793771ce1eb3fb75f172dbc9",
+            "base_blob": "bdfa85fb9657469215269e7b30eb615215ce0fd7",
+            "adapted_blob": "5c21d9e148f95a90153fe7db47f9c6bddcd25cca",
             "mode": "100644"
           },
           "scripts/openclaw-ci/tests.ts": {
-            "before": "86bf345ff306f216722f94da2d5fe88d7256f5c7aace9a30336643c8818d0cef",
-            "after": "d4a1a9c5a9ab869619cb127e9855d4e5a6abde878d22f0125d1b536155969aff",
-            "base_blob": "515a10cdf4e98e8fec07f5ca5a3ece29b2259078",
-            "adapted_blob": "bd869f380dd829470d747d0e782a18ec46ece551",
+            "before": "81e77eee371781a0cc83892e07564e27211649987285e9f7517959b0b1d15e4b",
+            "after": "c1d5cd9cfeb224dd75f7860f74d5238df7a0beae0532961c21a7f742839cf032",
+            "base_blob": "3a98b4fad5b73c2f00debd5d1bd302c42213bfb8",
+            "adapted_blob": "c2f637cda2da3a18e7dd742822cde9ec58d49e14",
             "mode": "100644"
           },
           "scripts/runner.node.ts": {
-            "before": "c9eab00d35b7bbb9c7c69d8ed7441a6bdb91dfdce54ab152c359b933f50ff800",
-            "after": "bc79759e971009a1f9f69d8e707b3492801914c0915d66c3a3d3385c71c58644",
-            "base_blob": "a7c25245a75a8587b5cdc5296b5ccbb0780804db",
-            "adapted_blob": "0822e904f2e25eaeac516c7cae93be025fba867e",
+            "before": "3f378025d889addd481341cf52e44d018d202514fe8510e4c9ca94ab322506ae",
+            "after": "74432e97a39a9a0e1ddd40d236e7f122ef3e8b96a138b0fb60158b511d8a0903",
+            "base_blob": "6c85c7d37c6ac9278415a5a9b9af1b7bd6258f1c",
+            "adapted_blob": "64a9254ed393dd7353729daf634687e068c8ba6c",
             "mode": "100755"
           }
         }

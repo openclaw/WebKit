@@ -121,8 +121,9 @@ struct LayoutFacts {
 struct ClassFacts {
     ExecutionCount evaluations { ExecutionCount::Unknown };
     BaseState baseState { BaseState::Unknown };
+    bool isEvaluatedOncePerInstance { false };
+    uint8_t logOfAccesses { 0 };
     LayoutID base;
-    BuiltinClassID baseClass;
     LayoutID prototypeBase;
 };
 
@@ -152,7 +153,6 @@ struct RegExpCallWithoutText {
 
 struct WorkerEntry {
     StringID path;
-    bool isGuess { false };
     bool hasOptions { false };
     Witness witness { noWitness };
 };

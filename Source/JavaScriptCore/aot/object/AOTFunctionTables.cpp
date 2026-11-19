@@ -19,11 +19,13 @@
 #include "AOTImage.h"
 #include "AOTInstance.h"
 #include "AOTMembersLeftOut.h"
+#include "AOTModuleHost.h"
 #include "AOTObjectModel.h"
 #include "AOTObjectWords.h"
 #include "AOTProgramStrings.h"
 #include "AOTSlimClosure.h"
 #include "AOTState.h"
+#include "AOTVMState.h"
 #include "FunctionRareData.h"
 #include "JSCInlines.h"
 #include "NativeExecutable.h"
@@ -226,6 +228,35 @@ String functionName(const FunctionDescription& description, NameForm form)
     RELEASE_ASSERT_NOT_REACHED();
 }
 
+static JSString* shareComputedName(VM& vm, FunctionID function, const String& name)
+{
+    VMState::ComputedFunctionName ownName { .hash = name.hash(), .length = name.length() };
+    VMState::ComputedFunctionName& shared = vm.aotState().computedFunctionNames.add(sourceFunctionOf(function).index(), WTF::move(ownName)).iterator->value;
+    if (shared.hash != name.hash() || shared.length != name.length())
+        shared.isOneOfSeveral = true;
+    if (JSString* string = shared.name.get(); string && !shared.isOneOfSeveral) {
+        if (string->tryGetValue().data == name)
+            return string;
+        shared.isOneOfSeveral = true;
+    }
+    JSString* string = jsString(vm, name);
+    shared.name = shared.isOneOfSeveral ? Weak<JSString>() : Weak<JSString>(string);
+    return string;
+}
+
+String computedNameInFrames(VM& vm, const FunctionDescription& description)
+{
+    if (runsInBodyWithoutName(description))
+        return emptyString();
+    FunctionID source = sourceFunctionOf(description.function());
+    if (functionKindData(source).isGenerator)
+        return emptyString();
+    const auto& names = vm.aotState().computedFunctionNames;
+    auto found = names.find(source.index());
+    JSString* name = found == names.end() ? nullptr : found->value.name.get();
+    return name ? String(name->tryGetValueWithoutGC().data) : emptyString();
+}
+
 static String computedFunctionName(JSGlobalObject* globalObject, const Identifier& key, MethodKind kind)
 {
     VM& vm = globalObject->vm();
@@ -256,10 +287,12 @@ void setComputedFunctionName(VM& vm, JSObject* closure, const Identifier& key, M
     auto scope = DECLARE_THROW_SCOPE(vm);
     String name = computedFunctionName(closure->realm(), key, kind);
     RETURN_IF_EXCEPTION(scope, void());
-    if (std::optional<FunctionID> function = functionOf(closure); function && !closure->getDirect(vm, vm.propertyNames->name) && initialNameProperty(sourceFunctionOf(*function)) == name)
+    std::optional<FunctionID> function = functionOf(closure);
+    if (function && !closure->getDirect(vm, vm.propertyNames->name) && initialNameProperty(sourceFunctionOf(*function)) == name)
         return;
+    JSString* nameString = function ? shareComputedName(vm, *function, name) : jsString(vm, name);
     CompiledCallee::reifyProperties(vm, closure);
-    closure->putDirect(vm, vm.propertyNames->name, jsString(vm, name), PropertyAttribute::ReadOnly | PropertyAttribute::DontEnum);
+    closure->putDirect(vm, vm.propertyNames->name, nameString, PropertyAttribute::ReadOnly | PropertyAttribute::DontEnum);
     if (isCompiledClosure(closure)) {
         FunctionRareData* rareData = uncheckedDowncast<Closure>(closure)->ensureRareData(vm);
         rareData->setHasReifiedName();
@@ -267,35 +300,31 @@ void setComputedFunctionName(VM& vm, JSObject* closure, const Identifier& key, M
     }
 }
 
-static std::span<const FunctionTextEntry> functionTextEntriesOfSource(const ProgramTables& tables, uint32_t source)
+static std::span<const FunctionSourceEntry> findFunctionSourceEntries(const ProgramTables& tables, uint32_t source)
 {
-    auto texts = tables.functionTexts();
-    if (texts.empty())
+    auto sources = tables.functionSources();
+    if (sources.empty())
         return { };
-    std::span entries { tables.at<FunctionTextEntry>(texts[0].entriesOffset), texts[0].numberOfEntries };
-    auto found = std::ranges::equal_range(entries, source, { }, [&](const FunctionTextEntry& entry) { return tables.sourceFunctionOf(entry.function); });
+    std::span entries { tables.at<FunctionSourceEntry>(sources[0].entriesOffset), sources[0].numberOfEntries };
+    auto found = std::ranges::equal_range(entries, source, { }, [&](const FunctionSourceEntry& entry) { return tables.sourceFunctionOf(entry.function); });
     return { found.begin(), found.end() };
 }
 
-static std::span<const Latin1Character> bytesOf(const ProgramTables& tables, const FunctionTextEntry& entry)
-{
-    return { tables.at<Latin1Character>(tables.functionTexts()[0].textOffset) + entry.start, entry.end - entry.start };
-}
-
-std::span<const Latin1Character> functionSourceBytes(FunctionID function)
+static std::span<const Latin1Character> functionSourceBytes(FunctionID function)
 {
     const ProgramTables& tables = programTables();
-    std::span entries = functionTextEntriesOfSource(tables, tables.sourceFunctionOf(function.index()));
-    auto entry = std::ranges::find(entries, function.index(), [](const FunctionTextEntry& entry) -> uint32_t { return entry.function; });
+    std::span entries = findFunctionSourceEntries(tables, tables.sourceFunctionOf(function.index()));
+    auto entry = std::ranges::find(entries, function.index(), [](const FunctionSourceEntry& entry) -> uint32_t { return entry.function; });
     if (entry == entries.end())
         return { };
-    return bytesOf(tables, *entry);
+    const FunctionSources& sources = tables.functionSources()[0];
+    RELEASE_ASSERT(entry->start <= entry->end && entry->end <= sources.sourceSize);
+    return { tables.at<Latin1Character>(sources.sourceOffset) + entry->start, entry->end - entry->start };
 }
 
-JSString* functionSourceText(JSGlobalObject* globalObject, FunctionID function)
+JSString* functionSourceText(VM& vm, FunctionID function)
 {
-    VM& vm = globalObject->vm();
-    FunctionTables::TextsByFunction& answered = FunctionTables::of(vm).sourceTexts;
+    FunctionTables::SourceTextMap& answered = FunctionTables::of(vm).sourceTexts;
     if (auto found = answered.find(function); found != answered.end()) {
         if (JSString* text = found->value.get())
             return text;
@@ -382,29 +411,40 @@ JSValue sourceText(JSGlobalObject* globalObject, JSObject* callee)
     CallableKind callableKind = kindData.callable();
     ASCIILiteral async = kindData.isAsync ? "async "_s : ""_s;
     bool isProgramFunction = !kindData.isInRuntimeModule;
-    JSString* text = isProgramFunction ? functionSourceText(globalObject, function) : nullptr;
-    RETURN_IF_EXCEPTION(scope, { });
-    if (text)
+    if (JSString* text = isProgramFunction ? functionSourceText(globalObject->vm(), function) : nullptr)
         return text;
-    if (isProgramFunction && callableKind == CallableKind::Arrow)
-        RELEASE_AND_RETURN(scope, jsMakeNontrivialString(globalObject, async, "() => { [native code] }"_s));
+    JSValue made;
     bool isWrittenWithoutName = callableKind == CallableKind::Arrow || (!isProgramFunction && kindData.hasInferredName);
-    String name = isWrittenWithoutName ? emptyString() : initialNameProperty(function);
-    if (kindData.isConstructor)
-        RELEASE_AND_RETURN(scope, jsMakeNontrivialString(globalObject, "class "_s, name, name.isEmpty() ? ""_s : " "_s, "{ [native code] }"_s));
-    if (isProgramFunction && callableKind == CallableKind::Method)
-        RELEASE_AND_RETURN(scope, jsMakeNontrivialString(globalObject, async, kindData.isGenerator ? "*"_s : ""_s, name, "() { [native code] }"_s));
-    RELEASE_AND_RETURN(scope, jsMakeNontrivialString(globalObject, async, kindData.isGenerator ? "function* "_s : "function "_s, name, "() { [native code] }"_s));
+    if (isProgramFunction && callableKind == CallableKind::Arrow)
+        made = jsMakeNontrivialString(globalObject, async, "() => { [native code] }"_s);
+    else if (String name = isWrittenWithoutName ? emptyString() : initialNameProperty(function); kindData.isConstructor)
+        made = jsMakeNontrivialString(globalObject, "class "_s, name, name.isEmpty() ? ""_s : " "_s, "{ [native code] }"_s);
+    else if (isProgramFunction && callableKind == CallableKind::Method)
+        made = jsMakeNontrivialString(globalObject, async, kindData.isGenerator ? "*"_s : ""_s, name, "() { [native code] }"_s);
+    else
+        made = jsMakeNontrivialString(globalObject, async, kindData.isGenerator ? "function* "_s : "function "_s, name, "() { [native code] }"_s);
+    RETURN_IF_EXCEPTION(scope, { });
+    if (isProgramFunction)
+        FunctionTables::of(globalObject->vm()).sourceTexts.set(function, Weak<JSString>(asString(made)));
+    return made;
 }
 
-JSString* sourceStringIfCreated(VM& vm, JSObject* callee)
+JSString* functionStringIfCreated(VM& vm, JSObject* callee)
 {
     FunctionID function = checkedFunctionOf(callee);
     if (functionKindData(function).isInRuntimeModule)
         return nullptr;
-    const FunctionTables::TextsByFunction& answered = FunctionTables::of(vm).sourceTexts;
+    const FunctionTables::SourceTextMap& answered = FunctionTables::of(vm).sourceTexts;
     auto found = answered.find(function);
     return found == answered.end() ? nullptr : found->value.get();
+}
+
+JSString* sourceStringIfCreated(VM& vm, JSObject* callee)
+{
+    const ProgramTables& tables = Image::current()->programTables();
+    uint32_t function = checkedFunctionOf(callee).index();
+    bool holdsSource = std::ranges::contains(findFunctionSourceEntries(tables, tables.sourceFunctionOf(function)), function, [](const FunctionSourceEntry& entry) -> uint32_t { return entry.function; });
+    return holdsSource ? functionStringIfCreated(vm, callee) : nullptr;
 }
 
 FunctionKind kind(JSObject* callee)
@@ -496,7 +536,7 @@ DeclaredAs declaredAs(JSCell* cell)
     if (!function)
         function = compiledBuiltinFunctionID(cell);
     if (!function)
-        return standsInForFunction(cell) ? DeclaredAs::Function : DeclaredAs::NotCompiled;
+        return isOmittedFunctionPlaceholder(cell) ? DeclaredAs::Function : DeclaredAs::NotCompiled;
     FunctionKindData kindData = functionKindData(*function);
     if (kindData.isConstructor)
         return FunctionDescription(*function).isNakedConstructor() ? DeclaredAs::Function : DeclaredAs::Class;
@@ -505,12 +545,30 @@ DeclaredAs declaredAs(JSCell* cell)
     return kindData.isAsync ? DeclaredAs::AsyncFunction : DeclaredAs::Function;
 }
 
-bool awaitsByItself(JSCell* cell)
+bool hasOwnAwait(JSCell* cell)
 {
     if (declaredAs(cell) != DeclaredAs::AsyncFunction)
         return false;
     std::optional<FunctionID> function = functionOf(cell);
     return function && !std::ranges::binary_search(programTables().asyncFunctionsWithoutAwait(), sourceFunctionOf(*function).index());
+}
+
+bool mayImportOwnOriginal(JSCell* cell)
+{
+    std::optional<FunctionID> function = functionOf(cell);
+    return !function || std::ranges::binary_search(programTables().functionsImportingOwnOriginal(), sourceFunctionOf(*function).index());
+}
+
+Vector<String> requestedOriginals(JSCell* cell)
+{
+    Vector<String> specifiers;
+    std::optional<FunctionID> function = functionOf(cell);
+    if (!function)
+        return specifiers;
+    const Image& image = *Image::current();
+    for (const RequestedOriginalData& asked : std::ranges::equal_range(programTables().requestedOriginals(), sourceFunctionOf(*function).index(), { }, &RequestedOriginalData::function))
+        specifiers.append(image.text().createString(StringID(asked.specifier)));
+    return specifiers;
 }
 
 String closureDeclaredName(JSObject* object)

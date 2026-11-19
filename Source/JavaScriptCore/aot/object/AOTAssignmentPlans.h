@@ -92,9 +92,12 @@ struct AssignmentPlan {
         const FieldData* to { nullptr };
         PropertyOffset sourceOffset { invalidOffset };
         StructureID lastAcceptedStructure { };
-        OptionSet<ValueKind> acceptedKinds;
         int32_t leastInt32 { 0 };
         int32_t greatestInt32 { -1 };
+        int32_t bytesInSource { 0 };
+        enum class MovesFrom : uint8_t { Nowhere, Cell, InlineProperties, OutsideProperties };
+        MovesFrom movesFrom { MovesFrom::Nowhere };
+        OptionSet<ValueKind> acceptedKinds;
         bool writesInt32AsItIs { false };
         bool sourceAlwaysFits { false };
         bool sourceFitsUnlessUndefinedOrNull { false };
@@ -106,21 +109,18 @@ struct AssignmentPlan {
         bool leavesUndefinedAndNullToOtherWay { false };
         uint8_t width { 0 };
         uint64_t absentBits { 0 };
-        enum class MovesFrom : uint8_t { Nowhere, Cell, InlineProperties, OutsideProperties };
-        MovesFrom movesFrom { MovesFrom::Nowhere };
-        int32_t bytesInSource { 0 };
         MappedCopy::Move move { };
     };
 
     struct ExtraPropertyStore {
         int32_t bytesInSource { 0 };
         int32_t bytesInTarget { 0 };
-        bool isOutsideInSource { false };
-        bool isOutsideInTarget { false };
         const FieldData* from { nullptr };
         PropertyOffset sourceOffset { invalidOffset };
         PropertyOffset offset { invalidOffset };
         UniquedStringImpl* name { nullptr };
+        bool isOutsideInSource { false };
+        bool isOutsideInTarget { false };
         bool addsName { false };
     };
     static constexpr uint16_t isExtraPropertyStore = 1 << 15;
@@ -184,7 +184,7 @@ struct AssignmentPlan {
     Vector<uint16_t> storesInSourceOrder;
     bool servesDefinitionsOnly { false };
     bool addsExtraProperties { false };
-    bool storesNameBehindSymbol { false };
+    bool storesNameAfterSymbol { false };
     bool storesOnlyFieldsThatFit { false };
     bool mayStoreCells { false };
     bool readsOutOfLineFields { false };
@@ -263,9 +263,11 @@ public:
     static constexpr unsigned waysPerSet = 4;
 
     ALWAYS_INLINE AssignmentPlan* planFor(VM&, JSObject* target, JSObject* extraProperties, const AssignmentSource&);
+    ALWAYS_INLINE AssignmentPlan* planFromSecondCopyOn(VM&, JSObject* target, JSObject* extraProperties, const AssignmentSource&);
     CopyOfTwoPlan* planForCopyOfTwo(VM&, JSGlobalObject*, const AssignmentSource* first, const AssignmentSource* second);
     ALWAYS_INLINE void didRunAsBefore(AssignmentPlan&);
-    ALWAYS_INLINE AssignmentPlan* recentPlan(StructureID target, StructureID source, uint32_t sourceOrderWord, uint32_t excludedRunNumberPlusOne) { return m_recentPlans[recentIndex(target, source, sourceOrderWord, excludedRunNumberPlusOne)]; }
+    ALWAYS_INLINE AssignmentPlan* recentPlan(StructureID target, StructureID source, StructureID sourcePropertyStorage, uint32_t sourceOrderWord, uint32_t excludedRunNumberPlusOne) { return m_recentPlans[recentIndex(target, source, sourcePropertyStorage, sourceOrderWord, excludedRunNumberPlusOne)]; }
+    ALWAYS_INLINE AssignmentPlan* planMadeFor(StructureID target, StructureID extraProperties, const AssignmentSource& source) { return find(target, extraProperties, source, hashFor(target, extraProperties, source)); }
     ALWAYS_INLINE MappedCopy& mappedCopyAt(uint64_t targetWords, uint64_t sourceWords, uint32_t excludedRunNumberPlusOne);
     const MappedCopy& copyOfNoSource() const { return m_copyOfNoSource; }
     FieldMap* fieldMapFor(const LayoutData& target, const LayoutData& source, uint32_t excludedRunNumberPlusOne);
@@ -316,9 +318,10 @@ private:
     bool hasChainDependent(VM&, uint32_t subject, UniquedStringImpl* uidOrNull) const final;
 
     static constexpr unsigned numberOfRecentPlans = 512;
-    static unsigned recentIndex(StructureID target, StructureID source, uint32_t sourceOrderWord, uint32_t excludedRunNumberPlusOne)
+    static unsigned recentIndex(StructureID target, StructureID source, StructureID sourcePropertyStorage, uint32_t sourceOrderWord, uint32_t excludedRunNumberPlusOne)
     {
-        return (target.bits() * 0x9e3779b1u ^ source.bits() * 0x85ebca6bu ^ sourceOrderWord * 0xc2b2ae35u ^ excludedRunNumberPlusOne * 0x27d4eb2fu) >> 23;
+        uint32_t otherStorage = sourcePropertyStorage == source ? 0 : sourcePropertyStorage.bits();
+        return (target.bits() * 0x9e3779b1u ^ source.bits() * 0x85ebca6bu ^ otherStorage * 0x165667b1u ^ sourceOrderWord * 0xc2b2ae35u ^ excludedRunNumberPlusOne * 0x27d4eb2fu) >> 23;
     }
     static_assert(numberOfRecentPlans == 1u << (32 - 23));
     static constexpr unsigned minNumberOfPlacesForMappedCopies = 16;
@@ -376,6 +379,16 @@ ALWAYS_INLINE AssignmentPlan* AssignmentPlanCache::planFor(VM& vm, JSObject* tar
     return makePlan(vm, target, extraProperties, source, hash);
 }
 
+ALWAYS_INLINE AssignmentPlan* AssignmentPlanCache::planFromSecondCopyOn(VM& vm, JSObject* target, JSObject* extraProperties, const AssignmentSource& source)
+{
+    StructureID targetID = target->structureID();
+    StructureID extraPropertiesID = extraProperties ? extraProperties->structureID() : StructureID();
+    uint32_t hash = hashFor(targetID, extraPropertiesID, source);
+    if (AssignmentPlan* plan = find(targetID, extraPropertiesID, source, hash)) [[likely]]
+        return plan;
+    return isSecondCopy(hash) ? makePlan(vm, target, extraProperties, source, hash) : nullptr;
+}
+
 ALWAYS_INLINE MappedCopy& AssignmentPlanCache::mappedCopyAt(uint64_t targetWords, uint64_t sourceWords, uint32_t excludedRunNumberPlusOne)
 {
     uint64_t hash = hashOfMappedCopy(targetWords, sourceWords, excludedRunNumberPlusOne);
@@ -397,7 +410,7 @@ ALWAYS_INLINE void AssignmentPlanCache::didRunAsBefore(AssignmentPlan& plan)
         describeMoves(plan);
     if (!plan.excludedNames.isEmpty())
         return;
-    m_recentPlans[recentIndex(plan.target, plan.source, plan.sourceOrderWord, plan.excludedList ? plan.excludedList->runNumberPlusOne() : 0)] = &plan;
+    m_recentPlans[recentIndex(plan.target, plan.source, plan.sourcePropertyStorage, plan.sourceOrderWord, plan.excludedList ? plan.excludedList->runNumberPlusOne() : 0)] = &plan;
 }
 
 ALWAYS_INLINE const ExcludedNameList& AssignmentPlanCache::excludedNames(const ExcludedRun& run)
@@ -423,7 +436,9 @@ JSFinalObject* tryCopyDictionary(VM&, JSObject* source);
 JSFinalObject* tryCopyWithElements(VM&, JSObject* source);
 bool flattenOnceUnlessCopiedAsDictionary(VM&, JSObject* source);
 std::optional<MappedCopy::MoveKind> moveKindOutOfOrdinaryObject(const RuntimeLayoutTable&, const AssignmentPlan::FieldStore&);
+bool takesPlainPropertiesDirectly(Structure* target);
 bool tryDefinePropertiesOnOrdinaryObject(VM&, State&, JSObject* target, JSObject* source, std::span<UniquedStringImpl* const> excludedNames);
+bool tryAssignToOrdinaryObject(VM&, State&, JSObject* target, JSObject* source);
 JSFinalObject* tryCopyTwoObjects(VM&, State&, JSGlobalObject*, JSValue first, JSValue second);
 
 } } // namespace JSC::AOT

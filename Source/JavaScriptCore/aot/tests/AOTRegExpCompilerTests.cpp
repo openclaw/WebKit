@@ -189,7 +189,7 @@ static std::unique_ptr<RegExpCode> generate(const Yarr::YarrPattern& pattern, St
         .sampleString = std::nullopt,
         .codeBlock = &codeBlock,
         .policy = policy,
-        .createCodeAddressing = [&](CCallHelpers& jit) -> std::unique_ptr<Yarr::CodeAddressing> {
+        .createCodeAddressing = [&](ImageAssembler& jit) -> std::unique_ptr<Yarr::CodeAddressing> {
             return makeUnique<ImageCodeAddressing>(jit, PCRelativeReach::Near, assemblerPolicy, nullptr);
         },
     };
@@ -220,6 +220,8 @@ static void testOnePatternServesBothWidthsAndRetries()
     checkPatternServesBothWidthsAndRetries("a*e"_s);
     AOT_TEST_CHECK(!compileToCode({ "a*b"_s, { } }).code[0]->hasElidedFrame);
     checkPatternServesBothWidthsAndRetries("a*b"_s);
+    for (ASCIILiteral pattern : { "T\\d\\d:\\d\\d:\\d\\d\\+\\d\\d:\\d\\d"_s, "T\\d\\d:\\d\\d:\\d\\d\\.00Z"_s, "abcd[xy]e[xy][xy]fghi"_s, "abcd[xy]ef[xy]ghij"_s })
+        checkPatternServesBothWidthsAndRetries(pattern);
 }
 
 static bool searchesForOneOfAClass(ASCIILiteral patternString)
@@ -227,7 +229,7 @@ static bool searchesForOneOfAClass(ASCIILiteral patternString)
     CompiledRegExp regExp = compileToCode({ patternString, { } });
     return std::ranges::any_of(regExp.code[1]->symbols, [](const RegExpSymbol& symbol) {
         auto* routine = std::get_if<Yarr::SharedRoutine>(&symbol);
-        return routine && routine->kind() == Yarr::SharedRoutine::Kind::FindFirstOfClass;
+        return routine && (routine->kind() == Yarr::SharedRoutine::Kind::FindFirstOfClass || routine->kind() == Yarr::SharedRoutine::Kind::FindFirstOfTwoUnits);
     });
 }
 
@@ -237,7 +239,77 @@ static void testOnlyARareFirstCharacterIsSearchedFor()
     AOT_TEST_CHECK(searchesForOneOfAClass("\\b[0-9]+"_s));
     AOT_TEST_CHECK(!searchesForOneOfAClass("[a-z]+"_s));
     AOT_TEST_CHECK(!searchesForOneOfAClass("\\b[a-z0-9-]+"_s));
+    AOT_TEST_CHECK(searchesForOneOfAClass("\\u001b\\[[0-9;]*m"_s));
+    AOT_TEST_CHECK(searchesForOneOfAClass("~~[a-z]+"_s));
+    AOT_TEST_CHECK(!searchesForOneOfAClass("needle[0-9]"_s));
+    AOT_TEST_CHECK(!searchesForOneOfAClass("//+"_s));
 }
+
+static std::optional<Yarr::SharedRoutine::FindFirstPairOfUnits> pairSearchedFor(ASCIILiteral patternString, OptionSet<Yarr::Flags> flags, size_t width)
+{
+    CompiledRegExp regExp = compileToCode({ patternString, flags });
+    for (const RegExpSymbol& symbol : regExp.code[width]->symbols) {
+        auto* routine = std::get_if<Yarr::SharedRoutine>(&symbol);
+        if (routine && routine->kind() == Yarr::SharedRoutine::Kind::FindFirstPairOfUnits)
+            return std::get<Yarr::SharedRoutine::FindFirstPairOfUnits>(routine->payload);
+    }
+    return std::nullopt;
+}
+
+static void testTwoPlacesOfOneUnitEachAreSearchedForAtOnce()
+{
+    using Pair = Yarr::SharedRoutine::FindFirstPairOfUnits;
+    using enum Yarr::PositionUnits;
+    AOT_TEST_CHECK((pairSearchedFor("e[a-z]{2}[0-9]{3}-[a-z]+"_s, { }, 1) == Pair { Yarr::CharSize::Char16, 6, One, One }));
+    AOT_TEST_CHECK((pairSearchedFor("ab+c"_s, { }, 1) == Pair { Yarr::CharSize::Char16, 1, One, One }));
+    AOT_TEST_CHECK((pairSearchedFor("k[0-9]s[0-9]+"_s, { Yarr::Flags::IgnoreCase }, 1) == Pair { Yarr::CharSize::Char16, 2, IgnoreCase, IgnoreCase }));
+    AOT_TEST_CHECK((pairSearchedFor("x-[a-z]{2}:[0-9]+"_s, { Yarr::Flags::IgnoreCase }, 1) == Pair { Yarr::CharSize::Char16, 3, One, One }));
+    AOT_TEST_CHECK((pairSearchedFor("\"(?:_|\\\\u005[Ff])(?:_|\\\\u005[Ff])p"_s, { }, 1) == Pair { Yarr::CharSize::Char16, 1, One, Two }));
+    AOT_TEST_CHECK((pairSearchedFor("[cd]:[a-z]+e"_s, { }, 1) == Pair { Yarr::CharSize::Char16, 1, Two, One }));
+#if CPU(X86_64)
+    AOT_TEST_CHECK((pairSearchedFor("\"(?:c|\\\\u0063)(?:o|\\\\u006[Ff])\"\\s*:"_s, { }, 0) == Pair { Yarr::CharSize::Char8, 1, One, Two }));
+    AOT_TEST_CHECK((pairSearchedFor("e[a-z]{2}[0-9]{3}-[a-z]+"_s, { }, 0) == Pair { Yarr::CharSize::Char8, 6, One, One }));
+    AOT_TEST_CHECK((pairSearchedFor("k[0-9]s[0-9]+"_s, { Yarr::Flags::IgnoreCase }, 0) == Pair { Yarr::CharSize::Char8, 2, IgnoreCase, IgnoreCase }));
+#endif
+    AOT_TEST_CHECK((!pairSearchedFor("[a-z]bz?.7"_s, { }, 1)));
+    AOT_TEST_CHECK((!pairSearchedFor("[a-z]:#?[^=]+"_s, { }, 1)));
+    AOT_TEST_CHECK((!pairSearchedFor("\\w(?:@|.)=[0-9]"_s, { }, 1)));
+    AOT_TEST_CHECK((!pairSearchedFor("[a-z]#=|[a-z].="_s, { }, 1)));
+    AOT_TEST_CHECK((!pairSearchedFor("[a-z](?:#|[\\u0100-\\u0fff])="_s, { }, 1)));
+    AOT_TEST_CHECK((!pairSearchedFor("[ab][cd]+e"_s, { }, 1)));
+    AOT_TEST_CHECK((!pairSearchedFor("aaa+[bc]"_s, { }, 1)));
+    AOT_TEST_CHECK((!pairSearchedFor("e[a-z]{2}[0-9]{3}-[a-z]+"_s, { Yarr::Flags::Unicode }, 1)));
+    AOT_TEST_CHECK((!pairSearchedFor("e[a-z]{2}[0-9]{3}-[a-z]+"_s, { Yarr::Flags::Sticky }, 1)));
+}
+
+#if CPU(X86_64)
+static unsigned lengthOfPrefixesSearchedFor(ASCIILiteral patternString, OptionSet<Yarr::Flags> flags = { }, size_t width = 0)
+{
+    CompiledRegExp regExp = compileToCode({ patternString, flags });
+    for (const RegExpSymbol& symbol : regExp.code[width]->symbols) {
+        auto* routine = std::get_if<Yarr::SharedRoutine>(&symbol);
+        if (routine && routine->kind() == Yarr::SharedRoutine::Kind::FindEitherPrefix)
+            return std::get<Yarr::SharedRoutine::FindEitherPrefix>(routine->payload).prefixLength;
+    }
+    return 0;
+}
+
+static void testTwoPrefixesAreSearchedTogether()
+{
+    OptionSet<Yarr::Flags> ignoreCase { Yarr::Flags::IgnoreCase };
+    AOT_TEST_CHECK(lengthOfPrefixesSearchedFor("abcdefgh|hgfedcba"_s) == 8);
+    AOT_TEST_CHECK(lengthOfPrefixesSearchedFor("[acg]bcdefgh|hgfed[c-e]ba"_s, ignoreCase) == 8);
+    AOT_TEST_CHECK(lengthOfPrefixesSearchedFor("abcd|efgh"_s) == 4);
+    AOT_TEST_CHECK(lengthOfPrefixesSearchedFor("abcde|efghijklm"_s) == 4);
+    AOT_TEST_CHECK(lengthOfPrefixesSearchedFor("abcd|efgh"_s, { }, 1) == 0);
+    AOT_TEST_CHECK(lengthOfPrefixesSearchedFor("abcd|efgh"_s, { Yarr::Flags::Sticky }) == 0);
+    AOT_TEST_CHECK(lengthOfPrefixesSearchedFor("abcd|efgh"_s, { Yarr::Flags::Unicode }) == 0);
+    AOT_TEST_CHECK(lengthOfPrefixesSearchedFor("abcde|efgh"_s) == 4);
+    AOT_TEST_CHECK(lengthOfPrefixesSearchedFor("abcdefghijkl|hgfedcba"_s) == 8);
+    AOT_TEST_CHECK(lengthOfPrefixesSearchedFor("abc|efgh"_s) == 0);
+    AOT_TEST_CHECK(lengthOfPrefixesSearchedFor("abcd|efgh|ijkl"_s) == 0);
+}
+#endif
 
 static void testUnicodePropertyLookup()
 {
@@ -302,6 +374,10 @@ std::span<const NativeTest> regExpCompilerTests()
         { "regexp-compiler/compilation-is-thread-independent"_s, testCompilationIsThreadIndependent },
         { "regexp-compiler/one-pattern-serves-both-widths-and-retries"_s, testOnePatternServesBothWidthsAndRetries },
         { "regexp-compiler/only-a-rare-first-character-is-searched-for"_s, testOnlyARareFirstCharacterIsSearchedFor },
+        { "regexp-compiler/two-places-of-one-unit-each-are-searched-for-at-once"_s, testTwoPlacesOfOneUnitEachAreSearchedForAtOnce },
+#if CPU(X86_64)
+        { "regexp-compiler/two-prefixes-are-searched-for-at-once"_s, testTwoPrefixesAreSearchedTogether },
+#endif
         { "regexp-compiler/unicode-property-lookup"_s, testUnicodePropertyLookup },
         { "regexp-compiler/class-table-limits-are-counted"_s, testClassTableLimitsAreCounted },
     };

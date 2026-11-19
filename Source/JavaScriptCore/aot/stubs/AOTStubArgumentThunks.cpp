@@ -10,14 +10,22 @@
 
 #include "AOTBuildContext.h"
 #include "AOTConvention.h"
+#include "AOTInstance.h"
 #include "AOTStubAssembler.h"
 #include "AOTStubCatalog.h"
 #include "AOTStubDescriptor.h"
+#include "AOTStubHelpers.h"
 #include "AOTThreads.h"
 #include "AOTVector.h"
 #include "AllowMacroScratchRegisterUsage.h"
+#include "Butterfly.h"
+#include "JSArrayBufferView.h"
+#include "JSObject.h"
+#include "JSString.h"
 #include <algorithm>
 #include <limits>
+#include <optional>
+#include <utility>
 #include <wtf/CheckedArithmetic.h>
 
 namespace JSC { namespace AOT {
@@ -142,15 +150,94 @@ static void emitConstantsOfThunk(CCallHelpers& jit, std::span<const uint64_t> mo
     });
 }
 
+static void returnLengthOfListOrTextInFrontOfMoves(CCallHelpers& jit, const StubSignature& signature, std::span<const uint64_t> moves, std::optional<int32_t> asked, bool checksWalk)
+{
+    const GPRReg operand = signature.operands[0].gpr();
+    const GPRReg scratch = *signature.immediate;
+    const GPRReg result = asked ? scratch : signature.firstResult.gpr();
+    auto answer = [&](CCallHelpers::Address length) {
+        if (!asked) {
+            jit.load32(length, result);
+            jit.or64(numberTag, result);
+            jit.ret();
+            return;
+        }
+#if CPU(X86_64)
+        jit.m_assembler.cmpl_im(*asked, length.offset, length.base);
+#else
+        jit.load32(length, scratch);
+        jit.m_assembler.cmp<32>(scratch, UInt12(*asked));
+#endif
+        jit.ret();
+    };
+    GPRReg receiver = operand;
+    bool liesInRegister = true;
+    forEachThunkMove(moves, [&](ArgumentSource source, GPRReg destination, uint64_t payload) {
+        if (destination != operand)
+            return;
+        if (source == ArgumentSource::Register)
+            receiver = static_cast<GPRReg>(payload);
+        else
+            liesInRegister = false;
+    });
+    if (!liesInRegister || receiver == scratch)
+        return;
+    CCallHelpers::Jump isNotCell = jit.branchIfNotCell(receiver);
+    CCallHelpers::Jump isNoContiguousList = jit.branch8(CCallHelpers::NotEqual, CCallHelpers::Address(receiver, JSCell::indexingTypeAndMiscOffset()), CCallHelpers::TrustedImm32(ArrayWithContiguous));
+    CCallHelpers::Label hasPlainStorage = jit.label();
+    jit.loadPtr(CCallHelpers::Address(receiver, JSObject::butterflyOffset()), result);
+    answer(CCallHelpers::Address(result, Butterfly::offsetOfPublicLength()));
+
+    isNoContiguousList.link(&jit);
+    CCallHelpers::Jump isNoText = jit.branch8(CCallHelpers::NotEqual, CCallHelpers::Address(receiver, JSCell::typeInfoTypeOffset()), CCallHelpers::TrustedImm32(StringType));
+    jit.loadPtr(CCallHelpers::Address(receiver, JSString::offsetOfValue()), scratch);
+    CCallHelpers::Jump isRope = jit.branchIfRopeStringImpl(scratch);
+    answer(CCallHelpers::Address(scratch, StringImpl::lengthMemoryOffset()));
+
+    isRope.link(&jit);
+    answer(CCallHelpers::Address(receiver, JSRopeString::offsetOfLength()));
+
+    isNoText.link(&jit);
+    static_assert(ArrayWithUndecided + 2 == ArrayWithInt32 && ArrayWithUndecided + 4 == ArrayWithDouble && ArrayWithUndecided + 6 == ArrayWithContiguous);
+    jit.load8(CCallHelpers::Address(receiver, JSCell::indexingTypeAndMiscOffset()), scratch);
+    jit.sub32(CCallHelpers::TrustedImm32(ArrayWithUndecided), scratch);
+    jit.branchTest32(CCallHelpers::Zero, scratch, CCallHelpers::TrustedImm32(0xff & ~(6 | CopyOnWrite | MayHaveIndexedAccessors))).linkTo(hasPlainStorage, &jit);
+    CCallHelpers::JumpList isNotPlainBuffer;
+    if (!checksWalk) {
+        jit.load32(CCallHelpers::Address(receiver, JSCell::structureIDOffset()), scratch);
+        isNotPlainBuffer.append(jit.branch32(CCallHelpers::NotEqual, scratch, CCallHelpers::Address(instanceGPR, Instance::offsetOfReceiverStructureID(Receiver::Buffer))));
+        isNotPlainBuffer.append(jit.branchTest8(CCallHelpers::NonZero, CCallHelpers::Address(instanceGPR, AOT_INSTANCE_OFFSET(builtins.someClassOfViewsWasWrittenAbove))));
+        isNotPlainBuffer.append(jit.branchTest8(CCallHelpers::NonZero, CCallHelpers::Address(receiver, JSArrayBufferView::offsetOfMode()), CCallHelpers::TrustedImm32(resizabilityAndAutoLengthMask)));
+        jit.load64(CCallHelpers::Address(receiver, JSArrayBufferView::offsetOfLength()), scratch);
+        isNotPlainBuffer.append(jit.branch64(CCallHelpers::Above, scratch, CCallHelpers::TrustedImm32(std::numeric_limits<int32_t>::max())));
+        answer(CCallHelpers::Address(receiver, JSArrayBufferView::offsetOfLength()));
+    }
+    isNotPlainBuffer.link(&jit);
+    isNotCell.link(&jit);
+}
+
+static void returnConstantOfGlobalBinding(CCallHelpers& jit, const StubSignature& signature, uint32_t number)
+{
+    const GPRReg result = signature.firstResult.gpr();
+    jit.loadPtr(CCallHelpers::Address(instanceGPR, AOT_INSTANCE_OFFSET(runtime.bindings.globalBindings)), result);
+    jit.load64(CCallHelpers::Address(result, safeCast<int32_t>(number * sizeof(GlobalBinding) + OBJECT_OFFSETOF(GlobalBinding, constant))), result);
+    CCallHelpers::Jump isNoConstant = jit.branchTest64(CCallHelpers::Zero, result);
+    jit.ret();
+    isNoConstant.link(&jit);
+}
+
 static std::expected<ArgumentThunks, LinkFailure> generateArgumentThunksOfChunk(BuildContext& context, const StubCatalog& catalog, std::span<const KeptArgumentMoves> lists, std::span<const uint32_t> stubKeyIndexes)
 {
     ArgumentThunks result;
-    CCallHelpers jit;
+    ImageAssembler jit;
     RelocationRecorder recorder(jit, context.assemblerPolicy());
     readTagsFromInstance(jit);
     AllowMacroScratchRegisterUsage allowScratch(jit);
     Vector<CCallHelpers::Label> labels;
-    labels.reserveInitialCapacity(lists.size());
+    labels.grow(lists.size());
+    size_t numberOfStubJumps = 0;
+    std::optional<size_t> thunkWithoutMoves;
+    CCallHelpers::JumpList jumpsToImmediate;
     for (size_t index = 0; index < lists.size(); ++index) {
         std::span<const uint64_t> words = lists[index].span();
         StubKey key = StubKey::fromBits(words[0]);
@@ -161,14 +248,42 @@ static std::expected<ArgumentThunks, LinkFailure> generateArgumentThunksOfChunk(
         std::span<const uint64_t> moves = words.subspan(numberOfHeaderWords);
         RELEASE_ASSERT(areThunkMovesSound(key, signature, movesImmediate, moves));
 
-        labels.append(jit.label());
+        auto sharesImmediateWithNext = [&] {
+            return movesImmediate && index + 1 < lists.size() && lists[index + 1].span()[0] == words[0] && lists[index + 1].span()[1] == words[1];
+        };
+        if (moves.empty() && sharesImmediateWithNext()) {
+            RELEASE_ASSERT(!thunkWithoutMoves);
+            if (key.family() != StubFamily::GetLengthAtSite && key.family() != StubFamily::LengthIs && key.family() != StubFamily::GetGlobalBinding) {
+                thunkWithoutMoves = index;
+                continue;
+            }
+        }
+        labels[index] = jit.label();
+        if (key.family() == StubFamily::GetLengthAtSite)
+            returnLengthOfListOrTextInFrontOfMoves(jit, signature, moves, std::nullopt, catalog.options().checksWalk);
+        if (key.family() == StubFamily::LengthIs)
+            returnLengthOfListOrTextInFrontOfMoves(jit, signature, moves, static_cast<int32_t>(key.count()), catalog.options().checksWalk);
+        if (key.family() == StubFamily::GetGlobalBinding) {
+            RELEASE_ASSERT(movesImmediate && moves.empty());
+            returnConstantOfGlobalBinding(jit, signature, static_cast<uint32_t>(words[1]));
+        }
         emitRegisterMovesOfThunk(jit, moves);
         emitLoadsOfThunk(jit, moves);
         emitConstantsOfThunk(jit, moves);
+        if (sharesImmediateWithNext()) {
+            jumpsToImmediate.append(jit.jump());
+            continue;
+        }
+        jumpsToImmediate.link(&jit);
+        jumpsToImmediate.clear();
+        if (thunkWithoutMoves)
+            labels[*std::exchange(thunkWithoutMoves, std::nullopt)] = jit.label();
         if (movesImmediate)
             jit.move(CCallHelpers::TrustedImm32(static_cast<int32_t>(words[1])), *signature.immediate);
         recorder.jump({ SymbolSpace::Stub, stubKeyIndexes[index] });
+        ++numberOfStubJumps;
     }
+    RELEASE_ASSERT(!thunkWithoutMoves && jumpsToImmediate.empty());
     ImageLinkBuffer buffer(jit, LinkBuffer::Profile::Thunk);
     if (buffer.didFailToAllocate())
         return makeUnexpected(LinkFailure::OutOfMemory);
@@ -179,7 +294,7 @@ static std::expected<ArgumentThunks, LinkFailure> generateArgumentThunksOfChunk(
     auto relocations = recorder.link(buffer, &context);
     if (!relocations)
         return makeUnexpected(relocations.error());
-    RELEASE_ASSERT(relocations->size() == lists.size());
+    RELEASE_ASSERT(relocations->size() == numberOfStubJumps);
     result.code = { Vector<uint8_t>(buffer.bytes()), WTF::move(*relocations) };
     return result;
 }

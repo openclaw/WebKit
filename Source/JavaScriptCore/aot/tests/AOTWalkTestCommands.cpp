@@ -11,9 +11,13 @@
 #include "AOTCode.h"
 #include "AOTCompileUnit.h"
 #include "AOTStages.h"
+#include "AOTSumOverRecords.h"
 #include "AOTSweep.h"
+#include "AOTTypeText.h"
 #include "AOTWalk.h"
 #include <wtf/StringPrintStream.h>
+#include <wtf/Threading.h>
+#include <wtf/text/StringToIntegerConversion.h>
 
 namespace JSC { namespace AOT { namespace Typed {
 
@@ -25,11 +29,9 @@ public:
     explicit VerifiedWalks(TestCommandContext& context)
         : m_stage(context.stage())
     {
-        const PreparedProgram* prepared = m_stage.prepared();
-        if (!prepared)
+        m_inputs = m_stage.prepareInputsForVerification();
+        if (!m_inputs)
             return;
-        m_inputs.emplace(*prepared->compileInputs);
-        m_inputs->walk.options.verifiesCode = true;
         m_worker.emplace(*m_inputs, context.build, m_stage.program().types);
     }
 
@@ -47,7 +49,7 @@ public:
 
 private:
     StagedBuild m_stage;
-    std::optional<CompileInputs> m_inputs;
+    std::unique_ptr<CompileInputs> m_inputs;
     std::optional<CompileWorker> m_worker;
 };
 
@@ -126,11 +128,23 @@ static void runCodeRoundTripCommand(TestCommandContext& context)
 
 static void runVerifyCodeCommand(TestCommandContext& context)
 {
-    if (refuseArgumentsOfWalkCommand(context))
-        return;
     VerifiedWalks walks(context);
     if (!walks.isReady())
         return;
+    Vector<Walker::ArrivalHeld> held;
+    for (const String& word : context.arguments) {
+        Vector<String> parts = word.split(':');
+        std::optional<uint32_t> callee = parts.size() == 3 && parts[0].startsWith('f') ? parseInteger<uint32_t>(StringView(parts[0]).substring(1)) : std::nullopt;
+        std::optional<uint32_t> entryParameter = callee ? parseInteger<uint32_t>(parts[1]) : std::nullopt;
+        unsigned offset = 0;
+        String error;
+        std::optional<TypeID> left = entryParameter ? parseType(walks.types(), parts[2], offset, error) : std::nullopt;
+        if (!left || *callee >= walks.program().functions.size()) {
+            context.out.println("bad argument "_s, word);
+            return;
+        }
+        held.append({ FunctionID(*callee), *entryParameter, *left, Walker::ArrivalHeld::Kind::Proven });
+    }
     Code code;
     if (!readCodeOfSection(context, walks, code))
         return;
@@ -138,14 +152,153 @@ static void runVerifyCodeCommand(TestCommandContext& context)
     String brokenRule = verifyCode(walks.contextOfVerifier(), code, &kindOfBrokenRule);
     if (brokenRule.isNull()) {
         kindOfBrokenRule = InternalErrorKind::TypeOutOfDate;
-        brokenRule = verifyTypesOfCode(TypingContext { walks.program(), walks.types(), walks.walker().positions() }, walks.plan().conventions(), walks.arrivals(), code);
+        brokenRule = verifyTypesOfCode(TypingContext { walks.program(), walks.types(), walks.walker().positionsOf(code.role()) }, walks.plan().conventions(), walks.arrivals(), code);
     }
     if (brokenRule.isNull())
-        brokenRule = findCallThatHandsOverWhatItsUnitHasNotLeft(walks.inputs(), walks.types(), code, { });
+        brokenRule = findCallThatHandsOverWhatItsUnitHasNotLeft(walks.inputs(), walks.types(), code, held.span(), &walks.walker().positionsKnowingWhatFunctionsHandBack());
     if (brokenRule.isNull())
         context.out.println("verified"_s);
     else
         context.out.println(nameOf(kindOfBrokenRule), ": "_s, brokenRule);
+}
+
+static std::optional<std::pair<StringView, ValueID>> valueNamedByWordOfWalkCommand(const Code& code, const String& word)
+{
+    size_t equals = word.find('=');
+    if (equals == notFound || word.length() < equals + 3 || word[equals + 1] != 'v')
+        return std::nullopt;
+    std::optional<uint32_t> number = parseInteger<uint32_t>(StringView(word).substring(equals + 2));
+    if (!number || *number >= code.numberOfValues())
+        return std::nullopt;
+    return std::pair { StringView(word).left(equals), ValueID(*number) };
+}
+
+static void runPositionInsideCommand(TestCommandContext& context)
+{
+    VerifiedWalks walks(context);
+    if (!walks.isReady())
+        return;
+    Code code;
+    if (!readCodeOfSection(context, walks, code))
+        return;
+    GroundsOfPosition grounds;
+    for (const String& word : context.arguments) {
+        auto named = valueNamedByWordOfWalkCommand(code, word);
+        ValueID GroundsOfPosition::* place = !named ? nullptr
+            : named->first == "position"_s ? &GroundsOfPosition::position
+            : named->first == "length"_s ? &GroundsOfPosition::length
+            : named->first == "below"_s || named->first == "not-below"_s ? &GroundsOfPosition::isBelow
+            : named->first == "from-zero-up"_s ? &GroundsOfPosition::isFromZeroUp
+            : named->first == "counter"_s ? &GroundsOfPosition::counter
+            : named->first == "start"_s ? &GroundsOfPosition::start
+            : named->first == "length-holds-bound"_s ? &GroundsOfPosition::limitWithinLengthCheck
+            : named->first == "lowered-counter"_s ? &GroundsOfPosition::loweredCounter
+            : named->first == "lowered-from"_s ? &GroundsOfPosition::loweredFrom
+            : nullptr;
+        if (!place) {
+            context.out.println("bad argument "_s, word);
+            return;
+        }
+        grounds.*place = named->second;
+        if (named->first == "not-below"_s)
+            grounds.isBelowResult = false;
+    }
+    bool isShown = grounds.position && groundsShowPositionInside(code, walks.types(), grounds.position, grounds, scopedLambda<bool(ValueID, bool)>([](ValueID, bool) {
+        return true;
+    }));
+    context.out.println(isShown ? "shown"_s : "not shown"_s);
+}
+
+struct GroundsWrittenInTests {
+    static PassedTest make(std::span<const PassedTest::Side> sides, const std::optional<GroundsOfPosition>& grounds)
+    {
+        PassedTest passed;
+        for (const PassedTest::Side& side : sides)
+            passed.add(side);
+        passed.m_groundsOfPosition = grounds;
+        return passed;
+    }
+};
+
+static void runVerifyGroundsCommand(TestCommandContext& context)
+{
+    VerifiedWalks walks(context);
+    if (!walks.isReady())
+        return;
+    Code code;
+    if (!readCodeOfSection(context, walks, code))
+        return;
+    code.setKeepsTestsPassed(true);
+    ValueID access;
+    Vector<PassedTest::Side, 4> sides;
+    std::optional<GroundsOfPosition> grounds;
+    auto noteGroundsOfAccess = [&] {
+        if (access)
+            code.noteTestsPassedFor(access, GroundsWrittenInTests::make(sides.span(), grounds));
+        sides.shrink(0);
+        grounds = std::nullopt;
+    };
+    for (const String& word : context.arguments) {
+        auto named = valueNamedByWordOfWalkCommand(code, word);
+        if (named && named->first == "access"_s) {
+            noteGroundsOfAccess();
+            access = named->second;
+            continue;
+        }
+        if (named && access && (named->first == "passed"_s || named->first == "failed"_s)) {
+            sides.append({ named->second, named->first == "passed"_s });
+            continue;
+        }
+        ValueID GroundsOfPosition::* place = !named || !access ? nullptr
+            : named->first == "view"_s ? &GroundsOfPosition::view
+            : named->first == "position"_s ? &GroundsOfPosition::position
+            : named->first == "length"_s ? &GroundsOfPosition::length
+            : named->first == "below"_s ? &GroundsOfPosition::isBelow
+            : named->first == "from-zero-up"_s ? &GroundsOfPosition::isFromZeroUp
+            : named->first == "counter"_s ? &GroundsOfPosition::counter
+            : named->first == "start"_s ? &GroundsOfPosition::start
+            : named->first == "length-holds-bound"_s ? &GroundsOfPosition::limitWithinLengthCheck
+            : named->first == "lowered-counter"_s ? &GroundsOfPosition::loweredCounter
+            : named->first == "lowered-from"_s ? &GroundsOfPosition::loweredFrom
+            : nullptr;
+        if (!place) {
+            context.out.println("bad argument "_s, word);
+            return;
+        }
+        if (!grounds)
+            grounds = GroundsOfPosition { };
+        (*grounds).*place = named->second;
+    }
+    noteGroundsOfAccess();
+    String brokenRule = verifyCode(walks.contextOfVerifier(), code);
+    context.out.println(brokenRule.isNull() ? "verified"_s : brokenRule);
+}
+
+static void runElementPresentCommand(TestCommandContext& context)
+{
+    VerifiedWalks walks(context);
+    if (!walks.isReady())
+        return;
+    Code code;
+    if (!readCodeOfSection(context, walks, code))
+        return;
+    ValueID list;
+    ValueID position;
+    Vector<PassedTest::Side, 4> sides;
+    for (const String& word : context.arguments) {
+        auto named = valueNamedByWordOfWalkCommand(code, word);
+        if (named && named->first == "list"_s)
+            list = named->second;
+        else if (named && named->first == "position"_s)
+            position = named->second;
+        else if (named && (named->first == "passed"_s || named->first == "failed"_s))
+            sides.append({ named->second, named->first == "passed"_s });
+        else {
+            context.out.println("bad argument "_s, word);
+            return;
+        }
+    }
+    context.out.println(list && position && !sides.isEmpty() && testsShowElementPresent(code, list, position, sides.span()) ? "shown"_s : "not shown"_s);
 }
 
 static void runSweepCodeCommand(TestCommandContext& context)
@@ -215,12 +368,91 @@ static void runWhyClosedCommand(TestCommandContext& context)
     inputs.walk.options.explainsClosedAccessesTo = &context.out;
     CompileWorker worker(inputs, context.build, stage.program().types);
     for (CodeUnit unit : *units) {
-        if (worker.walkAndSweep(unit))
+        if (!inputs.walk.plan.conventions().exists(unit) || worker.walkAndSweep(unit))
             continue;
         context.out.print("the walk of "_s);
         printCodeUnit(context.out, unit);
         context.out.println(" failed"_s);
         return;
+    }
+}
+
+static void runWalkWhereHandlerEdgesTakeStandInsCommand(TestCommandContext& context)
+{
+    std::optional<Vector<CodeUnit>> units = unitsInOrderOfWords(*context.program, context.arguments, context.out);
+    StagedBuild stage = context.stage();
+    std::unique_ptr<CompileInputs> prepared = units ? stage.prepareInputsForVerification() : nullptr;
+    if (!prepared)
+        return;
+    CompileInputs& inputs = *prepared;
+    inputs.walk.options.handlerEdgesTakeWhatStandsIn = true;
+    CompileWorker worker(inputs, context.build, stage.program().types);
+    for (CodeUnit unit : *units) {
+        context.out.print("the walk of "_s);
+        printCodeUnit(context.out, unit);
+        context.out.println(worker.walkAndSweep(unit) ? " was built"_s : " failed"_s);
+    }
+}
+
+static void runWalkWhereEveryClosureStandsBehindCopiesCommand(TestCommandContext& context)
+{
+    std::optional<Vector<CodeUnit>> units = unitsInOrderOfWords(*context.program, context.arguments, context.out);
+    StagedBuild stage = context.stage();
+    std::unique_ptr<CompileInputs> prepared = units ? stage.prepareInputsForVerification() : nullptr;
+    if (!prepared)
+        return;
+    CompileInputs& inputs = *prepared;
+    inputs.walk.options.everyClosureStandsBehindCopies = true;
+    CompileWorker worker(inputs, context.build, stage.program().types);
+    for (CodeUnit unit : *units) {
+        context.out.print("the walk of "_s);
+        printCodeUnit(context.out, unit);
+        context.out.println(worker.walkAndSweep(unit) ? " was built"_s : " failed"_s);
+    }
+}
+
+static void runWalkWhileKeptListsAreDroppedCommand(TestCommandContext& context)
+{
+    static constexpr unsigned enoughListsDropped = 2000;
+    static constexpr unsigned mostWalks = 20000;
+    std::optional<Vector<CodeUnit>> units = unitsInOrderOfWords(*context.program, context.arguments, context.out);
+    if (!units)
+        return;
+    StagedBuild stage = context.stage();
+    const Facts* facts = stage.prepared() ? stage.facts() : nullptr;
+    if (!facts)
+        return;
+    auto textOf = [&](CodeUnit unit) {
+        StringPrintStream text;
+        if (const Code* code = stage.code(unit))
+            printCode(text, CodeTextContext { stage.program(), stage.types() }, *code);
+        return text.toString();
+    };
+    for (CodeUnit unit : *units) {
+        String text = textOf(unit);
+        Vector<std::unique_ptr<const KeptWithBodyIndex>> dropped;
+        std::atomic<unsigned> numberOfListsDropped { 0 };
+        std::atomic<bool> walksAreDone { false };
+        Ref<Thread> dropsLists = Thread::create("AOT walk test"_s, [&] {
+            while (!walksAreDone.load()) {
+                for (uint32_t function = 0; function < stage.program().functions.size(); ++function) {
+                    const BodyIndex* body = facts->bodies().find(FunctionID(function));
+                    std::unique_ptr<const KeptWithBodyIndex> kept = body ? body->takeKeptByWalk() : nullptr;
+                    if (!kept)
+                        continue;
+                    dropped.append(WTF::move(kept));
+                    numberOfListsDropped.store(dropped.size());
+                }
+            }
+        });
+        bool someWalkMadeOtherCode = false;
+        for (unsigned walk = 0; walk < mostWalks && numberOfListsDropped.load() < enoughListsDropped && !someWalkMadeOtherCode; ++walk)
+            someWalkMadeOtherCode = textOf(unit) != text;
+        walksAreDone.store(true);
+        dropsLists->waitForCompletion();
+        context.out.print("code "_s);
+        printCodeUnit(context.out, unit);
+        context.out.println(text.isEmpty() ? ": the walk failed"_s : someWalkMadeOtherCode ? ": a walk made other code"_s : ": every walk made the same code"_s);
     }
 }
 
@@ -292,10 +524,16 @@ std::span<const TestCommand> walkTestCommands()
     static constexpr TestCommand commands[] {
         { "walk"_s, runWalkCommand, ProgramOfCommand::AsWritten, "unit.."_s },
         { "why-closed"_s, runWhyClosedCommand, ProgramOfCommand::AsWritten, "unit.."_s },
+        { "walk-where-handler-edges-take-stand-ins"_s, runWalkWhereHandlerEdgesTakeStandInsCommand, ProgramOfCommand::AsWritten, "unit.."_s },
+        { "walk-where-every-closure-stands-behind-copies"_s, runWalkWhereEveryClosureStandsBehindCopiesCommand, ProgramOfCommand::AsWritten, "unit.."_s },
+        { "walk-while-kept-lists-are-dropped"_s, runWalkWhileKeptListsAreDroppedCommand, ProgramOfCommand::AsWritten, "unit.."_s },
         { "notes"_s, runNotesCommand, ProgramOfCommand::AsWritten, "unit.."_s },
         { "code-round-trip"_s, runCodeRoundTripCommand },
         { "verify-code"_s, runVerifyCodeCommand },
         { "sweep-code"_s, runSweepCodeCommand },
+        { "position-inside"_s, runPositionInsideCommand, ProgramOfCommand::AsWritten, "position=v<n> length=v<n> { below=v<n> | not-below=v<n> | from-zero-up=v<n> | counter=v<n> | start=v<n> | length-holds-bound=v<n> | lowered-counter=v<n> | lowered-from=v<n> }"_s },
+        { "element-present"_s, runElementPresentCommand, ProgramOfCommand::AsWritten, "list=v<n> position=v<n> { passed=v<n> | failed=v<n> }"_s },
+        { "verify-grounds"_s, runVerifyGroundsCommand, ProgramOfCommand::AsWritten, "{ access=v<n> { view=v<n> | position=v<n> | length=v<n> | below=v<n> | from-zero-up=v<n> | length-holds-bound=v<n> | lowered-counter=v<n> | lowered-from=v<n> | passed=v<n> | failed=v<n> } }"_s },
     };
     return commands;
 }

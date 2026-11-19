@@ -56,7 +56,7 @@ void ClassEmitter::generateGetClassPrototype(const ValueContext& value)
     auto readByOperation = [&](bool isOnRarePath) {
         return callWithoutSite<CellPointer>(RuntimeOperation::GetClassPrototype, { classObject }, { .isOnRarePath = isOnRarePath });
     };
-    std::optional<Word32> rank = rankOfClassWithOnePrototypeObject(value);
+    std::optional<Word32> rank = value->readsClassObjectItself() ? std::nullopt : rankOfClassWithOnePrototypeObject(value);
     if (!rank) {
         define(value, readByOperation(false));
         return;
@@ -100,7 +100,7 @@ void ClassEmitter::generateBeginMemberGuards(const ValueContext& value)
     branch(emitter<GuardEmitter>().guardsWereBegun(constructorFunction), { normalEdge(continuation), rareEdge(wereNeverBegun) });
 
     m_out.appendTo(wereNeverBegun);
-    Operand arguments[] { word32(constructorFunction.index()) };
+    Operand arguments[] { word32(constructorFunction.index()), word32(value->endsTopLevelOfModule()) };
     callWithoutSite(RuntimeOperation::BeginMemberGuards, arguments, Representation::Void, { .isOnRarePath = true });
     m_out.jump(continuation);
 
@@ -136,7 +136,7 @@ void ClassEmitter::generateGetConstructPrototype(const ValueContext& value)
     LayoutID classLayout = declaredLayoutOf(m_program, value->layout());
     FunctionID constructor = singleFunctionOf(types(), typeOf(value->newTargetOperand()));
     AccessContext context { m_program, WalkFacts(m_facts), m_plan, types(), { } };
-    bool guardAnswers = constructor &&m_program.at(constructor).constructedClass == classLayout && prototypeOfConstructorFunctionIsLeftToGuards(context, classLayout);
+    bool guardAnswers = constructor &&m_program.at(constructor).constructedClass == classLayout && isConstructorPrototypeGuarded(context, classLayout);
     if (std::optional<Word32> rank = guardAnswers ? rankOfClassWithOnePrototypeObject(value) : std::nullopt) {
         m_out.noteForm(Form::Open, StateOfKnowledge::PrototypeInTable);
         LBasicBlock guardHolds = newBlock();
@@ -188,7 +188,7 @@ void ClassEmitter::generateSuperConstructList(const ValueContext& value)
     Boxed parent = in<Boxed>(value->parentOperand());
     Boxed newTarget = in<Boxed>(value->newTargetOperand());
     CellPointer list = in<CellPointer>(value->listOperand());
-    define(value, emitter<CallEmitter>().superConstructWithArray(value, parent, newTarget, list));
+    define(value, emitter<CallEmitter>().constructWithArray(value, ConstructSyntax::SuperCall, parent, newTarget, list));
 }
 
 } } } // namespace JSC::AOT::Typed

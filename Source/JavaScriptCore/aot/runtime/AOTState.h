@@ -8,6 +8,7 @@
 #if ENABLE(AOT)
 
 #include "AOTInstance.h"
+#include "AOTPrefetchStep.h"
 #include "AOTVector.h"
 #include <algorithm>
 #include <array>
@@ -22,6 +23,7 @@
 #include <wtf/Noncopyable.h>
 #include <wtf/OSAllocator.h>
 #include <wtf/PageBlock.h>
+#include <wtf/PtrTag.h>
 #include <wtf/TZoneMalloc.h>
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
@@ -138,6 +140,13 @@ public:
         return *m_value;
     }
 
+    T& makeFromZeros()
+    {
+        ASSERT(!m_value);
+        m_value = std::launder(reinterpret_cast<T*>(m_storage));
+        return *m_value;
+    }
+
 private:
     Storage* m_storage;
     T* m_value { nullptr };
@@ -179,6 +188,19 @@ namespace Typed {
 enum class CountInEffectsNet : uint8_t;
 }
 
+struct GrowingFlatText {
+    JSString* buffer;
+    const StringImpl* lastResolved;
+    uint32_t consecutiveResolves;
+};
+
+struct WideCharacterStrings {
+    static constexpr unsigned size = 256;
+
+    std::array<JSString*, size> strings;
+    std::array<char16_t, size> characters;
+};
+
 struct State {
     WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED(State);
     WTF_MAKE_NONCOPYABLE(State);
@@ -193,6 +215,18 @@ struct State {
     ZeroedPages pages;
     ZeroedTableArena tableArena;
     std::unique_ptr<CacheRegistry> caches;
+    GrowingFlatText growingFlatText { };
+    static constexpr unsigned maxPrefetchingLoops = 4;
+    struct PrefetchingLoop {
+        const JSCell* array;
+        uint32_t request;
+        uint64_t nextPosition;
+    };
+    using PrefetchedRows = std::array<std::array<const JSCell*, PrefetchStep::maxSlots>, PrefetchStep::maxRows>;
+    std::array<PrefetchingLoop, maxPrefetchingLoops> prefetchingLoops { };
+    std::unique_ptr<std::array<PrefetchedRows, maxPrefetchingLoops>> prefetchedRows;
+    WideCharacterStrings wideCharacterStrings { };
+    std::array<JSString*, 64> textsOfFewStrings { };
     std::unique_ptr<ImmortalCells> immortalCells;
     JSObject* objectThatHoldsUndefined { nullptr };
     std::unique_ptr<ProgramStrings> strings;
@@ -209,12 +243,18 @@ struct State {
     std::unique_ptr<BuiltinFamilyState> builtinFamilies;
     std::unique_ptr<GlobalBindings> globalBindings;
     uint64_t registerBeforeFault { 0 };
-    const void* returnAddressOfThrowAfterCleanup { nullptr };
+    const void* returnAddressOfThrowAfterCleanup() const { return removeReturnAddressSignature(rawReturnAddressOfThrowAfterCleanup); }
+    const void* rawReturnAddressOfThrowAfterCleanup { nullptr };
     uint64_t keptByCleanup { 0 };
     static constexpr size_t numberOfFieldsUnderDeclaredNames = 64;
     FieldUnderDeclaredName* fieldsUnderDeclaredNames { nullptr };
     UncheckedKeyHashSet<uint32_t, IntHash<uint32_t>, WTF::UnsignedWithZeroKeyHashTraits<uint32_t>> functionsEnteredThatRunOnce;
     std::array<uint64_t, 8> writesCountedForEffectsNet { };
+    EncodedJSValue receiverOfPendingRead { 0 };
+    uint32_t keyOfPendingRead { 0 };
+    uint32_t slowPathReadCountAtPendingRead { 0 };
+    bool acceptsForeignBinaryData { false };
+    bool disallowsEvaluation { false };
     void countWriteForEffectsNet(Typed::CountInEffectsNet count) { ++writesCountedForEffectsNet[static_cast<size_t>(count)]; }
 
 private:

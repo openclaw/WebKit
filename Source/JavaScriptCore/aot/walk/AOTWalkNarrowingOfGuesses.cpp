@@ -17,13 +17,14 @@
 #include "AOTResultRules.h"
 #include "AOTSweep.h"
 #include "AOTTypeNarrowing.h"
+#include "AOTWalkKnown.h"
 #include <algorithm>
 #include <array>
 #include <optional>
 
 namespace JSC { namespace AOT { namespace Typed {
 
-static bool saysNothingInNarrowingOfGuesses(const TypeArena& types, TypeID type)
+static bool isUninformativeForNarrowing(const TypeArena& types, TypeID type)
 {
     if (!type || isNeverType(type))
         return true;
@@ -46,8 +47,10 @@ static void meetWithWhatWasSeenToArriveInNarrowingOfGuesses(Walker& walker, uint
     Type written = types.at(found);
     if (!written.hasOnlyLayouts() || written.hasOnlyClosures() || holdsOneMember(written.layouts))
         return;
+    if (walker.program().at(walker.currentFunction()).thisParameterIndex() == entryParameter)
+        return;
     TypeID seen = typeSeenToArriveInNarrowingOfGuesses(walker, entryParameter);
-    if (saysNothingInNarrowingOfGuesses(types, seen))
+    if (isUninformativeForNarrowing(types, seen))
         return;
     TypeID met = types.intersectionOf(found, seen);
     if (!isNeverType(met) && types.at(met).hasObjects())
@@ -66,10 +69,10 @@ static void meetWithWhatUnitExpectsOfItsOwnParameterInNarrowingOfGuesses(Walker&
     if (unit.index() >= link.functions.size())
         return;
     std::span<const LinkedParameter> parameters = link.parametersOf(unit);
-    if (*ofUnit >= parameters.size() || !parameters[*ofUnit].expected)
+    if (*ofUnit >= parameters.size() || !parameters[*ofUnit].writtenOrSeenToArrive())
         return;
     TypeArena& types = walker.types();
-    TypeID met = types.intersectionOf(found, parameters[*ofUnit].expected);
+    TypeID met = types.intersectionOf(found, parameters[*ofUnit].writtenOrSeenToArrive());
     if (!isNeverType(met) && types.at(met).hasObjects())
         found = met;
 }
@@ -123,18 +126,38 @@ static bool oneBuiltinClassAnswersAllNamesInNarrowingOfGuesses(const Walker& wal
     });
 }
 
+static bool isPassedToSubclassMethodInNarrowing(Walker& walker, ValueID input, LayoutID expected)
+{
+    const Program& program = walker.program();
+    const Function& function = program.at(walker.currentFunction());
+    BuiltinClassID base = program.at(expected).writtenBuiltinBase;
+    std::optional<unsigned> receiver = function.thisParameterIndex();
+    TypeID own = base && receiver && *receiver != input.index() ? function.thisType.written() : TypeID();
+    TypeArena& types = walker.types();
+    if (!own || holdsOnlyPrimitives(own) || !types.at(own).hasOnlyLayouts() || types.at(own).hasOnlyClosures() || !std::ranges::contains(membersOf(types, types.at(own).layouts), expected))
+        return false;
+    const BuiltinTable& builtins = program.builtins();
+    BuiltinID prototype = builtins.at(base).prototype;
+    return prototype && std::ranges::any_of(walker.namesUsedOff(input), [&](PropertyKeyID key) {
+        BuiltinName name = liesInThread(key) || program.nameClassOf(key) == NameClass::Length ? BuiltinName() : program.builtinNameOf(key);
+        return name && builtins.findMember(builtins.canonicalID(prototype), name).outcome != BuiltinMemberLookup::Outcome::Found;
+    });
+}
+
 static bool restsOnNamesThatBuiltinsAnswerInNarrowingOfGuesses(Walker& walker, ValueID input, const BodyValue& definition, TypeID found)
 {
     TypeArena& types = walker.types();
     LayoutID expected = singleLayoutOf(types, types.at(found));
-    if (!expected || (!definition.isParameter() && inputOperationsThatHandOn.contains(definition.opcode())))
+    if (!expected || (!definition.isParameter() && inputPassThroughOpcodes.contains(definition.opcode())))
         return false;
-    if (definition.isParameter() && walker.currentBodyIndex().blockOf(input) == entryBlock && !saysNothingInNarrowingOfGuesses(types, typeSeenToArriveInNarrowingOfGuesses(walker, input.index())))
+    if (definition.isParameter() && walker.currentBodyIndex().blockOf(input) == entryBlock && !isUninformativeForNarrowing(types, typeSeenToArriveInNarrowingOfGuesses(walker, input.index())))
         return false;
     std::span<const PropertyKeyID> names = walker.namesUsedOff(input);
-    if (names.empty() || walker.facts().layoutsByNames().findOnlyLayoutWithAll(names, walker.isInLoop() && names.size() > 1) != expected)
+    if (names.empty() || walker.onlyLayoutInSightWithAllNames(names, walker.isInLoop() && names.size() > 1, { }, walker.numberOfLongListOfNamesUsedOff(input, names)) != expected)
         return false;
     if (someCastStatesLayoutInNarrowingOfGuesses(walker, input, expected))
+        return false;
+    if (definition.isParameter() && walker.currentBodyIndex().blockOf(input) == entryBlock && isPassedToSubclassMethodInNarrowing(walker, input, expected))
         return false;
     return std::ranges::none_of(names, [&](PropertyKeyID name) {
         return nameSpeaksForLayoutInNarrowingOfGuesses(walker, name);
@@ -149,13 +172,6 @@ struct EdgeThatFillsParameterInNarrowingOfExpectations {
 };
 
 } // anonymous namespace
-
-static bool saysNothingInNarrowingOfExpectations(const TypeArena& types, TypeID type)
-{
-    if (!type || isNeverType(type))
-        return true;
-    return !holdsOnlyPrimitives(type) && types.at(type).hasUnboundedUnknown();
-}
 
 static std::optional<EdgeThatFillsParameterInNarrowingOfExpectations> findEdgeThatFillsInNarrowingOfExpectations(const BodyIndex& index, ValueID parameter)
 {
@@ -183,7 +199,7 @@ static TypeID tagWrittenInMemberInNarrowingOfExpectations(Walker& walker, Layout
     if (field.form.contains(FieldForm::IsAccessor) || !field.flags.contains(FieldFlags::IsRequired))
         return { };
     TypeID written = field.declared.expected().predicted();
-    if (saysNothingInNarrowingOfExpectations(walker.types(), written))
+    if (isUninformativeForNarrowing(walker.types(), written))
         return { };
     if (asWritten)
         return written;
@@ -245,18 +261,19 @@ static void cutExpectationByTestedField(Walker& walker, ValueID input, TypeID& f
     Reference builtHolder = walker.referenceOf(narrowing.valueOperand());
     std::array<TypeID, 3> whatHolderMayBe { holder.isParameter() ? holder.parameterType() : TypeID(), found, builtHolder ? walker.typeOf(builtHolder) : TypeID() };
     for (TypeID inFront : whatHolderMayBe) {
-        if (saysNothingInNarrowingOfExpectations(types, inFront) || !types.at(inFront).hasOnlyLayouts() || types.at(inFront).hasOnlyClosures() || holdsOneMember(types.at(inFront).layouts))
+        if (isUninformativeForNarrowing(types, inFront) || !types.at(inFront).hasOnlyLayouts() || types.at(inFront).hasOnlyClosures() || holdsOneMember(types.at(inFront).layouts))
             continue;
         if (!selects && Walker::keepsRoundsOver(types, types.at(inFront).layouts))
             continue;
+        Vector<LayoutID, 16> membersInFront;
+        membersInFront.append(membersOf(types, types.at(inFront).layouts));
         Vector<LayoutID, 16> members;
-        members.append(membersOf(types, types.at(inFront).layouts));
-        size_t numberOfMembers = members.size();
-        members.removeAllMatching([&](LayoutID member) {
+        for (LayoutID member : membersInFront) {
             TypeID tag = tagWrittenInMemberInNarrowingOfExpectations(walker, member, key, selects);
-            return tag && !(selects ? types.overlap(tag, selected) : edgeLeavesSomethingOf(tag));
-        });
-        if (members.isEmpty() || members.size() == numberOfMembers)
+            if (!tag || (selects ? types.overlap(tag, selected) : edgeLeavesSomethingOf(tag)))
+                members.append(member);
+        }
+        if (members.isEmpty() || members.size() == membersInFront.size())
             continue;
         if (inFront != found)
             isDeclared = true;
@@ -265,7 +282,7 @@ static void cutExpectationByTestedField(Walker& walker, ValueID input, TypeID& f
     }
 }
 
-void refineExpectationOfValue(Walker& walker, ValueID input, TypeID& found, bool& isDeclared)
+void refineExpectationOfValue(Walker& walker, ValueID input, TypeID& found, bool& isDeclared, bool restsOnNamesUsedAlone)
 {
     const BodyIndex& index = walker.currentBodyIndex();
     TypeArena& types = walker.types();
@@ -281,15 +298,16 @@ void refineExpectationOfValue(Walker& walker, ValueID input, TypeID& found, bool
         return;
     if (!walker.walksOwnBodyOfUnit()) {
         bool statesType = !definition.isParameter() && opcodesThatStateTypes.contains(definition.opcode());
-        if (ValueID behindCasts = statesType ? index.valueBehindCasts(input) : input; index.isParameter(behindCasts) && index.blockOf(behindCasts) == entryBlock)
+        if (ValueID behindCasts = statesType ? index.stripCasts(input) : input; index.isParameter(behindCasts) && index.blockOf(behindCasts) == entryBlock)
             meetWithWhatUnitExpectsOfItsOwnParameterInNarrowingOfGuesses(walker, behindCasts, found);
     }
     if (isDeclared) {
-        if (definition.isParameter() && index.blockOf(input) == entryBlock)
+        if (definition.isParameter() && index.isInBlock(input, entryBlock))
             meetWithWhatWasSeenToArriveInNarrowingOfGuesses(walker, input.index(), found);
         return;
     }
-    if (restsOnNamesThatBuiltinsAnswerInNarrowingOfGuesses(walker, input, definition, found))
+    bool arrivesAtJoin = definition.isParameter() && !index.isInBlock(input, entryBlock) && !restsOnNamesUsedAlone;
+    if (!arrivesAtJoin && restsOnNamesThatBuiltinsAnswerInNarrowingOfGuesses(walker, input, definition, found))
         found = { };
 }
 
@@ -300,9 +318,20 @@ void bindNamesBehindFailedTest(Walker& walker, Reference value, Reference test, 
     if (!test || !test.isValue() || !value || !value.isValue())
         return;
     const Code& code = walker.code();
-    ValueID root = rootOfCellInSweptCode(code, value.id());
+    ValueID root = underlyingCellOf(code, value.id());
     if (walker.state().isFresh(code.isConstant(root) ? Reference::constant(root) : Reference::value(root)))
         return;
+    if (const Operation& asked = code.at(test.id()); asked.opcode == Opcode::ShapeTest && !canFailForMarkedObject(asked)) {
+        TypeArena& types = walker.types();
+        Type whole = types.at(code.at(value.id()).type);
+        if (whole.layouts && types.listOf(whole.layouts).size() > types.listOf(asked.layouts()).size() + 1) {
+            LayoutSetID refused = asked.layouts();
+            if (std::optional<uint64_t> before = findKnown(walker, KnownNote::IsOfNoneOfLayouts, value))
+                refused = types.at(types.unionOf(types.forLayoutSet(refused), types.forLayoutSet(LayoutSetID::fromBits(static_cast<uint32_t>(*before))))).layouts;
+            noteKnown(walker, KnownNote::IsOfNoneOfLayouts, value, { }, 0, LocationMasks(), refused.bits());
+            return;
+        }
+    }
 
     Draft narrowed(Opcode::Narrowed, origin);
     narrowed.setValueOperand(value);

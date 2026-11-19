@@ -9,6 +9,7 @@
 #if ENABLE(AOT)
 
 #include "AOTBuiltinIDs.h"
+#include "AOTBuiltinMembers.h"
 #include "AOTBuiltinTable.h"
 #include "AOTEffectsOfOperations.h"
 #include "AOTFamilies.h"
@@ -26,7 +27,7 @@
 
 namespace JSC { namespace AOT { namespace Typed {
 
-OperatorForm formAllowedForTypedOperator(Walker&, const Draft&);
+OperatorForm operatorFormFor(Walker&, const Draft&);
 bool joinIsLikelyKeyInWalkTexts(Walker&, ValueID join);
 
 using PartsInTextBuilderRows = Vector<Reference, 8>;
@@ -91,7 +92,7 @@ bool isReadByNoRecordSoFar(const Walker& walker, Reference made)
         });
         if (!takesText)
             continue;
-        if (!opcodesThatGiveSameCell.contains(record.opcode))
+        if (!cellPreservingOpcodes.contains(record.opcode))
             return false;
         names.append(behind[place]);
     }
@@ -108,15 +109,28 @@ static ValueID findOperationWrittenForOneReaderInTextBuilderRows(const BodyIndex
     return { };
 }
 
-bool takePartsOfJoinMadeForOneReader(Walker& walker, ValueID operand, Vector<Reference, 8>& parts)
+static bool onlyRecordsThatNobodySeesStandBehindInTextBuilderRows(const Walker& walker, ValueID made)
+{
+    const Code& code = walker.code();
+    for (ValueID id = code.lastOperationOf(walker.currentBlock()); id != made; id = code.at(id).previous) {
+        if (!id || !code.at(id).traits().isRemovableWhenUnused())
+            return false;
+    }
+    return true;
+}
+
+bool takePartsOfJoinMadeForOneReader(Walker& walker, ValueID operand, Vector<Reference, 8>& parts, Vector<ValueID, 2>* joinsThatFailWhereReaderFails)
 {
     Reference text = walker.isUnreachable() ? Reference() : walker.referenceOf(operand);
     if (!text || !text.isValue())
         return false;
     const Code& code = walker.code();
-    ValueID root = rootOfCellInSweptCode(code, text.id());
+    ValueID root = underlyingCellOf(code, text.id());
     const Operation& made = code.at(root);
-    if (!textsTakenApartInTextBuilderRows.contains(made.opcode) || !made.traits().isRemovableWhenUnused())
+    if (!textsTakenApartInTextBuilderRows.contains(made.opcode))
+        return false;
+    bool mayFailForItsLength = !made.traits().isRemovableWhenUnused();
+    if (mayFailForItsLength && (!joinsThatFailWhereReaderFails || !operationsThatJoinTexts.contains(made.opcode) || !made.traits().withoutThrowByRule().isRemovableWhenUnused() || made.block() != walker.currentBlock()))
         return false;
     if (made.opcode == Opcode::Strcat && made.isLikelyKey())
         return false;
@@ -137,8 +151,18 @@ bool takePartsOfJoinMadeForOneReader(Walker& walker, ValueID operand, Vector<Ref
         if (!part || !hasTextByItselfInTextBuilderRows(walker, referenceToRecordInTextBuilderRows(code, part)))
             return false;
     }
+    bool oneOperandIsText = std::ranges::any_of(made.operands(), [&](ValueID part) {
+        return hasOnlyInTextBuilderRows(walker, referenceToRecordInTextBuilderRows(code, part), Primitive::AnyString);
+    });
+    if (made.opcode == Opcode::Add && !oneOperandIsText)
+        return false;
     if (made.block() == walker.currentBlock() && !isReadByNoRecordSoFar(walker, Reference::value(root)))
         return false;
+    if (mayFailForItsLength) {
+        if (!onlyRecordsThatNobodySeesStandBehindInTextBuilderRows(walker, root))
+            return false;
+        joinsThatFailWhereReaderFails->append(root);
+    }
 
     for (ValueID part : made.operands())
         parts.append(referenceToRecordInTextBuilderRows(code, part));
@@ -170,6 +194,21 @@ static ValueID findOperandBesideStringInTextBuilderRows(const Walker& walker, co
             return sum.operand(side);
     }
     return { };
+}
+
+static ValueID findOperandOfAppendedSum(Walker& walker, const BodyValue& sum)
+{
+    if (sum.opcode() != Opcode::Add || !walker.isInLoop() || !walker.hasStringsInBuilders())
+        return { };
+    ValueID reader = walker.currentBodyIndex().onlyUsingValue(sum.id());
+    if (!reader || !findStringInBuilder(walker, reader))
+        return { };
+    for (uint32_t side : { OperandIndex::Add::left, OperandIndex::Add::right }) {
+        Reference operand = walker.referenceOf(sum.operand(side));
+        if (!operand || !operand.isValue() || !walker.types().overlap(walker.typeOf(operand), TypeTable::string) || hasTextByItselfInTextBuilderRows(walker, operand))
+            return { };
+    }
+    return sum.operand(OperandIndex::Add::left);
 }
 
 static uint32_t limitOfStretchInTextBuilderRows(const Walker& walker, const BodyIndex& index, const BodyBlock& block)
@@ -213,13 +252,13 @@ static ValueID findLastJoinTypedByProofInTextBuilderRows(const Walker& walker, c
     return last;
 }
 
-static bool isJoinedIntoTextInStringBuilder(Walker& walker, const BodyIndex& index, const BodyBlock& block, ValueID part)
+static bool isJoinedIntoStringInBuilder(Walker& walker, const BodyIndex& index, const BodyBlock& block, ValueID part)
 {
     ValueID reader = index.onlyUsingValue(part);
-    if (!reader || (index.opcodeOf(reader) != Opcode::Strcat && !findTextNamedBy(walker, reader)))
+    if (!reader || (index.opcodeOf(reader) != Opcode::Strcat && !findStringInBuilder(walker, reader)))
         return false;
     for (ValueID taker = reader; taker && block.holds(taker) && operationsThatJoinTexts.contains(index.opcodeOf(taker)); taker = index.onlyUsingValue(taker)) {
-        if (findTextNamedBy(walker, taker))
+        if (findStringInBuilder(walker, taker))
             return true;
     }
     return false;
@@ -251,7 +290,7 @@ static bool keepNumberThatIsConvertedInFrontOfOtherParts(Walker& walker, const B
     BlockID meeting = walker.addBlock();
     Reference part = walker.addParameter(meeting, { }, Representation::JSValue);
     walker.branch(isNumber, keeps, converts);
-    walker.noteGuessOpened();
+    walker.recordSpeculation();
 
     walker.continueIn(keeps);
     Draft proof(Opcode::Narrowed, origin);
@@ -266,7 +305,7 @@ static bool keepNumberThatIsConvertedInFrontOfOtherParts(Walker& walker, const B
     walker.continueIn(converts);
     Draft asWritten = walker.draftOf(conversion);
     walker.chooseConservativeFields(asWritten);
-    asWritten.setForm(formAllowedForTypedOperator(walker, asWritten));
+    asWritten.setForm(operatorFormFor(walker, asWritten));
     if (Reference text = walker.build(WTF::move(asWritten)))
         walker.jumpTo(meeting, singleElementSpan(text));
 
@@ -276,12 +315,19 @@ static bool keepNumberThatIsConvertedInFrontOfOtherParts(Walker& walker, const B
     return true;
 }
 
+static bool joinStringAndArrayInTextBuilderRows(Walker&, const BodyValue& sum);
+
 bool guessThatOperandBesideStringHasTextOfItsOpcodes(Walker& walker, const BodyValue& sum)
 {
     bool isConversion = sum.opcode() == Opcode::ToString;
     if ((sum.opcode() != Opcode::Add && !isConversion) || !walker.has(Mechanism::TypedOperations) || walker.isUnreachable())
         return false;
+    if (!isConversion && joinStringAndArrayInTextBuilderRows(walker, sum))
+        return true;
     ValueID guessed = isConversion ? sum.operand(OperandIndex::ToString::value) : findOperandBesideStringInTextBuilderRows(walker, sum);
+    bool isAppendedSum = !isConversion && !guessed;
+    if (isAppendedSum)
+        guessed = findOperandOfAppendedSum(walker, sum);
     Reference value = guessed ? walker.referenceOf(guessed) : Reference();
     if (!value || !value.isValue() || (isConversion && hasTextByItselfInTextBuilderRows(walker, value)))
         return false;
@@ -290,7 +336,7 @@ bool guessThatOperandBesideStringHasTextOfItsOpcodes(Walker& walker, const BodyV
     BodyBlock block = index.block(index.blockOf(sum.id()));
     ValueID joinOfTemplate = isConversion ? index.onlyUsingValue(sum.id()) : ValueID();
     bool handsPartOnToLikelyKey = joinOfTemplate && block.holds(joinOfTemplate) && index.opcodeOf(joinOfTemplate) == Opcode::Strcat && joinIsLikelyKeyInWalkTexts(walker, joinOfTemplate);
-    if (isConversion && !handsPartOnToLikelyKey && !walker.hasTextsInStringBuilders())
+    if (isConversion && !handsPartOnToLikelyKey && !walker.hasStringsInBuilders())
         return false;
     uint32_t firstValue = block.firstValue().index();
     uint32_t begin = sum.id().index() - firstValue;
@@ -301,19 +347,22 @@ bool guessThatOperandBesideStringHasTextOfItsOpcodes(Walker& walker, const BodyV
 
     TypeArena& types = walker.types();
     ExpectationOfValue expectation = findExpectation(walker, guessed);
-    bool endsInTextInStringBuilder = last != sum.id() && findTextNamedBy(walker, last);
-    handsPartOnToLikelyKey &= !endsInTextInStringBuilder && expectation.isDeclared;
+    bool endsInStringInBuilder = last != sum.id() && findStringInBuilder(walker, last);
+    handsPartOnToLikelyKey &= !endsInStringInBuilder && expectation.isDeclared;
     if (handsPartOnToLikelyKey)
         last = sum.id();
-    if (isConversion && !endsInTextInStringBuilder && !handsPartOnToLikelyKey && isJoinedIntoTextInStringBuilder(walker, index, block, sum.id()))
+    if (isConversion && !endsInStringInBuilder && !handsPartOnToLikelyKey && isJoinedIntoStringInBuilder(walker, index, block, sum.id()))
         return keepNumberThatIsConvertedInFrontOfOtherParts(walker, sum, value, expectation);
-    if ((isConversion || (expectation.type && walker.isInLoop())) && !endsInTextInStringBuilder && !handsPartOnToLikelyKey)
+    if ((isConversion || (expectation.type && walker.isInLoop())) && !endsInStringInBuilder && !handsPartOnToLikelyKey)
         return false;
-    TypeID expected = typeOfPartGuessedBesideString;
+    TypeID expected = isAppendedSum ? TypeID(TypeTable::string) : typeOfPartGuessedBesideString;
+    if (isAppendedSum && !endsInStringInBuilder)
+        return false;
     if (expectation.type) {
-        if (!hasTextByItself(types.at(expectation.type)))
+        TypeID withText = hasTextByItself(types.at(expectation.type)) ? expectation.type : walker.isInLoop() ? findPrimitivesExpectedBesideObjects(walker, guessed) : TypeID();
+        if (!withText || types.at(withText).isUndefinedOrNull())
             return false;
-        expected = types.intersectionOf(expectation.type, expected);
+        expected = types.intersectionOf(withText, expected);
     }
     TypeID tested = types.testablePartOf(types.withLiteralStringsWidened(expected));
     TypeID proven = walker.typeOf(value);
@@ -352,7 +401,9 @@ bool guessThatOperandBesideStringHasTextOfItsOpcodes(Walker& walker, const BodyV
     BlockID converts = walker.addBlock(BlockFrequency::Unlikely);
     BlockID meeting = walker.addBlock();
     walker.branch(hasText, joins, converts);
-    walker.noteGuessOpened();
+    walker.recordSpeculation();
+    if (isAppendedSum)
+        walker.count(StatisticID::AppendedSumsOfUnknownValues);
 
     Walker::StretchInArms stretch = walker.stretchInArms(block.id(), begin, end);
     Walker::ArmsThatMeet arms;
@@ -382,7 +433,7 @@ bool guessThatOperandBesideStringHasTextOfItsOpcodes(Walker& walker, const BodyV
             walker.bind(names[place], boundBefore[place]);
     }
     if (!walker.hasFailed())
-        walker.letArmsMeet(stretch, arms, meeting);
+        walker.joinArms(stretch, arms, meeting);
     return true;
 }
 
@@ -404,7 +455,7 @@ static BuiltinID findBuiltinCalledInTextBuilderRows(Walker& walker, const BodyVa
     BuiltinID named = type.isObject() ? singleBuiltinOf(types, type) : BuiltinID();
     if (!named) {
         const BodyIndex& index = walker.currentBodyIndex();
-        ValueID read = index.valueBehindCasts(call.calleeOperand());
+        ValueID read = index.stripCasts(call.calleeOperand());
         if (!read || index.isParameter(read) || index.opcodeOf(read) != Opcode::PropGet || index.value(read).isFreeName())
             return { };
         Reference object = walker.referenceOf(index.value(read).objectOperand());
@@ -418,7 +469,7 @@ static bool collectTextsOfTemplateObjectInTextBuilderRows(const Walker& walker, 
     if (!object || !object.isValue())
         return false;
     const Code& code = walker.code();
-    const Operation& made = code.at(rootOfCellInSweptCode(code, object.id()));
+    const Operation& made = code.at(underlyingCellOf(code, object.id()));
     if (made.opcode != Opcode::NewTemplateObject)
         return false;
     for (TemplateString text : made.templateStrings())
@@ -428,7 +479,7 @@ static bool collectTextsOfTemplateObjectInTextBuilderRows(const Walker& walker, 
 
 static std::optional<Vector<Reference, 8>> elementsOfJoinedListInTextBuilderRows(Walker& walker, Reference list)
 {
-    if (isFreshListAsMade(walker, list)) {
+    if (isFreshPristineArray(walker, list)) {
         std::optional<uint32_t> length = lengthOfFreshList(walker, list);
         if (!length || *length > mostElementsJoinedInTextBuilderRows)
             return std::nullopt;
@@ -443,6 +494,8 @@ static std::optional<Vector<Reference, 8>> elementsOfJoinedListInTextBuilderRows
     return elements;
 }
 
+static bool takeElementPartsInTextBuilderRows(Walker&, Reference list, Reference separator, PartsInTextBuilderRows&);
+
 static bool takePartsOfJoinedListInTextBuilderRows(Walker& walker, const BodyValue& call, PartsInTextBuilderRows& parts)
 {
     std::span<const ValueID> arguments = call.argumentsOperands();
@@ -453,10 +506,49 @@ static bool takePartsOfJoinedListInTextBuilderRows(Walker& walker, const BodyVal
     bool isLeftOut = arguments.empty() || hasOnlyInTextBuilderRows(walker, separator, Primitive::Undefined);
     if (!isLeftOut && !hasOnlyInTextBuilderRows(walker, separator, Primitive::AnyString))
         return false;
+    return takeElementPartsInTextBuilderRows(walker, list, isLeftOut ? Reference() : separator, parts);
+}
+
+static bool isConvertedByJoinInTextBuilderRows(Walker& walker, Reference list)
+{
+    const Program& program = walker.program();
+    const BuiltinTable& table = program.builtins();
+    if (program.admitsReplacedBuiltins)
+        return false;
+    PropertyKeyID hinted = program.keyOf(table.nameOf(WellKnownSymbol::ToPrimitive));
+    auto lacksHinted = [&](BuiltinID prototype) {
+        return !findOwnMember(program, prototype, hinted) && listsEveryMemberUnder(program, prototype, hinted);
+    };
+    auto finds = [&](BuiltinID member) {
+        PropertyKeyID key = program.keyOf(table.at(table.canonicalID(member)).name);
+        BuiltinID found = key ? findConstantMemberReadOff(walker, list, key) : BuiltinID();
+        return found && table.canonicalID(found) == table.canonicalID(member);
+    };
+    return hinted && lacksHinted(table.canonicalID(Builtins::ArrayPrototype)) && lacksHinted(table.canonicalID(Builtins::ObjectPrototype))
+        && finds(Builtins::ObjectPrototypeValueOf) && finds(Builtins::ArrayPrototypeToString) && finds(Builtins::ArrayPrototypeJoin);
+}
+
+bool takePartsOfConvertedList(Walker& walker, Reference list, Origin origin, Vector<Reference, 8>& parts)
+{
+    if (!list || !list.isValue() || !walker.has(Mechanism::TypedOperations) || walker.isUnreachable() || !walker.types().at(walker.typeOf(list)).isObject())
+        return false;
+    size_t numberOfParts = parts.size();
+    if (!isFreshPristineArray(walker, list) || !isConvertedByJoinInTextBuilderRows(walker, list) || !takeElementPartsInTextBuilderRows(walker, list, { }, parts)) {
+        parts.shrink(numberOfParts);
+        return false;
+    }
+    walker.checkWhatIsInSightOfList(list, origin);
+    if (parts.size() == numberOfParts)
+        parts.append(writtenTextInTextBuilderRows(walker, walker.program().strings.emptyString()));
+    return true;
+}
+
+static bool takeElementPartsInTextBuilderRows(Walker& walker, Reference list, Reference separator, PartsInTextBuilderRows& parts)
+{
     std::optional<Vector<Reference, 8>> elements = elementsOfJoinedListInTextBuilderRows(walker, list);
     if (!elements)
         return false;
-    if (isLeftOut)
+    if (!separator)
         separator = writtenTextInTextBuilderRows(walker, walker.program().strings.comma());
 
     bool separates = !isEmptyTextInTextBuilderRows(walker, separator);
@@ -509,6 +601,82 @@ static bool takePartsOfConcatInTextBuilderRows(Walker& walker, const BodyValue& 
     return true;
 }
 
+static bool isKeyAlwaysAbsentInTextBuilderRows(const Program& program, BuiltinID start, PropertyKeyID key)
+{
+    const BuiltinTable& table = program.builtins();
+    if (!start || !key)
+        return false;
+    MembersUnderKey members(program, key);
+    BuiltinID holder = table.canonicalID(start);
+    while (true) {
+        if (members.findOwnMember(holder) || !listsEveryMemberUnder(program, holder, key) || !members.isClosedKey(holder) || !table.hasLockedPrototypeLink(holder))
+            return false;
+        switch (table.at(holder).prototypeLink) {
+        case BuiltinPrototypeLink::Unknown:
+            return false;
+        case BuiltinPrototypeLink::Null:
+            return true;
+        case BuiltinPrototypeLink::Builtin:
+            holder = table.canonicalID(table.at(holder).inheritsFrom);
+            break;
+        }
+    }
+}
+
+static bool joinStringAndArrayInTextBuilderRows(Walker& walker, const BodyValue& sum)
+{
+    ValueID written = findOperandBesideStringInTextBuilderRows(walker, sum);
+    Reference list = written ? walker.referenceOf(written) : Reference();
+    if (!list || !isFreshPristineArray(walker, list))
+        return false;
+    const Program& program = walker.program();
+    const BuiltinTable& table = program.builtins();
+    auto finds = [&](BuiltinName name, BuiltinID method) {
+        PropertyKeyID key = program.keyOf(name);
+        BuiltinID found = key ? findConstantMemberReadOff(walker, list, key) : BuiltinID();
+        return found && table.canonicalID(found) == table.canonicalID(method);
+    };
+    if (!finds(BuiltinNames::valueOf, Builtins::ObjectPrototypeValueOf) || !finds(BuiltinNames::toString, Builtins::ArrayPrototypeToString) || !finds(BuiltinNames::join, Builtins::ArrayPrototypeJoin))
+        return false;
+    if (!isKeyAlwaysAbsentInTextBuilderRows(program, Builtins::ArrayPrototype, program.keyOf(table.nameOf(WellKnownSymbol::ToPrimitive))))
+        return false;
+    std::optional<Vector<Reference, 8>> elements = elementsOfJoinedListInTextBuilderRows(walker, list);
+    if (!elements)
+        return false;
+
+    bool textIsLeft = written == sum.operand(OperandIndex::Add::right);
+    Reference text = walker.referenceOf(sum.operand(textIsLeft ? OperandIndex::Add::left : OperandIndex::Add::right));
+    PartsInTextBuilderRows parts;
+    if (textIsLeft)
+        parts.append(text);
+    for (size_t place = 0; place < elements->size(); ++place) {
+        if (place)
+            parts.append(writtenTextInTextBuilderRows(walker, program.strings.comma()));
+        Reference element = elements->at(place);
+        if (hasOnlyInTextBuilderRows(walker, element, Primitive::UndefinedOrNull))
+            continue;
+        if (!hasOnlyInTextBuilderRows(walker, element, primitivesJoinedAsTheirText))
+            return false;
+        parts.append(element);
+    }
+    if (!textIsLeft)
+        parts.append(text);
+    walker.checkWhatIsInSightOfList(list, walker.originOf(sum));
+    if (parts.size() == 1) {
+        walker.bind(sum.id(), text);
+        return true;
+    }
+    Origin origin = walker.originOf(sum);
+    origin.isTailCall = false;
+    Draft joined(Opcode::Strcat, origin);
+    walker.chooseConservativeFields(joined);
+    joined.inputValueGiven = sum.id();
+    joined.setPartsOperands(parts.span());
+    if (Reference whole = walker.build(WTF::move(joined)))
+        walker.bind(sum.id(), whole);
+    return true;
+}
+
 bool joinOfWhatIsInSight(Walker& walker, const BodyValue& call, BuiltinID called)
 {
     if (call.opcode() != Opcode::Call || !walker.has(Mechanism::TypedOperations) || walker.isUnreachable())
@@ -545,7 +713,7 @@ bool joinOfWhatIsInSight(Walker& walker, const BodyValue& call, BuiltinID called
     joined.inputValueGiven = call.id();
     if (parts.size() == 1) {
         joined.setValueOperand(parts[0]);
-        joined.setForm(formAllowedForTypedOperator(walker, joined));
+        joined.setForm(operatorFormFor(walker, joined));
     } else
         joined.setPartsOperands(parts.span());
     if (Reference text = walker.build(WTF::move(joined)))

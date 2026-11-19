@@ -8,11 +8,14 @@
 
 #if ENABLE(AOT)
 
+#include "AOTControlEmitter.h"
 #include "AOTConversionEmitter.h"
 #include "AOTRepresentationRules.h"
 #include "AOTRuntimeCallEmitter.h"
 #include "AOTStringEmitter.h"
+#include "AOTStubsStrings.h"
 #include "AOTStubsValues.h"
+#include "AOTThrowEmitter.h"
 #include "AOTTypeArena.h"
 #include "AOTTypeTable.h"
 #include "JSCJSValueInlines.h"
@@ -35,6 +38,29 @@ public:
     Condition callEqualStub(const OperationContext& context, bool isStrict, Boxed left, Boxed right, const CallOptions& options = { })
     {
         return Condition(m_out.castToInt32(callStub(context, AOT::equal(isStrict), { left.value(), right.value() }, options).first));
+    }
+
+    Condition equalityOnBigInts(const ValueContext& value, bool isStrict, CellPointer left, CellPointer right)
+    {
+        auto callEqual = [&] {
+            return callEqualStub(value, isStrict, boxCell(left), boxCell(right));
+        };
+        if (!generator().runsRepeatedly(value.block()))
+            return callEqual();
+        Word32 length = loadField<Word32>(left, m_heaps.JSBigInt_length);
+        return selectByBranch<Condition>(equal(length, loadField<Word32>(right, m_heaps.JSBigInt_length)), [&] {
+            return either<Condition>(belowOrEqual(length, 1), [&] {
+                return selectByBranch<Condition>(isZero(length), [&] {
+                    return boolean(true);
+                }, [&] {
+                    Condition haveSameDigit = equal(loadField<Integer>(left, m_heaps.JSBigInt_data), loadField<Integer>(right, m_heaps.JSBigInt_data));
+                    Condition haveSameSign = equal(loadByte(left, m_heaps.JSBigInt_sign), loadByte(right, m_heaps.JSBigInt_sign));
+                    return Condition(m_out.bitAnd(haveSameDigit.value(), haveSameSign.value()));
+                });
+            }, callEqual);
+        }, [&] {
+            return boolean(false);
+        });
     }
 
     bool comparesOnlyNumbers(const ValueContext& value)
@@ -67,7 +93,7 @@ public:
             m_out.noteForm(Form::Closed, StateOfKnowledge::LiteralComparedByStub);
             return;
         }
-        FormAtPlace named = formByLoopAlone(value.opcode(), inPlace, generator().isInLoop(value.block()));
+        FormAtPlace named = formByLoopAlone(value.opcode(), inPlace, generator().usesLoopForms(value.block()));
         m_out.noteForm(named.form, inPlace, named.place);
     }
 
@@ -82,10 +108,51 @@ public:
         return callEqualStub(value, false, x, y);
     }
 
+    Condition isMultipleOfConstant(ValueID remainder, ValueID comparedWith)
+    {
+        if (m_code.useCountOf(remainder) != 1)
+            return { };
+        const Operation& divided = operationAt(definitionOf(remainder));
+        if (divided.opcode != Opcode::RemainderOfIntegers)
+            return { };
+        const Operation& zero = operationAt(definitionOf(comparedWith));
+        if (zero.opcode != Opcode::Integer || zero.integer())
+            return { };
+        ValueID dividend = divided.dividendOperand();
+        Representation representation = representationOf(dividend);
+        Range dividends = typeOf(dividend).integers;
+        Range divisors = typeOf(divided.divisorOperand()).integers;
+        bool isSigned = dividends.minimum < 0;
+        if ((representation != Representation::Int32 && representation != Representation::Int64) || !divisors.isSingleValue() || !dividends.isSubsetOf(isSigned ? Range::int32() : Range::uint32()))
+            return { };
+        int64_t divisor = std::abs(divisors.minimum);
+        if (divisor < 3 || divisor > std::numeric_limits<int32_t>::max() || hasOneBitSet(static_cast<uint64_t>(divisor)))
+            return { };
+
+        unsigned shift = std::countr_zero(static_cast<uint32_t>(divisor));
+        uint32_t oddPart = static_cast<uint32_t>(divisor) >> shift;
+        uint32_t inverse = oddPart;
+        while (inverse * oddPart != 1)
+            inverse *= 2 - inverse * oddPart;
+        uint32_t offset = isSigned ? (std::numeric_limits<int32_t>::max() / oddPart) >> shift << shift : 0;
+        uint32_t greatestQuotient = isSigned ? 2 * offset >> shift : std::numeric_limits<uint32_t>::max() / static_cast<uint32_t>(divisor);
+        Word32 quotient = mul(representation == Representation::Int32 ? in<Word32>(dividend) : low32(in<Integer>(dividend)), word32(static_cast<int32_t>(inverse)));
+        if (offset)
+            quotient = add(quotient, word32(static_cast<int32_t>(offset)));
+        if (shift)
+            quotient = Word32(m_out.bitOr(m_out.lShr(quotient.value(), shift), m_out.shl(quotient.value(), 32 - shift)));
+        build().statistics().count(StatisticID::MultiplesTestedWithoutRemainder);
+        return belowOrEqual(quotient, word32(static_cast<int32_t>(greatestQuotient)));
+    }
+
     Condition equalityOnIntegers(const ValueContext& value)
     {
         ValueID left = value->leftOperand();
         ValueID right = value->rightOperand();
+        if (Condition isMultiple = isMultipleOfConstant(left, right))
+            return isMultiple;
+        if (Condition isMultiple = isMultipleOfConstant(right, left))
+            return isMultiple;
         switch (formOfOperands(value)) {
         case Representation::Int32: {
             Word32 x = in<Word32>(left);
@@ -110,14 +177,65 @@ public:
         return { };
     }
 
+    Condition strictEqualityOnBoxesThatHoldNumbersOrNothing(const ValueContext& value)
+    {
+        ValueID left = value->leftOperand();
+        ValueID right = value->rightOperand();
+        Boxed x = in<Boxed>(left);
+        Boxed y = in<Boxed>(right);
+        return selectByBranch<Condition>(isInt32(Boxed(m_out.bitAnd(x.value(), y.value()))), [&] {
+            return equal(int32InBox(x), int32InBox(y));
+        }, [&] {
+            ConversionEmitter& conversions = emitter<ConversionEmitter>();
+            Operand first = conversions.unbox(x, typeOf(left), Representation::OptionalDouble);
+            Operand second = conversions.unbox(y, typeOf(right), Representation::OptionalDouble);
+            Condition areEqualNumbers = equal(conversions.withoutMarkers(first).as<Number>(), conversions.withoutMarkers(second).as<Number>());
+            Condition areSameNothing = logicalAnd(equal(conversions.bitsOf(first), conversions.bitsOf(second)), conversions.isMarker(first));
+            return logicalOr(areEqualNumbers, areSameNothing);
+        });
+    }
+
+    Condition strictEqualityOnOptionalDoubles(const ValueContext& value, Number x, Number y)
+    {
+        auto holdSameMarker = [&] {
+            ConversionEmitter& conversions = emitter<ConversionEmitter>();
+            Operand left = get(value->leftOperand());
+            return logicalAnd(equal(conversions.bitsOf(left), conversions.bitsOf(get(value->rightOperand()))), conversions.isMarker(left));
+        };
+        return selectByBranch<Condition>(equalOrUnordered(x, y), [&] {
+            if (!generator().paysForCodeInLine(value.block()))
+                return logicalOr(equal(x, y), holdSameMarker());
+            return selectByBranch<Condition>(equal(x, y), [&] { return boolean(true); }, holdSameMarker);
+        }, [&] {
+            return boolean(false);
+        });
+    }
+
     Condition equalityOnNumbers(const ValueContext& value, bool isStrict)
     {
         ValueID left = value->leftOperand();
         ValueID right = value->rightOperand();
+        if (isStrict && get(left).is<Boxed>() && get(right).is<Boxed>())
+            return strictEqualityOnBoxesThatHoldNumbersOrNothing(value);
         if (isStrict && get(left).representation == Representation::OptionalInt64 && get(right).representation == Representation::OptionalInt64) {
             ConversionEmitter& conversions = emitter<ConversionEmitter>();
             Integer leftBits = conversions.bitsOf(get(left));
             return equal(leftBits, conversions.bitsOf(get(right)));
+        }
+        ConversionEmitter& integers = emitter<ConversionEmitter>();
+        std::optional<ConversionEmitter::ComparedInteger> leftInteger = isStrict ? integers.findComparedInteger(get(left)) : std::nullopt;
+        std::optional<ConversionEmitter::ComparedInteger> rightInteger = leftInteger ? integers.findComparedInteger(get(right)) : std::nullopt;
+        if (rightInteger && (leftInteger->mayBeMarker || rightInteger->mayBeMarker) && ConversionEmitter::areComparedAsIntegers(*leftInteger, *rightInteger)) {
+            Condition areSame = equal(leftInteger->value, rightInteger->value);
+            if (leftInteger->mayBeMarker && rightInteger->mayBeMarker && (leftInteger->markerIsNaN || rightInteger->markerIsNaN))
+                areSame = logicalAnd(areSame, logicalNot(integers.isMarker(Operand(Representation::OptionalInt64, leftInteger->value.value()))));
+            if (emittersCheckProofs()) {
+                Condition areEqual = equal(numberOrNaN(value, left), numberOrNaN(value, right));
+                if (get(left).is<OptionalNumber>() && get(right).is<OptionalNumber>())
+                    areEqual = logicalOr(areEqual, logicalAnd(equal(integers.bitsOf(get(left)), integers.bitsOf(get(right))), integers.isMarker(get(left))));
+                emitter<ThrowEmitter>().requireOrCrash(value, equal(areSame, areEqual), std::nullopt, ProofSource::OtherOperation);
+            }
+            return areSame;
         }
         uint16_t leftPrimitives = typeOf(left).primitives;
         uint16_t rightPrimitives = typeOf(right).primitives;
@@ -125,6 +243,9 @@ public:
         bool mayBothBeNullish = (leftPrimitives & Primitive::UndefinedOrNull) && (rightPrimitives & Primitive::UndefinedOrNull);
         bool mayBeSameNullish = leftPrimitives & rightPrimitives & Primitive::UndefinedOrNull;
         bool mayBeEqualNullish = isStrict ? mayBeSameNullish : mayBothBeNullish;
+
+        if (isStrict && mayBothBeNumbers && mayBeEqualNullish && get(left).representation == Representation::OptionalDouble && get(right).representation == Representation::OptionalDouble)
+            return strictEqualityOnOptionalDoubles(value, numberOrNaN(value, left), numberOrNaN(value, right));
 
         Condition areEqualNumbers;
         if (mayBothBeNumbers)
@@ -165,6 +286,11 @@ public:
             CellPointer x = in<CellPointer>(left);
             return equal(x, in<CellPointer>(right));
         }
+        case Representation::Cell32: {
+            NarrowReference x = in<NarrowReference>(left);
+            build().statistics().count(StatisticID::NarrowReferencesCompared);
+            return equal(x, in<NarrowReference>(right));
+        }
         case Representation::JSValue: {
             Boxed x = in<Boxed>(left);
             return equalityOnBoxedBits(value, x, in<Boxed>(right), isStrict);
@@ -177,10 +303,20 @@ public:
         case Representation::Double:
         case Representation::OptionalInt64:
         case Representation::OptionalDouble:
-        case Representation::Cell32:
         case Representation::RawWord:
             break;
         }
+        return { };
+    }
+
+    bool hasBranched() const { return m_hasBranched; }
+
+    Condition equalsWrittenText(const ValueContext& value, ComparedOperand operand, LValue subject, StringID text, bool everyCellIsString)
+    {
+        if (!value.isBranchCondition())
+            return emitter<StringEmitter>().equalsLiteral(value, operand, subject, text, std::nullopt, everyCellIsString);
+        emitter<StringEmitter>().branchOnEqualsLiteral(value, operand, subject, text, value.branchTargets(), std::nullopt, everyCellIsString);
+        m_hasBranched = true;
         return { };
     }
 
@@ -197,7 +333,7 @@ public:
                 const Operation& definition = operationAt(definitionOf(written));
                 if (definition.opcode == Opcode::String) {
                     noteFormAgainstWrittenText(value, definition.string());
-                    return emitter<StringEmitter>().equalsLiteral(value, ComparedOperand::String, in<CellPointer>(other).value(), definition.string(), std::nullopt, true);
+                    return equalsWrittenText(value, ComparedOperand::String, in<CellPointer>(other).value(), definition.string(), true);
                 }
             }
             m_out.noteForm(Form::Closed, stateOf(value->form()));
@@ -297,19 +433,52 @@ public:
             const Type& type = typeOf(boxed);
             bool everyCellIsString = !type.hasObjects() && !(type.primitives & cellPrimitives & ~Primitive::AnyString);
             noteFormAgainstWrittenText(value, definition.string());
-            return emitter<StringEmitter>().equalsLiteral(value, ComparedOperand::Value, in<Boxed>(boxed).value(), definition.string(), std::nullopt, everyCellIsString);
+            return equalsWrittenText(value, ComparedOperand::Value, in<Boxed>(boxed).value(), definition.string(), everyCellIsString);
         }
         m_out.noteForm(Form::Closed, StateOfKnowledge::StringAndValue);
-        Boxed string = boxCell(in<CellPointer>(typed));
-        return callEqualStub(value, true, string, in<Boxed>(boxed));
+        CellPointer string = in<CellPointer>(typed);
+        Boxed other = in<Boxed>(boxed);
+        if (mayBeEmpty(boxed))
+            return callEqualStub(value, true, boxCell(string), other);
+        return Condition(m_out.castToInt32(callStub(value, stringEqualsValue(), { string.value(), other.value() }).first));
     }
 
-    Condition equalityOnValues(const ValueContext& value, bool isStrict)
+    void generateLooseEqualityOnValues(const ValueContext& value)
     {
         Boxed x = in<Boxed>(value->leftOperand());
         Boxed y = in<Boxed>(value->rightOperand());
-        m_out.noteForm(Form::Closed, StateOfKnowledge::Generic);
-        return callEqualStub(value, isStrict, x, y);
+        ComparedKinds kinds = kindsComparedBy(value);
+        bool mayBeAbsent = mayBeEmpty(value->leftOperand()) || mayBeEmpty(value->rightOperand());
+        if (mayBeAbsent || !kinds.mayBothBeStrings || !generator().takesOpenForm(value, StateOfKnowledge::Generic)) {
+            m_out.noteForm(Form::Closed, StateOfKnowledge::Generic);
+            defineTest(value, callEqualStub(value, false, x, y));
+            return;
+        }
+        build().statistics().count(StatisticID::LooseEqualitiesOpened);
+        defineTestByBranching(value, [&](BranchTargets targets) {
+            LBasicBlock areCells = newBlock();
+            LBasicBlock areNotBothCells = newBlock();
+            LBasicBlock areDifferentCells = newBlock();
+            LBasicBlock firstIsString = newBlock();
+            LBasicBlock areStrings = newBlock();
+            LBasicBlock callsStub = newBlock();
+            m_out.branch(areBothCells(x, y).value(), normalEdge(areCells), normalEdge(areNotBothCells));
+            m_out.appendTo(areCells);
+            m_out.branch(equal(x, y).value(), targets.taken, normalEdge(areDifferentCells));
+            m_out.appendTo(areDifferentCells);
+            m_out.branch(hasCellType(unboxCell(x), StringType).value(), normalEdge(firstIsString), rareEdge(callsStub));
+            m_out.appendTo(firstIsString);
+            m_out.branch(hasCellType(unboxCell(y), StringType).value(), normalEdge(areStrings), rareEdge(callsStub));
+            m_out.appendTo(areStrings);
+            emitter<StringEmitter>().branchOnEqualityOfDistinctStrings(value, unboxCell(x), unboxCell(y), targets);
+            m_out.appendTo(areNotBothCells);
+            LBasicBlock areInt32s = newBlock();
+            m_out.branch(isInt32(Boxed(m_out.bitAnd(x.value(), y.value()))).value(), normalEdge(areInt32s), rareEdge(callsStub));
+            m_out.appendTo(areInt32s);
+            branch(equal(x, y), targets);
+            m_out.appendTo(callsStub);
+            branch(callEqualStub(value, false, x, y), targets);
+        });
     }
 
     void generateStrictEqualityOnValues(const ValueContext& value)
@@ -330,8 +499,13 @@ public:
             });
             return;
         }
-        bool asksBothTagsInLine = value->expectsInt32s() && generator().code().at(value.block()).frequency != BlockFrequency::Rare;
-        if (asksBothTagsInLine && !bitsDecide(kindsComparedBy(value)) && !generator().takesOpenForm(value, StateOfKnowledge::Generic)) {
+        if (bitsDecide(kindsComparedBy(value))) {
+            m_out.noteForm(Form::Open, StateOfKnowledge::Bits);
+            defineTest(value, equal(x, y));
+            return;
+        }
+        bool isOpen = generator().takesOpenForm(value, StateOfKnowledge::Generic) || generator().isInRecursion(value.block());
+        if (asksForInt32sFirst(value) && !isOpen) {
             m_out.noteForm(Form::Closed, StateOfKnowledge::Generic);
             defineTestByBranching(value, [&](BranchTargets targets) {
                 LBasicBlock areInt32s = newBlock();
@@ -347,7 +521,7 @@ public:
         }
         ValueID expectedObject = value->expectsObjectOnLeft() ? value->leftOperand() : value->expectsObjectOnRight() ? value->rightOperand() : ValueID();
         bool asksKindInLine = expectedObject && !mayBeEmpty(expectedObject) && generator().code().at(value.block()).frequency != BlockFrequency::Rare;
-        if (asksKindInLine && !bitsDecide(kindsComparedBy(value)) && generator().takesOpenForm(value, StateOfKnowledge::Generic)) {
+        if (asksKindInLine && isOpen) {
             Boxed tested = expectedObject == value->leftOperand() ? x : y;
             defineTestByBranching(value, [&](BranchTargets targets) {
                 LBasicBlock isCellOfSomeKind = newBlock();
@@ -364,7 +538,7 @@ public:
             });
             return;
         }
-        if (!bitsDecide(kindsComparedBy(value)) && !generator().takesOpenForm(value, StateOfKnowledge::Generic)) {
+        if (!isOpen) {
             if (value.isBranchCondition()) {
                 LValue operands[] = { x.value(), y.value() };
                 emitter<RuntimeCallEmitter>().callStubAndBranch(value, strictEqualInFlags(), operands, { }, value.branchTargets());
@@ -431,8 +605,13 @@ private:
         Condition haveSameBits = equal(x, y);
         if (isStrict)
             return haveSameBits;
-        Condition isLeftNullish = isUndefinedOrNull(x, typeOf(value->leftOperand()).primitives);
-        Condition isRightNullish = isUndefinedOrNull(y, typeOf(value->rightOperand()).primitives);
+        auto leftPrimitives = typeOf(value->leftOperand()).primitives;
+        auto rightPrimitives = typeOf(value->rightOperand()).primitives;
+        bool mayBeUndefinedAndNull = (leftPrimitives & Primitive::Undefined && rightPrimitives & Primitive::Null) || (leftPrimitives & Primitive::Null && rightPrimitives & Primitive::Undefined);
+        if (!mayBeUndefinedAndNull)
+            return haveSameBits;
+        Condition isLeftNullish = isUndefinedOrNull(x, leftPrimitives);
+        Condition isRightNullish = isUndefinedOrNull(y, rightPrimitives);
         return logicalOr(haveSameBits, logicalAnd(isLeftNullish, isRightNullish));
     }
 
@@ -442,12 +621,20 @@ private:
             const Operation& definition = operationAt(definitionOf(written));
             if (definition.opcode == Opcode::String) {
                 noteFormAgainstWrittenText(value, definition.string());
-                return emitter<StringEmitter>().equalsLiteral(value, ComparedOperand::Value, in<Boxed>(other).value(), definition.string(), std::nullopt, true);
+                return equalsWrittenText(value, ComparedOperand::Value, in<Boxed>(other).value(), definition.string(), true);
             }
         }
         m_out.noteForm(Form::Closed, stateOf(value->form()));
         Boxed x = in<Boxed>(value->leftOperand());
-        return callEqualStub(value, isStrict, x, in<Boxed>(value->rightOperand()));
+        Boxed y = in<Boxed>(value->rightOperand());
+        if (!mayBeEmpty(value->leftOperand()) && !mayBeEmpty(value->rightOperand())) {
+            if (typeOf(value->leftOperand()).isAnyString())
+                return Condition(m_out.castToInt32(callStub(value, stringEqualsNullable(), { x.value(), y.value() }).first));
+            if (typeOf(value->rightOperand()).isAnyString())
+                return Condition(m_out.castToInt32(callStub(value, stringEqualsNullable(), { y.value(), x.value() }).first));
+            return Condition(m_out.castToInt32(callStub(value, nullableStringsAreEqual(isStrict), { x.value(), y.value() }).first));
+        }
+        return callEqualStub(value, isStrict, x, y);
     }
 
     bool mayBeEmpty(ValueID id) { return typeOf(id).primitives & Primitive::Absent; }
@@ -472,6 +659,11 @@ private:
         return { typesAreExhaustive, mayBothBe(Primitive::WholeNumber), mayBothBe(Primitive::Number), mayBothBeStrings, mayBothBeStrings || mayBothBe(Primitive::BigInt) };
     }
 
+    bool asksForInt32sFirst(const ValueContext& value)
+    {
+        return value->opcode == Opcode::StrictEq && value->expectsInt32s() && generator().code().at(value.block()).frequency != BlockFrequency::Rare;
+    }
+
     static bool bitsDecide(const ComparedKinds& kinds) { return !kinds.mayBothBeNumbers && !kinds.mayBeEqualByContents; }
 
     void decideWithoutContents(const ValueContext& value, Boxed x, Boxed y, BranchTargets targets, NOESCAPE const Invocable<void()> auto& answerByStub, NOESCAPE const Invocable<void()> auto& answerForStrings)
@@ -484,13 +676,17 @@ private:
         auto mayBeComparedByIdentity = [&, typesAreExhaustive = typesAreExhaustive](const Type& type) {
             return !typesAreExhaustive || type.hasObjects() || type.primitives & Primitive::AnySymbol;
         };
-        if (bitsDecide(kinds)) {
-            m_out.noteForm(Form::Open, StateOfKnowledge::Bits);
+        bool areInt32sDecided = mayBothBeNumbers && asksForInt32sFirst(value);
+        if (areInt32sDecided) {
+            LBasicBlock areInt32s = newBlock();
+            LBasicBlock areNotBothInt32s = newBlock();
+            m_out.branch(isInt32(Boxed(m_out.bitAnd(x.value(), y.value()))).value(), normalEdge(areInt32s), rareEdge(areNotBothInt32s));
+            m_out.appendTo(areInt32s);
             branch(equal(x, y), targets);
-            return;
+            m_out.appendTo(areNotBothInt32s);
         }
 
-        bool comparesStringsHere = generator().takesFormOfLoops(value, StateOfKnowledge::Generic) && mayBothBeStrings;
+        bool comparesStringsHere = (generator().takesFormOfLoops(value, StateOfKnowledge::Generic) || generator().isInRecursion(value.block())) && mayBothBeStrings;
 
         LBasicBlock hasOtherBits = newBlock();
         LBasicBlock callsStub = newBlock();
@@ -511,8 +707,11 @@ private:
 
         m_out.appendTo(hasOtherBits);
         LBasicBlock areCells = mayBeEqualByContents ? newBlock() : nullptr;
-        LBasicBlock areNotBothCells = mayBothBeNumbers ? newBlock() : nullptr;
-        m_out.branch(areBothCells(x, y).value(), areCells ? normalEdge(areCells) : targets.notTaken, areNotBothCells ? normalEdge(areNotBothCells) : targets.notTaken);
+        LBasicBlock areNotBothCells = mayBothBeNumbers && !areInt32sDecided ? newBlock() : nullptr;
+        auto nonCellEdge = [&] {
+            return areNotBothCells ? normalEdge(areNotBothCells) : areInt32sDecided ? edgeToStub() : targets.notTaken;
+        };
+        m_out.branch(areBothCells(x, y).value(), areCells ? normalEdge(areCells) : targets.notTaken, nonCellEdge());
         if (areNotBothCells) {
             m_out.appendTo(areNotBothCells);
             m_out.branch(isInt32(Boxed(m_out.bitAnd(x.value(), y.value()))).value(), targets.notTaken, edgeToStub());
@@ -576,6 +775,8 @@ private:
     }
 
     Condition areBothCells(Boxed x, Boxed y) { return isCell(Boxed(m_out.bitOr(x.value(), y.value()))); }
+
+    bool m_hasBranched { false };
 };
 
 } // anonymous namespace
@@ -598,6 +799,12 @@ void OperatorEmitter::generateNumberOrNaN(const ValueContext& value)
 
 void OperatorEmitter::generateEquality(const ValueContext& value, bool isStrict)
 {
+    if (tryGenerateRemainderTest(value))
+        return;
+    if (emitter<ControlEmitter>().tryGenerateLiteralChain(value))
+        return;
+    if (isStrict && value->form() == OperatorForm::Bits && emitter<ControlEmitter>().tryGenerateSymbolChain(value))
+        return;
     EqualityEmitter equality(generator());
     ValueID left = value->leftOperand();
     ValueID right = value->rightOperand();
@@ -614,12 +821,32 @@ void OperatorEmitter::generateEquality(const ValueContext& value, bool isStrict)
             });
             return;
         }
-        if (isStrict) {
-            equality.generateStrictEqualityOnValues(value);
+        if (bool isRightBigInt = isBigInt(right); isRightBigInt != isBigInt(left) && expectsBigInts(value.block(), left)) {
+            m_out.noteForm(Form::Open, StateOfKnowledge::BigInts);
+            Boxed known = boxedOperand(isRightBigInt ? right : left);
+            Boxed other = in<Boxed>(isRightBigInt ? left : right);
+            defineTestByBranching(value, [&](BranchTargets targets) {
+                LBasicBlock isCellCase = newBlock();
+                LBasicBlock areBigInts = newBlock();
+                LBasicBlock isZeroCase = newBlock();
+                LBasicBlock otherCase = newBlock();
+                branch(isCell(other), { normalEdge(isCellCase), rareEdge(otherCase) });
+                m_out.appendTo(isCellCase);
+                branch(equal(loadByte(unboxCell(other), m_heaps.JSCell_typeInfoType), static_cast<int32_t>(HeapBigIntType)), { normalEdge(areBigInts), rareEdge(otherCase) });
+                m_out.appendTo(areBigInts);
+                branch(isZero(loadField<Word32>(unboxCell(known), m_heaps.JSBigInt_length)), { normalEdge(isZeroCase), rareEdge(otherCase) });
+                m_out.appendTo(isZeroCase);
+                branch(isZero(loadField<Word32>(unboxCell(other), m_heaps.JSBigInt_length)), targets);
+                m_out.appendTo(otherCase);
+                branch(equality.callEqualStub(value, isStrict, isRightBigInt ? other : known, isRightBigInt ? known : other), targets);
+            });
             return;
         }
-        result = equality.equalityOnValues(value, isStrict);
-        break;
+        if (isStrict)
+            equality.generateStrictEqualityOnValues(value);
+        else
+            equality.generateLooseEqualityOnValues(value);
+        return;
     case OperatorForm::Integers:
         m_out.noteForm(Form::Open, StateOfKnowledge::Integers);
         result = equality.equalityOnIntegers(value);
@@ -645,7 +872,7 @@ void OperatorEmitter::generateEquality(const ValueContext& value, bool isStrict)
     case OperatorForm::BigInts: {
         m_out.noteForm(Form::Closed, StateOfKnowledge::BigInts);
         CellPointer x = in<CellPointer>(left);
-        result = equality.callEqualStub(value, isStrict, boxCell(x), boxCell(in<CellPointer>(right)));
+        result = equality.equalityOnBigInts(value, isStrict, x, in<CellPointer>(right));
         break;
     }
     case OperatorForm::Strings:
@@ -678,6 +905,8 @@ void OperatorEmitter::generateEquality(const ValueContext& value, bool isStrict)
     case OperatorForm::MayBeStringOrNumber:
         break;
     }
+    if (equality.hasBranched())
+        return;
     if (!result) {
         fail(value, InternalErrorKind::OpcodeWithoutCode);
         result = boolean(false);

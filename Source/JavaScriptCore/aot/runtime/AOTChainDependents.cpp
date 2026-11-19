@@ -16,11 +16,13 @@
 #include "AOTHeapCacheRegistry.h"
 #include "AOTInstance.h"
 #include "AOTObject.h"
+#include "AOTObjectInternal.h"
 #include "AOTObjectModel.h"
 #include "AOTProgramIdentifiers.h"
 #include "AOTPropertyCaches.h"
 #include "AOTPropertyCachesAnswers.h"
 #include "AOTRuntimeHooks.h"
+#include "AOTRuntimeReporter.h"
 #include "AOTState.h"
 #include "ArrayPrototype.h"
 #include "InlineCacheCompiler.h"
@@ -39,6 +41,7 @@ ChainDependents::ChainDependents(State& state)
 {
     ChainDependentOwnerID self = addOwner(*this);
     RELEASE_ASSERT(self == ChainDependentOwnerID { });
+    m_idOfStructuresThatPassStores = addOwner(m_structuresThatPassStores);
     state.caches->add(CacheKind::WeakByKey, "ChainDependents"_s, *this);
 }
 
@@ -61,6 +64,60 @@ bool ChainDependents::hasChainDependent(VM&, uint32_t structureIDBits, UniquedSt
     return m_structuresWithState.contains(std::bit_cast<StructureID>(structureIDBits));
 }
 
+void ChainDependents::StructuresThatPassStores::dropChainDependent(VM&, uint32_t structureIDBits, UniquedStringImpl*)
+{
+    StructureID id = std::bit_cast<StructureID>(structureIDBits);
+    if (m_dependents.m_structuresWithState.contains(id))
+        uncheckedDowncast<CompiledStructure>(id.decode())->clear(CompiledStructure::FurtherFlag::PassesStoresAbove);
+}
+
+bool ChainDependents::StructuresThatPassStores::hasChainDependent(VM&, uint32_t structureIDBits, UniquedStringImpl*) const
+{
+    StructureID id = std::bit_cast<StructureID>(structureIDBits);
+    return m_dependents.m_structuresWithState.contains(id) && uncheckedDowncast<CompiledStructure>(id.decode())->has(CompiledStructure::FurtherFlag::PassesStoresAbove);
+}
+
+bool ChainDependents::StructuresThatPassStores::keepChainDependent(VM& vm, uint32_t, UniquedStringImpl* uid, const CreatedMembers& created)
+{
+    unsigned attributes = 0;
+    PropertyOffset offset = created.prototype->structure()->get(vm, uid, attributes);
+    return !isValidOffset(offset) || !(attributes & PropertyAttribute::ReadOnlyOrAccessorOrCustomAccessorOrValue);
+}
+
+bool ChainDependents::areStoresPassedAbove(Object& object)
+{
+    using Flag = CompiledStructure::FurtherFlag;
+    auto& structure = *uncheckedDowncast<CompiledStructure>(object.structure());
+    if (structure.has(Flag::PassesStoresAbove))
+        return true;
+    if (object.isInFrame())
+        return false;
+    if (!structure.has(Flag::WasAskedAboutStoresAbove)) {
+        structure.set(Flag::WasAskedAboutStoresAbove);
+        return false;
+    }
+    if (structure.has(Flag::MayNotPassStoresAbove))
+        return false;
+    VM& vm = *m_state.instance.vm;
+    bool everyStorePasses = structure.realm() == realm() && !structure.mayBePrototype() && !structure.hasExtraProperties();
+    for (const FieldData& field : object.layout().fields()) {
+        if (!everyStorePasses)
+            break;
+        if (field.isPrivate() || field.isBrand())
+            continue;
+        UniquedStringImpl* name = propertyNameOf(vm, object, field);
+        everyStorePasses = name && storeCreatesOwnProperty(realm(), &structure, &object, name, *this, { name, structure.id().bits(), m_idOfStructuresThatPassStores });
+    }
+    if (!everyStorePasses) {
+        structure.set(Flag::MayNotPassStoresAbove);
+        return false;
+    }
+    m_structuresWithState.add(structure.id());
+    structure.set(Flag::PassesStoresAbove);
+    countEvent(vm, RuntimeCounterID::StructuresPassingStores);
+    return true;
+}
+
 JSGlobalObject* ChainDependents::realm() const
 {
     return m_state.instance.globalObject;
@@ -73,17 +130,68 @@ ChainDependentOwnerID ChainDependents::addOwner(ChainDependentOwner& owner)
     return static_cast<ChainDependentOwnerID>(m_owners.size() - 1);
 }
 
+size_t ChainDependents::ObjectDependents::size() const
+{
+    size_t size = onAnyName.size();
+    for (const DependentSet& set : byName.values())
+        size += set.size();
+    return size;
+}
+
+void ChainDependents::ObjectDependents::forEach(const Invocable<void(const ChainDependent&)> auto& functor) const
+{
+    for (const ChainDependent& dependent : onAnyName)
+        functor(dependent);
+    for (const DependentSet& set : byName.values()) {
+        for (const ChainDependent& dependent : set)
+            functor(dependent);
+    }
+}
+
+void ChainDependents::ObjectDependents::removeIf(const Invocable<bool(const ChainDependent&)> auto& functor)
+{
+    onAnyName.removeIf(functor);
+    byName.removeIf([&](auto& entry) {
+        entry.value.removeIf(functor);
+        return entry.value.isEmpty();
+    });
+}
+
+void startReportingReplacements(VM& vm, JSObject* object)
+{
+    Object* compiled = compiledObjectOrNull(object);
+    if (!compiled || compiled->compiledStructure().reportsReplacements())
+        return;
+    compiled->setVariantOfStructure(vm, compiled->state().objects->structures.withReportedReplacements(vm, compiled->compiledStructure()));
+}
+
+static bool holdsExtraProperty(VM& vm, JSObject* object, UniquedStringImpl* uidOrNull)
+{
+    Object* compiled = compiledObjectOrNull(object);
+    JSObject* extra = compiled ? extraPropertiesIfCreated(*compiled) : nullptr;
+    return extra && (!uidOrNull || isValidOffset(extra->structure()->get(vm, uidOrNull)));
+}
+
 void ChainDependents::add(std::span<JSObject* const> chainObjects, const ChainDependent& dependent)
 {
     if (chainObjects.empty())
         return;
+    VM& vm = *m_state.instance.vm;
+    const bool readsValuesInPlace = ownerOf(dependent).readsValuesInPlace();
     for (JSObject* object : chainObjects) {
         ASSERT(object->mayBePrototype());
+        if (!readsValuesInPlace)
+            m_state.instance.propertyCaches.forgetReplacedMembersOf(object);
+        if (holdsExtraProperty(vm, object, dependent.uidOrNull))
+            startReportingReplacements(vm, object);
         m_objectsWithDependents.add(object);
         ObjectDependents& dependents = m_dependentsByObject.ensure(object, [] {
             return ObjectDependents();
         }).iterator->value;
-        if (!dependents.set.add(dependent).isNewEntry)
+        DependentSet& set = dependent.uidOrNull ? dependents.byName.ensure(dependent.uidOrNull, [] {
+            return DependentSet();
+        }).iterator->value : dependents.onAnyName;
+        if (!set.add(dependent).isNewEntry)
             continue;
         ++m_numberOfDependentsAddedSinceOwnersWereAsked;
     }
@@ -112,22 +220,18 @@ void ChainDependents::dropDependentsOn(JSObject* changed, UniquedStringImpl* uid
 
     if (!uidOrNull) {
         ObjectDependents dependents = m_dependentsByObject.take(iterator);
-        for (const ChainDependent& dependent : dependents.set)
-            drop(dependent);
+        dependents.forEach(drop);
         return;
     }
 
     ObjectDependents& all = iterator->value;
-    Vector<ChainDependent, 8> dependents;
-    all.set.removeIf([&](const ChainDependent& dependent) {
-        if (dependent.uidOrNull && dependent.uidOrNull != uidOrNull)
-            return false;
-        dependents.append(dependent);
-        return true;
-    });
-    if (all.set.isEmpty())
+    DependentSet onName = all.byName.take(uidOrNull);
+    DependentSet onAnyName = std::exchange(all.onAnyName, { });
+    if (all.isEmpty())
         m_dependentsByObject.remove(iterator);
-    for (const ChainDependent& dependent : dependents)
+    for (const ChainDependent& dependent : onName)
+        drop(dependent);
+    for (const ChainDependent& dependent : onAnyName)
         drop(dependent);
 }
 
@@ -142,13 +246,13 @@ void ChainDependents::didCreateMembers(const CreatedMembers& created)
     DeferGC deferGC(vm);
     ObjectDependents& all = iterator->value;
     Vector<ChainDependent, 8> dropped;
-    all.set.removeIf([&](const ChainDependent& dependent) {
+    all.removeIf([&](const ChainDependent& dependent) {
         if (ownerOf(dependent).keepChainDependent(vm, dependent.subject, dependent.uidOrNull, created))
             return false;
         dropped.append(dependent);
         return true;
     });
-    if (all.set.isEmpty())
+    if (all.isEmpty())
         m_dependentsByObject.remove(iterator);
     for (const ChainDependent& dependent : dropped)
         ownerOf(dependent).dropChainDependent(vm, dependent.subject, dependent.uidOrNull);
@@ -157,7 +261,7 @@ void ChainDependents::didCreateMembers(const CreatedMembers& created)
 size_t ChainDependents::numberOfDependents(JSObject* object) const
 {
     auto iterator = m_dependentsByObject.find(object);
-    return iterator == m_dependentsByObject.end() ? 0 : iterator->value.set.size();
+    return iterator == m_dependentsByObject.end() ? 0 : iterator->value.size();
 }
 
 size_t ChainDependents::removeDeadEntries(VM& vm, CollectionScope scope)
@@ -171,16 +275,16 @@ size_t ChainDependents::removeDeadEntries(VM& vm, CollectionScope scope)
     m_writtenSinceCollection.forEachRegionToSweep(scope, [&](size_t, size_t) {
         m_dependentsByObject.removeIf([&](auto& entry) {
             if (!vm.heap.isMarked(entry.key)) {
-                numberOfDependentsOfDeadObjects += entry.value.set.size();
+                numberOfDependentsOfDeadObjects += entry.value.size();
                 return true;
             }
             if (!dropsEvictedDependents)
                 return false;
-            entry.value.set.removeIf([&](const ChainDependent& dependent) {
+            entry.value.removeIf([&](const ChainDependent& dependent) {
                 return !ownerOf(dependent).hasChainDependent(vm, dependent.subject, dependent.uidOrNull);
             });
-            numberOfDependentsLeft += entry.value.set.size();
-            return entry.value.set.isEmpty();
+            numberOfDependentsLeft += entry.value.size();
+            return entry.value.isEmpty();
         });
     });
     if (dropsEvictedDependents) {
@@ -203,31 +307,52 @@ static const LayoutData* classWhoseHolderChanged(const ClassTable& classes, JSOb
     return layout;
 }
 
-static void didChangeClassHolder(VM& vm, State& state, JSObject* changed, UniquedStringImpl* uidOrNull)
+static bool seesAccessesUnderName(VM& vm, const ClassTable& classes, const LayoutData& layout, ClassSide side, JSObject* holder, UniquedStringImpl* uid)
+{
+    unsigned attributes = 0;
+    Object* compiled = compiledObjectOrNull(holder);
+    JSValue held = compiled ? compiled->getDirectFromNativeCode(vm, uid, &attributes) : holder->getDirect(vm, uid, attributes);
+    if (!held || !ClassTable::seesAccesses(vm, uid, attributes))
+        return false;
+    return ClassTable::isAccessorOfProgram(layout, held) || !classes.holdsMemberOfRecordUnder(vm, layout, side, holder, uid);
+}
+
+enum class ChangeOfChainObject : uint8_t { IsOfAnyKind, ReplacesValue, SetsPrototype };
+
+static void didChangeClassHolder(VM& vm, State& state, JSObject* changed, UniquedStringImpl* uidOrNull, ChangeOfChainObject change)
 {
     ClassTable& classes = state.objects->classes;
     ClassSide side;
     const LayoutData* layout = classWhoseHolderChanged(classes, changed, side);
     if (!layout)
         return;
+    classes.reportReplacementsOnHolder(vm, *layout, side, changed, uidOrNull);
     if (uidOrNull) {
         classes.holdMemberToProof(vm, *layout, side, changed, uidOrNull);
+        if (!classes.hasNoGuardLeft(*layout, side) && seesAccessesUnderName(vm, classes, *layout, side, changed, uidOrNull))
+            classes.didLayWhatSeesAccesses(vm, *layout, side);
         classes.didChangeMember(*layout, side, uidOrNull);
+        classes.noteReplacedMember(vm, *layout, side, changed, uidOrNull);
         return;
     }
     classes.holdLinkToProof(vm, *layout, side, changed);
     if (changed->isFrozen(vm)) {
+        classes.didLayWhatSeesAccesses(vm, *layout, side);
         classes.didFreezeHolder(vm, *layout, side, changed);
         return;
     }
-    classes.didChangeEveryMember(*layout, side);
+    if (change != ChangeOfChainObject::SetsPrototype || isCompiledObject(changed))
+        classes.didChangeEveryMember(*layout, side);
     classes.didChangePrototypeLink(*layout, side);
 }
 
-void didChangeChainObject(VM& vm, JSObject* changed, UniquedStringImpl* uidOrNull)
+static void tellOfChangeOfChainObject(VM& vm, JSObject* changed, UniquedStringImpl* uidOrNull, ChangeOfChainObject change)
 {
     if (VMPropertyCaches* caches = vm.aotState().propertyCaches.get()) {
-        caches->didChangeObjectOnSomeChain(changed, uidOrNull);
+        if (change == ChangeOfChainObject::ReplacesValue)
+            caches->didReplaceValueOnObjectOfSomeChain(changed, uidOrNull);
+        else
+            caches->didChangeObjectOnSomeChain(changed, uidOrNull);
         JSGlobalObject* realm = changed->structure()->realm();
         if (realm && changed == realm->objectPrototype() && realm->aotInstance())
             caches->didChangeObjectPrototype(changed, uidOrNull);
@@ -236,17 +361,45 @@ void didChangeChainObject(VM& vm, JSObject* changed, UniquedStringImpl* uidOrNul
         State* state = instance->state;
         if (!state)
             continue;
+        instance->propertyCaches.forgetReplacedMembersOf(changed);
+        if (!uidOrNull)
+            instance->propertyCaches.forgetPrototypeChainFilters();
         if (state->chainDependents)
             state->chainDependents->didChange(changed, uidOrNull);
         if (state->objects)
-            didChangeClassHolder(vm, *state, changed, uidOrNull);
+            didChangeClassHolder(vm, *state, changed, uidOrNull, change);
     }
+}
+
+void didChangeChainObject(VM& vm, JSObject* changed, UniquedStringImpl* uidOrNull)
+{
+    if (changed && changed == vm.aotState().unobservedClassHolder)
+        return;
+    tellOfChangeOfChainObject(vm, changed, uidOrNull, ChangeOfChainObject::IsOfAnyKind);
+}
+
+void didSetPrototypeOfChainObject(VM& vm, JSObject* changed)
+{
+    if (changed && changed == vm.aotState().unobservedClassHolder)
+        return;
+    tellOfChangeOfChainObject(vm, changed, nullptr, ChangeOfChainObject::SetsPrototype);
+}
+
+void didReplaceValueOnChainObject(VM& vm, JSObject* changed, UniquedStringImpl* uid)
+{
+    tellOfChangeOfChainObject(vm, changed, uid, ChangeOfChainObject::ReplacesValue);
 }
 
 void RuntimeHooks::didStartWatchingReplacements(VM& vm)
 {
     if (VMPropertyCaches* caches = vm.aotState().propertyCaches.get())
         caches->didStartWatchingReplacements();
+    for (Instance* instance : vm.aotState().instances) {
+        State* state = instance->state;
+        instance->propertyCaches.forgetReplacedMembers();
+        if (state && state->objects)
+            state->objects->classes.forgetStructuresOfHeirs();
+    }
 }
 
 void RuntimeHooks::didChangeGlobalLexicalBindings(JSGlobalObject* realm)
@@ -269,12 +422,14 @@ static State* stateOrNull(Structure* structure)
     return instance ? instance->state : nullptr;
 }
 
-bool RuntimeHooks::becomesDictionaryByAddition(VM& vm, JSObject* object, Structure* structure, UniquedStringImpl* uid)
+bool RuntimeHooks::shouldUseDictionaryForAddition(VM& vm, JSObject* object, Structure* structure, UniquedStringImpl* uid)
 {
     JSType type = structure->typeInfo().type();
     if (type != FinalObjectType && type != CompiledClosureType && type != SlimClosureWithPropertiesType)
         return false;
     if (structure->hasBeenDictionary() || isCopyOnWrite(structure->indexingMode()) || structure->isCompiledStructure() || structure->typeInfo().prohibitsPropertyCaching())
+        return false;
+    if (structure->transitionKind() == TransitionKind::PropertyDeletion)
         return false;
     if (structure->inlineCapacity() == extraPropertiesInlineCapacity && structure->hasMonoProto() && structure->storedPrototype().isNull())
         return false;
@@ -284,7 +439,7 @@ bool RuntimeHooks::becomesDictionaryByAddition(VM& vm, JSObject* object, Structu
     FirstAdditions& additions = firstAdditionsOf(*state);
     if (additions.shouldMakeStructure(structure, uid) || !hasFewEnoughNamesToBeFilled(structure) || !additions.mayBeginToFill(object))
         return false;
-    additions.didBeginToFill(vm, object);
+    additions.didBeginToFill(vm, object, structure);
     return true;
 }
 
@@ -298,7 +453,7 @@ void RuntimeHooks::finishFillingObjects(VM& vm)
     }
 }
 
-void RuntimeHooks::didMakeStructureForAddition(VM&, Structure* made)
+void RuntimeHooks::didCreateAdditionTransition(VM&, Structure* made)
 {
     State* state = stateOrNull(made);
     if (state && state->firstAdditions)
@@ -335,6 +490,17 @@ static PropertyWalk::Presence ownPresenceForStructure(Structure* structure, Uniq
     return isValidOffset(*offset) ? Presence::Present : Presence::Absent;
 }
 
+static bool lazyPrototypeDeclaresMember(Structure* structure, UniquedStringImpl* uid)
+{
+    if (!structure->hasMonoProto())
+        return false;
+    for (JSObject* object = structure->storedPrototypeObject(); object && object->classInfo() == ClassPrototype::info() && !object->butterfly(); object = object->getPrototypeDirect().getObject()) {
+        if (ClassPrototype::hasMember(object, uid))
+            return true;
+    }
+    return false;
+}
+
 PropertyWalk::Presence presenceForStructure(VM&, Structure* structure, UniquedStringImpl* uid)
 {
     using Presence = PropertyWalk::Presence;
@@ -347,7 +513,7 @@ PropertyWalk::Presence presenceForStructure(VM&, Structure* structure, UniquedSt
 
     ChainWalk walk = walkChain({ structure->realm(), structure, nullptr, ChainWalkMode::AllocatesNothing }, uid);
     if (walk.result == ChainWalkResult::Unknown)
-        return Presence::Unknown;
+        return lazyPrototypeDeclaresMember(structure, uid) ? Presence::Present : Presence::Unknown;
     state->chainDependents->addStateOfStructure(walk.changeableObjects.span(), structure, uid);
     return walk.result == ChainWalkResult::Found ? Presence::Present : Presence::Absent;
 }
@@ -360,7 +526,9 @@ enum class StepResult : uint8_t { Continue, Stop };
 
 static bool canWalkThrough(Structure* structure)
 {
-    return !isProxyType(structure->typeInfo().type()) && !structure->needImpurePropertyWatchpoint() && !structure->isDictionary() && (structure->isCompiledStructure() || structure->propertyAccessesAreCacheable());
+    if (isProxyType(structure->typeInfo().type()))
+        return false;
+    return structure->isCompiledStructure() || (structure->prototypeQueriesAreCacheable() && !structure->typeInfo().getOwnPropertySlotIsImpure());
 }
 
 static bool findsNothingAbove(JSGlobalObject* globalObject, Structure* receiverStructure, UniquedStringImpl* uid, StoredName name)
@@ -441,10 +609,24 @@ static StepResult passLazyClassPrototypes(const ChainWalkStart& start, UniquedSt
     return StepResult::Continue;
 }
 
+static bool isCompleteClassObject(VM& vm, JSObject* object, Structure* structure)
+{
+    auto* closure = uncheckedDowncast<Closure>(object);
+    if (!closure->classData())
+        return true;
+    unsigned attributes = 0;
+    std::optional<PropertyOffset> prototype = structure->getWithoutMaterializing(vm.propertyNames->prototype.impl(), attributes);
+    return prototype && isValidOffset(*prototype) && !closure->hasStaticFieldsLeft();
+}
+
 static bool hasOrdinaryLookupForName(const ChainWalkStart& start, JSObject* object, Structure* structure, UniquedStringImpl* uid)
 {
     VM& vm = start.globalObject->vm();
     TypeInfo typeInfo = structure->typeInfo();
+    if (start.mode == ChainWalkMode::AllocatesNothing && typeInfo.type() == CompiledClosureType) {
+        bool isNameOfEveryFunction = uid == vm.propertyNames->length || uid == vm.propertyNames->name || uid == vm.propertyNames->prototype || uid == vm.propertyNames->underscoreProto;
+        return !isNameOfEveryFunction && isCompleteClassObject(vm, object, structure);
+    }
     if (!structure->propertyAccessesAreCacheableForAbsence()) {
         return start.mode == ChainWalkMode::MayAllocate && !mayHaveLazyProperty(vm, object, uid, LookupPosition::PrototypeChain);
     }
@@ -507,7 +689,7 @@ static StepResult lookUpExtraPropertyOfCompiledObject(const ChainWalkStart& star
     if (JSObject* extra = object.extraProperties()) {
         Structure* structure = extra->structure();
         unsigned attributes = 0;
-        if (structure->isDictionary() && start.use != ChainWalkUse::UsedAtOnce)
+        if (structure->isUncacheableDictionary() && start.use != ChainWalkUse::UsedAtOnce)
             return stopAt(&object, walk);
         std::optional<PropertyOffset> offset = findOffset(start.globalObject->vm(), structure, uid, start.mode, attributes);
         if (!offset || attributes & PropertyAttribute::CustomAccessorOrValue)
@@ -540,21 +722,24 @@ static StepResult lookUpInCompiledObject(const ChainWalkStart& start, UniquedStr
     return stopAtField(object, *field, offsetOfBoxedValueInCell(*field), walk);
 }
 
+bool isArrayPrototypeWithWritableLength(const JSGlobalObject* globalObject, const JSObject* object)
+{
+    Structure* structure = object->structure();
+    return object == globalObject->arrayPrototype() && !hasIndexedProperties(structure->indexingType()) && !structure->hasPolyProto() && !structure->hasNonReifiedStaticProperties();
+}
+
 static StepResult lookUpInObject(const ChainWalkStart& start, UniquedStringImpl* uid, JSObject* object, ChainWalk& walk)
 {
     VM& vm = start.globalObject->vm();
     Structure* structure = object->structure();
-    if (!canWalkThrough(structure)) {
-        bool staysInPlace = structure->isDictionary() && !structure->isUncacheableDictionary();
-        if (staysInPlace)
-            flattenOnce(vm, object);
-        else if (structure->isDictionary() && start.mode == ChainWalkMode::MayAllocate)
-            walk.didFlatten = flattenOnce(vm, object);
-        if (!staysInPlace || !canWalkThrough(structure))
-            return stopAt(object, walk);
-    }
+    if (!canWalkThrough(structure))
+        return stopAt(object, walk);
     if (structure->isCompiledStructure())
         return isCompiledObject(object) ? lookUpInCompiledObject(start, uid, *uncheckedDowncast<Object>(object), walk) : stopAt(object, walk);
+    if (start.use == ChainWalkUse::KeptForStores && uid == vm.propertyNames->length && isArrayPrototypeWithWritableLength(start.globalObject, object)) {
+        walk.changeableObjects.append(object);
+        return stopAtProperty(walk, object, object, invalidOffset, PropertyAttribute::DontEnum | PropertyAttribute::DontDelete);
+    }
     if (!hasOrdinaryLookupForName(start, object, structure, uid))
         return stopAt(object, walk);
 

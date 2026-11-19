@@ -7,10 +7,12 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
 #include "AOTFactRecords.h"
 #include <memory>
-#include <wtf/BitVector.h>
+#include <wtf/HashSet.h>
 #include <wtf/Noncopyable.h>
+
 
 namespace JSC { namespace AOT {
 
@@ -37,12 +39,38 @@ OwnedLooksAtBodies makeEmptyLooksAtBodies(const BodyIndexTable&);
 void lookAtBodies(LooksAtBodies&, const Program&, const ThinSummaries&, BuildContext&);
 const BodyIndexTable& bodiesLookedAt(const LooksAtBodies&);
 class FieldsOfNumbers;
+class NamesOfModules;
 struct LinkTables;
 const FieldsOfNumbers& fieldsReadAsIntegersIn(const LooksAtBodies&);
+const NamesOfModules& namesReadAsIntegersIn(const LooksAtBodies&);
 const FieldsOfNumbers& fieldsReadForArithmeticIn(const LooksAtBodies&);
 const FieldsOfNumbers& fieldsStoredWhatIsNoInt32In(const LooksAtBodies&);
+const FieldsOfNumbers& fieldsCopiedByNameIn(const LooksAtBodies&);
+const FieldsOfNumbers& fieldsStoredUntypedValuesIn(const LooksAtBodies&);
+const FieldsOfNumbers& initializerFields(const LooksAtBodies&);
+const FieldsOfNumbers& fieldsFilledByEveryInitializerIn(const LooksAtBodies&);
+BitVector initializerMethodsIn(const LooksAtBodies&, const Program&);
+BitVector variablesCutToInt32In(const LooksAtBodies&, const Program&);
+BitVector functionsCalledInLoopsIn(const LooksAtBodies&, const Program&, const ThinSummaries&, const LinkTables& linked, const LinkTables& held, BitVector& keysCalledInLoops, bool& elementsAreCalledInLoops, BitVector& calledInLoopsOfOwnFile);
+BitVector constructorsCalledInLoopsIn(const Program&, const ThinSummaries&, const LinkTables& linked, const LinkTables& held);
+BitVector constructorsCalledInNestedIterationsIn(const Program&, const ThinSummaries&, const LinkTables& linked, const LinkTables& held);
+BitVector mixedClassesConstructedIn(const Program&, const ThinSummaries&, const LinkTables& linked, const LinkTables& held);
+BitVector functionsCalledByValueInLoopsIn(const Program&, const ThinSummaries&, const LinkTables&, BitVector& functionsInElements);
+BitVector comparatorCallees(const Program&, const ThinSummaries&, const LinkTables& linked, const LinkTables& held);
+void markLiteralsStoredByCallees(ThinSummaries&, const LinkTables& linked, const LinkTables& held);
+struct FunctionsDoneInIterations {
+    BitVector functions;
+    BitVector inNestedIterations;
+    BitVector reachedByRecursion;
+    BitVector copiedInRecursion;
+};
+FunctionsDoneInIterations findFunctionsFinishedInIterations(const Program&, const ThinSummaries&, const LinkTables& linked, const LinkTables& held);
+FieldsOfNumbers fieldsUsedInProductsIn(const LooksAtBodies&, const BitVector& functionsCalledInLoops);
 FieldsOfNumbers fieldsStoredCountsIn(const LooksAtBodies&, const Program&, const LinkTables& linked);
 const BitVector& keysStoredWhatIsNoInt32In(const LooksAtBodies&);
+const FieldsOfNumbers& fieldsStoredNullishIn(const LooksAtBodies&);
+const FieldsOfNumbers& fieldsStoredBooleansAloneIn(const LooksAtBodies&);
+FieldsOfNumbers fieldsOfPositionsIn(const LooksAtBodies&);
 
 class BuiltinsInReach {
     WTF_MAKE_NONCOPYABLE(BuiltinsInReach);
@@ -50,6 +78,8 @@ public:
     BuiltinsInReach(const Program&, const LooksAtBodies&, const ThinSummaries&, BuildContext&);
     ~BuiltinsInReach();
 
+    void leaveOutDirectEvals();
+    void admitDirectEvals();
     void noteFindingsIn(FunctionID);
     void noteFindingsIn(std::span<const FunctionID>);
     void noteWhatBodyMakes(FunctionID);
@@ -58,9 +88,13 @@ public:
     void noteEvaluated(ModuleID);
     void noteNativeCodeMayHoldObjects();
     void noteNameRead(PropertyKeyID);
-    void noteNameCalled(PropertyKeyID);
+    void noteNameCalled(PropertyKeyID, bool mayPassOperands);
+    void noteNameCalledByNativeCodeOffUnseenObjects(PropertyKeyID);
     void noteNameSpelledByProgram(PropertyKeyID);
     void noteReadUnderKeyNobodyKnows();
+    void noteReadUnderKeyNobodyKnowsOff(BuiltinID canonicalHolder);
+    void notePrototypeAboveOtherObjects(BuiltinID canonicalPrototype);
+    void noteReadUnderNameThatLoopGave();
     void noteReadOfProgramUnderKeyNobodyKnows(FunctionID, ValueID);
     void noteRead(BuiltinID);
     void noteCalled(BuiltinID);
@@ -69,6 +103,10 @@ public:
     void noteLetGo(BuiltinID);
     void noteCalledOutOfSight(BuiltinID);
     void noteCalledWithoutRow(BuiltinID);
+    void noteCalledWithOperandsNobodyRead(BuiltinID);
+    void noteRowApplied(BuiltinID canonical, BuiltinOverloadID);
+    Vector<uint64_t> takeCallsWhoseRowsLinkTells();
+    void noteCallLeftToUnseen(FunctionID caller, ValueID site);
     void noteCallMayRunCode(BuiltinID);
     void noteOperandMayMeetCondition(BuiltinID, BuiltinName toldUnder);
     void noteCalledAtSite(FunctionID caller, ValueID site, bool isConstruction, BuiltinID row);
@@ -78,9 +116,14 @@ public:
     struct NameOnHolder {
         BuiltinID holder;
         PropertyKeyID key;
+        bool isLocked { false };
         friend bool operator==(const NameOnHolder&, const NameOnHolder&) = default;
     };
     Vector<NameOnHolder> takeNamesLaidAfterAll() { return std::exchange(m_namesLaidAfterAll, { }); }
+    std::span<const NameOnHolder> namesTakenForUnlaid() const LIFETIME_BOUND { return m_namesTakenForUnlaid.span(); }
+    NameOnHolder nameTakenForUnlaid(BuiltinID canonicalHolder, PropertyKeyID) const;
+    bool canLockAbsentName(BuiltinID canonicalHolder, PropertyKeyID) const;
+    bool needsAbsentNameLock(const NameOnHolder&) const;
 
     bool mayBeHandedWhatIsNoTextNumberOrBoolean(BuiltinID canonical) const;
     bool hasCallThatMayRunCode(BuiltinID canonical) const;
@@ -89,24 +132,27 @@ public:
     bool mayRunOrHasObjects(BuiltinID canonical) const;
     bool isAskedForOtherNames(BuiltinID canonical) const;
     bool isOutOfSight(BuiltinID canonical) const;
+    bool isInReach(BuiltinID canonical) const;
     const BuiltinCondition* lightFormOf(BuiltinID canonical) const;
     bool loaderOfHostMayRun() const;
     bool hasWrittenLoaderReplacement(BuiltinMark) const;
     bool hostIsAskedForValueOfModule() const;
     bool unseenCodeCanRun() const;
-    bool holdsBackNamesFromRunTime() const;
+    bool loaderOfMachineCodeIsInUse() const;
+    bool defersRuntimeNames() const;
     Vector<ModuleID> takeModulesSpelledInTexts();
-    bool letInNamesFromRunTime();
+    bool allowRuntimeNames();
     bool objectsMayHaveMethodCalledWithStartupLoads() const;
 
     bool takeForConstant(BuiltinID member);
-    void takeForUnlaid(BuiltinID canonicalHolder, PropertyKeyID);
+    void takeForUnlaid(BuiltinID canonicalHolder, PropertyKeyID, bool isLocked);
 
     void noteWrite(BuiltinID holder, PropertyKeyID, bool onlyDeletes = false);
     void noteHandedWhatIsNoTextNumberOrBoolean(BuiltinID holder);
     void noteWriteThroughLostBuiltins(PropertyKeyID, bool isByFileOfProduct);
     void noteWriteThroughUnseenByProgram(PropertyKeyID, bool isByFileOfProduct);
     void noteNameWrittenThroughUnseenByLibrary(PropertyKeyID);
+    void noteWriteThroughUnseenInSight(PropertyKeyID);
     void noteReadThroughLostBuiltins(PropertyKeyID);
     void noteClimbFromLostBuiltins();
     void noteClimbFromUnseenObjects();
@@ -115,29 +161,40 @@ public:
     void noteOptionThatRunsCodePassed(BuiltinID);
     void noteLostBuiltinsReachUnseen();
     void noteInstanceAtUnseen(BuiltinClassID);
-    void noteObjectHandedToFormatter();
+    void noteInstanceHasEscaped(BuiltinClassID);
+    void noteInstanceHandedToFormatter(BuiltinClassID);
+    void noteObjectHandedToFormatter(bool isWalked);
+    void noteInstancesLoseTheirConstructor();
     void noteTypeHandedToHandler(BuiltinTypeID);
+    void recordUsedViaFlow(BuiltinID);
+    void noteFoundWhereFlowBroughtHolder(BuiltinID, FunctionID reader);
+    void noteStandsAboveClass(BuiltinID, FunctionID constructor);
     void noteEntryHandsHostNothing(uint32_t entry);
     void noteHostMayFindSomethingAt(uint32_t entry);
+    void noteHostStartsByCallInSight(uint32_t entry);
     std::span<const FunctionID> functionsThatAnswerEveryNameOnInstances() const;
     void noteInstancesAnswerEveryNameWithObjects();
     bool isWorthFollowingToWrites(BuiltinID canonical) const { return m_builtinsWorthFollowingToWrites.quickGet(canonical.index()); }
 
     LookupsPastProgramObjects takeLookups();
+    void putBackLookups(const LookupsPastProgramObjects&);
+
+    bool mayHaveNameLaid(const NameOnHolder&) const;
+    bool programMayLayName(const NameOnHolder&) const;
+    bool mayStillBeTakenForConstant(BuiltinID member) const;
 
 private:
-    bool mayHaveNameLaid(BuiltinID canonicalHolder, PropertyKeyID) const;
-
     std::unique_ptr<FactTables> m_tables;
     std::unique_ptr<LinkTables> m_linked;
     std::unique_ptr<InputsOfProgramFacts> m_inputs;
     std::unique_ptr<BuilderOfProgramFacts> m_builder;
     BitVector m_builtinsWorthFollowingToWrites;
     Vector<BuiltinID> m_membersWrittenAfterAll;
-    Vector<std::pair<BuiltinID, BuiltinID>> m_entriesBelowPrototypesOfEntries;
     Vector<NameOnHolder> m_namesTakenForUnlaid;
+    UncheckedKeyHashSet<uint64_t, DefaultHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> m_namesEverTakenForUnlaid;
     Vector<NameOnHolder> m_namesLaidAfterAll;
     bool m_wasToldSomethingNew { true };
+    bool m_writersMayRunUnseen { false };
 };
 
 } } } // namespace JSC::AOT::Typed

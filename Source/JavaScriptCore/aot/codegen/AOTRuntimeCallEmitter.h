@@ -89,11 +89,13 @@ public:
             uint32_t operandIndex { 0 };
             LValue cell { nullptr };
             LValue inFront { nullptr };
+            LValue restInFront { nullptr };
             LValue secondInFront { nullptr };
+            LValue restOfSecondInFront { nullptr };
             VariableID variable;
         };
 
-        bool isSet() const { return entriesInFront || collectionsInFront || isHeldToThrowNothing || callHeldToThrowNothing || numberOfDigests || countsInFront; }
+        bool isSet() const { return entriesInFront || collectionsInFront || isHeldToThrowNothing || callHeldToThrowNothing || numberOfDigests || countsInFront || deedsInFront || loudDeedsInFront; }
 
         uint32_t rows { 0 };
         LValue entriesInFront { nullptr };
@@ -103,16 +105,32 @@ public:
         const WatchOfEffects* around { nullptr };
         uint8_t lanesNotWritten { 0 };
         uint8_t secondLanesNotWritten { 0 };
-        uint8_t countsHeld { 0 };
+        uint8_t stableCounts { 0 };
         LValue countsInFront { nullptr };
+        LValue deedsInFront { nullptr };
+        LValue loudDeedsInFront { nullptr };
         static constexpr unsigned mostOperandsDigested = 6;
         std::array<Digest, 14> digests { };
         unsigned numberOfDigests { 0 };
+        Vector<std::pair<VariableID, LValue>, 4> wordsOfVariablesInFront;
     };
     void beginWatchOfOperation(const ValueContext&, WatchOfEffects&);
     void endWatchOfEffects(const OperationContext&, const WatchOfEffects&, LValue behind);
     void abandonWatchOfOperation(const WatchOfEffects&);
     void countStoreForEffectsNet(CountInEffectsNet);
+    void beginWatchOfWhatMayRunAgain(const ValueContext& beginning);
+    void endWatchOfWhatRunsAgain(const ValueContext& end, ValueID beginning);
+    struct DeedsInFrontOfQuietCall {
+        LValue all { nullptr };
+        LValue loud { nullptr };
+    };
+    DeedsInFrontOfQuietCall countDeedOf(const ValueContext&);
+    void takeBackCountOfExtension();
+    void putBackDeedsBehindQuietCall(DeedsInFrontOfQuietCall);
+    void saveDeedsForHandler(DeedsInFrontOfQuietCall);
+    void restoreDeedsInHandler();
+
+    LValue readCollectionCount() { return readCollectionsForEffectsNet(nullptr); }
 
     Pointer argumentBuffer(std::span<const Boxed>);
     Pointer uninitializedArgumentBuffer(unsigned numberOfWords);
@@ -166,15 +184,21 @@ private:
     StubCallResult emitEntryCall(const OperationContext*, AOT::Entry, std::span<const LValue> arguments, const CallOptions&);
     StubCallResult emitCall(const OperationContext*, const CallRequest&);
     enum class EntersCompiledCode : bool { No, Yes };
-    void beginWatchOfEffects(const OperationContext&, const Effects&, EntersCompiledCode, uint32_t rows, WatchOfEffects&);
+    void beginWatchOfEffects(const OperationContext&, const Effects&, EntersCompiledCode, uint32_t rows, WatchOfEffects&, uint8_t exemptCounts = 0);
     LValue readCountsForEffectsNet(uint8_t counts, LValue behind);
     LValue digestForEffectsNet(LValue cell, uint64_t lanes);
+    LValue restOfDigestForEffectsNet(LValue digest);
+    LValue lanesThatDifferInEffectsNet(LValue inFront, LValue restInFront, LValue cell, uint64_t lanes);
     void digestInFrontOfCall(WatchOfEffects&, uint32_t operandIndex, LValue cell, VariableID = { });
     void digestVariablesThatUnitReads(const Effects&, WatchOfEffects&);
     LValue loadVariableForEffectsNet(VariableID);
+    LValue loadWordOfVariableForEffectsNet(VariableID);
+    void keepWordsOfVariablesThatUnitStores(WatchOfEffects&);
     std::optional<Vector<VariableID, 8>> m_variablesThatUnitReads;
+    std::optional<Vector<VariableID, 8>> m_variablesThatUnitStores;
     LValue readWordForEffectsNet(ptrdiff_t offsetInInstance, std::optional<ptrdiff_t> offsetBehindPointer, LValue behind);
     LValue readCollectionsForEffectsNet(LValue behind);
+    Vector<std::pair<ValueID, std::unique_ptr<WatchOfEffects>>, 2> m_watchesOfWhatMayRunAgain;
     void noteCallHeldToThrowNothing(uint64_t call, uint32_t rows);
     void markRowsExercised(uint32_t rows, std::span<const PartOfEffects>);
     void stopAtFalseEffects(const OperationContext&, uint32_t rows, LValue holds, uint32_t part, LValue differs);
@@ -184,6 +208,7 @@ private:
 
     const WatchOfEffects* m_watchOfOperation { nullptr };
     Machine::StackSlot* m_transientBuffer { nullptr };
+    Machine::StackSlot* m_deedsForHandler { nullptr };
     mutable StubCallShapeCache* m_stubCallShapes { nullptr };
     PatchEffectsMemo* m_patchEffectsMemo { nullptr };
     mutable std::optional<RegisterSet> m_registersClobberedByCalls;

@@ -11,6 +11,8 @@
 #include <wtf/Atomics.h>
 #include <wtf/Vector.h>
 
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+
 namespace JSC { namespace AOT { namespace Typed {
 
 class UnitedFamilies {
@@ -38,20 +40,30 @@ public:
     {
         if (member >= m_parent.size())
             return member;
-        for (uint32_t parent = parentOf(member); parent != member; parent = parentOf(member)) {
-            uint32_t above = parentOf(parent);
+        uint32_t* parents = m_parent.mutableSpan().data();
+        for (uint32_t parent = parentOf(parents, member); parent != member; parent = parentOf(parents, member)) {
+            uint32_t above = parentOf(parents, parent);
             if (above != parent)
-                WTF::atomicStore(&m_parent[member], above, std::memory_order_relaxed);
+                WTF::atomicStore<MemoryOrder::Relaxed>(parents + member, above);
             member = above;
         }
         return member;
     }
+    ALWAYS_INLINE void prefetch(uint32_t member) const
+    {
+        if (member >= m_parent.size())
+            return;
+        __builtin_prefetch(m_parent.span().data() + member);
+        __builtin_prefetch(m_next.span().data() + member);
+        __builtin_prefetch(m_size.span().data() + member);
+    }
     bool areUnited(uint32_t one, uint32_t other) const { return representativeOf(one) == representativeOf(other); }
-    uint32_t representativeWithoutShortening(uint32_t member) const
+    ALWAYS_INLINE uint32_t representativeWithoutShortening(uint32_t member) const
     {
         if (member >= m_parent.size())
             return member;
-        for (uint32_t parent = parentOf(member); parent != member; parent = parentOf(member))
+        const uint32_t* parents = m_parent.span().data();
+        for (uint32_t parent = parentOf(parents, member); parent != member; parent = parentOf(parents, member))
             member = parent;
         return member;
     }
@@ -88,7 +100,7 @@ public:
     }
 
 private:
-    uint32_t parentOf(uint32_t member) const { return WTF::atomicLoad(&m_parent[member], std::memory_order_relaxed); }
+    static uint32_t parentOf(const uint32_t* parents, uint32_t member) { return WTF::atomicLoad<MemoryOrder::Relaxed>(const_cast<uint32_t*>(parents) + member); }
 
     mutable Vector<uint32_t> m_parent;
     Vector<uint32_t> m_next;
@@ -96,5 +108,7 @@ private:
 };
 
 } } } // namespace JSC::AOT::Typed
+
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 
 #endif // ENABLE(AOT)

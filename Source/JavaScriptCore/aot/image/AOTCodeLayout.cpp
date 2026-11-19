@@ -10,6 +10,7 @@
 
 #include "AOTBuildContext.h"
 #include "AOTCallSiteTable.h"
+#include "AOTImageFormat.h"
 #include "AOTSort.h"
 #include "AOTUnitPlacement.h"
 #include <algorithm>
@@ -24,12 +25,13 @@ namespace JSC { namespace AOT {
 static constexpr int64_t reachOfNearCall = MacroAssembler::relocationReach(RelocationKind::Call);
 static_assert(MacroAssembler::relocationReach(RelocationKind::Jump) == reachOfNearCall);
 
+static constexpr size_t alignmentOfCodeAfterSharedCode = 64;
 static constexpr size_t maxSizeOfRunOfBodies = 1 * MB;
 static_assert(static_cast<int64_t>(maxSizeOfRunOfBodies) * 8 <= reachOfNearCall);
 
 unsigned chooseCodeGranuleShift(const LinkedFunctions& functions, BuildContext& context)
 {
-    constexpr size_t maxStartsPassedOnAverage = 8;
+    constexpr size_t maxGroupsPassedOnAverage = 2;
     Vector<size_t> functionEnds(functions.size());
     Vector<uint8_t> isReturnedInto(functions.size());
     forEachRangeOfIndicesInParallel(context.parallelLoops(), functions.size(), [&](size_t first, size_t end) {
@@ -42,7 +44,7 @@ unsigned chooseCodeGranuleShift(const LinkedFunctions& functions, BuildContext& 
     for (size_t index = 1; index < functionEnds.size(); ++index)
         functionEnds[index] += WTF::roundUpToMultipleOf<imageFunctionAlignment>(functionEnds[index - 1]);
     auto walkIsShort = [&](unsigned shift) {
-        size_t startsPassed = 0;
+        size_t groupsPassed = 0;
         size_t lookups = 0;
         size_t granuleStart = 0;
         for (size_t index = 0; index < functionEnds.size(); ++index) {
@@ -51,10 +53,10 @@ unsigned chooseCodeGranuleShift(const LinkedFunctions& functions, BuildContext& 
             size_t startOfGranule = (functionEnds[index] - 1) >> shift << shift;
             while (functionEnds[granuleStart] <= startOfGranule)
                 ++granuleStart;
-            startsPassed += index - granuleStart;
+            groupsPassed += index / FunctionStarts::functionsInGroup - granuleStart / FunctionStarts::functionsInGroup;
             ++lookups;
         }
-        return startsPassed <= maxStartsPassedOnAverage * lookups;
+        return groupsPassed <= maxGroupsPassedOnAverage * lookups;
     };
     unsigned codeGranuleShift = maxCodeGranuleShift;
     while (codeGranuleShift > minCodeGranuleShift && !walkIsShort(codeGranuleShift))
@@ -188,11 +190,19 @@ static BitVector findFallThroughs(const CodeLayoutInputs& inputs, std::span<cons
     return fallsIntoNext;
 }
 
-static UnitPlacement placeBodies(std::span<const size_t> unitSizes, std::span<const size_t> alignedOffsets, const BitVector& fallsIntoNext, size_t sharedCodeSize, unsigned codeGranuleShift, const ParallelLoops& loops)
+static uint32_t offsetOfFirstTransfer(const CodeBody& body)
 {
-    static_assert(!((1 << minCodeGranuleShift) % imageFunctionAlignment) && !(sizeof(uint32_t) % imageFunctionAlignment));
+    for (const Relocation& relocation : body.relocations) {
+        if (transfersControl(relocation.kind))
+            return relocation.offset;
+    }
+    return 0;
+}
+
+static UnitPlacement placeBodies(const LinkedFunctions& functions, std::span<const size_t> unitSizes, std::span<const size_t> alignedOffsets, const BitVector& fallsIntoNext, size_t sharedCodeSize, const ParallelLoops& loops)
+{
+    static_assert(!(alignmentOfCodeAfterSharedCode % imageFunctionAlignment) && !(sizeof(uint32_t) % imageFunctionAlignment));
     const size_t numberOfBodies = unitSizes.size();
-    const size_t granuleSize = static_cast<size_t>(1) << codeGranuleShift;
 
     Vector<CopyableUse> uses(numberOfBodies);
     Vector<uint32_t> firstUseByBody(numberOfBodies + 1);
@@ -200,13 +210,19 @@ static UnitPlacement placeBodies(std::span<const size_t> unitSizes, std::span<co
         for (size_t index = first; index < end; ++index) {
             firstUseByBody[index] = static_cast<uint32_t>(index);
             if (index < numberOfBodies)
-                uses[index] = { 0, 0, clampTo<uint32_t>(unitSizes[index]), reachOfNearCall };
+                uses[index] = { 0, static_cast<int64_t>(unitSizes[index]) < reachOfNearCall ? 0 : offsetOfFirstTransfer(functions[index].body), clampTo<uint32_t>(unitSizes[index]), reachOfNearCall };
         }
     });
 
-    size_t codeSizeBound = sharedCodeSize + imageStubsAlignment + granuleSize;
-    for (size_t size : unitSizes)
-        codeSizeBound += WTF::roundUpToMultipleOf<imageFunctionAlignment>(size) + imageFunctionAlignment;
+    Vector<uint64_t> placesInLine(numberOfBodies);
+    forEachRangeOfIndicesInParallel(loops, numberOfBodies, [&](size_t first, size_t end) {
+        for (size_t index = first; index < end; ++index)
+            placesInLine[index] = functions[index].body.placesInLine();
+    });
+
+    size_t codeSizeBound = sharedCodeSize + imageStubsAlignment + alignmentOfCodeAfterSharedCode;
+    for (size_t index = 0; index < numberOfBodies; ++index)
+        codeSizeBound += WTF::roundUpToMultipleOf<imageFunctionAlignment>(unitSizes[index]) + imageFunctionAlignment + (placesInLine[index] == UINT64_MAX ? 0 : sizeOfCodeLine);
     bool oneCopyReachesAllCode = static_cast<int64_t>(codeSizeBound) <= reachOfNearCall;
 
     const CopyableUnit sharedCode { sharedCodeSize, imageStubsAlignment };
@@ -214,18 +230,19 @@ static UnitPlacement placeBodies(std::span<const size_t> unitSizes, std::span<co
         .sizes = unitSizes,
         .alignedOffsets = alignedOffsets,
         .alignments = singleElementSpan(imageFunctionAlignment),
+        .placesInLine = placesInLine.span(),
         .fallsIntoNext = fallsIntoNext,
         .copyables = singleElementSpan(sharedCode),
         .uses = uses.span(),
         .firstUseByUnit = firstUseByBody.span(),
-        .alignmentAfterCopies = granuleSize,
-        .start = oneCopyReachesAllCode && sharedCodeSize ? 0 : granuleSize,
+        .alignmentAfterCopies = alignmentOfCodeAfterSharedCode,
+        .start = oneCopyReachesAllCode && sharedCodeSize ? 0 : alignmentOfCodeAfterSharedCode,
         .policy = oneCopyReachesAllCode ? CopyPolicy::BeforeUser : CopyPolicy::AfterUsers,
     });
     if (placement.copies.isEmpty()) {
         size_t offset = WTF::roundUpToMultipleOf<imageStubsAlignment>(placement.end);
         placement.copies.append(PlacedCopy { 0, offset });
-        placement.end = WTF::roundUpToMultipleOf(granuleSize, offset + sharedCodeSize);
+        placement.end = WTF::roundUpToMultipleOf<alignmentOfCodeAfterSharedCode>(offset + sharedCodeSize);
     }
     return placement;
 }
@@ -236,10 +253,14 @@ static void layOutWhatFollowsFunctions(const CodeLayoutInputs& inputs, CodeLayou
     const RegExpSection& regExpSection = inputs.regExpSection;
     size_t webAssemblyCodeOffset = WTF::roundUpToMultipleOf(inputs.webAssemblyCodeAlignment, functionsEnd);
     size_t ffiCodeOffset = WTF::roundUpToMultipleOf(inputs.ffiCodeAlignment, webAssemblyCodeOffset + inputs.webAssemblyCodeSize);
-    size_t executableSize = WTF::roundUpToMultipleOf<imagePageSize>(ffiCodeOffset + inputs.ffiCodeSize + regExpSection.dataOffset);
+    size_t endOfFFICode = ffiCodeOffset + inputs.ffiCodeSize;
+    size_t executableSize = WTF::roundUpToMultipleOf<imagePageSize>(endOfFFICode + regExpSection.dataOffset);
     size_t regExpCodeOffset = executableSize - regExpSection.dataOffset;
     size_t constantsOffset = WTF::roundUpToMultipleOf<imageConstantsAlignment>(regExpCodeOffset + regExpSection.bytes.size());
-    size_t ffiDirectoryOffset = constantsOffset + inputs.constantsSize;
+    size_t sizeOfAlignedConstants = WTF::roundUpToMultipleOf<imageConstantsAlignment>(inputs.constantsSize);
+    if (sizeOfAlignedConstants && !inputs.ffiCodeSize && regExpSection.bytes.isEmpty() && sizeOfAlignedConstants <= executableSize - endOfFFICode)
+        constantsOffset = executableSize - sizeOfAlignedConstants;
+    size_t ffiDirectoryOffset = std::max(executableSize, constantsOffset + inputs.constantsSize);
     if (inputs.ffiCodeSize)
         ffiDirectoryOffset = WTF::roundUpToMultipleOf<imageFFIDirectoryAlignment>(ffiDirectoryOffset);
     layout.codeSize = ffiDirectoryOffset + inputs.ffiDirectorySize;
@@ -290,7 +311,7 @@ static std::optional<UnitPlacement> placeCodeOfLayout(const CodeLayoutInputs& in
         }
     });
     size_t sharedCodeSize = sharedCodeSizeWithVeneers(inputs, layout);
-    UnitPlacement placement = placeBodies(unitSizes.span(), alignedOffsets, layout.fallsIntoNext, sharedCodeSize, inputs.codeGranuleShift, loops);
+    UnitPlacement placement = placeBodies(inputs.functions, unitSizes.span(), alignedOffsets, layout.fallsIntoNext, sharedCodeSize, loops);
     layOutWhatFollowsFunctions(inputs, layout, placement.end, codeSizeLimit);
     if (layout.codeSize > codeSizeLimit) {
         context.reportLimitExceeded(LimitID::CodeBytes, layout.codeSize);
@@ -340,7 +361,7 @@ static Vector<size_t> computeLatestStartsOfBodies(const CodeLayoutInputs& inputs
             ++numberOfTransfers;
         });
         size_t largestSize = numberOfTransfers ? sizeOfUnitWithVeneers(bodySizes[position], inputs.sizeOfFarInstanceWords(position), numberOfTransfers, inputs.templates) : unitSizes[position];
-        latestStarts[position] = largestSize - unitSizes[position] + imageFunctionAlignment - 1;
+        latestStarts[position] = largestSize - unitSizes[position] + imageFunctionAlignment - 1 + (inputs.functions[position].body.placesInLine() == UINT64_MAX ? 0 : sizeOfCodeLine);
     });
     size_t growthInFront = 0;
     for (size_t position = 0; position < latestStarts.size(); ++position) {
@@ -357,7 +378,7 @@ static bool addVeneersToLayout(const CodeLayoutInputs& inputs, std::span<const s
     appendTransfersToRegExpCode(layout.sharedCodeVeneers, inputs.sharedCode.argumentThunks.code.relocations.span(), inputs.regExpSection);
     sortVeneerTargetsAndRemoveDuplicates(layout.sharedCodeVeneers);
 
-    const size_t roomOfCopy = sharedCodeSizeWithVeneers(inputs, layout) + imageStubsAlignment + (static_cast<size_t>(1) << inputs.codeGranuleShift);
+    const size_t roomOfCopy = sharedCodeSizeWithVeneers(inputs, layout) + imageStubsAlignment + alignmentOfCodeAfterSharedCode;
     const Vector<size_t> latestStarts = computeLatestStartsOfBodies(inputs, bodySizes, unitSizes, firstPlacement.unitStarts.span(), loops);
     std::atomic<bool> hasVeneers { !layout.sharedCodeVeneers.isEmpty() };
     forEachIndexInParallel(loops, bodySizes.size(), [&](unsigned position) {

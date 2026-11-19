@@ -18,14 +18,19 @@ public:
     void generateTypedArrayLength(const InlineCall&);
     void generateTypedArrayByteLength(const InlineCall&);
     void generateTypedArrayByteOffset(const InlineCall&);
+    void generateViewLength(const InlineCall&);
+    void generateViewIsOutOfBounds(const InlineCall&);
     void generateTypedArrayWithLength(const InlineCall&);
     void generateTypedArraySet(const InlineCall&);
+    void generateByteLiteral(const InlineCall&);
 
+    Integer lengthOfViewInArgument(const InlineCall&);
     Condition hasFixedLength(CellPointer view);
     Integer lengthOf(CellPointer view);
     Integer byteOffsetOf(CellPointer view);
     Pointer vectorOf(CellPointer view);
     Condition haveFixedLength(CellPointer first, CellPointer second);
+    CellPointer askedAnewWherePositionsAreTested(CellPointer view);
     void moveBytes(const OperationContext&, CellPointer target, Integer targetOffset, CellPointer source, Integer sourceOffset, Integer count);
 };
 

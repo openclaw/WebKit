@@ -7,12 +7,12 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
 #include "AOTID.h"
 #include "AOTStatistics.h"
 #include "AOTThreads.h"
 #include "AOTVector.h"
 #include <span>
-#include <wtf/BitVector.h>
 #include <wtf/Noncopyable.h>
 
 namespace JSC { namespace AOT { namespace Typed {
@@ -42,6 +42,7 @@ struct ModuleStart {
     std::span<const ModuleID> filesRunWhileLoaded;
     bool beginsInBody { false };
     bool mayBeLeftByCaughtError { false };
+    bool resumesLoadOnThrow { false };
     bool bodyOnlyReturns { false };
 };
 
@@ -54,6 +55,7 @@ struct ModuleStartOperation {
         Finish,
         ReturnIfLoadingStops,
         AbandonOnThrow,
+        ResumeLoadOnThrow,
         NeverComesBack,
     };
 
@@ -77,13 +79,14 @@ struct StepsOfLateModuleSites {
 struct ModuleEvaluationParts {
     Vector<ModuleStart> starts;
     Vector<uint32_t> startsByBody;
+    BitVector bodiesWithStart;
     Vector<ModuleStep> steps;
     Vector<ModuleID> filesRunWhileLoaded;
     Vector<BareModuleSite> bareSites;
     Vector<StepsOfLateModuleSites> stepsOfLateSites;
     BitVector modulesCalledWhereRequired;
     BitVector modulesThatStartThemselves;
-    BitVector modulesWhoseRequiresRecordNothingThatIsSeen;
+    BitVector modulesSkippingRecordRequire;
     BitVector modulesEvaluatedByCodeAlone;
     BitVector modulesWhosePathNoSiteNames;
     BitVector bodiesThatRowsLeaveOut;
@@ -92,6 +95,7 @@ struct ModuleEvaluationParts {
 
 class ModuleEvaluationPlan {
     WTF_MAKE_NONCOPYABLE(ModuleEvaluationPlan);
+    friend class FactMisstater;
 public:
     ModuleEvaluationPlan() = default;
     explicit ModuleEvaluationPlan(ModuleEvaluationParts&& parts)
@@ -112,7 +116,7 @@ public:
     bool leavesOutCallOf(FunctionID body) const { return m_parts.bodiesThatRowsLeaveOut.get(body.index()); }
     bool isCalledWhereRequired(ModuleID module) const { return m_parts.modulesCalledWhereRequired.get(module.index()); }
     bool startsItself(ModuleID module) const { return m_parts.modulesThatStartThemselves.get(module.index()); }
-    bool recordsNothingThatIsSeen(ModuleID module) const { return m_parts.modulesWhoseRequiresRecordNothingThatIsSeen.get(module.index()); }
+    bool canSkipRecordRequire(ModuleID module) const { return m_parts.modulesSkippingRecordRequire.get(module.index()); }
     static bool beginAsksRunTime(const Program&, ModuleID);
     bool finishLeavesStatusInRecord(const Program&, ModuleID) const;
     ModuleID moduleThatBeginsIn(FunctionID body) const

@@ -9,6 +9,7 @@
 
 #include "AOTImage.h"
 #include "AOTLoadedProgramTestSupport.h"
+#include "AOTModuleHost.h"
 #include "AOTModuleTable.h"
 #include "AOTNativeTest.h"
 #include "AOTVector.h"
@@ -182,12 +183,12 @@ static void checkFindByPath(LoadedProgram&)
     ModuleTable table = tableOfImage();
     for (unsigned index = 0; index < numberOfModules; ++index) {
         ModuleID module(index);
-        AOT_TEST_CHECK(table.findByPath(table.pathText(module)) == module);
+        AOT_TEST_CHECK(table.findByPath(table.fullPath(module)) == module);
     }
     AOT_TEST_CHECK(table.data(mainModule).directory != Number24::max && table.data(mainModule).directory == table.data(leftModule).directory && table.data(mainModule).directory != table.data(entryModule).directory);
-    AOT_TEST_CHECK(table.data(sharedModule).directory == Number24::max && table.pathText(sharedModule) == "/app/shared.js"_s);
-    AOT_TEST_CHECK(table.pathText(mainModule) == "/app/main.js"_s && table.pathText(entryModule) == "/entry.js"_s && table.pathText(shortModule) == "/a"_s);
-    AOT_TEST_CHECK(table.pathText(faceModule) == fromUTF8("/app/\xf0\x9f\x98\x80.js"));
+    AOT_TEST_CHECK(table.data(sharedModule).directory == Number24::max && table.fullPath(sharedModule) == "/app/shared.js"_s);
+    AOT_TEST_CHECK(table.fullPath(mainModule) == "/app/main.js"_s && table.fullPath(entryModule) == "/entry.js"_s && table.fullPath(shortModule) == "/a"_s);
+    AOT_TEST_CHECK(table.fullPath(faceModule) == fromUTF8("/app/\xf0\x9f\x98\x80.js"));
     AOT_TEST_CHECK(table.displayPathText(mainModule) == "main.js"_s && table.displayPathText(entryModule) == "entry.js"_s && table.displayPathText(mapModule) == "shared.js.map.js"_s);
     AOT_TEST_CHECK(table.displayPathText(accentModule) == "e.js"_s && table.displayPathText(tildeModule) == "tilde.js"_s && table.displayPathText(faceModule) == "face.js"_s);
 
@@ -219,6 +220,27 @@ static void checkFindExportOfSymbol(LoadedProgram& program)
     AOT_TEST_CHECK(table.findExport(sharedModule, Identifier::fromString(vm, "alpha"_s).impl()) == 0u);
 }
 
+static void testPathBesideFile()
+{
+    AOT_TEST_CHECK(pathBesideFile("/app/main.js"_s, "./x.sqlite"_s) == "/app/x.sqlite"_s);
+    AOT_TEST_CHECK(pathBesideFile("/app/lib/main.js"_s, "../data/./x.sqlite"_s) == "/app/data/x.sqlite"_s);
+    AOT_TEST_CHECK(pathBesideFile("/main.js"_s, "../../x.sqlite"_s) == "/x.sqlite"_s);
+    AOT_TEST_CHECK(pathBesideFile("/app/main.js"_s, "./a\\b.sqlite"_s) == "/app/a\\b.sqlite"_s);
+    AOT_TEST_CHECK(pathBesideFile("/$bunfs/root/main.js"_s, "./x.sqlite"_s) == "/$bunfs/root/x.sqlite"_s);
+
+    AOT_TEST_CHECK(pathBesideFile("C:\\a\\main.js"_s, "./x.sqlite"_s) == "C:\\a\\x.sqlite"_s);
+    AOT_TEST_CHECK(pathBesideFile("C:\\a\\b\\main.js"_s, "../data/x.sqlite"_s) == "C:\\a\\data\\x.sqlite"_s);
+    AOT_TEST_CHECK(pathBesideFile("C:\\main.js"_s, "../../x.sqlite"_s) == "C:\\x.sqlite"_s);
+
+    AOT_TEST_CHECK(pathBesideFile("C:/a/main.js"_s, "./x.sqlite"_s) == "C:/a/x.sqlite"_s);
+    AOT_TEST_CHECK(pathBesideFile("B:/~BUN/root/main.js"_s, "./data\\x.sqlite"_s) == "B:/~BUN/root/data/x.sqlite"_s);
+    AOT_TEST_CHECK(pathBesideFile("B:/~BUN/root/main.js"_s, "../../../x.sqlite"_s) == "B:/x.sqlite"_s);
+
+    AOT_TEST_CHECK(pathBesideFile("\\\\server\\share\\a\\main.js"_s, "../x.sqlite"_s) == "\\\\server\\share\\x.sqlite"_s);
+    AOT_TEST_CHECK(pathBesideFile("\\\\server\\share\\main.js"_s, "../../x.sqlite"_s) == "\\\\server\\share\\x.sqlite"_s);
+    AOT_TEST_CHECK(pathBesideFile("//server/share/main.js"_s, "../x.sqlite"_s) == "//server/share/x.sqlite"_s);
+}
+
 template<LoadedProgramTest body>
 static constexpr void (*withModules)() = runNativeTestWithLoadedProgram<moduleTableTests, programText, body>;
 
@@ -228,6 +250,7 @@ std::span<const NativeTest> moduleTableTests()
         { "module-table/lists"_s, withModules<checkLists> },
         { "module-table/module-numbers-in-one-and-two-words"_s, testModuleNumbersInOneAndTwoWords },
         { "module-table/find-by-path"_s, withModules<checkFindByPath> },
+        { "module-table/a-path-beside-a-file-keeps-the-root-and-the-separator-of-that-file"_s, testPathBesideFile },
         { "module-table/export-of-symbol"_s, withModules<checkFindExportOfSymbol> },
     };
     return tests;

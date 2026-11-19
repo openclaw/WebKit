@@ -142,6 +142,7 @@ public:
         script = { };
     }
 
+    void addWideCode() { m_codeBlock.at<void*>(Yarr::YarrCodeBlock::offsetOf16BitCode()) = tagCFunctionPtr<void*, Yarr8BitPtrTag>(runMatchingCodeScript); }
     void makeLastIndexReadOnly() { regExpObject.at<uint64_t>(RegExpObject::offsetOfRegExpAndFlags()) |= RegExpObject::lastIndexIsNotWritableFlag; }
     void markGlobalObjectBlack() { m_globalObject->at<uint8_t>(JSCell::cellStateOffset()) = static_cast<uint8_t>(CellState::PossiblyBlack); }
     void setStorageAllocator(unsigned numberOfGroups, FakeAllocator* allocator)
@@ -253,6 +254,8 @@ static void testMatchesOfAtoms()
     Matches matches;
     matches.runner.install(Entry::operationAOTStringFindCharacter8, operationAOTStringFindCharacter8);
     matches.runner.install(Entry::operationAOTStringFind8, operationAOTStringFind8);
+    matches.runner.install(Entry::operationAOTRegExpMatchFlatProgram8, operationAOTRegExpMatchFlatProgram8);
+    matches.runner.install(Entry::operationAOTRegExpMatchFlatProgram16, operationAOTRegExpMatchFlatProgram16);
     Ref<StringImpl> text = StringImpl::create("abcdef"_span);
     FakeSubject subject(text.get());
 
@@ -304,10 +307,10 @@ struct MatchArrayMemory {
         : storageAllocator(static_cast<uint32_t>(WTF::roundUpToMultipleOf<2>(wordsInFrontOfElements + numberOfGroups + 1) * sizeof(uint64_t)))
     {
         storage.bytes.fill(0xab);
-        storageAllocator.makeRoomAt(storage.address(), sizeof(storage.bytes));
+        storageAllocator.makeRoomAt(storage.address(), storage.bytes.size());
         matches.setStorageAllocator(numberOfGroups, &storageAllocator);
-        matches.ropeAllocator.makeRoomAt(ropes.address(), sizeof(ropes.bytes));
-        matches.arrayAllocator.makeRoomAt(array.address(), sizeof(array.bytes));
+        matches.ropeAllocator.makeRoomAt(ropes.address(), ropes.bytes.size());
+        matches.arrayAllocator.makeRoomAt(array.address(), array.bytes.size());
     }
 
     uint64_t butterfly() const { return storage.address() + wordsInFrontOfElements * sizeof(uint64_t); }
@@ -616,6 +619,32 @@ static void testSubjectsWithoutCodeAreLeftToOperation()
     AOT_TEST_CHECK(run.recordedArguments[0] == subject.address() && run.recordedArguments[1] == matches.regExpObject.address() && run.recordedArguments[2] == replacement.address() && !static_cast<uint32_t>(run.recordedArguments[3]));
 }
 
+static void testWideTextsUnderUnicode()
+{
+    Matches matches;
+    matches.addWideCode();
+    const char16_t units[] = { 'a', 0xd83d, 0xde00, 'b' };
+    Ref<StringImpl> text = StringImpl::create(std::span<const char16_t>(units));
+    FakeSubject subject(text.get());
+
+    for (auto [form, match, miss] : formsWithoutArray) {
+        for (Yarr::Flags flag : { Yarr::Flags::Unicode, Yarr::Flags::UnicodeSets }) {
+            for (int start = -1; start <= 4; ++start) {
+                bool isInsidePair = start == 2;
+                matches.reset({ flag }, jsNumber(0));
+                matches.script.answer = start;
+                matches.script.offsets = { start, 4 };
+                StubRun run = matches.match(form, subject);
+                AOT_TEST_CHECK(matches.script.numberOfCalls == 1 && run.calledOperation == isInsidePair);
+                if (start < 0)
+                    AOT_TEST_CHECK(run.result == miss && matches.hasRecordedNothing());
+                else if (!isInsidePair)
+                    AOT_TEST_CHECK(run.result == match && matches.hasRecorded(subject, start, 4));
+            }
+        }
+    }
+}
+
 static void testReplacementByFunctionLooksFirst()
 {
     Matches matches;
@@ -741,7 +770,12 @@ static void testWideSubjectsOfLiterals()
         run = testWithObject(wide, withCodeForBothWidths);
         AOT_TEST_CHECK(!run.calledOperation && run.result == JSValue::ValueTrue && matches.script.numberOfCalls == 1 && matches.lastIndex() == bitsOfValue(jsNumber(isGlobal ? 3 : 0)));
         run = testWithObject(wide, withCodeFor8BitSubjectsAlone);
-        AOT_TEST_CHECK(run.numberOfRecordedCalls == 1 && run.result == 0x1234 && !matches.script.numberOfCalls && matches.lastIndex() == bitsOfValue(jsNumber(0)));
+        AOT_TEST_CHECK(run.calledOperation && !matches.script.numberOfCalls && matches.lastIndex() == bitsOfValue(jsNumber(0)));
+        if (!isGlobal) {
+            AOT_TEST_CHECK(!run.numberOfRecordedCalls && run.result == JSValue::ValueFalse);
+            continue;
+        }
+        AOT_TEST_CHECK(run.numberOfRecordedCalls == 1 && run.result == 0x1234);
         AOT_TEST_CHECK(run.recordedArguments[0] == matches.regExpObject.address() && run.recordedArguments[1] == wide.address());
     }
 }
@@ -759,6 +793,7 @@ std::span<const NativeTest> stubRegExpTests()
         { "stubs/regexp-match/arrays-left-to-operation"_s, ImageTests::whenExecutable<testMatchArraysLeftToOperation> },
         { "stubs/regexp-match/arrays-without-object"_s, ImageTests::whenExecutable<testMatchArraysWithoutObject> },
         { "stubs/regexp-match/subjects-without-code-are-left-to-operation"_s, ImageTests::whenExecutable<testSubjectsWithoutCodeAreLeftToOperation> },
+        { "stubs/regexp-match/wide-texts-under-unicode"_s, ImageTests::whenExecutable<testWideTextsUnderUnicode> },
         { "stubs/regexp-match/replacement-by-function-looks-first"_s, ImageTests::whenExecutable<testReplacementByFunctionLooksFirst> },
         { "stubs/regexp-match/replacement-of-any-kind-is-looked-at-first"_s, ImageTests::whenExecutable<testReplacementOfAnyKindIsLookedAtFirst> },
         { "stubs/regexp-match/wide-subjects-of-literals"_s, ImageTests::whenExecutable<testWideSubjectsOfLiterals> },

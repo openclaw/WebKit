@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 
-BASE = '5a61071f79134bf41844e7ea31a8449147d85dd4'
+BASE = '0befb64c5f30ae5af5137f31c1ebd4f7c3f908d4'
 HISTORY_FLOOR = '5718a6ec579b98362ea7276a426deedcc6281ef5'
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = json.loads((ROOT / '.github/openclaw/variants.json').read_text())

@@ -7,6 +7,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBuiltinTable.h"
 #include "AOTClassMemberTable.h"
 #include "AOTCompiledFrame.h"
 #include "AOTConstantPool.h"
@@ -302,6 +303,34 @@ static void testSectionSizeNotWholeRecords()
     }
 }
 
+static void testFunctionStartsInGroups()
+{
+    for (size_t count : { 0u, 1u, 31u, 32u, 33u, 200u }) {
+        for (uint32_t distance : { 1u, 2000u, 3000u, 70000u, 0x1000000u }) {
+            Vector<uint32_t> starts;
+            for (size_t index = 0; index < count; ++index)
+                starts.append(static_cast<uint32_t>(16 + index * distance + (index % 7 == 5 ? distance / 2 : 0)));
+            Vector<uint8_t> bytes = FunctionStarts::encode(starts.span());
+            AOT_TEST_CHECK(!(bytes.size() % sizeof(uint32_t)) && bytes.size() / sizeof(uint32_t) >= FunctionStarts::numberOfWordsWithoutLists(count));
+            FunctionStarts decoded(reinterpret_cast<const uint32_t*>(bytes.span().data()), count);
+            uint32_t lastGroup = static_cast<uint32_t>(FunctionStarts::numberOfGroupsFor(count) - 1);
+            for (uint32_t index = 0; index < count; ++index) {
+                AOT_TEST_CHECK(decoded[index] == starts[index]);
+                uint32_t end = index + 1 < count ? starts[index + 1] : starts[index] + distance;
+                for (uint32_t offset : { starts[index], end - 1 }) {
+                    if (offset < starts[index])
+                        continue;
+                    for (uint32_t firstGroup : { 0u, index >> FunctionStarts::groupShift }) {
+                        for (uint32_t last : { index >> FunctionStarts::groupShift, lastGroup })
+                            AOT_TEST_CHECK(decoded.find(offset, firstGroup, last) == index);
+                    }
+                }
+            }
+            AOT_TEST_CHECK(decoded[count] == std::numeric_limits<uint32_t>::max());
+        }
+    }
+}
+
 static void testFunctionCount()
 {
     checkHeaderChange(Verdict::MalformedTables, [](ImageHeader& header) { header.counts.functions += 1; });
@@ -469,18 +498,50 @@ static void testRuntimeDescriptionNamesFormatVersion()
     uint32_t named;
     memcpy(&named, record.data() + 28, sizeof(named));
     AOT_TEST_CHECK(named == imageFormatVersion && named == smallImage().image->header().formatVersion);
-    AOT_TEST_CHECK(!findDifferenceFromThisRuntime(record));
+    AOT_TEST_CHECK(!findRuntimeDifference(record));
 
     Vector<uint8_t> other(record);
     ++named;
     memcpy(other.mutableSpan().data() + 28, &named, sizeof(named));
-    std::optional<RuntimeDifference> difference = findDifferenceFromThisRuntime(other.span());
+    std::optional<RuntimeDifference> difference = findRuntimeDifference(other.span());
     AOT_TEST_CHECK(difference && difference->name == "the version of the image format"_s && difference->here == imageFormatVersion && difference->there == imageFormatVersion + 1);
 
     named = 0;
     memcpy(other.mutableSpan().data() + 28, &named, sizeof(named));
-    difference = findDifferenceFromThisRuntime(other.span());
+    difference = findRuntimeDifference(other.span());
     AOT_TEST_CHECK(difference && difference->name == "the version of the image format"_s && !difference->there);
+}
+
+static void testRuntimeDescriptionNamesPlatformOfBuiltinTable()
+{
+    Vector<uint8_t> record(descriptionOfThisRuntime());
+    uint8_t& platform = record[offsetof(RuntimeDescription, platform)];
+    AOT_TEST_CHECK(platform == static_cast<uint8_t>(targetOfThisBuild().platform));
+
+    static_assert(BuiltinPlatform::Android != BuiltinPlatform::Linux);
+    platform = static_cast<uint8_t>(targetOfThisBuild().platform == BuiltinPlatform::Android ? BuiltinPlatform::Linux : BuiltinPlatform::Android);
+    std::optional<RuntimeDifference> difference = findRuntimeDifference(record.span());
+    AOT_TEST_CHECK(difference && difference->name == "the operating system"_s && difference->there == platform);
+}
+
+static void testRuntimeFactsNameWhatEmittedCodeTakes()
+{
+    std::span<const ASCIILiteral> names = namesOfRuntimeFacts();
+    for (ASCIILiteral name : {
+        "the names of the entries in the table of the run time in the order of their numbers"_s,
+        "isHardenedBuild"_s,
+        "ENABLE(RETURN_ADDRESS_SIGNING)"_s,
+        "sizeOfLoopPoll"_s,
+        "sizeof(InlineAllocationData)"_s,
+        "sizeof(BuiltinDirectFunctionBinding)"_s,
+        "OBJECT_OFFSETOF(BuiltinDirectFunctionBinding, function)"_s,
+        "sizeof(StackStringBuilder)"_s,
+        "OBJECT_OFFSETOF(StackStringBuilder, limit)"_s,
+        "MutatorMarkStackLayout::offsetOfTop()"_s,
+        "OBJECT_OFFSETOF(ProgramSymbols, entries)"_s,
+        "Yarr::MatchingContextHolder::offsetOfStackLimit()"_s,
+    })
+        AOT_TEST_CHECK(std::ranges::find(names, name) != names.end());
 }
 
 static void testAdmittedCodeNeedsHeaderOfThisFormat()
@@ -849,6 +910,7 @@ std::span<const NativeTest> imageTableTests()
         { "image/check/section-offset-unaligned"_s, testSectionOffsetUnaligned },
         { "image/check/section-size-not-whole-records"_s, testSectionSizeNotWholeRecords },
         { "image/check/function-count"_s, testFunctionCount },
+        { "image/check/function-starts-in-groups"_s, testFunctionStartsInGroups },
         { "image/check/functions-past-code"_s, testFunctionsPastCode },
         { "image/check/too-few-granules"_s, testTooFewGranules },
         { "image/check/shared-code-ends-past-functions"_s, testSharedCodeEndsPastFunctions },
@@ -865,6 +927,8 @@ std::span<const NativeTest> imageTableTests()
         { "image/locate/constants-and-ffi-code"_s, testConstantsAndFFICode },
         { "image/stamp/stamp"_s, testStamp },
         { "image/stamp/runtime-description-names-format-version"_s, testRuntimeDescriptionNamesFormatVersion },
+        { "image/stamp/runtime-description-names-platform-of-builtin-table"_s, testRuntimeDescriptionNamesPlatformOfBuiltinTable },
+        { "image/stamp/runtime-facts-name-what-emitted-code-takes"_s, testRuntimeFactsNameWhatEmittedCodeTakes },
         { "image/admitted-code/needs-header-of-this-format"_s, testAdmittedCodeNeedsHeaderOfThisFormat },
         { "image/flags/need-header-of-this-format"_s, testFlagsNeedHeaderOfThisFormat },
         { "image/constants/constants-of-bodies-are-found-among-shared-constants"_s, testConstantsOfBodiesAreFoundAmongSharedConstants },

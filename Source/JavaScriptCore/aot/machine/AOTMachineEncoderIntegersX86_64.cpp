@@ -28,6 +28,7 @@ enum class X86IntegerShift : uint8_t {
     Left,
     ArithmeticRight,
     LogicalRight,
+    RotateRight,
 };
 
 enum class X86IntegerExtension : uint8_t {
@@ -162,7 +163,7 @@ static NEVER_INLINE X86IntegerOperand takeX86IntegerOperandFromFusedLoad(Encoder
 static ALWAYS_INLINE X86IntegerOperand takeX86IntegerOperand(Encoder& encoder, const Operation* user, unsigned childIndex, LeafCursor& cursor)
 {
     const Operation* child = inlineChildWithoutCheck(user, childIndex);
-    if (encoder.isFused(child) && child->opcode() != Trunc)
+    if (encoder.isFused(child) && child->opcode() != Trunc && child->opcode() != ZExt32)
         return takeX86IntegerOperandFromFusedLoad(encoder, child, cursor);
 
     Location location = cursor.take();
@@ -183,7 +184,7 @@ static ALWAYS_INLINE X86IntegerOperand takeX86IntegerOperand(Encoder& encoder, c
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-static X86IntegerOperand takeFirstX86IntegerOperand(Encoder& encoder, const Step& step)
+static ALWAYS_INLINE X86IntegerOperand takeFirstX86IntegerOperand(Encoder& encoder, const Step& step)
 {
     LeafCursor cursor(step);
     return takeX86IntegerOperand(encoder, step.operation, 0, cursor);
@@ -290,7 +291,53 @@ static void applyX86IntegerInstruction(CCallHelpers& jit, X86IntegerInstruction 
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-static void applyX86IntegerImmediate(CCallHelpers& jit, X86IntegerInstruction instruction, Width width, int64_t constant, GPRReg source, GPRReg destination)
+static bool tryMultiplyX86ByShift(CCallHelpers& jit, Width width, int64_t factor, GPRReg source, GPRReg destination)
+{
+    bool is32 = width == Width32;
+    auto multiplyByLea = [&](MacroAssembler::Scale scale) {
+        MacroAssembler::BaseIndex product(source, source, scale);
+        if (is32)
+            jit.x86Lea32(product, destination);
+        else
+            jit.x86Lea64(product, destination);
+    };
+    switch (factor) {
+    case 3:
+        multiplyByLea(MacroAssembler::TimesTwo);
+        return true;
+    case 5:
+        multiplyByLea(MacroAssembler::TimesFour);
+        return true;
+    case 9:
+        multiplyByLea(MacroAssembler::TimesEight);
+        return true;
+    case 10:
+        multiplyByLea(MacroAssembler::TimesFour);
+        applyX86IntegerInstruction(jit, X86IntegerInstruction::Add, width, destination, destination);
+        return true;
+    case 31:
+    case 33: {
+        GPRReg addend = source;
+        if (source == destination) {
+            if (source == scratchGPR)
+                return false;
+            moveX86IntegerRegister(jit, width, source, scratchGPR);
+            addend = scratchGPR;
+        } else
+            moveX86IntegerRegister(jit, width, source, destination);
+        if (is32)
+            jit.lshift32(MacroAssembler::TrustedImm32(5), destination);
+        else
+            jit.lshift64(MacroAssembler::TrustedImm32(5), destination);
+        applyX86IntegerInstruction(jit, factor == 31 ? X86IntegerInstruction::Subtract : X86IntegerInstruction::Add, width, addend, destination);
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+static ALWAYS_INLINE void applyX86IntegerImmediate(CCallHelpers& jit, X86IntegerInstruction instruction, Width width, int64_t constant, GPRReg source, GPRReg destination)
 {
     bool is32 = width == Width32;
     RELEASE_ASSERT(is32 || isRepresentableAs<int32_t>(constant));
@@ -311,6 +358,8 @@ static void applyX86IntegerImmediate(CCallHelpers& jit, X86IntegerInstruction in
             jit.sub64(source, immediate, destination);
         return;
     case X86IntegerInstruction::Multiply:
+        if (tryMultiplyX86ByShift(jit, width, is32 ? static_cast<int32_t>(constant) : constant, source, destination))
+            return;
         if (is32)
             jit.mul32(immediate, source, destination);
         else
@@ -477,6 +526,12 @@ static void encodeX86IntegerShift(Encoder& encoder, const Step& step, X86Integer
         else
             jit.urshift64(source, immediate, destination);
         return;
+    case X86IntegerShift::RotateRight:
+        if (is32)
+            jit.rotateRight32(source, immediate, destination);
+        else
+            jit.rotateRight64(source, immediate, destination);
+        return;
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
@@ -493,7 +548,7 @@ static void encodeX86IntegerExtension(Encoder& encoder, const Step& step, X86Int
         moveX86IntegerOperand(jit, Width32, source, destination);
         source = X86IntegerOperand::inRegister(destination);
     }
-    if (source.isInRegister() && source.gpr == destination && isFreeInRegisterOfChild(encoder.m_liveness, step.operation))
+    if (source.isInRegister() && source.gpr == destination && isFreeWhenCoalesced(encoder.m_liveness, step.operation))
         return;
 
     switch (extension) {
@@ -667,7 +722,7 @@ static void encodeX86PopulationCount(Encoder& encoder, const Step& step)
         jit.countPopulation64(gpr, destination);
 }
 
-static void encodeX86ScaledSum(Encoder& encoder, const Step& step)
+static ALWAYS_INLINE void encodeX86ScaledSum(Encoder& encoder, const Step& step)
 {
     LeafCursor cursor(step);
     AddressForm form = encoder.resolveScaledSum(step.operation, cursor);
@@ -686,7 +741,7 @@ bool Encoder::tryEncodeSumAndConstant(const Step& sumStep, const Step& outerStep
         return false;
     if (sum->useCount() != 1 || sum->isNarrowReference() || m_liveness.of(sum).has(ValueFlag::IsKeptForCollector))
         return false;
-    if (m_allocation.isSpilled(sum) || m_liveness.worksInMemory(sum) || m_liveness.worksInMemory(outer) || m_liveness.goesByOverflow(outer))
+    if (m_allocation.isSpilled(sum) || m_liveness.worksInMemory(sum) || m_liveness.worksInMemory(outer) || m_liveness.usesOverflowFlag(outer))
         return false;
     for (const Operation* child : sum->children()) {
         if (child->isConstant() || (m_liveness.isFused(child) && child->opcode() != Trunc))
@@ -754,7 +809,7 @@ static void applyX86InstructionThatSetsFlags(CCallHelpers& jit, bool subtracts, 
 
 void Encoder::encodeSumThatSetsFlags(const Step& step)
 {
-    SumTestedByOverflow test = sumTestedByOverflowOf(m_liveness, step.operation);
+    OverflowCheckedSum test = overflowCheckedSumOf(m_liveness, step.operation);
     AllowMacroScratchRegisterUsage allowScratch(m_jit);
     GPRReg destination = step.destination.gpr();
     bool subtracts = test.subtracts();
@@ -787,7 +842,7 @@ void Encoder::encodeInteger(const Step& step)
 
     switch (step.operation->opcode()) {
     case Add:
-        if (m_liveness.goesByOverflow(step.operation))
+        if (m_liveness.usesOverflowFlag(step.operation))
             encodeSumThatSetsFlags(step);
         else if (addsScaledIndex(m_liveness, step.operation))
             encodeX86ScaledSum(*this, step);
@@ -795,7 +850,7 @@ void Encoder::encodeInteger(const Step& step)
             encodeX86IntegerBinary(*this, step, X86IntegerInstruction::Add);
         return;
     case Sub:
-        if (m_liveness.goesByOverflow(step.operation))
+        if (m_liveness.usesOverflowFlag(step.operation))
             encodeSumThatSetsFlags(step);
         else
             encodeX86IntegerBinary(*this, step, X86IntegerInstruction::Subtract);
@@ -821,6 +876,9 @@ void Encoder::encodeInteger(const Step& step)
         return;
     case ZShr:
         encodeX86IntegerShift(*this, step, X86IntegerShift::LogicalRight);
+        return;
+    case RotR:
+        encodeX86IntegerShift(*this, step, X86IntegerShift::RotateRight);
         return;
 
     case SExt8:

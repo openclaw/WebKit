@@ -319,7 +319,7 @@ JSString* JSBoundFunction::nameSlow(VM& vm)
             if (builder.hasOverflowed())
                 terminal = jsEmptyString(vm);
             else
-                terminal = jsNontrivialString(vm, builder.toString());
+                terminal = jsNontrivialString(vm, WTF::move(builder).toString());
         }
     }
 
@@ -343,9 +343,11 @@ String JSBoundFunction::nameStringWithoutGCSlow(VM& vm)
     String terminal;
     while (true) {
 #if ENABLE(AOT)
-        if (isSlimClosureType(cursor->type())) {
-            terminal = AOT::CompiledCallee::name(cursor);
-            break;
+        if (vm.hasCompiledCode()) [[unlikely]] {
+            if (String declaredName = AOT::closureDeclaredName(cursor); !declaredName.isNull()) {
+                terminal = declaredName;
+                break;
+            }
         }
 #endif
         ASSERT(cursor->inherits<JSFunction>()); // If this is not JSFunction, we eagerly materialized the name.
@@ -371,7 +373,7 @@ String JSBoundFunction::nameStringWithoutGCSlow(VM& vm)
     builder.append(WTF::move(terminal));
     if (builder.hasOverflowed())
         return emptyString();
-    return builder.toString();
+    return WTF::move(builder).toString();
 }
 
 double JSBoundFunction::lengthSlow(VM& vm)

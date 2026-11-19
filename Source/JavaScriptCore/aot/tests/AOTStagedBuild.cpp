@@ -27,6 +27,19 @@
 
 namespace JSC { namespace AOT { namespace Typed {
 
+static thread_local bool t_testRunsAsUsersBuild = false;
+
+ScopeOfTestThatRunsAsUsersBuild::ScopeOfTestThatRunsAsUsersBuild(bool runsAsUsersBuild)
+    : m_before(t_testRunsAsUsersBuild)
+{
+    t_testRunsAsUsersBuild = runsAsUsersBuild;
+}
+
+ScopeOfTestThatRunsAsUsersBuild::~ScopeOfTestThatRunsAsUsersBuild()
+{
+    t_testRunsAsUsersBuild = m_before;
+}
+
 Vector<TypeID> typesNamedBy(const Program& program, std::optional<FunctionID> functionOfTypesLine)
 {
     FunctionID function = functionOfTypesLine.value_or(FunctionID(0u));
@@ -226,20 +239,22 @@ static InternalErrorKind errorKindOfStagedMachineFailure(Machine::FailureKind ki
     switch (kind) {
     case Machine::FailureKind::MalformedProcedure:
     case Machine::FailureKind::OutOfRegisters:
-    case Machine::FailureKind::NeedsFrameWhereNoneIsSetUp:
+    case Machine::FailureKind::MissingFrameSetup:
         return InternalErrorKind::Unknown;
     case Machine::FailureKind::AccessOutsideDeclaredEffects:
         return InternalErrorKind::StoreOutsideDeclaredEffects;
-    case Machine::FailureKind::RegisterLacksItsValue:
-        return InternalErrorKind::RegisterLacksItsValue;
-    case Machine::FailureKind::SpillSlotLacksItsValue:
-        return InternalErrorKind::SpillSlotLacksItsValue;
+    case Machine::FailureKind::WrongValueInRegister:
+        return InternalErrorKind::WrongValueInRegister;
+    case Machine::FailureKind::WrongValueInSpillSlot:
+        return InternalErrorKind::WrongValueInSpillSlot;
     case Machine::FailureKind::FrameAddressAcrossSuspension:
         return InternalErrorKind::FrameAddressAcrossSuspension;
     case Machine::FailureKind::NarrowReferenceWithoutPointer:
         return InternalErrorKind::NarrowReferenceWithoutPointer;
     case Machine::FailureKind::InnerPointerWithoutOwner:
         return InternalErrorKind::InnerPointerWithoutOwner;
+    case Machine::FailureKind::UpperHalfIsNotClear:
+        return InternalErrorKind::UpperHalfNotClear;
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
@@ -254,7 +269,7 @@ struct MachineOperationsOfStagedBuild {
     {
     }
 
-    CCallHelpers jit;
+    ImageAssembler jit;
     RelocationRecorder relocations;
     CodeRecords records;
     StackCheckState stackChecks;
@@ -297,7 +312,7 @@ struct StagedBuild::State {
 
 StagedBuild::State::State(std::unique_ptr<Program>&& program, BuildContext& build, Mechanisms mechanisms, OrderOfWorklist orderOfWorklist)
     : build(build)
-    , mechanisms(withoutMechanismsMissingDependencies(mechanisms))
+    , mechanisms(withoutMechanismsMissingDependencies(withoutMechanismsThatOptionsWithhold(mechanisms, build.options().testing)))
     , orderOfWorklist(orderOfWorklist)
     , hasFailed(!program)
 {
@@ -466,6 +481,18 @@ const PreparedProgram* StagedBuild::prepared()
     return m_state->ensurePrepared() ? &m_state->prepared : nullptr;
 }
 
+std::unique_ptr<CompileInputs> StagedBuild::prepareInputsForVerification()
+{
+    if (!m_state->isPrepared)
+        m_state->prepared.isVerifiedByCaller = true;
+    if (!prepared())
+        return nullptr;
+    RELEASE_ASSERT(willVerifyCode(m_state->prepared, m_build));
+    auto inputs = makeUniqueWithoutFastMallocCheck<CompileInputs>(*m_state->prepared.compileInputs);
+    inputs->walk.options.verifiesCode = true;
+    return inputs;
+}
+
 TypeArena& StagedBuild::types()
 {
     State& state = *m_state;
@@ -508,7 +535,8 @@ Machine::Procedure* StagedBuild::emitMachineOperations(const Code& codeToEmit, M
     CompileWorker& worker = *state.compileWorker;
     const CodeGenerationInputs& inputs = state.prepared.compileInputs->generation;
     Machine::ProcedureTraits traits = machineTraitsOf(m_build, inputs, *code);
-    traits.checksAllocation = true;
+    if (!t_testRunsAsUsersBuild)
+        traits.checksAllocation = true;
 
     state.machineArena.reset();
     state.machine = makeUniqueWithoutFastMallocCheck<MachineOperationsOfStagedBuild>(m_build, inputs, state.machineArena, traits, worker.totals());

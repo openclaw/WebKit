@@ -44,6 +44,7 @@ static_assert(sizeof(LayoutSetData) == 16 && isImageRecord<LayoutSetData>);
 
 static constexpr uint16_t fieldIsOptional = 1u << 0;
 static constexpr uint16_t fieldIsOutOfLine = 1u << 1;
+static constexpr uint16_t fieldTakesAccessorsOfLibraryAlone = 1u << 2;
 static constexpr uint16_t fieldIsNeverStoredWithOtherType = 1u << 3;
 static constexpr uint16_t fieldMayExistWithoutStorage = 1u << 4;
 static constexpr uint16_t fieldDeferredClosureCapturesObject = 1u << 5;
@@ -59,6 +60,8 @@ static constexpr uint16_t fieldIsNotConfigurable = static_cast<unsigned>(Propert
 static constexpr uint16_t fieldIsAccessor = static_cast<unsigned>(PropertyAttribute::Accessor) << fieldAttributesShift;
 static constexpr uint16_t fieldAttributeFlags = fieldIsReadOnly | fieldIsNotEnumerable | fieldIsNotConfigurable | fieldIsAccessor;
 static constexpr uint16_t allFieldFlags = (1u << 15) - 1;
+static constexpr uint16_t fieldRecordIsCopyInFieldReturn = 1u << 15;
+static constexpr uint16_t fieldTypeIsLeftToRunTime = fieldRecordIsCopyInFieldReturn;
 static_assert(fieldAttributeFlags == (allFieldFlags & ~((1u << 11) - 1)));
 
 struct FieldData {
@@ -74,26 +77,37 @@ struct FieldData {
     uint32_t isWrittenPrivateName : 1;
     uint32_t isKeptFromComparisons : 1;
     uint16_t flags;
-    uint16_t operandIndex;
+    uint16_t typeNumber;
     SlotData slot;
-    uint32_t type;
 
     bool isOutOfLine() const { return flags & fieldIsOutOfLine; }
     bool isPrivate() const { return flags & fieldIsPrivate; }
     bool isBrand() const { return flags & fieldIsBrand; }
     bool isAccessor() const { return flags & fieldIsAccessor; }
+    bool takesAccessorsOfLibraryAlone() const { return flags & fieldTakesAccessorsOfLibraryAlone; }
     unsigned attributes() const { return (flags & fieldAttributeFlags) >> fieldAttributesShift; }
     bool canLeaveSlot() const { return AOT::canLeaveSlot(slot.representation()); }
     bool isRequired() const { return !(flags & fieldIsOptional); }
 };
-static_assert(sizeof(FieldData) == 16 && isImageRecord<FieldData> && FieldData::nameBits + 8 == 32);
+static_assert(sizeof(FieldData) == 12 && isImageRecord<FieldData> && FieldData::nameBits + 8 == 32);
+
+struct FieldOperandsData {
+    uint32_t field;
+    uint32_t deferredClosure;
+    uint32_t environmentSlot;
+};
+static_assert(sizeof(FieldOperandsData) == 12 && isImageRecord<FieldOperandsData>);
 
 struct alignas(64) FieldExit {
     static constexpr unsigned numberOfPlaces = 64;
+    static constexpr unsigned numberOfPlacesBySlot = 16;
     static constexpr unsigned sizeShift = 6;
 
     const FieldData* field;
-    uint64_t absentBits;
+    union {
+        uint64_t absentBits;
+        GetterSetter* accessorOfDefinition;
+    };
     StructureID structureBefore;
     StructureID structureAfter;
     StructureID extraPropertiesBefore;
@@ -114,6 +128,23 @@ struct alignas(64) FieldExit {
 };
 static_assert(sizeof(FieldExit) == 1u << FieldExit::sizeShift && std::is_trivially_copyable_v<FieldExit>);
 
+struct alignas(64) FieldReturn {
+    static constexpr unsigned numberOfPlaces = 16;
+    static constexpr unsigned sizeShift = 6;
+
+    FieldData markedCopyOfField;
+    const FieldData* field;
+    StructureID structureBefore;
+    StructureID structureAfter;
+    StructureID extraPropertiesBefore;
+    StructureID extraPropertiesAfter;
+    uint32_t orderWord;
+    uint32_t name;
+    PropertyOffset offset;
+    uint16_t offsetOfExtraPropertiesWord;
+};
+static_assert(sizeof(FieldReturn) == 1u << FieldReturn::sizeShift && std::is_trivially_copyable_v<FieldReturn> && !offsetof(FieldReturn, markedCopyOfField));
+
 struct AddedExtraProperty {
     static constexpr unsigned numberOfPlaces = 64;
 
@@ -125,11 +156,16 @@ struct AddedExtraProperty {
     uint32_t orderWordBefore;
     PropertyOffset offset;
     unsigned attributes;
+    GetterSetter* lastAccessor;
 };
 static_assert(std::is_trivially_copyable_v<AddedExtraProperty>);
 
 struct VariableData {
     static constexpr uint32_t noName = UINT32_MAX;
+    static constexpr uint32_t isVariableOfModuleFlag = 1u << 31;
+
+    constexpr bool isVariableOfModule() const { return name != noName && name & isVariableOfModuleFlag; }
+    constexpr uint32_t string() const { return name & ~isVariableOfModuleFlag; }
 
     uint32_t name;
     SlotData slot;
@@ -140,6 +176,7 @@ static constexpr uint32_t methodHasComputedName = 1;
 static constexpr uint32_t methodTakesEnvironment = 2;
 static constexpr uint32_t methodIsCreatedAtDefinition = 4;
 static constexpr uint32_t methodMayBeStoredOver = 8;
+static constexpr uint32_t methodIsStoredFirst = 16;
 
 struct MethodData {
     static constexpr unsigned nameBits = FieldData::nameBits;
@@ -151,7 +188,7 @@ struct MethodData {
     MethodKind kind() const { return static_cast<MethodKind>(kindBits); }
 };
 static_assert(sizeof(MethodData) == 8 && isImageRecord<MethodData>);
-static_assert(numberOfEnumerators<MethodKind> <= 1u << 2 && methodMayBeStoredOver < 1u << (30 - MethodData::nameBits));
+static_assert(numberOfEnumerators<MethodKind> <= 1u << 2 && methodIsStoredFirst < 1u << (30 - MethodData::nameBits));
 
 static constexpr unsigned numberOfClassSides = numberOfEnumerators<ClassSide>;
 
@@ -179,6 +216,21 @@ struct ClassBelowWithGuardOfNameData {
 };
 static_assert(sizeof(ClassBelowWithGuardOfNameData) == 8 && isImageRecord<ClassBelowWithGuardOfNameData>);
 
+struct AssignedMemberData {
+    uint32_t classLayout() const { return classAndSide / numberOfClassSides; }
+    ClassSide side() const { return static_cast<ClassSide>(classAndSide % numberOfClassSides); }
+    uint64_t place() const { return static_cast<uint64_t>(classAndSide) << 32 | name; }
+
+    uint32_t classAndSide;
+    uint32_t name;
+    uint32_t guardBit;
+    uint32_t method;
+    uint32_t getter;
+    uint32_t setter;
+    uint32_t holdsValue;
+};
+static_assert(sizeof(AssignedMemberData) == 28 && isImageRecord<AssignedMemberData>);
+
 struct ClassGuardCountData {
     uint32_t guardBit;
     uint32_t offsetOfCount;
@@ -187,16 +239,38 @@ struct ClassGuardCountData {
 };
 static_assert(sizeof(ClassGuardCountData) == 8 && isImageRecord<ClassGuardCountData>);
 
+struct PropertiesOfHeirsData {
+    static constexpr uint32_t mayBeStoredLate = 1u << 31;
+    static constexpr uint32_t extendsMixin = 1u << 31;
+
+    uint32_t builtinClassAndForm;
+    uint32_t numberOfNames;
+
+    uint32_t builtinClass() const { return builtinClassAndForm & ~extendsMixin; }
+    bool isBelowMixin() const { return builtinClassAndForm & extendsMixin; }
+    std::span<const uint32_t> names() const { return { reinterpret_cast<const uint32_t*>(this + 1), numberOfNames }; }
+};
+static_assert(sizeof(PropertiesOfHeirsData) == 8 && isImageRecord<PropertiesOfHeirsData>);
+
+inline constexpr unsigned maxLogOfAccesses = 31;
+
+constexpr bool prefersLayoutAbove(unsigned logOfAccessesAbove, size_t fieldsAbove, unsigned logOfAccessesBelow, size_t fieldsBelow)
+{
+    if (!fieldsAbove || logOfAccessesAbove + 1 < logOfAccessesBelow)
+        return false;
+    return logOfAccessesAbove > logOfAccessesBelow + 1 || fieldsAbove > fieldsBelow;
+}
+
 struct ClassData {
     uint32_t base;
     uint32_t expectedBase;
-    uint32_t builtinBase;
     uint32_t classConstructor;
     uint32_t environment;
     uint32_t numberOfMethods;
     uint32_t numberOfStaticMethods;
     uint32_t numberOfStaticFields;
     uint32_t subclassesOffset;
+    uint32_t propertiesOfHeirsOffset;
     uint32_t guardBit[numberOfClassSides];
     uint32_t namedGuardsOffset[numberOfClassSides];
     uint32_t guardsHoldWhileClear : 1;
@@ -206,9 +280,10 @@ struct ClassData {
     uint32_t sidesChangedInSightAlone : numberOfClassSides;
     uint32_t namesAreLaidUnderWrittenKeysAlone : 1;
     uint32_t classObjectLacksHasInstance : 1;
-    uint32_t hasStaticFieldUnderComputedKey : 1;
     uint32_t privateNamesAreKnownToTexts : 1;
-    uint32_t unusedClassBits : 25 - 2 * numberOfClassSides { 0 };
+    uint32_t numberOfFieldsThroughLastAllocated : 16;
+    uint32_t hasComputedMemberNames : 1;
+    uint32_t logOfAccesses : 9 - 2 * numberOfClassSides;
 
     bool bitsAreClearWhileGuardsHold(ClassSide side) const { return side == ClassSide::Prototype ? guardsOfPrototypeSideHoldWhileClear : guardsHoldWhileClear; }
     bool hasGuardsHereOrBelow(ClassSide side) const { return sidesWithGuardsHereOrBelow >> static_cast<unsigned>(side) & 1; }
@@ -228,11 +303,13 @@ static_assert(offsetof(ExtensionLayoutData, granulesOfFirstExtensionHigh) == off
 struct LayoutData {
     static constexpr uint32_t noBase = UINT32_MAX;
 
-    static constexpr unsigned impossibleMutationBits = 13;
+    static constexpr unsigned impossibleMutationBits = 11;
 
     uint32_t kindBits : 4;
     uint32_t isDerived : 1;
     uint32_t impossibleMutationsRaw : impossibleMutationBits;
+    uint32_t marksFrozenObjects : 1;
+    uint32_t marksOtherPrototypes : 1;
     uint32_t isSaidNeverToReachUnseenCode : 1;
     uint32_t evaluationBits : 2;
     uint32_t hasFieldsWithSymbolKeys : 1;
@@ -248,7 +325,6 @@ struct LayoutData {
     uint32_t isCopiedByWords : 1;
     uint32_t index;
     uint32_t shape;
-    uint32_t name;
     uint32_t size;
     uint16_t numberOfFields;
     uint16_t numberOfFieldOperands;
@@ -297,6 +373,8 @@ struct LayoutData {
     uint32_t extensionSize() const { return hasExtensionData ? extensionData().extensionSize : 0; }
     uint64_t granulesOfFirstExtension() const { return hasExtensionData ? static_cast<uint64_t>(extensionData().granulesOfFirstExtensionHigh) << 32 | extensionData().granulesOfFirstExtensionLow : 0; }
     uint32_t base() const { return isClass() ? classData().base : noBase; }
+    unsigned logOfAccesses() const { return isClass() ? classData().logOfAccesses : 0; }
+    bool isPreferredToLayoutBelow(const LayoutData& below) const { return prefersLayoutAbove(logOfAccesses(), numberOfFields, below.logOfAccesses(), below.numberOfFields); }
     uint32_t assumedBase() const
     {
         if (!isClass())
@@ -305,21 +383,29 @@ struct LayoutData {
     }
 
     std::span<const FieldData> fields() const { return { reinterpret_cast<const FieldData*>(this + 1), numberOfFields }; }
+    std::span<const FieldData> fieldsThroughLastAllocated() const { return fields().first(isClass() ? classData().numberOfFieldsThroughLastAllocated : numberOfFields); }
     std::span<const uint32_t> fieldOperands() const { return { reinterpret_cast<const uint32_t*>(fields().data() + numberOfFields), numberOfFieldOperands }; }
     std::span<const MethodData> methods() const { return { reinterpret_cast<const MethodData*>(fieldOperands().data() + numberOfFieldOperands), isClass() ? classData().numberOfMethods : 0 }; }
     std::span<const MethodData> staticMethods() const { return { methods().data() + methods().size(), isClass() ? classData().numberOfStaticMethods : 0 }; }
     std::span<const FieldData> staticFields() const { return { reinterpret_cast<const FieldData*>(staticMethods().data() + staticMethods().size()), isClass() ? classData().numberOfStaticFields : 0 }; }
 
     uint16_t indexOf(const FieldData& field) const { return static_cast<uint16_t>(&field - fields().data()); }
+    const FieldOperandsData& operandsOf(const FieldData& field) const
+    {
+        auto operands = spanReinterpretCast<const FieldOperandsData>(fieldOperands());
+        auto found = std::ranges::find(operands, indexOf(field), &FieldOperandsData::field);
+        RELEASE_ASSERT(found != operands.end());
+        return *found;
+    }
     uint32_t deferredClosureNumberOf(const FieldData& field) const
     {
         ASSERT(field.slot.representation() == SlotRepresentation::DeferredClosure);
-        return fieldOperands()[field.operandIndex];
+        return operandsOf(field).deferredClosure;
     }
     SlotData closureEnvironmentSlotOf(const FieldData& field) const
     {
         ASSERT(field.flags & fieldDeferredClosureCapturesEnvironment);
-        return SlotData::decode(fieldOperands()[field.operandIndex + 1]);
+        return SlotData::decode(operandsOf(field).environmentSlot);
     }
 
     static constexpr size_t prefixSize(bool isClass, bool hasExtensionData, bool hasExtraPropertiesSlot) { return (isClass ? sizeof(ClassData) : 0) + (hasExtensionData ? sizeof(ExtensionLayoutData) : 0) + (hasExtraPropertiesSlot ? sizeof(SlotData) : 0); }
@@ -344,7 +430,7 @@ struct LayoutData {
         return trailingSize(counts);
     }
 };
-static_assert(sizeof(LayoutData) == 36 && offsetof(LayoutData, index) == 4 && isImageRecord<LayoutData>);
+static_assert(sizeof(LayoutData) == 32 && offsetof(LayoutData, index) == 4 && isImageRecord<LayoutData>);
 static_assert(numberOfEnumerators<LayoutKind> <= 1u << 5 && numberOfEnumerators<EvaluationState> <= 1u << 2);
 static_assert(numberOfEnumerators<ObjectMutation> <= LayoutData::impossibleMutationBits);
 static_assert(numberOfEnumerators<LayoutKind> <= 1u << 4);
@@ -352,7 +438,7 @@ static_assert(maxFieldsInOrder <= UINT16_MAX);
 
 struct EnvironmentData {
     LayoutKind kind;
-    uint8_t unused[3] { };
+    Number24 moduleAfterNone;
     uint32_t index;
     uint32_t shape;
     uint32_t name;
@@ -386,6 +472,39 @@ struct AllocationData {
 };
 static_assert(sizeof(AllocationData) == 10 && alignof(AllocationData) == 2 && isImageRecord<AllocationData>);
 static_assert(AllocationData::create(0x123456, 0x89abcdef, AllocationData::maxSize, true, false).size() == AllocationData::maxSize && AllocationData::create(0x123456, 0x89abcdef, 16, true, false).orderWord() == 0x89abcdef);
+
+struct AllocationRow {
+    Number24 shape;
+    Number24 form;
+};
+static_assert(sizeof(AllocationRow) == 6 && isImageRecord<AllocationRow>);
+
+class AllocationTable {
+public:
+    AllocationTable(std::span<const AllocationRow> rows, std::span<const AllocationData> forms)
+        : m_rows(rows)
+        , m_forms(forms)
+    {
+    }
+
+    size_t size() const { return m_rows.size(); }
+    AllocationData operator[](size_t number) const
+    {
+        const AllocationRow& row = m_rows[number];
+        AllocationData allocation = m_forms[row.form];
+        allocation.shape = row.shape;
+        return allocation;
+    }
+    AllocationData checkedAt(size_t number) const
+    {
+        RELEASE_ASSERT(number < size());
+        return (*this)[number];
+    }
+
+private:
+    std::span<const AllocationRow> m_rows;
+    std::span<const AllocationData> m_forms;
+};
 
 struct ConstructedAllocationData {
     Number24 allocation;

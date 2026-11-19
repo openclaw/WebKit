@@ -12,7 +12,9 @@
 #include "AOTDiagnostics.h"
 #include "AOTIRFunction.h"
 #include "AOTIRProgram.h"
+#include "AOTInliningAcrossFiles.h"
 #include "AOTLimits.h"
+#include "AOTOpcodeSets.h"
 #include "AOTTypedArrayKinds.h"
 #include <algorithm>
 #include <limits>
@@ -48,15 +50,27 @@ constinit const OpcodeSet opcodesWithoutEmitterInCode = opcodesWithoutEmitterByL
 
 bool readsNumberOutOfBytes(const Operation& operation)
 {
-    if (operation.opcode != Opcode::GetTypedArrayElement || !operation.isInsideView() || operation.representation != Representation::Double)
+    if (operation.representation != Representation::Double)
         return false;
-    return isFloat(operation.typedArrayType()) && hasInlineElementAccess(operation.typedArrayType());
+    if (operation.opcode == Opcode::GetDataViewElement)
+        return isFloat(operation.typedArrayType());
+    if (operation.opcode != Opcode::GetTypedArrayElement || !operation.isInsideView())
+        return false;
+    return operation.typedArrayType() == NotTypedArray || (isFloat(operation.typedArrayType()) && hasInlineElementAccess(operation.typedArrayType()));
+}
+
+bool readsNumberOrNothingOutOfBytes(const Operation& operation)
+{
+    if (operation.opcode != Opcode::GetTypedArrayElement || operation.isInsideView() || operation.representation != Representation::OptionalDouble)
+        return false;
+    return !isBigInt(operation.typedArrayType()) && hasInlineElementAccess(operation.typedArrayType());
 }
 
 bool handsOnBitsOfNaN(const Operation& operation)
 {
-    constexpr OpcodeSet arithmetic { Opcode::Add, Opcode::Sub, Opcode::Mul, Opcode::Div };
-    return arithmetic.contains(operation.opcode) && operation.form() == OperatorForm::Numbers && operation.representation == Representation::Double;
+    constexpr OpcodeSet arithmetic { Opcode::Add, Opcode::Sub, Opcode::Mul, Opcode::Div, Opcode::Negate };
+    bool isArithmetic = arithmetic.contains(operation.opcode) || operation.opcode == Opcode::ToNumber;
+    return isArithmetic && operation.form() == OperatorForm::Numbers && operation.representation == Representation::Double;
 }
 
 bool takesAnyNaN(const Operation& user, uint32_t operandIndex)
@@ -66,8 +80,10 @@ bool takesAnyNaN(const Operation& user, uint32_t operandIndex)
         return user.form() == OperatorForm::Numbers;
     if (user.opcode == Opcode::ToInt32 || user.opcode == Opcode::ToUint32)
         return true;
+    if (user.opcode == Opcode::PutDataViewElement)
+        return operandIndex == OperandIndex::PutDataViewElement::value;
     if (user.opcode == Opcode::PutTypedArrayElement)
-        return operandIndex == OperandIndex::PutTypedArrayElement::value && user.isInsideView() && hasInlineElementAccess(user.typedArrayType()) && !isClamped(user.typedArrayType());
+        return operandIndex == OperandIndex::PutTypedArrayElement::value && hasInlineElementAccess(user.typedArrayType()) && !isClamped(user.typedArrayType());
     return handsOnBitsOfNaN(user);
 }
 
@@ -126,13 +142,13 @@ static ALWAYS_INLINE bool allocatesInFrameOfUnit(const Draft& draft)
     return shapesOfOperationsInCode[static_cast<unsigned>(draft.opcode)].hasWordOfStorage && draft.storage() != AllocationStorage::Heap;
 }
 
-static ALWAYS_INLINE ValueID appendRecordToCode(StableArray<Operation, 10>& operations, const Operation& operation)
+static ALWAYS_INLINE ValueID appendRecordToCode(auto& operations, const Operation& operation)
 {
     RELEASE_ASSERT(operations.size() < Reference::indexMask);
     return ValueID(operations.append(operation));
 }
 
-ALWAYS_INLINE void Code::fill(Instruction& instruction, const DraftWords& draft)
+ALWAYS_INLINE_INTO_OTHER_FILES void Code::fill(Instruction& instruction, const DraftWords& draft)
 {
     std::span<const Reference> operands = draft.operands();
     std::span<const uint32_t> payload = draft.payload();
@@ -153,7 +169,8 @@ ALWAYS_INLINE void Code::fill(Instruction& instruction, const DraftWords& draft)
         instruction.m_numberOfInlineOperands = numberOfOperands;
         instruction.m_numberOfInlinePayloadWords = numberOfPayloadWords;
     } else {
-        RELEASE_ASSERT(numberOfNamedOperands <= Instruction::maxNumberOfNamedOperands);
+        static_assert(Instruction::maxNumberOfNamedOperands == (1u << 4) - 1);
+        RELEASE_ASSERT(numberOfNamedOperands <= Instruction::maxNumberOfNamedOperands && numberOfPayloadWords <= UINT32_MAX >> 4);
         payloadWords = m_sideWords.allocate(numberOfPayloadWords + numberOfOperands);
         operandWords = payloadWords + numberOfPayloadWords;
         auto address = std::bit_cast<std::array<uint32_t, 2>>(payloadWords);
@@ -230,36 +247,41 @@ void Code::noteEffectsBelieved(ValueID id, const Effects& effects)
     m_effectsBelieved.append({ id, effects });
 }
 
+void Code::noteSteppedWithCounter(const SteppedWithCounter& beside)
+{
+    if (!m_steppedWithCounters.contains(beside))
+        m_steppedWithCounters.append(beside);
+}
+
+void Code::noteTestsPassedFor(ValueID id, const PassedTest& passed)
+{
+    while (!m_testsPassed.isEmpty() && m_testsPassed.last().first.index() >= id.index())
+        m_testsPassed.removeLast();
+    m_testsPassed.append({ id, passed });
+}
+
+const PassedTest* Code::testsPassedFor(ValueID id) const
+{
+    auto found = std::ranges::lower_bound(m_testsPassed, id.index(), { }, [](const auto& noted) { return noted.first.index(); });
+    return found != m_testsPassed.end() && found->first == id ? &found->second : nullptr;
+}
+
+void Code::noteThatOperationWritesWhatTurnHasMade(ValueID id)
+{
+    while (!m_operationsThatWriteWhatTurnHasMade.isEmpty() && m_operationsThatWriteWhatTurnHasMade.last().index() >= id.index())
+        m_operationsThatWriteWhatTurnHasMade.removeLast();
+    m_operationsThatWriteWhatTurnHasMade.append(id);
+}
+
+bool Code::writesWhatTurnHasMade(ValueID id) const
+{
+    return std::ranges::binary_search(m_operationsThatWriteWhatTurnHasMade, id.index(), { }, &ValueID::index);
+}
+
 const Effects* Code::effectsBelievedOf(ValueID id) const
 {
     auto found = std::ranges::lower_bound(m_effectsBelieved, id.index(), { }, [](const auto& noted) { return noted.first.index(); });
     return found != m_effectsBelieved.end() && found->first == id ? &found->second : nullptr;
-}
-
-void Code::takeRoomOf(Code& former)
-{
-    m_operations.takeRoomOf(former.m_operations);
-    m_blocks.takeRoomOf(former.m_blocks);
-    m_edges.takeRoomOf(former.m_edges);
-    m_sideWords.takeRoomOf(former.m_sideWords);
-    takeRoom(m_inlineFrames, former.m_inlineFrames);
-    takeRoom(m_entries, former.m_entries);
-    takeRoom(m_factUses, former.m_factUses);
-    takeRoom(m_effectsBelieved, former.m_effectsBelieved);
-    takeRoom(m_testsOfGuardsInFrontOfCopies, former.m_testsOfGuardsInFrontOfCopies);
-    takeRoom(m_pollsWithFates, former.m_pollsWithFates);
-    takeRoom(m_changesToOlderParts, former.m_changesToOlderParts);
-    takeRoom(m_olderBlocksEnded, former.m_olderBlocksEnded);
-    takeRoom(m_recordsAbandoned, former.m_recordsAbandoned);
-    takeRoom(m_partsAbandoned, former.m_partsAbandoned);
-    takeRoom(m_marks, former.m_marks);
-    takeRoom(m_useCounts, former.m_useCounts);
-    takeRoom(m_onlyUsers, former.m_onlyUsers);
-    takeRoom(m_parametersFed, former.m_parametersFed);
-    takeRoom(m_order, former.m_order);
-    takeRoom(m_suspensions, former.m_suspensions);
-    takeRoom(m_liveValues, former.m_liveValues);
-    takeRoom(m_releasesBehindLastReads, former.m_releasesBehindLastReads);
 }
 
 void Code::reset(CodeUnit unit)
@@ -267,44 +289,64 @@ void Code::reset(CodeUnit unit)
     m_unit = unit;
     m_graveyard = { };
     m_changesToOlderParts.shrink(0);
+    m_olderBlocksEnded.shrink(0);
+    m_numberOfBlocksAtNewestMark = 0;
     m_recordsAbandoned.shrink(0);
     m_partsAbandoned.shrink(0);
     m_keepsChangesToOlderParts = false;
-    m_operations.clear();
-    m_blocks.clear();
-    m_edges.clear();
-    m_sideWords.clear();
+    m_operations.forgetUnit();
+    m_blocks.forgetUnit();
+    m_edges.forgetUnit();
+    m_sideWords.forgetUnit();
     m_inlineFrames.shrink(0);
     m_entries.shrink(0);
     m_factUses.shrink(0);
     m_effectsBelieved.shrink(0);
+    m_operationsThatWriteWhatTurnHasMade.shrink(0);
+    m_testsPassed.shrink(0);
+    m_steppedWithCounters.shrink(0);
+    m_keepsTestsPassed = false;
+    m_marksLoops = m_unit.role != CodeRole::SlowBody;
     m_testsOfGuardsInFrontOfCopies.shrink(0);
+    m_inputsOfHolesReadAsNaN.shrink(0);
+    m_readsAnsweredByHolesReadAsNaN.shrink(0);
+    m_cellsMadeForOneOperation.shrink(0);
+    m_syntheticVariableReads.shrink(0);
+    m_mergedObjects = BitVector();
+    m_valuesThatFoldedArithmeticGives.shrink(0);
     m_pollsWithFates.shrink(0);
     m_opcodesOfValues = { };
     m_numberOfFrameWords = 0;
     m_hasHandlers = false;
+    m_hasBoxesForHandlers = false;
     m_hasSuspensions = false;
     m_hasLoops = false;
     m_holdsFrameCells = false;
     m_holdsCallThatPlanHasNotCounted = false;
     m_callsOfFunctionNeverCollect = false;
     m_readsNumbersOutOfBytes = false;
+    m_hasOptionalNumberArithmetic = false;
+    m_callsItself = false;
     m_isEntryThatWalksBody = false;
+    m_mayHoldReturnedCalls = false;
+    m_mechanismsWithheld = { };
     m_frequenciesOfBlocks = FrequenciesOfBlocks::AsGiven;
     m_seedOfFrequencies = 0;
     m_numberOfBlocksPlacedOtherwise = 0;
 
     m_isSwept = false;
     m_marks.shrink(0);
+    m_storesWhoseBarriersAreCountedOn = BitVector();
     m_useCounts.shrink(0);
     m_onlyUsers.shrink(0);
+    m_valuesBehindRowsOfNarrowed.clear();
     m_parametersFed.shrink(0);
     m_order.shrink(0);
-    m_reachedBlocks.clearAll();
-    m_blocksWithoutThrows.clearAll();
+    m_numberOfOperationsInOrder = 0;
+    m_reachedBlocks = BitVector();
+    m_blocksWithoutThrows = BitVector();
     m_suspensions.shrink(0);
     m_liveValues.shrink(0);
-    m_releasesBehindLastReads.shrink(0);
 
     InlineFrame functionItself { };
     functionItself.callee = unit.function;
@@ -382,7 +424,7 @@ BlockID Code::addBlock(BlockRole role, BlockFrequency frequency)
     return id;
 }
 
-BlockID Code::addBlockBehindEdge(EdgeID edgeID, BlockFrequency frequency, bool isInLoop)
+ALWAYS_INLINE_INTO_OTHER_FILES BlockID Code::addBlockBehindEdge(EdgeID edgeID, BlockFrequency frequency, bool isInLoop)
 {
     RELEASE_ASSERT(!m_isSwept);
     RELEASE_ASSERT(m_blocks.size() < Operation::noBlock);
@@ -391,7 +433,7 @@ BlockID Code::addBlockBehindEdge(EdgeID edgeID, BlockFrequency frequency, bool i
     Block block;
     block.frequency = frequencyTakenFor(m_blocks.size(), frequency);
     if (isInLoop) {
-        block.isInLoop = m_unit.role != CodeRole::SlowBody && !loopMarkIsDrawnAway(m_blocks.size());
+        block.isInLoop = m_marksLoops && !loopMarkIsDrawnAway(m_blocks.size());
         m_hasLoops = true;
     }
     block.m_firstEdgeIn = edgeID;
@@ -414,11 +456,11 @@ void Code::makeBlocksRare(uint32_t first, uint32_t end)
     }
 }
 
-void Code::makeBlockUnlikely(BlockID id)
+void Code::makeBlockUnlikely(BlockID id, bool thoughRare)
 {
     RELEASE_ASSERT(!m_isSwept);
     Block& block = m_blocks[checkedIndexInCode(id, m_blocks.size())];
-    if (block.frequency == BlockFrequency::Normal && !block.isEntry) {
+    if ((block.frequency == BlockFrequency::Normal || (thoughRare && block.frequency == BlockFrequency::Rare)) && !block.isEntry) {
         keepMarksOfOlderBlock(id.index());
         block.frequency = frequencyTakenFor(id.index(), BlockFrequency::Unlikely);
     }
@@ -431,14 +473,39 @@ void Code::makeBlockRare(BlockID block)
     m_blocks[checkedIndexInCode(block, m_blocks.size())].frequency = frequencyTakenFor(block.index(), BlockFrequency::Rare);
 }
 
+void Code::makeBlockNormal(BlockID block)
+{
+    RELEASE_ASSERT(!m_isSwept);
+    keepMarksOfOlderBlock(checkedIndexInCode(block, m_blocks.size()));
+    m_blocks[checkedIndexInCode(block, m_blocks.size())].frequency = frequencyTakenFor(block.index(), BlockFrequency::Normal);
+}
+
 void Code::setLoopMarks(BlockID blockID, bool isInLoop, bool isLoopHead)
 {
     RELEASE_ASSERT(!m_isSwept);
     Block& block = m_blocks[checkedIndexInCode(blockID, m_blocks.size())];
-    block.isInLoop = isInLoop && m_unit.role != CodeRole::SlowBody && !loopMarkIsDrawnAway(blockID.index());
+    block.isInLoop = isInLoop && m_marksLoops && !loopMarkIsDrawnAway(blockID.index());
     block.isLoopHead = isLoopHead;
     if (isInLoop || isLoopHead)
         m_hasLoops = true;
+}
+
+void Code::noteBeliefAheadOfEdges(BlockID blockID, BeliefAheadOfEdges belief)
+{
+    RELEASE_ASSERT(!m_isSwept);
+    m_blocks[checkedIndexInCode(blockID, m_blocks.size())].beliefAheadOfEdges = belief;
+}
+
+void Code::markBlockInRareLoop(BlockID blockID)
+{
+    RELEASE_ASSERT(!m_isSwept);
+    m_blocks[checkedIndexInCode(blockID, m_blocks.size())].isInRareLoop = true;
+}
+
+void Code::markRareBlockThatKeepsSites(BlockID blockID)
+{
+    RELEASE_ASSERT(!m_isSwept);
+    m_blocks[checkedIndexInCode(blockID, m_blocks.size())].keepsSitesThoughRare = true;
 }
 
 void Code::markMeetingOfStepWrittenByHand(BlockID blockID)
@@ -452,6 +519,15 @@ void Code::setSubject(BlockID blockID, ValueID subject)
     RELEASE_ASSERT(!m_isSwept);
     RELEASE_ASSERT(!subject || subject.index() < m_operations.size());
     m_blocks[checkedIndexInCode(blockID, m_blocks.size())].subject = subject;
+}
+
+NEVER_INLINE size_t Block::placeAmongManyParameters(ValueID parameter) const
+{
+    std::span<const ValueID> all = parameters();
+    auto found = std::ranges::lower_bound(all, parameter);
+    if (found != all.end() && *found == parameter)
+        return found - all.begin();
+    return std::ranges::find(all, parameter) - all.begin();
 }
 
 void Code::setParameters(BlockID blockID, std::span<const ValueID> parameters)
@@ -479,6 +555,29 @@ void Code::setTypeOfJoinParameter(ValueID parameter, TypeID type)
     record.type = type;
 }
 
+Code::AllIncomingEdges Code::seal(BlockID blockID)
+{
+    RELEASE_ASSERT(!m_isSwept);
+    Block& block = m_blocks[checkedIndexInCode(blockID, m_blocks.size())];
+    if (!block.isSealed) {
+        if (m_keepsChangesToOlderParts)
+            m_changesToOlderParts.append(ChangeToOlderPart { { }, { }, { }, { }, { }, blockID, block.frequency, block.isInLoop, false });
+        block.isSealed = true;
+    }
+    return { *this, blockID };
+}
+
+void Code::setCheckedTypeOfProof(ValueID check, TypeID type)
+{
+    RELEASE_ASSERT(!m_isSwept && type);
+    Operation& record = m_operations[checkedIndexInCode(check, m_operations.size())];
+    RELEASE_ASSERT(record.opcode == Opcode::CheckProof && !record.m_hasSideWords);
+    if (m_keepsChangesToOlderParts)
+        m_changesToOlderParts.append(ChangeToOlderPart { { }, { }, { }, check, record });
+    const_cast<uint32_t&>(record.payload()[*PayloadWord::checkedType(Opcode::CheckProof)]) = encodePayloadWord(type);
+    record.flags &= ~*FlagMask::isLeftToTestBehind(Opcode::CheckProof);
+}
+
 void Code::makeTestAskInFull(ValueID test)
 {
     RELEASE_ASSERT(!m_isSwept);
@@ -497,6 +596,83 @@ void Code::makeTypeTestAskInFull(ValueID test)
     if (m_keepsChangesToOlderParts)
         m_changesToOlderParts.append(ChangeToOlderPart { { }, { }, { }, test, record });
     record.flags |= *FlagMask::asksInFull(Opcode::TypeTest);
+}
+
+void Code::letJoinFailWhereItsReaderFails(ValueID join)
+{
+    RELEASE_ASSERT(!m_isSwept);
+    Operation& record = m_operations[checkedIndexInCode(join, m_operations.size())];
+    RELEASE_ASSERT(operationsThatJoinTexts.contains(record.opcode));
+    if (m_keepsChangesToOlderParts)
+        m_changesToOlderParts.append(ChangeToOlderPart { { }, { }, { }, join, record });
+    record.traitBits = record.traits().withoutThrowByRule().bits();
+}
+
+void Code::turnFinishIntoUnusedString(ValueID finish)
+{
+    RELEASE_ASSERT(!m_isSwept);
+    Operation& record = m_operations[checkedIndexInCode(finish, m_operations.size())];
+    RELEASE_ASSERT(record.opcode == Opcode::StackStringBuilderFinish || record.opcode == Opcode::StringBuilderFinish);
+    if (m_keepsChangesToOlderParts)
+        m_changesToOlderParts.append(ChangeToOlderPart { { }, { }, { }, finish, record });
+    record.opcode = record.opcode == Opcode::StackStringBuilderFinish ? Opcode::StackStringBuilderToString : Opcode::StringBuilderToString;
+    Effects ofContents = Effects::none();
+    ofContents.writes = LocationMasks(AbstractHeapSet { AbstractHeap::StringBuilderContents });
+    record.traitBits = record.traits().withoutThrowByRule().bits() & ~EffectTraits(ofContents).bits();
+    m_opcodesOfValues.add(record.opcode);
+}
+
+void Code::turnBranchIntoJump(BlockID block, EdgeID lastOnWay)
+{
+    Terminator& terminator = m_blocks[checkedIndexInCode(block, m_blocks.size())].terminator;
+    RELEASE_ASSERT(m_isSwept && terminator.kind == TerminatorKind::Branch);
+    m_edges[checkedIndexInCode(lastOnWay, m_edges.size())].from = block;
+    for (EdgeID written : { terminator.taken(), terminator.notTaken() }) {
+        if (written != lastOnWay)
+            m_edges[written.index()].to = BlockID();
+    }
+    terminator.m_numberOfInlineOperands = 0;
+    terminator.flags = 0;
+    terminator.kind = TerminatorKind::Jump;
+    terminator.firstEdge = lastOnWay;
+    terminator.numberOfEdges = 1;
+}
+
+void Code::retargetSweptEdge(EdgeID edgeID, BlockID to, std::span<const ValueID> arguments)
+{
+    RELEASE_ASSERT(m_isSwept);
+    Edge& edge = m_edges[checkedIndexInCode(edgeID, m_edges.size())];
+    Block& left = m_blocks[checkedIndexInCode(edge.to, m_blocks.size())];
+    EdgeID previous;
+    for (EdgeID each = left.m_firstEdgeIn; each != edgeID; each = m_edges[each.index()].m_nextInto)
+        previous = each;
+    (previous ? m_edges[previous.index()].m_nextInto : left.m_firstEdgeIn) = edge.m_nextInto;
+    if (left.m_lastEdgeIn == edgeID)
+        left.m_lastEdgeIn = previous;
+    Block& entered = m_blocks[checkedIndexInCode(to, m_blocks.size())];
+    (entered.m_firstEdgeIn ? m_edges[entered.m_lastEdgeIn.index()].m_nextInto : entered.m_firstEdgeIn) = edgeID;
+    entered.m_lastEdgeIn = edgeID;
+    std::span<const ValueID> kept = m_sideWords.copy(arguments);
+    edge.to = to;
+    edge.m_nextInto = EdgeID();
+    edge.m_arguments = kept.data();
+    edge.m_numberOfArguments = static_cast<uint32_t>(kept.size());
+}
+
+void Code::leadJumpPastBlockThatJumps(BlockID block)
+{
+    Terminator& terminator = m_blocks[checkedIndexInCode(block, m_blocks.size())].terminator;
+    RELEASE_ASSERT(m_isSwept && terminator.kind == TerminatorKind::Jump);
+    const EdgeID entering = terminator.firstEdge;
+    const BlockID passedBlock = m_edges[entering.index()].to;
+    Terminator& passed = m_blocks[passedBlock.index()].terminator;
+    RELEASE_ASSERT(passed.kind == TerminatorKind::Jump);
+    const EdgeID leaving = passed.firstEdge;
+    retargetSweptEdge(entering, m_edges[leaving.index()].to, m_edges[leaving.index()].arguments());
+    m_edges[entering.index()].from = passedBlock;
+    m_edges[leaving.index()].from = block;
+    terminator.firstEdge = leaving;
+    passed.firstEdge = entering;
 }
 
 void Code::layClosureInFrame(ValueID closure, LoanOfClosure loan)
@@ -541,6 +717,30 @@ void Code::bearListWithStorage(ValueID list, ArrayStorage storage)
     const_cast<uint32_t&>(word) = encodePayloadWord(storage);
 }
 
+void Code::letListRememberStorageAtSite(ValueID list, bool takesAnyValueAtFirst)
+{
+    RELEASE_ASSERT(!m_isSwept);
+    Operation& record = m_operations[checkedIndexInCode(list, m_operations.size())];
+    RELEASE_ASSERT(record.opcode == Opcode::NewArrayLike);
+    RELEASE_ASSERT(!record.remembersStorageAtSite());
+    if (m_keepsChangesToOlderParts)
+        m_changesToOlderParts.append(ChangeToOlderPart { { }, { }, { }, list, record });
+    record.flags |= *FlagMask::remembersStorageAtSite(Opcode::NewArrayLike);
+    if (takesAnyValueAtFirst)
+        record.flags |= *FlagMask::takesAnyValueAtFirst(Opcode::NewArrayLike);
+}
+
+void Code::letListForgetStorageAtSite(ValueID list)
+{
+    RELEASE_ASSERT(!m_isSwept);
+    Operation& record = m_operations[checkedIndexInCode(list, m_operations.size())];
+    RELEASE_ASSERT(record.opcode == Opcode::NewArrayLike);
+    RELEASE_ASSERT(record.remembersStorageAtSite());
+    if (m_keepsChangesToOlderParts)
+        m_changesToOlderParts.append(ChangeToOlderPart { { }, { }, { }, list, record });
+    record.flags &= ~(*FlagMask::remembersStorageAtSite(Opcode::NewArrayLike) | *FlagMask::takesAnyValueAtFirst(Opcode::NewArrayLike));
+}
+
 ValueID Code::appendParameter(BlockID blockID, TypeID type, Representation representation, Origin origin)
 {
     RELEASE_ASSERT(!m_isSwept);
@@ -583,9 +783,45 @@ ValueID Code::append(BlockID blockID, const Draft& draft, TypeID proven, EffectT
         m_holdsFrameCells = true;
     if (traits.maySuspend())
         m_hasSuspensions = true;
-    if (readsNumberOutOfBytes(operation))
+    if (draft.opcode == Opcode::GetTypedArrayElement && (readsNumberOutOfBytes(operation) || readsNumberOrNothingOutOfBytes(operation)))
         m_readsNumbersOutOfBytes = true;
+    if (!m_hasOptionalNumberArithmetic && handsOnBitsOfNaN(operation)) {
+        operation.forEachChild([&](ValueID operand) {
+            m_hasOptionalNumberArithmetic |= at(operand).representation == Representation::OptionalDouble;
+        });
+    }
+    if (draft.opcode == Opcode::CallDirect && operation.function() == m_unit.function)
+        m_callsItself = true;
     return id;
+}
+
+ValueID Code::valueBehindManyNames(ValueID name, const OpcodeSet& names, SourcesOfNames sources) const
+{
+    while (name && names.contains(at(name).opcode)) {
+        ValueID source = valueBehindRowOfNarrowed(name);
+        if (sources == SourcesOfNames::StandEarlier && source.index() >= name.index())
+            return { };
+        name = source;
+    }
+    return name;
+}
+
+ValueID Code::valueBehindRowOfNarrowed(ValueID name) const
+{
+    ValueID behind = at(name).operand(0);
+    if (m_isSwept || at(name).opcode != Opcode::Narrowed || at(behind).opcode != Opcode::Narrowed)
+        return behind;
+    if (auto kept = m_valuesBehindRowsOfNarrowed.find(name.index() + 1); kept != m_valuesBehindRowsOfNarrowed.end())
+        return ValueID(kept->value);
+    while (at(behind).opcode == Opcode::Narrowed) {
+        if (auto kept = m_valuesBehindRowsOfNarrowed.find(behind.index() + 1); kept != m_valuesBehindRowsOfNarrowed.end()) {
+            behind = ValueID(kept->value);
+            break;
+        }
+        behind = at(behind).operand(0);
+    }
+    m_valuesBehindRowsOfNarrowed.add(name.index() + 1, behind.index());
+    return behind;
 }
 
 ValueID Code::appendConversion(BlockID blockID, Opcode opcode, ValueID operand, Representation representation, TypeID proven, Origin origin)
@@ -641,7 +877,7 @@ ValueID Code::addConstant(const Draft& draft, TypeID proven)
     return appendRecordToCode(m_operations, constant);
 }
 
-ValueID Code::addCopyOfConstant(ValueID constant, Representation representation)
+ALWAYS_INLINE_INTO_OTHER_FILES ValueID Code::addCopyOfConstant(ValueID constant, Representation representation)
 {
     RELEASE_ASSERT(!m_isSwept && representation != Representation::Unchosen);
     Operation copy = m_operations[checkedIndexInCode(constant, m_operations.size())];
@@ -665,6 +901,7 @@ void Code::end(BlockID blockID, const TerminatorDraft& draft, uint32_t numberOfE
     Terminator terminator;
     fill(terminator, draft);
     terminator.kind = draft.kind;
+    m_mayHoldReturnedCalls |= draft.kind == TerminatorKind::ReturnCall;
     terminator.isSet = true;
     terminator.numberOfEdges = numberOfEdges;
     if (numberOfEdges) {
@@ -719,9 +956,10 @@ void Code::endWithBranch(BlockID blockID, ValueID condition, Origin origin)
     setTerminator(blockID, block, terminator);
 }
 
-ALWAYS_INLINE void Code::appendEdgeInto(BlockID from, BlockID to, std::span<const ValueID> arguments)
+ALWAYS_INLINE_INTO_OTHER_FILES void Code::appendEdgeInto(BlockID from, BlockID to, std::span<const ValueID> arguments)
 {
     Block& entered = m_blocks[checkedIndexInCode(to, m_blocks.size())];
+    RELEASE_ASSERT(!entered.isSealed);
     Edge edge;
     edge.from = from;
     edge.to = to;
@@ -743,6 +981,7 @@ void Code::endWithJump(BlockID blockID, Origin origin, BlockID to, const Argumen
     RELEASE_ASSERT(!m_isSwept);
     Block& block = m_blocks[checkedIndexInCode(blockID, m_blocks.size())];
     RELEASE_ASSERT(!block.hasEnded());
+    RELEASE_ASSERT(m_blocks[checkedIndexInCode(to, m_blocks.size())].beliefAheadOfEdges == BeliefAheadOfEdges::NoEdgeIsAwaited || brought.m_heldFor == to);
     for (ValueID argument : arguments)
         RELEASE_ASSERT(argument.index() < m_operations.size());
 
@@ -793,7 +1032,8 @@ void Code::closeEdge(EdgeID edgeID, BlockID to, const ArgumentsOfEdge& brought)
     RELEASE_ASSERT(!m_isSwept);
     Edge& edge = m_edges[checkedIndexInCode(edgeID, m_edges.size())];
     RELEASE_ASSERT(edge.isOpen());
-    RELEASE_ASSERT(to.index() < m_blocks.size());
+    RELEASE_ASSERT(to.index() < m_blocks.size() && !m_blocks[to.index()].isSealed);
+    RELEASE_ASSERT(m_blocks[to.index()].beliefAheadOfEdges == BeliefAheadOfEdges::NoEdgeIsAwaited || brought.m_heldFor == to);
     for (ValueID argument : arguments)
         RELEASE_ASSERT(argument.index() < m_operations.size());
     std::span<const ValueID> kept = m_sideWords.copy(arguments);
@@ -821,7 +1061,13 @@ Code::Mark Code::mark() const
     mark.numberOfFrameWords = m_numberOfFrameWords;
     mark.numberOfFactUses = static_cast<uint32_t>(m_factUses.size());
     mark.numberOfEffectsBelieved = static_cast<uint32_t>(m_effectsBelieved.size());
+    mark.numberOfOperationsThatWriteWhatTurnHasMade = static_cast<uint32_t>(m_operationsThatWriteWhatTurnHasMade.size());
+    mark.numberOfTestsPassed = static_cast<uint32_t>(m_testsPassed.size());
+    mark.numberOfSteppedCounters = static_cast<uint32_t>(m_steppedWithCounters.size());
     mark.numberOfTestsOfGuardsInFrontOfCopies = static_cast<uint32_t>(m_testsOfGuardsInFrontOfCopies.size());
+    mark.numberOfInputsOfHolesReadAsNaN = static_cast<uint32_t>(m_inputsOfHolesReadAsNaN.size());
+    mark.numberOfReadsAnsweredByHolesReadAsNaN = static_cast<uint32_t>(m_readsAnsweredByHolesReadAsNaN.size());
+    mark.numberOfValuesThatFoldedArithmeticGives = static_cast<uint32_t>(m_valuesThatFoldedArithmeticGives.size());
     mark.numberOfPollsWithFates = static_cast<uint32_t>(m_pollsWithFates.size());
     mark.numberOfChangesToOlderParts = static_cast<uint32_t>(m_changesToOlderParts.size());
     mark.numberOfOlderBlocksEnded = static_cast<uint32_t>(m_olderBlocksEnded.size());
@@ -834,6 +1080,8 @@ Code::Mark Code::mark() const
     mark.holdsCallThatPlanHasNotCounted = m_holdsCallThatPlanHasNotCounted;
     mark.callsOfFunctionNeverCollect = m_callsOfFunctionNeverCollect;
     mark.readsNumbersOutOfBytes = m_readsNumbersOutOfBytes;
+    mark.hasOptionalNumberArithmetic = m_hasOptionalNumberArithmetic;
+    mark.callsItself = m_callsItself;
     return mark;
 }
 
@@ -856,6 +1104,7 @@ void Code::abandonBackTo(const Mark& mark, std::span<const OpenBlock> openBlocks
             if (change.marked.index() < mark.numberOfBlocks) {
                 m_blocks[change.marked.index()].frequency = change.frequencyBefore;
                 m_blocks[change.marked.index()].isInLoop = change.wasInLoop;
+                m_blocks[change.marked.index()].isSealed = change.wasSealed;
             }
             continue;
         }
@@ -971,7 +1220,13 @@ void Code::abandonBackTo(const Mark& mark, std::span<const OpenBlock> openBlocks
     m_numberOfFrameWords = mark.numberOfFrameWords;
     m_factUses.shrink(mark.numberOfFactUses);
     m_effectsBelieved.shrink(mark.numberOfEffectsBelieved);
+    m_operationsThatWriteWhatTurnHasMade.shrink(mark.numberOfOperationsThatWriteWhatTurnHasMade);
+    m_testsPassed.shrink(mark.numberOfTestsPassed);
+    m_steppedWithCounters.shrink(mark.numberOfSteppedCounters);
     m_testsOfGuardsInFrontOfCopies.shrink(mark.numberOfTestsOfGuardsInFrontOfCopies);
+    m_inputsOfHolesReadAsNaN.shrink(mark.numberOfInputsOfHolesReadAsNaN);
+    m_readsAnsweredByHolesReadAsNaN.shrink(std::min<size_t>(m_readsAnsweredByHolesReadAsNaN.size(), mark.numberOfReadsAnsweredByHolesReadAsNaN));
+    m_valuesThatFoldedArithmeticGives.shrink(mark.numberOfValuesThatFoldedArithmeticGives);
     m_pollsWithFates.shrink(mark.numberOfPollsWithFates);
     m_opcodesOfValues = mark.opcodesOfValues;
     m_hasHandlers = mark.hasHandlers;
@@ -981,6 +1236,28 @@ void Code::abandonBackTo(const Mark& mark, std::span<const OpenBlock> openBlocks
     m_holdsCallThatPlanHasNotCounted = mark.holdsCallThatPlanHasNotCounted;
     m_callsOfFunctionNeverCollect = mark.callsOfFunctionNeverCollect;
     m_readsNumbersOutOfBytes = mark.readsNumbersOutOfBytes;
+    m_hasOptionalNumberArithmetic = mark.hasOptionalNumberArithmetic;
+    m_callsItself = mark.callsItself;
+}
+
+void Code::releaseAbandonedBlocks()
+{
+    RELEASE_ASSERT(m_isSwept);
+    uint32_t numberOfBlocks = 0;
+    for (const PartsAbandoned& parts : m_partsAbandoned)
+        numberOfBlocks += parts.blocks.second - parts.blocks.first;
+    static constexpr uint32_t mostBlocksKept = ASSERT_ENABLED ? 0 : 1 << 13;
+    if (numberOfBlocks <= mostBlocksKept)
+        return;
+    for (const PartsAbandoned& parts : m_partsAbandoned) {
+        uint32_t first = parts.blocks.first;
+        if (m_graveyard && first <= m_graveyard.index() && m_graveyard.index() < parts.blocks.second) {
+            m_blocks.releasePages(first, m_graveyard.index());
+            first = m_graveyard.index() + 1;
+        }
+        m_blocks.releasePages(first, parts.blocks.second);
+        m_edges.releasePages(parts.edges.first, parts.edges.second);
+    }
 }
 
 uint32_t Code::addInlineFrame(const InlineFrame& frame)
@@ -992,7 +1269,7 @@ uint32_t Code::addInlineFrame(const InlineFrame& frame)
         m_inlineFrames[0].callee = m_unit.function;
         return 0;
     }
-    RELEASE_ASSERT(!namesFunctionItself || !walksInputBody(m_unit.role));
+    RELEASE_ASSERT(frame.callee || frame.calledBuiltin || !walksInputBody(m_unit.role));
     RELEASE_ASSERT(frame.parent < m_inlineFrames.size());
     RELEASE_ASSERT(m_inlineFrames.size() < mostInlineFramesInCode);
     m_inlineFrames.append(frame);
@@ -1017,11 +1294,12 @@ void Code::addFactUse(const FactUse& use)
     m_factUses.append(use);
 }
 
-void Code::addFateOfPoll(ValueID poll, FateOfPoll fate)
+void Code::addFateOfPoll(ValueID poll, FateOfPoll fate, ValueID unlessKept)
 {
     RELEASE_ASSERT(!m_isSwept);
     RELEASE_ASSERT(m_operations[checkedIndexInCode(poll, m_operations.size())].opcode == Opcode::LoopHint);
-    m_pollsWithFates.append(PollWithFate { poll, fate });
+    RELEASE_ASSERT(!unlessKept || (fate == FateOfPoll::LeavesHandler && m_operations[checkedIndexInCode(unlessKept, m_operations.size())].opcode != Opcode::LoopHint));
+    m_pollsWithFates.append(PollWithFate { poll, fate, unlessKept });
 }
 
 } } } // namespace JSC::AOT::Typed

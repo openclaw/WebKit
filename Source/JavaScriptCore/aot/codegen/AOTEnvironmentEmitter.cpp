@@ -44,7 +44,7 @@ void EnvironmentEmitter::generateGetCapture(const ValueContext& value)
         return;
     }
     CellPointer holder = in<CellPointer>(value->closureOperand());
-    emitter<HintEmitter>().stopWhereLifeHasEnded(value, holder);
+    emitter<HintEmitter>().crashIfLifetimeEnded(value, holder);
     define(value, closureCapture(holder, value->function(), value->index()));
 }
 
@@ -76,7 +76,12 @@ void EnvironmentEmitter::markEnvironmentsThatClosureKeeps(const ValueContext& cl
 {
     if (closure->loan() != LoanOfClosure::None)
         return;
-    for (ValueID capture : closure->capturesOperands()) {
+    markEnvironmentsKept(closure->capturesOperands());
+}
+
+void EnvironmentEmitter::markEnvironmentsKept(std::span<const ValueID> captures)
+{
+    for (ValueID capture : captures) {
         if (!capture || m_code.isConstant(capture))
             continue;
         TypeID type = m_code.at(capture).type;
@@ -86,7 +91,7 @@ void EnvironmentEmitter::markEnvironmentsThatClosureKeeps(const ValueContext& cl
         if (!environment)
             continue;
         const PlannedLayout& planned = m_plan.layout(environment);
-        if (planned.cellsAreHandedBack && !planned.liesOnlyInFrames)
+        if (planned.cellsAreHandedBack)
             markEscaped(capture);
     }
 }
@@ -100,8 +105,8 @@ void EnvironmentEmitter::generateReleaseEnvironment(const ValueContext& value)
     LayoutID layout = typeOf(environment).environment;
     Word32 byteWithEscapeMark(m_out.load8ZeroExt32(byteWithEscapeMarkOf(environment)));
     ifElse(hasNoBits(byteWithEscapeMark, environmentIsEscapedBit), [&] {
-        if (emitter<HintEmitter>().endsLivesAtRunTime()) {
-            emitter<HintEmitter>().endLifeOf(value, environment);
+        if (emitter<HintEmitter>().shouldEmitLifetimeEnds()) {
+            emitter<HintEmitter>().emitLifetimeEnd(value, environment);
             return;
         }
         Machine::DeclaredAccessesSuspension writesToCellThatNobodyHolds(m_out);

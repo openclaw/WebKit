@@ -34,6 +34,7 @@ inline constexpr bool framesAreThoseOfAddressSanitizer = ASAN_ENABLED;
     v(stringTableTests) \
     v(arrayTests) \
     v(idSetTests) \
+    v(sharedArrayTests) \
     v(bodyTests) \
     v(readerTests)
 
@@ -124,6 +125,7 @@ inline constexpr bool framesAreThoseOfAddressSanitizer = ASAN_ENABLED;
     v(imageTextTests) \
     v(instanceKeyOrderTests) \
     v(interpretedStoreUnderCompiledPrototypeTests) \
+    v(storesOfStubsProgramTests) \
     v(interpreterSiteCacheTests) \
     v(locationsReadAtRunTimeTests) \
     v(lockedRealmMemberTests) \
@@ -133,7 +135,6 @@ inline constexpr bool framesAreThoseOfAddressSanitizer = ASAN_ENABLED;
     v(moduleProgramTests) \
     v(moduleRequestListTests) \
     v(nakedConstructorTests) \
-    v(nativeModuleExportTests) \
     v(objectCreateProgramTests) \
     v(originalBesideMockTests) \
     v(privateAccessorProgramTests) \
@@ -151,6 +152,7 @@ inline constexpr bool framesAreThoseOfAddressSanitizer = ASAN_ENABLED;
     v(requiredNameTests) \
     v(savedFrameTests) \
     v(sharingModeAndNamespaceTests) \
+    v(signedReturnAddressTests) \
     v(sparseElementProgramTests) \
     v(startupTests) \
     v(staticMembersNamedLikeBuiltinsTests) \
@@ -197,6 +199,7 @@ inline constexpr bool framesAreThoseOfAddressSanitizer = ASAN_ENABLED;
     v(machineFrameFormTests) \
     v(machineOperationTests) \
     v(machineRandomTests) \
+    v(machineExecutionFuzzerTests) \
     v(machineMemoryTests) \
     v(machineCheckerTests) \
     v(outputTests)
@@ -210,6 +213,10 @@ FOR_EACH_AOT_IMAGE_NATIVE_TEST_PROVIDER(AOT_DECLARE_NATIVE_TEST_PROVIDER)
 } // namespace ImageTests
 FOR_EACH_AOT_ENGINE_NATIVE_TEST_PROVIDER(AOT_DECLARE_NATIVE_TEST_PROVIDER)
 #undef AOT_DECLARE_NATIVE_TEST_PROVIDER
+
+using NativeTestProvider = std::span<const NativeTest> (*)();
+
+std::span<const NativeTestProvider> nativeTestProvidersOfHost();
 
 class ChildProcessLauncher;
 
@@ -232,7 +239,6 @@ struct NativeTestSummary {
     unsigned passed { 0 };
     unsigned failed { 0 };
     unsigned todo { 0 };
-    unsigned leftOut { 0 };
 };
 
 NativeTestSummary runNativeTests(const NativeTestRequest&, PrintStream&);

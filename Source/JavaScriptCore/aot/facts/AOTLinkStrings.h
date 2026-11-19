@@ -14,16 +14,29 @@
 
 namespace JSC { namespace AOT { namespace Typed {
 
+class BodyIndex;
 class Walker;
 
 using DefinitionsInScanOfStrings = ScopedLambda<BodyValue(ValueID)>;
 
 void notePathsOfModulesReadInScan(const BodyValue&, SummaryBeingMade&);
-PropertyKeyID nameKeyOfAccessInScan(const Program&, PrimitiveKnownToFolding held, const BodyValue& definition, NOESCAPE const DefinitionsInScanOfStrings& definitionOf, StringID& beginning);
-StringID textThatValueBeginsWith(const Program&, BodyValue definition, NOESCAPE const DefinitionsInScanOfStrings& definitionOf);
+PropertyKeyID nameKeyOfAccessInScan(const Program&, PrimitiveKnownToFolding held, const BodyValue& definition, NOESCAPE const DefinitionsInScanOfStrings& definitionOf, Vector<uint32_t>& beginningsFound, StringID& beginning);
+StringID textThatValueBeginsWith(const Program&, BodyValue definition, NOESCAPE const DefinitionsInScanOfStrings& definitionOf, Vector<uint32_t>& beginningsFound);
 void finishListsOfStringsInScan(SummaryBeingMade&);
 
 bool keyThatBeginsSoMayNamePrototypeLink(const Program&, const SummaryAccess&);
+
+struct KeyAffixes {
+    explicit operator bool() const { return !beginning.empty() || !ending.empty(); }
+    bool mayMatch(std::span<const uint8_t> name) const;
+
+    std::span<const uint8_t> beginning;
+    std::span<const uint8_t> ending;
+};
+
+ValueID valueBetweenAffixes(const Program&, const BodyIndex&, ValueID key, KeyAffixes&);
+
+KeyAffixes affixesOfKey(const Program&, const BodyIndex&, ValueID key);
 
 void fillTablesOfStringsForFacts(const Program&, const ThinSummaries&, const LinkTables& linked, const LinkTables& held, FactTables&);
 

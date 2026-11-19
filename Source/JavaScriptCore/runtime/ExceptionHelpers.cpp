@@ -29,6 +29,7 @@
 #include "config.h"
 #include "ExceptionHelpers.h"
 
+#include "AOTErrorMessages.h"
 #include "ErrorHandlingScope.h"
 #include "Exception.h"
 #include "JSCInlines.h"
@@ -70,6 +71,10 @@ JSObject* createUndefinedVariableError(JSGlobalObject* globalObject, const Ident
 
 String errorDescriptionForValue(JSGlobalObject* globalObject, JSValue v)
 {
+#if ENABLE(AOT)
+    if (String kind = AOT::primitiveKindForErrorMessage(v); !kind.isNull())
+        return kind;
+#endif
     if (v.isString()) {
         auto string = asString(v)->value(globalObject);
         if (!string)
@@ -94,7 +99,7 @@ String errorDescriptionForValue(JSGlobalObject* globalObject, JSValue v)
     return v.toString(globalObject)->value(globalObject);
 }
 
-static StringView LEGACY_NODELETE clampErrorMessage(const String& originalMessage LIFETIME_BOUND)
+NODELETE static StringView clampErrorMessage(const String& originalMessage LIFETIME_BOUND)
 {
     // Hopefully this is sufficiently long. Note, this is the length of the string not the number of bytes used.
     constexpr unsigned maxLength = 2 * KB;
@@ -115,7 +120,7 @@ String defaultSourceAppender(const String& originalMessage, StringView sourceTex
     return makeString(clampErrorMessage(originalMessage), " (evaluating '"_s, sourceText, "')"_s);
 }
 
-static StringView LEGACY_NODELETE functionCallBase(StringView sourceText)
+NODELETE static StringView functionCallBase(StringView sourceText)
 {
     // This function retrieves the 'foo.bar' substring from 'foo.bar(baz)'.
     // FIXME: This function has simple processing of /* */ style comments.
@@ -202,7 +207,7 @@ String notAFunctionSourceAppender(const String& originalMessage, StringView sour
     if (builder.hasOverflowed())
         return "object is not a function."_s;
 
-    return builder.toString();
+    return WTF::move(builder).toString();
 }
 
 static String invalidParameterInSourceAppender(const String& originalMessage, StringView sourceText, RuntimeType type, ErrorInstance::SourceTextWhereErrorOccurred occurrence)

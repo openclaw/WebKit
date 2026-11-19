@@ -38,7 +38,7 @@ static GPRReg resolvedAddressRegisterOf(Location leaf)
     return leaf.gpr();
 }
 
-static AddressForm resolvedAddressOfBaseWithoutPosition(const Encoder& encoder, const Operation* base, int32_t offsetOfAccess)
+static ALWAYS_INLINE AddressForm resolvedAddressOfBaseWithoutPosition(const Encoder& encoder, const Operation* base, int32_t offsetOfAccess)
 {
     RELEASE_ASSERT(base->hasNoPosition());
 
@@ -74,7 +74,7 @@ static AddressForm resolvedAddressOfBaseWithoutPosition(const Encoder& encoder, 
     return resolvedAddressAt(reg.gpr(), offset.value());
 }
 
-static AddressForm resolvedAddressOfLeaf(const Encoder& encoder, const Operation* base, Location location, int32_t offset)
+static ALWAYS_INLINE AddressForm resolvedAddressOfLeaf(const Encoder& encoder, const Operation* base, Location location, int32_t offset)
 {
     switch (location.kind()) {
     case Location::Register:
@@ -96,7 +96,7 @@ static AddressForm resolvedAddressOfLeaf(const Encoder& encoder, const Operation
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-static void resolveIndexOfAddress(const Liveness& liveness, AddressForm& form, const Operation* index, LeafCursor& leaves)
+static ALWAYS_INLINE void resolveIndexOfAddress(const Liveness& liveness, AddressForm& form, const Operation* index, LeafCursor& leaves)
 {
     const Operation* shift = nullptr;
     if (index->opcode() == Shl && liveness.isFused(index)) {
@@ -107,10 +107,10 @@ static void resolveIndexOfAddress(const Liveness& liveness, AddressForm& form, c
         RELEASE_ASSERT(index->opcode() == ZExt32 || index->opcode() == SExt32);
         form.extension = index->opcode() == ZExt32 ? IndexExtension::ZeroExtend32 : IndexExtension::SignExtend32;
         index = index->child(0);
-        if (form.extension == IndexExtension::ZeroExtend32 && clearsUpperHalfOfRegister(index))
+        if (form.extension == IndexExtension::ZeroExtend32 && clearsUpperHalf(index))
             form.extension = IndexExtension::None;
     }
-    RELEASE_ASSERT(!liveness.isFused(index));
+    RELEASE_ASSERT(!liveness.isFused(index) || (index->opcode() == Trunc && form.extension != IndexExtension::None));
     form.index = resolvedAddressRegisterOf(leaves.take());
 
     if (shift) {
@@ -144,9 +144,9 @@ AddressForm Encoder::resolveAddressSlowCase(const Operation* access, LeafCursor&
 AddressForm Encoder::resolveScaledSum(const Operation* sum, LeafCursor& leaves)
 {
     RELEASE_ASSERT(addsScaledIndex(m_liveness, sum));
-    unsigned indexChildIndex = m_liveness.isFused(sum->child(1));
+    unsigned indexChildIndex = sum->child(1)->opcode() == Shl && m_liveness.isFused(sum->child(1));
     const Operation* base = sum->child(1 - indexChildIndex);
-    RELEASE_ASSERT(!m_liveness.isFused(base));
+    RELEASE_ASSERT(!m_liveness.isFused(base) || namesWord(base));
 
     AddressForm form;
     form.kind = AddressForm::BaseIndex;

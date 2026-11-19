@@ -189,7 +189,7 @@ public:
     {
     }
     
-    ASCIILiteral LEGACY_NODELETE name() const final
+    NODELETE ASCIILiteral name() const final
     {
         return m_pool->m_threadName;
     }

@@ -22,23 +22,12 @@ OpcodeSet StraightEmitter::opcodesOfArrayIntrinsics()
     return {
         Opcode::IsPristineArray, Opcode::ArrayStorageKind,
         Opcode::HasContiguousIndex, Opcode::GetContiguousIndex, Opcode::GetDoubleIndex,
-        Opcode::NewContiguousArray, Opcode::NewArrayLike,
-        Opcode::TryPutByValDirect, Opcode::TryPutIndex, Opcode::TryCopyFilledElements, Opcode::TryPutElements, Opcode::TryFillNewArray,
+        Opcode::NewContiguousArray, Opcode::SortKeyArray, Opcode::NewArrayLike,
+        Opcode::TryPutByValDirect, Opcode::TryPutIndex, Opcode::TryCopyFilledElements, Opcode::TryPutElements, Opcode::SortNumbers, Opcode::SortByKeys, Opcode::TryFillNewArray,
         Opcode::TruncateNewArray,
     };
 }
 
-static constexpr int32_t bitsOfShapesWithoutBoxedElements = IndexingShapeMask & ~(ContiguousShape - Int32Shape);
-
-static_assert([] {
-    for (uint32_t byte = 0; byte <= 0xff; ++byte) {
-        uint32_t shape = byte & IndexingShapeMask;
-        bool passesTest = !((byte - Int32Shape) & bitsOfShapesWithoutBoxedElements);
-        if (passesTest != (shape == Int32Shape || shape == ContiguousShape))
-            return false;
-    }
-    return true;
-}());
 static_assert(!arrayStorageFormOf(ArrayStorage::Int32).hole && !arrayStorageFormOf(ArrayStorage::Contiguous).hole);
 static_assert(std::endian::native == std::endian::little);
 
@@ -67,14 +56,13 @@ static CCallHelpers::BaseIndex elementBelowLengthOfList(StraightEmitter& emitter
     GPRReg position = StraightEmitter::temporary(2);
     GPRReg word = StraightEmitter::temporary(3);
     emitter.load(value.arrayOperand(), storage);
-    jit.load8(CCallHelpers::Address(storage, JSCell::indexingTypeAndMiscOffset()), word);
+    CCallHelpers::Address mode(storage, JSCell::indexingTypeAndMiscOffset());
     if (kind == ArrayStorage::Double) {
+        jit.load8(mode, word);
         jit.and32(CCallHelpers::TrustedImm32(arrayStorageTestMask), word);
         isAbsent.append(jit.branch32(CCallHelpers::NotEqual, word, CCallHelpers::TrustedImm32(DoubleShape)));
-    } else {
-        jit.sub32(CCallHelpers::TrustedImm32(Int32Shape), word);
-        isAbsent.append(jit.branchTest32(CCallHelpers::NonZero, word, CCallHelpers::TrustedImm32(bitsOfShapesWithoutBoxedElements)));
-    }
+    } else
+        isAbsent.append(jit.branchTest8(CCallHelpers::NonZero, mode, CCallHelpers::TrustedImm32(UndecidedShape)));
     jit.loadPtr(CCallHelpers::Address(storage, JSObject::butterflyOffset()), storage);
     loadIntegerOperandOfList(emitter, value.positionOperand(), position);
     jit.load32(CCallHelpers::Address(storage, Butterfly::offsetOfPublicLength()), word);
@@ -89,15 +77,6 @@ static void loadContiguousElementOrEmpty(StraightEmitter& emitter, const BodyVal
     jit.move(CCallHelpers::TrustedImm32(0), element);
     jit.load64(elementBelowLengthOfList(emitter, value, ArrayStorage::Contiguous, isAbsent), element);
     isAbsent.link(&jit);
-}
-
-static void defineBitsOfDouble(StraightEmitter& emitter, const BodyValue& value, GPRReg bits)
-{
-    CCallHelpers& jit = emitter.jit();
-    jit.withNumberTag([&](auto tag) {
-        jit.sub64(tag, bits);
-    });
-    emitter.define(value, bits);
 }
 
 static void generateIsPristineArray(StraightEmitter& emitter, const BodyValue& value)
@@ -188,10 +167,12 @@ void StraightEmitter::generateArrayIntrinsic(const BodyValue& value)
         jit().move(CCallHelpers::TrustedImm64(static_cast<int64_t>(arrayStorageFormOf(ArrayStorage::Double).hole)), result);
         jit().load64(elementBelowLengthOfList(*this, value, ArrayStorage::Double, isAbsent), result);
         isAbsent.link(&jit());
-        defineBitsOfDouble(*this, value, result);
+        jit().move64ToDouble(result, takeResultFPR());
+        defineDouble(value);
         return;
     }
     case Opcode::NewContiguousArray:
+    case Opcode::SortKeyArray:
         generateNewArrayOfHoles(*this, value, ValueID(), ArrayStorage::Contiguous, NewArrayWithHolesFlag::mustHaveIndexingType);
         return;
     case Opcode::NewArrayLike:
@@ -205,6 +186,8 @@ void StraightEmitter::generateArrayIntrinsic(const BodyValue& value)
     case Opcode::TryPutByValDirect:
     case Opcode::TryPutIndex:
     case Opcode::TryPutElements:
+    case Opcode::SortNumbers:
+    case Opcode::SortByKeys:
     case Opcode::TryFillNewArray:
         jit().move(CCallHelpers::TrustedImm32(JSValue::ValueFalse), takeResultRegister());
         define(value);

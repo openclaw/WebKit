@@ -10,10 +10,12 @@
 
 #include "AOTArrayStorageForms.h"
 #include "AOTElementAccessEmitter.h"
+#include "AOTElementEmitterAllocation.h"
 #include "AOTForInEmitter.h"
 #include "AOTGuardEmitter.h"
 #include "AOTRuntimeCallEmitter.h"
 #include "AOTStubsArrays.h"
+#include "AOTStubsCollections.h"
 #include "AOTStubsPropertyKeys.h"
 #include "AOTVector.h"
 #include "Butterfly.h"
@@ -39,7 +41,7 @@ void ExpandedIterationEmitter::generateDestructureIterable(const ValueContext& v
         return results;
     };
     static_assert(formDependsOnLoopOf(Opcode::DestructureIterable) && namedFormOf(Opcode::DestructureIterable, StateOfKnowledge::Always, Place::Loop) == Form::Open);
-    if (!value->readsListsByIndex() || !count || !generator().isInLoop(value.block())) {
+    if (!value->readsListsByIndex() || !count || !generator().usesLoopForms(value.block())) {
         defineResults(value, takeOutOfLine().span());
         return;
     }
@@ -53,7 +55,7 @@ void ExpandedIterationEmitter::generateDestructureIterable(const ValueContext& v
     CellPointer list = unboxCell(iterable);
     branchUnless(hasCellType(list, ArrayType), outOfLine);
     branchUnless(elements.isPristineArray(list, { PristineAspects::Storage, PristineAspects::Names }), outOfLine);
-    branchUnless(elements.holdsBoxedElements(elements.indexingMode(list, arrayStorageTestMask)), outOfLine);
+    branchUnless(elements.holdsBoxedElements(list), outOfLine);
     ArrayElements storage = elements.elementsOf(list);
     branchUnless(aboveOrEqual(elements.publicLength(storage), integer(count)), outOfLine);
     Vector<ValueFromBlock, 8> takenInLine;
@@ -81,11 +83,29 @@ void ExpandedIterationEmitter::generateDestructureIterable(const ValueContext& v
 
 void ExpandedIterationEmitter::generateAppendIterable(const ValueContext& value)
 {
+    if (generator().m_literalLeftToSpreadRightBehind == value->arrayOperand()) [[unlikely]] {
+        ArrayAllocationEmitter(generator()).bearLiteralHoldingList(value, in<Boxed>(value->iterableOperand()).value(), appendIterable());
+        return;
+    }
+    if (const Operation& literal = operationAt(value->arrayOperand()); literal.opcode == Opcode::NewArray && ArrayAllocationEmitter(generator()).isLeftToListCall(value.block(), value->arrayOperand(), literal)) {
+        generator().nameAgain(value->arrayOperand(), callStub(value, listOfIterable(), { in<Boxed>(value->iterableOperand()).value() }).first);
+        return;
+    }
     if (value->readsListsByIndex()) {
         callStub(value, appendIterable(), { in<CellPointer>(value->arrayOperand()).value(), in<Boxed>(value->iterableOperand()).value() });
         return;
     }
     callVoidOperation(value, RuntimeOperation::AppendIterable, { in<CellPointer>(value->arrayOperand()), in<Boxed>(value->iterableOperand()) });
+}
+
+void ExpandedIterationEmitter::generateReserveTableCapacity(const ValueContext& value)
+{
+    callVoidOperation(value, RuntimeOperation::ReserveTableCapacity, { in<CellPointer>(value->tableOperand()), in<Boxed>(value->sourceOperand()) });
+}
+
+void ExpandedIterationEmitter::generateNextSetElement(const ValueContext& value)
+{
+    define(value, Boxed(callStub(value, nextSetElement(), { in<Boxed>(value->iteratorOperand()).value() }).first));
 }
 
 void GuardEmitter::generateIsEnumeratorCurrent(const ValueContext& value)
@@ -95,9 +115,18 @@ void GuardEmitter::generateIsEnumeratorCurrent(const ValueContext& value)
     ForInEmitter::EnumeratorFields fields = forIn.loadFields(enumerator);
     Integer nameIndex = forIn.nameIndexOf(fields, integerOf(value->positionOperand()));
     Condition isInStructurePart = forIn.isInStructurePart(enumerator, nameIndex);
+    if (value->currentNamesOperand()) {
+        defineTestByBranching(value, [&](BranchTargets targets) {
+            branch(logicalAnd(isInStructurePart, below(nameIndex, integerOf(value->currentNamesOperand()))), targets);
+        });
+        return;
+    }
     defineTestByBranching(value, [&](BranchTargets targets) {
+        LBasicBlock isName = newBlock();
+        branch(isInStructurePart, { normalEdge(isName), targets.notTaken });
+        m_out.appendTo(isName);
         CellPointer object = cellOrElse(value, value->objectOperand(), targets.notTaken);
-        branch(logicalAnd(isInStructurePart, forIn.hasCachedKeys(enumerator, fields, object)), targets);
+        branch(forIn.hasCachedKeys(enumerator, fields, object), targets);
     });
 }
 
@@ -111,6 +140,10 @@ void ExpandedIterationEmitter::generateEnumeratorGetByVal(const ValueContext& va
     Integer position = integerOf(value->positionOperand());
     ForInEmitter::EnumeratorFields fields = forIn.loadFields(enumerator);
     Integer index = forIn.nameIndexOf(fields, position);
+    if (emitter<ElementAccessEmitter>().checksBounds()) {
+        emitter<ElementAccessEmitter>().stopUnlessInside(value, isCell(boxedObject));
+        emitter<ElementAccessEmitter>().stopUnlessInside(value, forIn.hasCachedKeys(enumerator, fields, object));
+    }
     const Machine::AbstractHeap& properties = m_heaps.entire(AbstractHeap::NamedProperties);
     LBasicBlock isOrdinaryObject = newBlock();
     LBasicBlock isCompiledObject = newBlock();

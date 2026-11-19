@@ -8,6 +8,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTInliningAcrossFiles.h"
 #include "AOTMachineCallsOnWays.h"
 #include <algorithm>
 #include <bit>
@@ -71,7 +72,7 @@ static bool isResultOfPatchEndingBlock(const Block* block, const Operation* valu
 
 static ALWAYS_INLINE RegisterMask calleeSavesStillToNoteBetweenBlocks(const Allocator& allocator)
 {
-    if (allocator.m_isAheadOfFramedPart)
+    if (allocator.m_isOutsideFramedPart)
         return allocator.m_file.calleeSaved;
     return allocator.m_file.calleeSaved & ~(allocator.isInRareRegion() ? allocator.m_allocation.usedCalleeSaves() : allocator.m_calleeSavesTakenOutsideRareRegions);
 }
@@ -137,9 +138,7 @@ static ALWAYS_INLINE void takeSnapshotBetweenBlocks(Allocator& allocator, Alloca
         unsigned index = static_cast<unsigned>(std::countr_zero(bound));
         new (NotNull, next++) RegisterBinding { Reg::fromIndex(index), allocator.m_valueIn[index] };
     }
-    snapshot.isSet = true;
-    snapshot.bindings = std::span<const RegisterBinding>(bindings, count);
-    snapshot.registers = allocator.m_bound;
+    snapshot.set(bindings, allocator.m_bound);
 }
 
 static ALWAYS_INLINE void passReadsOfUpsilonsBetweenBlocks(Allocator& allocator, const Block* from, Position positionOfEdges)
@@ -230,16 +229,13 @@ static bool isRareEdgeIntoHead(const Order& order, const Block* from, const Bloc
 
 static bool isRareEdgeIntoHead(const Order& order, const Block* target, size_t numberOfPredecessor)
 {
-    uint32_t regionOfFrom = order.of(order.of(target).predecessors[numberOfPredecessor]).rareRegion;
-    if (regionOfFrom != noRareRegion && regionOfFrom != order.of(target).rareRegion)
-        return true;
-    return order.edgeFromPredecessor(target, numberOfPredecessor).isRare();
+    return order.isRareEdgeFromPredecessor(target, numberOfPredecessor);
 }
 
 static NEVER_INLINE const Block* findBlockThatFixesHead(const Allocator& allocator, const Block* target, const BlockPlace& place)
 {
     const Order& order = allocator.m_order;
-    bool headIsAheadOfFramedPart = allocator.headIsAheadOfFramedPart(target);
+    bool startsOutsideFramedPart = allocator.startsOutsideFramedPart(target);
     const Block* firstFromOutsideFramedPart = nullptr;
     const Block* countsLast = nullptr;
     Block* const* const predecessors = place.predecessors.data();
@@ -249,7 +245,7 @@ static NEVER_INLINE const Block* findBlockThatFixesHead(const Allocator& allocat
         const BlockPlace& placeOfPredecessor = order.of(predecessor);
         if (placeOfPredecessor.orderIndex >= place.orderIndex)
             break;
-        if (headIsAheadOfFramedPart && !allocator.isAheadOfFramedPart(predecessor))
+        if (startsOutsideFramedPart && !allocator.isOutsideFramedPart(predecessor))
             continue;
         if (predecessor == place.sourceOfUnsplitEdgeThatCountsLast) {
             countsLast = predecessor;
@@ -262,7 +258,7 @@ static NEVER_INLINE const Block* findBlockThatFixesHead(const Allocator& allocat
     }
     if (countsLast)
         return countsLast;
-    return headIsAheadOfFramedPart && firstFromOutsideFramedPart ? firstFromOutsideFramedPart : place.predecessors.front();
+    return startsOutsideFramedPart && firstFromOutsideFramedPart ? firstFromOutsideFramedPart : place.predecessors.front();
 }
 
 static bool someLoopHasSideEntrance(const Order& order)
@@ -607,17 +603,17 @@ bool Allocator::wayHasSavedInRareRegion(const Block* block, const Operation* val
 struct HeadThatListsRegisters {
     const Block* block;
     const SpillIndex* spillsOfValues;
-    bool isAheadOfFramedPart;
+    bool isOutsideFramedPart;
 };
 
 static ALWAYS_INLINE bool isListedAtHead(const Allocator& allocator, const HeadThatListsRegisters& head, const Operation* value)
 {
     if (head.spillsOfValues[value->index()] == noSpill)
         return true;
-    return isPhiAtHeadOf(head.block, value) || (head.isAheadOfFramedPart && allocator.isStoredAtHeadsOfFramedPart(value));
+    return isPhiAtHeadOf(head.block, value) || (head.isOutsideFramedPart && allocator.isStoredAtHeadsOfFramedPart(value));
 }
 
-static std::span<const RegisterBinding> listRegistersAtHead(Allocator& allocator, const HeadThatListsRegisters& head)
+static ALWAYS_INLINE std::span<const RegisterBinding> listRegistersAtHead(Allocator& allocator, const HeadThatListsRegisters& head)
 {
     RegisterMask bound = allocator.m_bound;
     if (!bound)
@@ -666,11 +662,11 @@ static ALWAYS_INLINE void listIncomingValuesAtEdge(const Block* from, const Bloc
     }
 }
 
-static Operation* findChildThatDiesInRegisterOfResult(const Liveness& liveness, const Operation* user, unsigned childIndex)
+static ALWAYS_INLINE Operation* findChildThatDiesInRegisterOfResult(const Liveness& liveness, const Operation* user, unsigned childIndex)
 {
     Operation* child = user->child(childIndex);
     if (liveness.isFused(child)) {
-        if (child->opcode() != Trunc)
+        if (child->opcode() != Trunc && !namesWord(child))
             return nullptr;
         child = child->child(0);
     }
@@ -695,7 +691,7 @@ static void hintRegisterFromValueDown(Allocator& allocator, Operation* value, Re
         Opcode opcode = value->opcode();
         if (opcode == Phi) {
             const Block* block = value->owner();
-            if (!allocator.m_heads[block->index()].isSet && !allocator.m_hasPassedOnHintsOfPhis.get(block->index())) {
+            if (!allocator.m_heads[block->index()].isSet() && !allocator.m_hasPassedOnHintsOfPhis.get(block->index())) {
                 allocator.m_hasPassedOnHintsOfPhis.set(block->index());
                 blocksOfHintedPhis.append(allocator.m_arena, block);
             }
@@ -750,7 +746,7 @@ static ALWAYS_INLINE void noteHintOfValueThatHeadHolds(Reg* hints, const Block* 
         hints[value->index()] = reg;
 }
 
-static bool rareRegionsAloneReadBehindHead(Allocator& allocator, const Operation* value, Position head)
+static ALWAYS_INLINE bool rareRegionsAloneReadBehindHead(Allocator& allocator, const Operation* value, Position head)
 {
     const Liveness& liveness = allocator.m_liveness;
     if (allocator.m_knownReadsOutsideRareRegions.isEmpty())
@@ -926,23 +922,57 @@ static bool callStandsOnEveryWayToReadsBehindHead(Allocator& allocator, const Op
     return blockWithCall != UINT32_MAX && blockWithCall >= place.orderIndex && everyPathToReadsPasses(blockWithCall);
 }
 
-static bool headOfLoopAroundHoldsValueIn(const Allocator& allocator, const BlockPlace& place, const Operation* value, RegisterMask registers)
+static bool headOfLoopAroundHoldsValueIn(Allocator& allocator, const BlockPlace& place, const Operation* value, RegisterMask registers)
 {
     std::span<const Loop> loops = allocator.m_order.loops();
-    for (uint32_t loop = place.isLoopHead ? loops[place.loop].parent : place.loop; loop != noLoop; loop = loops[loop].parent) {
+    const Position home = allocator.m_order.headOf(value->owner());
+    const uint32_t innermost = place.isLoopHead ? loops[place.loop].parent : place.loop;
+    if (innermost == noLoop)
+        return false;
+    auto liesAround = [&](uint32_t around, uint32_t loop) ALWAYS_INLINE_LAMBDA {
+        return loops[around].firstBlock <= loops[loop].firstBlock && loops[loop].endBlock <= loops[around].endBlock;
+    };
+    const Allocator::WhetherHeadAroundHolds* known = allocator.m_whetherHeadsAroundHold.isEmpty() ? nullptr : &allocator.m_whetherHeadsAroundHold[value->index()];
+    if (known && known->loopWhoseHeadHolds != noLoop && (registers & known->registersHeld) && liesAround(known->loopWhoseHeadHolds, innermost))
+        return true;
+    const bool knowsOfNone = known && known->loopFromWhichNoHeadHolds != noLoop && !(registers & ~known->registersNotHeld);
+    unsigned numberOfHeadsLookedAt = 0;
+    uint32_t loopWhoseHeadHolds = noLoop;
+    RegisterMask registersHeld = 0;
+    for (uint32_t loop = innermost; loop != noLoop && loops[loop].begin >= home; loop = loops[loop].parent) {
+        if (knowsOfNone && liesAround(loop, known->loopFromWhichNoHeadHolds))
+            break;
         const Allocator::Snapshot& head = allocator.m_heads[allocator.m_order.blocksInOrder()[loops[loop].firstBlock]->index()];
-        for (const RegisterBinding& binding : head.bindings) {
-            if (binding.value == value && (registers & maskOf(binding.reg)))
-                return true;
+        for (const RegisterBinding& binding : head.bindings()) {
+            if (binding.value == value)
+                registersHeld |= registers & maskOf(binding.reg);
+        }
+        ++numberOfHeadsLookedAt;
+        if (registersHeld) {
+            loopWhoseHeadHolds = loop;
+            break;
         }
     }
-    return false;
+    constexpr unsigned headsWorthRemembering = 4;
+    if (numberOfHeadsLookedAt >= headsWorthRemembering) {
+        if (allocator.m_whetherHeadsAroundHold.isEmpty())
+            allocator.m_whetherHeadsAroundHold.fill(allocator.m_arena, allocator.m_order.mostOperations(), Allocator::WhetherHeadAroundHolds { });
+        Allocator::WhetherHeadAroundHolds& remembered = allocator.m_whetherHeadsAroundHold[value->index()];
+        if (registersHeld) {
+            remembered.loopWhoseHeadHolds = loopWhoseHeadHolds;
+            remembered.registersHeld = registersHeld;
+        } else {
+            remembered.loopFromWhichNoHeadHolds = innermost;
+            remembered.registersNotHeld = registers;
+        }
+    }
+    return registersHeld;
 }
 
 static NEVER_INLINE bool headLetsGoOfSpilledValue(Allocator& allocator, const Block* target, const BlockPlace& place, const Operation* value, RegisterMask held, bool isExpectedFurtherOn)
 {
     ASSERT(isExpectedFurtherOn == (allocator.m_hints[value->index()] && (held & maskOf(allocator.m_hints[value->index()]))));
-    if (allocator.headIsAheadOfFramedPart(target) && allocator.isStoredAtHeadsOfFramedPart(value))
+    if (allocator.startsOutsideFramedPart(target) && allocator.isStoredAtHeadsOfFramedPart(value))
         return false;
 
     if (!isExpectedFurtherOn && rareRegionsAloneReadBehindHead(allocator, value, place.head))
@@ -975,28 +1005,28 @@ static NEVER_INLINE bool isWorthHoldingWhatIsMadeAgainAtHead(Allocator& allocato
     return (maskOf(reg) & allocator.m_file.calleeSaved) || read < allocator.m_liveness.nextCallBehindHeadOf(target, bankOf(reg));
 }
 
-static bool firstCallBehindHeadReadsValueElsewhere(Allocator& allocator, const Block* target, const RegisterBinding& binding)
+bool Allocator::firstCallBehindHeadReadsValueElsewhere(const Block* target, Reg reg, const Operation* value)
 {
-    if (maskOf(binding.reg) & allocator.m_file.calleeSaved)
+    if (maskOf(reg) & m_file.calleeSaved)
         return false;
-    Position call = allocator.m_liveness.nextCallBehindHeadOf(target, bankOf(binding.reg));
-    if (call == noPosition || allocator.findFirstReadFromHeadOf(target, binding.value) != call - 1)
+    Position call = m_liveness.nextCallBehindHeadOf(target, bankOf(reg));
+    if (call == noPosition || findFirstReadFromHeadOf(target, value) != call - 1)
         return false;
 
-    const Order& order = allocator.m_order;
+    const Order& order = m_order;
     const Block* block = order.blocksInOrder().data()[findPlaceOfBlockAtPosition(order, call, order.of(target).orderIndex)];
     const PatchOperation* patch = block->at((call - 1 - order.earlyPositionOf(block, 0)) / 2)->as<PatchOperation>();
     if (!patch)
         return false;
     bool isReadByCall = false;
     for (unsigned child = 0; child < patch->numChildren(); ++child) {
-        if (patch->child(child) != binding.value)
+        if (patch->child(child) != value)
             continue;
         isReadByCall = true;
         const ValueRep& constraint = patch->constraintOf(child);
         switch (constraint.kind()) {
         case ValueRep::Register:
-            if (constraint.reg() == binding.reg)
+            if (constraint.reg() == reg)
                 return false;
             break;
         case ValueRep::ColdAny:
@@ -1078,7 +1108,7 @@ bool Allocator::passThroughBlockThatOnlyJumps(Block* blockAsked)
     const Block* predecessor = placeOfBlockAsked.predecessors.data()[0];
     const Block* target = blockAsked->successor(0).block();
     const Snapshot& endOfPredecessor = m_ends[predecessor->index()];
-    if (predecessor->last()->opcode() == Patch || !endOfPredecessor.isSet || target->isLandingPad() || !m_heads[target->index()].isSet)
+    if (predecessor->last()->opcode() == Patch || !endOfPredecessor.isSet() || target->isLandingPad() || !m_heads[target->index()].isSet())
         return false;
     if (!m_operandsTakenBackAtHeads.isEmpty() && m_operandsTakenBackAtHeads[blockAsked->index()].value)
         return false;
@@ -1090,8 +1120,8 @@ bool Allocator::passThroughBlockThatOnlyJumps(Block* blockAsked)
         bool changesRareRegion = m_rareRegion != place.rareRegion;
         if (changesRareRegion && isInRareRegion())
             leaveRareRegionBetweenBlocks(*this);
-        if (place.entersRareRegion || m_proc.checksAllocation())
-            registersAtHeads[block->index()] = listBindingsAtHead(*this, HeadThatListsRegisters { block, m_allocation.spillsOfValues(), headIsAheadOfFramedPart(block) }, end.bindings);
+        if (place.entersRareRegion || m_allocation.recordsWhatCheckersRead())
+            registersAtHeads[block->index()] = listBindingsAtHead(*this, HeadThatListsRegisters { block, m_allocation.spillsOfValues(), startsOutsideFramedPart(block) }, end.bindings());
         if (changesRareRegion && place.isRare())
             enterRareRegionBetweenBlocks(*this, place.rareRegion);
 
@@ -1193,14 +1223,14 @@ static NEVER_INLINE void listRegistersAtHeadBeingEntered(Allocator& allocator, c
     if (RegisterMask registersToNote = calleeSavesToNoteAtHeadBeingEntered(allocator, registersHeld)) [[unlikely]]
         noteCalleeSavesAtHeadBeingEntered(allocator, registersToNote);
 
-    if (edgeHasFixedHead || place.entersRareRegion || allocator.m_proc.checksAllocation()) {
+    if (edgeHasFixedHead || place.entersRareRegion || allocator.m_allocation.recordsWhatCheckersRead()) {
         const HeadThatListsRegisters headThatLists { block, allocator.m_allocation.spillsOfValues(), false };
-        const RegisterBinding* const first = taken.bindings.data();
-        const RegisterBinding* const limit = first + taken.bindings.size();
-        bool snapshotMatchesHead = static_cast<size_t>(std::popcount(registersHeld)) == taken.bindings.size();
+        const RegisterBinding* const first = taken.bindings().data();
+        const RegisterBinding* const limit = first + taken.bindings().size();
+        bool snapshotMatchesHead = static_cast<size_t>(std::popcount(registersHeld)) == taken.bindings().size();
         for (const RegisterBinding* binding = first; snapshotMatchesHead && binding != limit; ++binding)
             snapshotMatchesHead = isListedAtHead(allocator, headThatLists, binding->value);
-        allocator.registersAtHeads()[block->index()] = snapshotMatchesHead ? taken.bindings : listRegistersAtHead(allocator, headThatLists);
+        allocator.registersAtHeads()[block->index()] = snapshotMatchesHead ? taken.bindings() : listRegistersAtHead(allocator, headThatLists);
     }
 
     if (allocator.m_rareRegion != place.rareRegion)
@@ -1215,9 +1245,9 @@ static ALWAYS_INLINE void finishEnteringPlainBlock(Allocator& allocator, const B
     else if (RegisterMask others = allocator.m_bound & ~registersHeld)
         unbindRegistersBetweenBlocks(allocator, others);
 
-    if (blockIsRare || allocator.m_proc.checksAllocation())
+    if (blockIsRare || allocator.m_allocation.recordsWhatCheckersRead())
         return listRegistersAtHeadBeingEntered<edgeHasFixedHead>(allocator, block, place, taken, registersHeld);
-    ASSERT(!allocator.m_isAheadOfFramedPart && !allocator.isInRareRegion());
+    ASSERT(!allocator.m_isOutsideFramedPart && !allocator.isInRareRegion());
     if (RegisterMask registersToNote = registersHeld & allocator.m_file.calleeSaved & ~allocator.m_calleeSavesTakenOutsideRareRegions) [[unlikely]]
         return noteCalleeSavesAtHeadBeingEntered(allocator, registersToNote);
 }
@@ -1244,8 +1274,8 @@ static NEVER_INLINE void enterPlainBlockBehindOnePredecessor(Allocator& allocato
         }
     };
 
-    const RegisterBinding* binding = taken.bindings.data();
-    const RegisterBinding* const limit = binding + taken.bindings.size();
+    const RegisterBinding* binding = taken.bindings().data();
+    const RegisterBinding* const limit = binding + taken.bindings().size();
     while (binding != limit) {
         const HeadBeingEntered head = describeHeadBeingEntered(allocator, blockIsRare);
         uint32_t firstRead = 0;
@@ -1270,7 +1300,7 @@ static NEVER_INLINE void enterPlainBlockBehindOnePredecessor(Allocator& allocato
 static NEVER_INLINE void enterPlainBlockWhoseHeadIsFixed(Allocator& allocator, const Block* block, const BlockPlace& place, const Allocator::Snapshot& taken)
 {
     Allocator::ValueState* const states = allocator.m_values.begin();
-    for (const RegisterBinding& binding : taken.bindings)
+    for (const RegisterBinding& binding : taken.bindings())
         holdValueAtHeadBeingEntered(allocator, states, binding.reg, binding.value);
     finishEnteringPlainBlock<false, true>(allocator, block, place, place.isRare(), taken, taken.registers);
 }
@@ -1289,18 +1319,18 @@ void Allocator::enterBlock(Block* block)
     if (isInRareRegion() && m_rareRegion != placeOfBlock.rareRegion)
         leaveRareRegionBetweenBlocks(*this);
 
-    const bool mayBePlain = !block->isEntry() && !block->isLandingPad() && !m_allocation.hasFramedPart()
+    const bool mayBePlain = !block->isEntry() && !block->isLandingPad() && !startsOutsideFramedPart(block)
         && (m_operandsTakenBackAtHeads.isEmpty() || !m_operandsTakenBackAtHeads[block->index()].value);
     if (mayBePlain && placeOfBlock.predecessors.size() != 1) {
         const Snapshot& taken = m_heads[block->index()];
-        if (taken.isSet) {
+        if (taken.isSet()) {
             m_blockWhoseEndRegistersHold = nullptr;
             return enterPlainBlockWhoseHeadIsFixed(*this, block, placeOfBlock, taken);
         }
     } else if (mayBePlain && block->phis().empty() && placeOfBlock.head >= m_endOfLastLoopThatKeepsValueMadeAgain) {
         const Block* predecessor = placeOfBlock.predecessors.data()[0];
         const Snapshot& taken = m_ends[predecessor->index()];
-        if (taken.isSet) {
+        if (taken.isSet()) {
             const Operation* endOfPredecessor = predecessor->last();
             const bool predecessorEndsInPatch = endOfPredecessor->opcode() == Patch;
             const bool blockIsRare = placeOfBlock.isRare();
@@ -1339,14 +1369,14 @@ void Allocator::enterBlock(Block* block)
         Snapshot taken;
         const Block* predecessor = nullptr;
         if (block->isEntry() || block->isLandingPad())
-            taken.isSet = true;
+            taken.set(m_arena.allocateArray<RegisterBinding>(0), 0);
         else if (headBehindEdgesIsFixedByEdge(m_valueFacts, block, place))
             taken = m_heads[block->index()];
         else {
             predecessor = place.predecessors.front();
             taken = m_ends[predecessor->index()];
         }
-        if (!taken.isSet) [[unlikely]] {
+        if (!taken.isSet()) [[unlikely]] {
             m_proc.fail(FailureKind::MalformedProcedure, block->last());
             return;
         }
@@ -1356,7 +1386,7 @@ void Allocator::enterBlock(Block* block)
 
         ValueState* const states = m_values.begin();
         const RegisterMask calleeSavesStillToNote = calleeSavesStillToNoteBetweenBlocks(*this);
-        const HeadThatListsRegisters headThatLists { block, m_allocation.spillsOfValues(), headIsAheadOfFramedPart(block) };
+        const HeadThatListsRegisters headThatLists { block, m_allocation.spillsOfValues(), startsOutsideFramedPart(block) };
         bool snapshotMatchesHead = listsRegisters;
 
         RegisterMask registersHeld = 0;
@@ -1377,7 +1407,7 @@ void Allocator::enterBlock(Block* block)
         };
 
         if (!predecessor) {
-            for (const RegisterBinding& binding : taken.bindings) {
+            for (const RegisterBinding& binding : taken.bindings()) {
                 hold(binding.reg, binding.value, states[binding.value->index()]);
                 if (snapshotMatchesHead)
                     snapshotMatchesHead = isListedAtHead(*this, headThatLists, binding.value);
@@ -1415,7 +1445,7 @@ void Allocator::enterBlock(Block* block)
             const bool predecessorEndsInPatch = endOfPredecessor->opcode() == Patch;
             const bool someValueMadeAgainIsKept = head < m_endOfLastLoopThatKeepsValueMadeAgain;
             const bool blockHasResultsOfPatch = predecessorEndsInPatch && predecessor->successor(0).block() == block;
-            for (const RegisterBinding& binding : taken.bindings) {
+            for (const RegisterBinding& binding : taken.bindings()) {
                 Operation* value = binding.value;
                 const uint32_t index = value->index();
                 ValueState& state = states[index];
@@ -1441,7 +1471,7 @@ void Allocator::enterBlock(Block* block)
             }
         }
         if (listsRegisters)
-            registersAtHeads[block->index()] = snapshotMatchesHead ? taken.bindings : listRegistersAtHead(*this, headThatLists);
+            registersAtHeads[block->index()] = snapshotMatchesHead ? taken.bindings() : listRegistersAtHead(*this, headThatLists);
 
         if (changesRareRegion && blockIsRare)
             enterRareRegion(place.rareRegion);
@@ -1640,10 +1670,7 @@ static ALWAYS_INLINE void setHeadAndNoteItsHints(Allocator& allocator, const Blo
         if (someEdgeIsToCome)
             noteHintOfValueThatHeadHolds<kind != KindOfHeadBeingFixed::Plain>(hints, target, reg, value);
     }
-    Allocator::Snapshot& snapshot = allocator.m_heads[target->index()];
-    snapshot.isSet = true;
-    snapshot.bindings = std::span<const RegisterBinding>(bindings, count);
-    snapshot.registers = allocator.m_bound;
+    allocator.m_heads[target->index()].set(bindings, allocator.m_bound);
 
     if constexpr (kind != KindOfHeadBeingFixed::Plain) {
         if (someEdgeIsToCome && !target->phis().empty())
@@ -1665,7 +1692,7 @@ static NEVER_INLINE void fixPlainHeadBetweenBlocks(Allocator& allocator, Block* 
     serveEdgesThatWaitedForHead(allocator, target);
 }
 
-static ALWAYS_INLINE bool registersHoldWhatHeadExpects(const Allocator& allocator, const Block* target, std::span<const RegisterBinding> head)
+static ALWAYS_INLINE bool registersMatchBlockHead(const Allocator& allocator, const Block* target, std::span<const RegisterBinding> head)
 {
     for (const Operation* phi : target->phis()) {
         if (!allocator.m_valueFacts[phi->index()].has(ValueFlag::IsDropped))
@@ -1751,6 +1778,104 @@ Allocator::PhisInSpill& Allocator::phisInSpill(SpillIndex spill)
     return *phis;
 }
 
+SpillIndex Allocator::findSpillOfDeadSource(const Operation* phi)
+{
+    const Block* owner = phi->owner();
+    const BlockPlace& place = m_order.of(owner);
+    if (!m_allocation.m_registerAtDefinition[phi->index()] || !valueMayShareSpill(*this, phi))
+        return noSpill;
+    if (m_allocation.hasFramedPart() || m_proc.traits().savesFrameOnSuspend || place.isRare() || isInRareRegion() || owner->isLandingPad() || owner->isEntry())
+        return noSpill;
+    const Position definition = m_valueFacts[phi->index()].definition;
+    for (const Block* predecessor : place.predecessors) {
+        for (const Operation* upsilon : predecessor->upsilons()) {
+            const Operation* source = upsilon->valueHandedOn();
+            if (upsilon->phi() != phi || source == phi || !m_allocation.isSpilled(source) || source->type() != phi->type() || !valueMayShareSpill(*this, source) || m_order.of(source->owner()).isRare())
+                continue;
+            SpillIndex candidate = m_allocation.spillOf(source);
+            const SpillFacts& facts = m_allocation.m_spills[candidate];
+            if (!facts.isSaveInRareRegion && !facts.isPointerBesideNarrowReference && facts.end < definition)
+                return candidate;
+        }
+    }
+    return noSpill;
+}
+
+static bool isReadOnce(const Liveness& liveness, const Operation* value)
+{
+    uint32_t firstUse = liveness.of(value).firstUse;
+    return firstUse && !liveness.use(firstUse).next;
+}
+
+std::span<const SpillIndex> Allocator::findSpillsThatPhisAreOnlyHandedOnTo(const Block* target)
+{
+    constexpr size_t fewPhis = 16;
+    const size_t numberOfPhis = target->phis().size();
+    const Operation** handedOn = m_arena.allocateArray<const Operation*>(2 * numberOfPhis);
+    const Operation** takers = handedOn + numberOfPhis;
+    auto notePlacesHandedOn = [&] {
+        if (numberOfPhis <= fewPhis)
+            return;
+        if (m_placesHandedOn.empty()) {
+            size_t numberOfOperations = m_proc.numberOfOperations();
+            m_placesHandedOn = { m_arena.allocateArray<uint32_t>(numberOfOperations), numberOfOperations };
+            std::ranges::fill(m_placesHandedOn, 0);
+        }
+        for (size_t place = 0; place < numberOfPhis; ++place) {
+            if (handedOn[place])
+                m_placesHandedOn[handedOn[place]->index()] = static_cast<uint32_t>(place);
+        }
+    };
+    auto placeHandedOn = [&](const Operation* value) -> size_t {
+        if (numberOfPhis <= fewPhis)
+            return std::find(handedOn, handedOn + numberOfPhis, value) - handedOn;
+        size_t place = value->index() < m_placesHandedOn.size() ? m_placesHandedOn[value->index()] : numberOfPhis;
+        return place < numberOfPhis && handedOn[place] == value ? place : numberOfPhis;
+    };
+    bool someIsHandedOn = false;
+    for (size_t index = 0; index < numberOfPhis; ++index) {
+        const Operation* phi = target->phis()[index];
+        bool mayBeHandedOn = !m_allocation.isSpilled(phi) && isReadOnce(m_liveness, phi) && valueMayShareSpill(*this, phi);
+        handedOn[index] = mayBeHandedOn ? phi : nullptr;
+        someIsHandedOn |= mayBeHandedOn;
+    }
+    const Block* block = target;
+    for (unsigned stepsLeft = 8; someIsHandedOn && stepsLeft && block->last()->isUnconditionalJump() && !m_order.of(block).isRare(); --stepsLeft) {
+        const Block* next = block->successor(0).block();
+        std::fill_n(takers, numberOfPhis, nullptr);
+        notePlacesHandedOn();
+        for (const Operation* upsilon : block->upsilons()) {
+            size_t place = placeHandedOn(upsilon->valueHandedOn());
+            if (place != numberOfPhis && upsilon->phi()->owner() == next && upsilon->phi()->type() == handedOn[place]->type() && valueMayShareSpill(*this, upsilon->phi()))
+                takers[place] = upsilon->phi();
+        }
+        if (m_heads[next->index()].isSet()) {
+            for (const RegisterBinding& binding : m_heads[next->index()].bindings()) {
+                if (!binding.value || binding.value->owner() != next || binding.value->opcode() != Phi)
+                    continue;
+                for (size_t index = 0; index < numberOfPhis; ++index) {
+                    if (takers[index] == binding.value)
+                        takers[index] = nullptr;
+                }
+            }
+            SpillIndex* spills = m_arena.allocateArray<SpillIndex>(numberOfPhis);
+            for (size_t index = 0; index < numberOfPhis; ++index) {
+                spills[index] = takers[index] && m_allocation.isSpilled(takers[index]) ? m_allocation.spillOf(takers[index]) : noSpill;
+                if (spills[index] != noSpill && (m_allocation.m_spills[spills[index]].isSaveInRareRegion || m_allocation.m_spills[spills[index]].isPointerBesideNarrowReference))
+                    spills[index] = noSpill;
+            }
+            return { spills, numberOfPhis };
+        }
+        someIsHandedOn = false;
+        for (size_t index = 0; index < numberOfPhis; ++index) {
+            handedOn[index] = takers[index] && isReadOnce(m_liveness, takers[index]) ? takers[index] : nullptr;
+            someIsHandedOn |= !!handedOn[index];
+        }
+        block = next;
+    }
+    return { };
+}
+
 void Allocator::letEdgesWritePhi(Operation* phi, SpillIndex spill, const BlockPlace& place)
 {
     if (!m_allocation.m_phisWrittenByEdges.size())
@@ -1810,12 +1935,8 @@ void Allocator::leaveBlock(Block* from)
     auto letEdgeWaitForHead = [this](Block* from, unsigned successorIndex, const Block* target, Position positionOfEdges) NEVER_INLINE {
         if (isInRareRegion()) {
             forEachValueHeldOnlyInRareRegionSave(*this, from, [&](Operation* value) {
-                if (!isLiveAtEdgePosition(m_liveness, value, positionOfEdges))
-                    return;
-                if (isAheadOfFramedPart(from) && isStoredAtHeadsOfFramedPart(value))
+                if (isLiveAtEdgePosition(m_liveness, value, positionOfEdges))
                     m_savesReadByWaitingEdges.append(m_arena, SaveReadByWaitingEdge { from, value, stateOf(value).saveInRareRegion });
-                else
-                    markSpilled(value);
             });
         }
         if (m_waitingEdgesOfHeads.isEmpty())
@@ -1830,9 +1951,9 @@ void Allocator::leaveBlock(Block* from)
     const BlockPlace* const places = m_order.places();
     const bool hasFramedPart = m_allocation.hasFramedPart();
     Snapshot& end = m_ends[from->index()];
-    ASSERT(!end.isSet);
+    ASSERT(!end.isSet());
     bool someSuccessorTakesRegisters = false;
-    bool registersMatchEndOfBlock = true;
+    bool registersMatchBlockEnd = true;
     for (unsigned successorIndex = 0; successorIndex < numberOfSuccessors; ++successorIndex) {
         const Edge& edge = successors[successorIndex];
         Block* target = edge.block();
@@ -1847,25 +1968,25 @@ void Allocator::leaveBlock(Block* from)
         }
 
         someSuccessorTakesRegisters = true;
-        ASSERT(end.isSet || registersMatchEndOfBlock);
+        ASSERT(end.isSet() || registersMatchBlockEnd);
         ASSERT(!target->isEntry());
         const BlockPlace& placeOfTarget = places[target->index()];
         if (!headBehindEdgesIsFixedByEdge(m_valueFacts, target, placeOfTarget)) {
-            if (!end.isSet)
+            if (!end.isSet())
                 takeSnapshotBetweenBlocks(*this, end);
             continue;
         }
 
         const Snapshot& head = m_heads[target->index()];
-        if (!head.isSet) {
-            if (!registersMatchEndOfBlock) {
+        if (!head.isSet()) {
+            if (!registersMatchBlockEnd) {
                 restore(end);
-                registersMatchEndOfBlock = true;
+                registersMatchBlockEnd = true;
             }
             const bool isFirstEdgeThatCounts = !hasFramedPart && placeOfTarget.predecessors.data()[0] == from && from != placeOfTarget.sourceOfUnsplitEdgeThatCountsLast
                 && numberOfSuccessors <= 2 && !edge.isRare() && (!isInRareRegion() || m_rareRegion == placeOfTarget.rareRegion) && m_headOfBlock < placeOfTarget.head;
             if (!isFirstEdgeThatCounts && findBlockThatFixesHead(*this, target, placeOfTarget) != from) {
-                if (!end.isSet)
+                if (!end.isSet())
                     takeSnapshotBetweenBlocks(*this, end);
                 letEdgeWaitForHead(from, successorIndex, target, positionOfEdges);
                 continue;
@@ -1875,9 +1996,9 @@ void Allocator::leaveBlock(Block* from)
             const bool headIsPlain = kind == KindOfHeadBeingFixed::Plain;
             const bool headIsPlainButRare = kind == KindOfHeadBeingFixed::PlainButRare && target->phis().empty() && !isInRareRegion();
             const bool edgeIsServedWithHead = headIsPlain || headIsPlainButRare || headIsFixedTogetherWithMovesOfEdge(kind, from);
-            if (!end.isSet && !(edgeIsServedWithHead && successorIndex + 1 == numberOfSuccessors))
+            if (!end.isSet() && !(edgeIsServedWithHead && successorIndex + 1 == numberOfSuccessors))
                 takeSnapshotBetweenBlocks(*this, end);
-            registersMatchEndOfBlock = false;
+            registersMatchBlockEnd = false;
             if (headIsPlain)
                 fixPlainHeadBetweenBlocks<KindOfHeadBeingFixed::Plain>(*this, target, from, placeOfTarget);
             else if (headIsPlainButRare)
@@ -1888,18 +2009,40 @@ void Allocator::leaveBlock(Block* from)
                 return;
             if (edgeIsServedWithHead)
                 continue;
-        } else if (hasFramedPart) {
-            if (!end.isSet)
-                takeSnapshotBetweenBlocks(*this, end);
-        } else if (registersMatchEndOfBlock && registersHoldWhatHeadExpects(*this, target, head.bindings))
+        } else if (registersMatchBlockEnd && !(hasFramedPart && edgeMayChangeFrame(from, target)) && registersMatchBlockHead(*this, target, head.bindings()))
             continue;
+        else if (hasFramedPart && !end.isSet())
+            takeSnapshotBetweenBlocks(*this, end);
 
         appendEdgeMoves(from, successorIndex, end);
         if (m_proc.failure()) [[unlikely]]
             return;
     }
-    if (someSuccessorTakesRegisters && registersMatchEndOfBlock)
+    if (someSuccessorTakesRegisters && registersMatchBlockEnd)
         m_blockWhoseEndRegistersHold = from;
+}
+
+static NEVER_INLINE void loadBackOwnersWhereFrameEndsOnEdge(Allocator& allocator, const HeadBeingFixed& head, const Block* from, bool movesMayWriteRegisters, RegisterMask calleeSavesStillToNote)
+{
+    const Allocation& allocation = allocator.m_allocation;
+    if (!allocation.hasFramedPart() || allocation.needsFrameAheadOfFramedPart() || !allocator.startsOutsideFramedPart(head.target) || allocator.isOutsideFramedPart(from))
+        return;
+    allocation.everyHeadOfFramedPartAbove(from, [&](const Allocation::HeadOfFramedPart& headAbove) {
+        for (const RegisterBinding& binding : allocation.registersAtHeadOf(headAbove.block)) {
+            Operation* value = binding.value;
+            Allocator::ValueState& state = head.states[value->index()];
+            const ValueFacts& facts = head.factsOfValues[value->index()];
+            if (!facts.has(ValueFlag::IsKeptForCollector) || state.registers || !allocation.isSpilled(value) || facts.has(ValueFlag::NeedsPointerBesideIt) || !isLiveAtHeadBeingFixed<KindOfHeadBeingFixed::Any>(allocator, head, value))
+                continue;
+            RegisterMask freeRegisters = movesMayWriteRegisters ? allocator.m_file.allocatableIn(bankOf(binding.reg)) & ~allocator.m_file.calleeSaved & ~allocator.m_bound : 0;
+            if (!freeRegisters) {
+                allocator.giveUpFramedPartForReadOfSpill();
+                return false;
+            }
+            bindFreeRegisterBetweenBlocks(allocator, freeRegisters & maskOf(binding.reg) ? binding.reg : lowestRegisterAtEdge(freeRegisters), value, state, calleeSavesStillToNote);
+        }
+        return true;
+    });
 }
 
 void Allocator::fixHeadOf(Block* targetOfEdge, Block* blockOfEdge, const BlockPlace& placeOfTarget, KindOfHeadBeingFixed kindOfHead)
@@ -1911,9 +2054,9 @@ void Allocator::fixHeadOf(Block* targetOfEdge, Block* blockOfEdge, const BlockPl
         Operation* const* const phis = target->phis().data();
         const size_t numberOfPhis = target->phis().size();
         const bool movesMayWriteRegisters = from->last()->isUnconditionalJump() || Order::isUnsplit(from, place);
-        bool leavesFramedPart = false;
+        bool exitsFramedPart = false;
         if constexpr (isOfAnyKind)
-            leavesFramedPart = movesMayWriteRegisters && !head.isRare && isAheadOfFramedPart(target) && !isAheadOfFramedPart(from) && !m_allocation.needsFrameAheadOfFramedPart();
+            exitsFramedPart = movesMayWriteRegisters && !head.isRare && isOutsideFramedPart(target) && !isOutsideFramedPart(from) && !m_allocation.needsFrameAheadOfFramedPart();
         RegisterMask takenByPatchesOfLoop = 0;
         if constexpr (isOfAnyKind) {
             if (head.startsLoop && hasBackEdgeOutsideRareRegions(m_order.loops()[place.loop]))
@@ -1924,7 +2067,7 @@ void Allocator::fixHeadOf(Block* targetOfEdge, Block* blockOfEdge, const BlockPl
         ValueState* const states = head.states;
         const Reg* const hints = m_hints.begin();
         const RegisterMask calleeSavedRegisters = m_file.calleeSaved;
-        ASSERT(kind != KindOfHeadBeingFixed::PlainButForPhis || (!m_isAheadOfFramedPart && !isInRareRegion()));
+        ASSERT(kind != KindOfHeadBeingFixed::PlainButForPhis || (!m_isOutsideFramedPart && !isInRareRegion()));
         const RegisterMask calleeSavesStillToNote = kind == KindOfHeadBeingFixed::PlainButForPhis ? calleeSavedRegisters & ~m_calleeSavesTakenOutsideRareRegions : calleeSavesStillToNoteBetweenBlocks(*this);
 
         WhatCallInBlockOfHeadTakes whatCallTakes;
@@ -1974,7 +2117,7 @@ void Allocator::fixHeadOf(Block* targetOfEdge, Block* blockOfEdge, const BlockPl
                     continue;
                 ValueState& stateOfIncoming = states[incoming->index()];
                 RegisterMask held = stateOfIncoming.registers;
-                if (leavesFramedPart)
+                if (exitsFramedPart)
                     held &= ~calleeSavedRegisters;
                 if (!held || isLiveAtHeadBeingFixed<kind>(*this, head, incoming))
                     continue;
@@ -2007,7 +2150,7 @@ void Allocator::fixHeadOf(Block* targetOfEdge, Block* blockOfEdge, const BlockPl
 
         Operation* valuesMadeAgain[64];
         RegisterMask registersOfValuesMadeAgain = dropWhatHeadBeingFixedDoesNotHold<kind>(*this, head, valuesMadeAgain);
-        if (leavesFramedPart) {
+        if (exitsFramedPart) {
             registersOfValuesMadeAgain &= ~calleeSavedRegisters;
             for (RegisterMask registers = m_bound & calleeSavedRegisters; registers; registers &= registers - 1) {
                 const Reg reg = lowestRegisterAtEdge(registers);
@@ -2021,11 +2164,18 @@ void Allocator::fixHeadOf(Block* targetOfEdge, Block* blockOfEdge, const BlockPl
                 bindFreeRegisterBetweenBlocks(*this, hint && (freeRegisters & maskOf(hint)) ? hint : lowestRegisterAtEdge(freeRegisters), value, state, calleeSavesStillToNote);
             }
         }
+        if constexpr (isOfAnyKind) {
+            if (m_proc.numberOfInnerPointersAcrossSafepoints()) [[unlikely]]
+                loadBackOwnersWhereFrameEndsOnEdge(*this, head, from, movesMayWriteRegisters, calleeSavesStillToNote);
+        }
 
         if constexpr (isOfAnyKind) {
             if (head.startsLoop)
                 chooseRegistersKeptThroughLoop(m_order.loops()[place.loop], movesMayWriteRegisters);
         }
+        const Block* headOfLoopLedBackTo = movesMayWriteRegisters && !appendsMovesOfEdge && !exitsFramedPart && !isInRareRegion() ? headOfLoopThatBlockOnlyLeadsBackTo(target) : nullptr;
+        if (headOfLoopLedBackTo)
+            dropWhatBlockThatLeadsBackNeitherReadsNorHandsOn(target, headOfLoopLedBackTo);
 
         if (movesMayWriteRegisters) {
             for (size_t index = 0; index < numberOfPhis; ++index) {
@@ -2034,13 +2184,21 @@ void Allocator::fixHeadOf(Block* targetOfEdge, Block* blockOfEdge, const BlockPl
                 ValueState& state = states[phi->index()];
                 if (facts.has(ValueFlag::IsDropped) || state.registers)
                     continue;
-                if (Reg reg = chooseFreeRegisterAtHead(*this, bankOf(phi->type()), head.isRare, !leavesFramedPart && phiLivesAcrossCall(index, phi, facts) && (calleeSavesWorthTakingFor(phi, bankOf(phi->type()), target) & ~m_bound), leavesFramedPart ? calleeSavedRegisters : takenByPatchesOfLoop, { hints[phi->index()], registersOfDyingValues[index], facts.hint }))
+                if (Reg reg = chooseFreeRegisterAtHead(*this, bankOf(phi->type()), head.isRare, !exitsFramedPart && phiLivesAcrossCall(index, phi, facts) && (calleeSavesWorthTakingFor(phi, bankOf(phi->type()), target) & ~m_bound), exitsFramedPart ? calleeSavedRegisters : takenByPatchesOfLoop, { hints[phi->index()], registersOfDyingValues[index], facts.hint }))
                     bindFreeRegisterBetweenBlocks(*this, reg, phi, state, calleeSavesStillToNote);
+                else if constexpr (isOfAnyKind) {
+                    if (head.startsLoop && !exitsFramedPart) {
+                        if (Reg taken = takeRegisterOfValueThatLoopReadsBehindPhi(m_order.loops()[place.loop], phi))
+                            bindFreeRegisterBetweenBlocks(*this, taken, phi, state, calleeSavesStillToNote);
+                    }
+                }
             }
             if constexpr (isOfAnyKind) {
                 if (head.startsLoop)
                     bringInWhatLoopReads(m_order.loops()[place.loop], head.limitOfDefinitions);
             }
+            if (headOfLoopLedBackTo)
+                holdWhatHeadOfLoopHolds(target, headOfLoopLedBackTo, head.limitOfDefinitions);
         }
 
         if constexpr (kind != KindOfHeadBeingFixed::PlainButForPhis) {
@@ -2059,7 +2217,7 @@ void Allocator::fixHeadOf(Block* targetOfEdge, Block* blockOfEdge, const BlockPl
         }
 
         if (numberOfPhis) {
-            const bool headLiesAheadOfFramedPart = isOfAnyKind && headIsAheadOfFramedPart(target);
+            const bool targetStartsUnframed = isOfAnyKind && startsOutsideFramedPart(target);
             bool isKnownWhetherEdgesMayWritePhis = false;
             bool edgesMayWritePhis = false;
             struct SpillsHandedToPhi {
@@ -2067,6 +2225,33 @@ void Allocator::fixHeadOf(Block* targetOfEdge, Block* blockOfEdge, const BlockPl
                 SpillIndex second { noSpill };
             };
             SpillsHandedToPhi* spillsHandedToPhis = nullptr;
+            auto askWhetherEdgesMayWritePhis = [&]() ALWAYS_INLINE_LAMBDA {
+                if (!std::exchange(isKnownWhetherEdgesMayWritePhis, true))
+                    edgesMayWritePhis = edgesMayWritePhisWithRegistersAtHead(*this, target, place);
+                return edgesMayWritePhis;
+            };
+            auto phiMayLieIn = [&](SpillIndex candidate) {
+                PhisInSpill& phisInCandidate = phisInSpill(candidate);
+                Operation** endOfPhisNotYetDead = phisInCandidate.begin();
+                for (Operation* other : phisInCandidate) {
+                    const Position lastUse = factsOfValues[other->index()].lastUse;
+                    if (lastUse == noPosition || lastUse >= m_headOfBlock)
+                        *endOfPhisNotYetDead++ = other;
+                }
+                phisInCandidate.shrink(static_cast<uint32_t>(endOfPhisNotYetDead - phisInCandidate.begin()));
+                return std::ranges::none_of(phisInCandidate, [&](const Operation* other) {
+                    return other->owner() == target || (isLiveAtHeadBeingFixed<kind>(*this, head, other) && (other->opcode() != Phi || isReadOnSomeWayFromHeadOf(other, target)));
+                });
+            };
+            auto layPhiIn = [&](Operation* phi, SpillIndex shared) {
+                m_allocation.m_spillOfValue[phi->index()] = shared;
+                factsOfSpills[shared].isSharedByPhis = true;
+                letEdgesWritePhi(phi, shared, place);
+                m_phisInSpills[shared]->append(m_arena, phi);
+            };
+            std::span<const SpillIndex> spillsHandedOnTo;
+            if (kind != KindOfHeadBeingFixed::PlainButRare && !head.isRare && !isInRareRegion() && target->last()->isUnconditionalJump() && askWhetherEdgesMayWritePhis())
+                spillsHandedOnTo = findSpillsThatPhisAreOnlyHandedOnTo(target);
             for (size_t index = 0; index < numberOfPhis; ++index) {
                 Operation* phi = phis[index];
                 const ValueFacts& facts = factsOfValues[phi->index()];
@@ -2075,15 +2260,19 @@ void Allocator::fixHeadOf(Block* targetOfEdge, Block* blockOfEdge, const BlockPl
                 Reg reg = anyRegisterOf(phi, ~RegisterMask { 0 });
                 registersAtDefinitions[phi->index()] = reg;
                 bool isKeptByCalls = reg && (calleeSavedRegisters & maskOf(reg));
-                if (reg && !facts.has(ValueFlag::LivesIntoLandingPad) && !facts.has(ValueFlag::LivesAcrossSuspension) && (isKeptByCalls || headLiesAheadOfFramedPart || !phiLivesAcrossCall(index, phi, facts)))
+                if (index < spillsHandedOnTo.size() && spillsHandedOnTo[index] != noSpill && phiMayLieIn(spillsHandedOnTo[index])) {
+                    if (reg) {
+                        unbindRegisterBetweenBlocks(*this, reg, states[phi->index()]);
+                        registersAtDefinitions[phi->index()] = Reg();
+                    }
+                    layPhiIn(phi, spillsHandedOnTo[index]);
+                    continue;
+                }
+                if (reg && !facts.has(ValueFlag::LivesIntoLandingPad) && !facts.has(ValueFlag::LivesAcrossSuspension) && (isKeptByCalls || targetStartsUnframed || !phiLivesAcrossCall(index, phi, facts)))
                     continue;
 
                 if constexpr (kind != KindOfHeadBeingFixed::PlainButRare) {
-                    if (!isKnownWhetherEdgesMayWritePhis) {
-                        isKnownWhetherEdgesMayWritePhis = true;
-                        edgesMayWritePhis = edgesMayWritePhisWithRegistersAtHead(*this, target, place);
-                    }
-                    if (edgesMayWritePhis && valueMayShareSpill(*this, phi) && !m_allocation.isSpilled(phi)) {
+                    if (askWhetherEdgesMayWritePhis() && valueMayShareSpill(*this, phi) && !m_allocation.isSpilled(phi)) {
                         if (!spillsHandedToPhis) {
                             spillsHandedToPhis = m_arena.allocateArray<SpillsHandedToPhi>(numberOfPhis);
                             std::fill_n(spillsHandedToPhis, numberOfPhis, SpillsHandedToPhi { });
@@ -2116,18 +2305,7 @@ void Allocator::fixHeadOf(Block* targetOfEdge, Block* blockOfEdge, const BlockPl
                         for (SpillIndex candidate : { spillsHandedToPhis[index].first, spillsHandedToPhis[index].second }) {
                             if (candidate == noSpill)
                                 break;
-                            PhisInSpill& phisInCandidate = phisInSpill(candidate);
-                            Operation** endOfPhisNotYetDead = phisInCandidate.begin();
-                            for (Operation* other : phisInCandidate) {
-                                const Position lastUse = factsOfValues[other->index()].lastUse;
-                                if (lastUse == noPosition || lastUse >= m_headOfBlock)
-                                    *endOfPhisNotYetDead++ = other;
-                            }
-                            phisInCandidate.shrink(static_cast<uint32_t>(endOfPhisNotYetDead - phisInCandidate.begin()));
-                            bool liesApart = std::ranges::none_of(phisInCandidate, [&](const Operation* other) {
-                                return other->owner() == target || (isLiveAtHeadBeingFixed<kind>(*this, head, other) && (other->opcode() != Phi || isReadOnSomeWayFromHeadOf(other, target)));
-                            });
-                            if (liesApart) {
+                            if (phiMayLieIn(candidate)) {
                                 shared = candidate;
                                 break;
                             }
@@ -2140,10 +2318,7 @@ void Allocator::fixHeadOf(Block* targetOfEdge, Block* blockOfEdge, const BlockPl
                             }
                         }
                         if (shared != noSpill) {
-                            m_allocation.m_spillOfValue[phi->index()] = shared;
-                            factsOfSpills[shared].isSharedByPhis = true;
-                            letEdgesWritePhi(phi, shared, place);
-                            m_phisInSpills[shared]->append(m_arena, phi);
+                            layPhiIn(phi, shared);
                             continue;
                         }
                         if (head.startsLoop) {
@@ -2225,8 +2400,8 @@ static ALWAYS_INLINE bool edgeBringsEverythingWhereHeadExpectsIt(const ValueFact
         if (!factsOfValues[phi->index()].has(ValueFlag::IsDropped))
             return false;
     }
-    const RegisterBinding* next = end.bindings.data();
-    for (const RegisterBinding& expected : head.bindings) {
+    const RegisterBinding* next = end.bindings().data();
+    for (const RegisterBinding& expected : head.bindings()) {
         const unsigned index = expected.reg.index();
         while (next->reg.index() != index)
             ++next;
@@ -2244,16 +2419,21 @@ static NEVER_INLINE Location findPlaceOutsideRegistersAtEndOf(Allocator& allocat
     if (facts.definition > allocator.m_order.earlyPositionOf(from, from->size() - 1))
         return Location();
     const SpillIndex spill = allocator.m_allocation.spillOf(value);
-    if (spill != noSpill && !(allocator.isAheadOfFramedPart(from) && allocator.isStoredAtHeadsOfFramedPart(value)))
-        return Location::spill(spill);
+    if (spill != noSpill && !(allocator.isOutsideFramedPart(from) && allocator.isStoredAtHeadsOfFramedPart(value)))
+        return allocator.placeToReadIn(spill);
     if (!isServedLate) {
         SpillIndex save = allocator.stateOf(value).saveInRareRegion;
         if (save != noSpill && wasSavedOnWayThroughRareRegion(allocator, from, value))
             return Location::spill(save);
     } else {
-        for (const Allocator::SaveReadByWaitingEdge& held : allocator.m_savesReadByWaitingEdges) {
-            if (held.from == from && held.value == value)
-                return Location::spill(held.save);
+        const Order& order = allocator.m_order;
+        std::span<const Allocator::SaveReadByWaitingEdge> saves = allocator.m_savesReadByWaitingEdges.span();
+        auto held = std::ranges::lower_bound(saves, order.of(from).orderIndex, { }, [&](const Allocator::SaveReadByWaitingEdge& save) {
+            return order.of(save.from).orderIndex;
+        });
+        for (; held != saves.end() && held->from == from; ++held) {
+            if (held->value == value)
+                return Location::spill(held->save);
         }
     }
     if (spill == noSpill)
@@ -2261,17 +2441,17 @@ static NEVER_INLINE Location findPlaceOutsideRegistersAtEndOf(Allocator& allocat
     if (headMayDoWithoutDeadValue && allocator.isDeadOnEveryPathFrom(value, from, allocator.m_order.endOf(from)))
         return Location();
     allocator.giveUpFramedPartForReadOfSpill();
-    return Location::spill(spill);
+    return allocator.placeToReadIn(spill);
 }
 
-void Allocator::appendEdgeMoves(Block* blockOfEdge, unsigned indexOfEdge, const Snapshot& endOfBlockOfEdge)
+ALWAYS_INLINE_INTO_OTHER_FILES void Allocator::appendEdgeMoves(Block* blockOfEdge, unsigned indexOfEdge, const Snapshot& endOfBlockOfEdge)
 {
     Block* targetOfEdge = blockOfEdge->successor(indexOfEdge).block();
-    const bool registersAreEndOfBlockOfEdge = !endOfBlockOfEdge.isSet;
-    ASSERT(m_heads[targetOfEdge->index()].isSet);
+    const bool registersAreEndOfBlockOfEdge = !endOfBlockOfEdge.isSet();
+    ASSERT(m_heads[targetOfEdge->index()].isSet());
     ASSERT(!registersAreEndOfBlockOfEdge || (blockOfEdge == m_block && &endOfBlockOfEdge == &m_ends[blockOfEdge->index()] && !m_allocation.hasFramedPart()));
     const bool edgeBringsEverything = !registersAreEndOfBlockOfEdge && edgeBringsEverythingWhereHeadExpectsIt(m_valueFacts, targetOfEdge, m_heads[targetOfEdge->index()], endOfBlockOfEdge);
-    if (edgeBringsEverything && !m_allocation.hasFramedPart())
+    if (edgeBringsEverything && !edgeMayChangeFrame(blockOfEdge, targetOfEdge))
         return;
 
     auto appendTheLongWay = [this]<bool registersAreEndOfFrom>(Block* from, unsigned successorIndex, const Snapshot& endOfFrom, Block* target, bool bringsEverything, ArenaVector<BlockSteps>& stepsOfBlocks, ArenaVector<Step>& allSteps) NEVER_INLINE {
@@ -2279,15 +2459,15 @@ void Allocator::appendEdgeMoves(Block* blockOfEdge, unsigned indexOfEdge, const 
         const BlockPlace& placeOfTarget = m_order.places()[target->index()];
         const bool isUnsplit = Order::isUnsplit(from, placeOfTarget);
         if (bringsEverything) {
-            if (isUnsplit && frameMayChangeOnEdge(from, target))
+            if (isUnsplit && edgeMayChangeFrame(from, target))
                 splitEdge(from, successorIndex, endOfFrom);
             return;
         }
         const bool isServedLate = from != m_block;
-        const RegisterBinding* const firstAtHead = head.bindings.data();
-        const RegisterBinding* const limitAtHead = firstAtHead + head.bindings.size();
-        const RegisterBinding* const firstAtEnd = endOfFrom.bindings.data();
-        const RegisterBinding* const limitAtEnd = firstAtEnd + endOfFrom.bindings.size();
+        const RegisterBinding* const firstAtHead = head.bindings().data();
+        const RegisterBinding* const limitAtHead = firstAtHead + head.bindings().size();
+        const RegisterBinding* const firstAtEnd = endOfFrom.bindings().data();
+        const RegisterBinding* const limitAtEnd = firstAtEnd + endOfFrom.bindings().size();
 
         auto placeAtEndOf = [&](Operation* value, Location wanted, bool headMayDoWithoutDeadValue = false) ALWAYS_INLINE_LAMBDA -> Location {
             if constexpr (registersAreEndOfFrom) {
@@ -2341,7 +2521,7 @@ void Allocator::appendEdgeMoves(Block* blockOfEdge, unsigned indexOfEdge, const 
             Location source = placeAtEndOf(value, destination, !headIsEntered);
             if (!source) {
                 if (headIsEntered) {
-                    m_proc.fail(FailureKind::RegisterLacksItsValue, value);
+                    m_proc.fail(FailureKind::WrongValueInRegister, value);
                     return;
                 }
                 registersOfAbsentValues |= maskOf(binding.reg);
@@ -2358,7 +2538,7 @@ void Allocator::appendEdgeMoves(Block* blockOfEdge, unsigned indexOfEdge, const 
                         edgeMakesWhatHeadHolds = placeOfTarget.predecessors.size() <= 2 && from->last()->isUnconditionalJump() && isRareEdgeIntoHead(m_order, from, target);
                     isOwedByNoEdge = !edgeMakesWhatHeadHolds && !isKeptThroughLoopAround(binding.reg, value, placeOfTarget.head);
                 } else
-                    isOwedByNoEdge = spillHoldsValueAtHeadOf(target, value) && firstCallBehindHeadReadsValueElsewhere(*this, target, binding);
+                    isOwedByNoEdge = spillHoldsValueAtHeadOf(target, value) && firstCallBehindHeadReadsValueElsewhere(target, binding.reg, value);
                 if (isOwedByNoEdge) {
                     registersOfAbsentValues |= maskOf(binding.reg);
                     continue;
@@ -2387,11 +2567,11 @@ void Allocator::appendEdgeMoves(Block* blockOfEdge, unsigned indexOfEdge, const 
                     new (NotNull, next++) RegisterBinding(*binding);
             }
             ASSERT(next == kept + numberKept);
-            head.bindings = std::span<const RegisterBinding>(kept, numberKept);
-            head.registers &= ~registersOfAbsentValues;
+            ASSERT(numberKept == static_cast<size_t>(std::popcount(head.registers & ~registersOfAbsentValues)));
+            head.set(kept, head.registers & ~registersOfAbsentValues);
         }
 
-        if (m_pendingMoves.isEmpty() && !(isUnsplit && frameMayChangeOnEdge(from, target)))
+        if (m_pendingMoves.isEmpty() && !(isUnsplit && edgeMayChangeFrame(from, target)))
             return;
         if (isUnsplit) {
             if constexpr (registersAreEndOfFrom)
@@ -2406,7 +2586,7 @@ void Allocator::appendEdgeMoves(Block* blockOfEdge, unsigned indexOfEdge, const 
     appendTheLongWay.operator()<false>(blockOfEdge, indexOfEdge, endOfBlockOfEdge, targetOfEdge, edgeBringsEverything, m_allocation.m_blocks, m_allocation.m_steps);
 }
 
-bool Allocator::frameMayChangeOnEdge(const Block* from, const Block* target)
+ALWAYS_INLINE_INTO_OTHER_FILES bool Allocator::edgeMayChangeFrame(const Block* from, const Block* target)
 {
     if (!m_allocation.hasFramedPart())
         return false;
@@ -2444,11 +2624,13 @@ Block* Allocator::splitEdge(Block* from, unsigned successorIndex, const Snapshot
     if (m_allocation.hasFramedPart() && m_allocation.isInFramedPart(from)) {
         m_allocation.m_isInFramedPart.set(middle->index());
         m_allocation.m_headAboveBlock[middle->index()] = m_allocation.m_headAboveBlock[from->index()];
+        if (!m_allocation.m_setOfHeadsAboveBlock.isEmpty())
+            m_allocation.m_setOfHeadsAboveBlock[middle->index()] = m_allocation.m_setOfHeadsAboveBlock[from->index()];
     }
     if (!m_immediateDominators.isEmpty())
         m_immediateDominators[middle->index()] = from;
     if (listsRegistersAtHeadOf(middle))
-        m_allocation.m_registersAtHead[middle->index()] = listBindingsAtHead(*this, HeadThatListsRegisters { middle, m_allocation.spillsOfValues(), headIsAheadOfFramedPart(middle) }, endOfFrom.bindings);
+        m_allocation.m_registersAtHead[middle->index()] = listBindingsAtHead(*this, HeadThatListsRegisters { middle, m_allocation.spillsOfValues(), startsOutsideFramedPart(middle) }, endOfFrom.bindings());
     return middle;
 }
 
@@ -2461,11 +2643,11 @@ Allocator::Snapshot Allocator::takeSnapshot()
 
 void Allocator::restore(const Snapshot& snapshot)
 {
-    ASSERT(snapshot.isSet);
+    ASSERT(snapshot.isSet());
     unbindRegistersBetweenBlocks(*this, m_bound);
     ValueState* const states = m_values.begin();
     const RegisterMask calleeSavesStillToNote = calleeSavesStillToNoteBetweenBlocks(*this);
-    for (const RegisterBinding& binding : snapshot.bindings)
+    for (const RegisterBinding& binding : snapshot.bindings())
         bindFreeRegisterBetweenBlocks(*this, binding.reg, binding.value, states[binding.value->index()], calleeSavesStillToNote);
 }
 
@@ -2481,7 +2663,7 @@ void Allocator::noteHintsOfHead(const Block* target)
         passOnHintsOfPhisOfHead(*this, target, placeOfWalk);
 
     Reg* const hints = m_hints.begin();
-    for (const RegisterBinding& binding : m_heads[target->index()].bindings)
+    for (const RegisterBinding& binding : m_heads[target->index()].bindings())
         noteHintOfValueThatHeadHolds<true>(hints, target, binding.reg, binding.value);
 }
 
@@ -2505,13 +2687,7 @@ bool Allocator::dominates(const Block* above, const Block* below)
 
 bool Allocator::hasBackEdgeOutsideRareRegions(const Loop& loop) const
 {
-    const Block* head = m_order.blocksInOrder()[loop.firstBlock];
-    std::span<Block* const> predecessors = m_order.of(head).predecessors;
-    for (size_t index = predecessors.size(); index-- && m_order.of(predecessors[index]).orderIndex >= loop.firstBlock;) {
-        if (!isRareEdgeIntoHead(m_order, head, index))
-            return true;
-    }
-    return false;
+    return m_order.hasBackEdgeOutsideRareRegions(loop);
 }
 
 static bool isReadOnWayOutOfBranch(const Liveness& liveness, const Operation* value, const WayOutOfBranch& way)
@@ -2526,11 +2702,11 @@ static bool isReadOnWayOutOfBranch(const Liveness& liveness, const Operation* va
 Allocator::OperandTakenBack Allocator::findOperandThatSumMayOverwrite(const Operation* sum, std::span<const Location> sources)
 {
     ASSERT(sum->owner() == m_block && sources.size() == 2);
-    SumTestedByOverflow test = sumTestedByOverflowOf(m_liveness, sum);
-    if (test.isWidenedWhereTestFails)
+    OverflowCheckedSum test = overflowCheckedSumOf(m_liveness, sum);
+    if (test.isWidenedOnFailure)
         return { };
 
-    const Block* passes = m_block->successor(test.successorThatPasses).block();
+    const Block* passes = m_block->successor(test.passingSuccessor).block();
     Position headOfPassingSide = m_order.headOf(passes);
     Operation* operands[] = { test.left(), test.right() };
     OperandTakenBack found;
@@ -2552,7 +2728,7 @@ Allocator::OperandTakenBack Allocator::findOperandThatSumMayOverwrite(const Oper
     if (!found.value)
         return { };
 
-    WayOutOfBranch failingSide = wayOutOfBranchThrough(m_order, m_block->successor(!test.successorThatPasses).block());
+    WayOutOfBranch failingSide = wayOutOfBranchThrough(m_order, m_block->successor(!test.passingSuccessor).block());
     if (failingSide.leadsOn || isReadOnWayOutOfBranch(m_liveness, sum, failingSide))
         return { };
     for (unsigned index = sum->indexInBlock() + 1; index + 1 < m_block->size(); ++index) {
@@ -2565,8 +2741,8 @@ Allocator::OperandTakenBack Allocator::findOperandThatSumMayOverwrite(const Oper
 
 void Allocator::noteOperandTakenBack(const Operation* sum, OperandTakenBack operand, Location otherOperand)
 {
-    SumTestedByOverflow test = sumTestedByOverflowOf(m_liveness, sum);
-    const Block* fails = m_block->successor(!test.successorThatPasses).block();
+    OverflowCheckedSum test = overflowCheckedSumOf(m_liveness, sum);
+    const Block* fails = m_block->successor(!test.passingSuccessor).block();
     if (m_operandsTakenBackAtHeads.isEmpty())
         m_operandsTakenBackAtHeads.fill(m_arena, m_proc.numberOfBlocks(), OperandTakenBack { });
     m_operandsTakenBackAtHeads[fails->index()] = operand;

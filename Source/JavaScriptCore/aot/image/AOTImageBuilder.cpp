@@ -9,7 +9,9 @@
 #if ENABLE(AOT)
 
 #include "AOTBuildContext.h"
+#include "AOTBuiltinIDs.h"
 #include "AOTCallSiteTable.h"
+#include "AOTCodedTexts.h"
 #include "AOTCodeTemplates.h"
 #include "AOTFacts.h"
 #include "AOTFaultTable.h"
@@ -17,14 +19,18 @@
 #include "AOTIRProgram.h"
 #include "AOTIdentifierNumbering.h"
 #include "AOTImage.h"
+#include "AOTObfuscatedSites.h"
+#include "AOTOrderFile.h"
 #include "AOTPhaseTimes.h"
 #include "AOTPlan.h"
 #include "AOTProgramTables.h"
 #include "AOTRuntimeTable.h"
 #include "AOTSectionWriter.h"
 #include "AOTSort.h"
+#include "AOTStringUses.h"
 #include "AOTStubCatalog.h"
 #include "AOTStubDescriptor.h"
+#include "AOTStubsCallAdapters.h"
 #include "AOTStubsPropertyKeys.h"
 #include "AOTTestRunReportSizes.h"
 #include "AOTThreads.h"
@@ -157,15 +163,20 @@ static Vector<uint8_t> encodeStubAddresses(const StubBlob& blob)
 static Vector<uint8_t> encodeSlotHandlers(const StubBlob& blob)
 {
     Vector<uint32_t> offsets;
-    offsets.reserveInitialCapacity(numberOfSlotHandlerTables * numberOfSlotKindsWithHandlers);
+    offsets.reserveInitialCapacity(sizeof(SlotHandlers) / sizeof(void*));
     for (SlotHandlerTable table : allSlotHandlerTables) {
         for (Slot::Kind kind : slotKindsWithHandlers)
             offsets.append(blob.offsetOf(slotHandlerFor(table, kind)).value_or(offsetOfAbsentStub));
     }
+    for (AnswerHandlerTable table : allAnswerHandlerTables) {
+        const std::array handlers = answerHandlerKeys(table);
+        for (unsigned bits = 0; bits < numberOfSlotKindsWithHandlers; ++bits)
+            offsets.append(bits < handlers.size() ? blob.offsetOf(handlers[bits]).value_or(offsetOfAbsentStub) : offsetOfAbsentStub);
+    }
     return bytesOf(offsets);
 }
 
-static Vector<uint8_t> encodeNamesOfSites(const ImageNumbers& numbers)
+static Vector<uint8_t> encodeNamesOfSites(const ImageNumbers& numbers, const BuildContext& context)
 {
     const NumberedKeys& sites = numbers.siteCaches();
     const IdentifierNumbering& identifiers = numbers.identifiers();
@@ -177,11 +188,14 @@ static Vector<uint8_t> encodeNamesOfSites(const ImageNumbers& numbers)
             continue;
         uint32_t name = identifiers.numberOf(ImageNumbers::nameOfSite(key)).value();
         uint32_t number = numbersOfSites[place];
-        names[number] = static_cast<uint16_t>(name);
-        if (numbersOfSites[place + 1] - number == 2)
-            names[number + 1] = static_cast<uint16_t>(name >> 16);
-        else
-            RELEASE_ASSERT(name <= UINT16_MAX);
+        if (name < InstanceLayout::nameOfSiteStandsBehind) {
+            names[number] = static_cast<uint16_t>(name);
+            continue;
+        }
+        RELEASE_ASSERT(!context.startRanks().empty() || numbersOfSites[place + 1] - number == InstanceLayout::numbersOfSiteWhoseNameStandsBehind);
+        names[number] = InstanceLayout::nameOfSiteStandsBehind;
+        names[number + 1] = static_cast<uint16_t>(name);
+        names[number + 2] = static_cast<uint16_t>(name >> 16);
     }
     return bytesOf(names);
 }
@@ -193,11 +207,11 @@ OptionSet<ImageFlag> imageFlagsAdmittedBy(Wire::UnseenCodeCause cause)
     case Wire::UnseenCodeCause::RunsUnseenCode:
         return { ImageFlag::AdmitsUnknownJavaScript };
     case Wire::UnseenCodeCause::ImportsUncompiledModule:
-        return { ImageFlag::AdmitsUnknownJavaScript, ImageFlag::AdmitsLibraryText };
+        return { ImageFlag::AdmitsUnknownJavaScript, ImageFlag::AllowsLibrarySource };
     case Wire::UnseenCodeCause::OptionAdmitsCode:
-        return { ImageFlag::AdmitsUnknownJavaScript, ImageFlag::AdmitsLibraryText, ImageFlag::LoadsModulesByName };
+        return { ImageFlag::AdmitsUnknownJavaScript, ImageFlag::AllowsLibrarySource, ImageFlag::LoadsModulesByName };
     case Wire::UnseenCodeCause::LoadsCodeByName:
-        return { ImageFlag::AdmitsUnknownJavaScript, ImageFlag::AdmitsLibraryText, ImageFlag::LoadsModulesByName, ImageFlag::LoadsCodeOutsideImage };
+        return { ImageFlag::AdmitsUnknownJavaScript, ImageFlag::AllowsLibrarySource, ImageFlag::LoadsModulesByName, ImageFlag::LoadsCodeOutsideImage };
     case Wire::UnseenCodeCause::LoadsModuleByName:
         return { ImageFlag::LoadsModulesByName };
     case Wire::UnseenCodeCause::Unknown:
@@ -207,6 +221,29 @@ OptionSet<ImageFlag> imageFlagsAdmittedBy(Wire::UnseenCodeCause cause)
     }
     RELEASE_ASSERT_NOT_REACHED();
     return { };
+}
+
+static bool holdsCodeOfEscapedBuiltins(const Typed::Facts& facts)
+{
+    const Typed::Program& program = facts.program();
+    const BuiltinTable& builtins = program.builtins();
+    auto isHeld = [&](RuntimeFunctionID function) {
+        if (!function || !builtins.contains(function) || !builtins.at(function).platforms.contains(targetOfThisBuild().platform))
+            return true;
+        const Typed::RuntimeFunctionEntry* entry = Typed::findRuntimeFunction(program, function);
+        return entry && entry->function;
+    };
+    return std::ranges::all_of(facts.builtinUses(), [&](const auto& use) {
+        BuiltinID builtin(use.builtin);
+        if (!facts.isLetGo(builtin))
+            return true;
+        bool holdsCalled = std::ranges::all_of(builtins.calledFunctionsOf(builtin), [&](const BuiltinCalledFunction& called) {
+            return called.condition || isHeld(called.function);
+        });
+        return holdsCalled && std::ranges::all_of(builtins.overloadsOf(builtin), [&](const BuiltinOverload& overload) {
+            return isHeld(overload.code.implementation.function);
+        });
+    });
 }
 
 OptionSet<ImageFlag> flagsForUnseenCode(const Typed::Facts& facts, const CompileOptions& options)
@@ -220,9 +257,11 @@ OptionSet<ImageFlag> flagsForUnseenCode(const Typed::Facts& facts, const Compile
     RELEASE_ASSERT(!facts.unseenCodeCanRun() || facts.linked().unseenCodeCanRun);
     if (facts.unseenCodeCanRun() || facts.unseenScriptsCanRun())
         flags.add(ImageFlag::AdmitsUnknownJavaScript);
-    if (facts.storesPathOfMainModule())
-        flags.add(ImageFlag::StoresPathOfMainModule);
+    if (facts.setsMainModulePath())
+        flags.add(ImageFlag::SetsMainModulePath);
     const Typed::Program& program = facts.program();
+    if (facts.isLetGo(program.builtins().canonicalID(Builtins::GlobalThis)) && (!options.excludesLibraryText() || holdsCodeOfEscapedBuiltins(facts)))
+        flags.add(ImageFlag::LetsGlobalObjectGo);
     bool holdsMockOfFile = false;
     bool originalMayRun = false;
     for (const Typed::Variable& variable : program.variables) {
@@ -274,10 +313,16 @@ struct StringHeaderNumbers {
     bool hasRecords() const { return form == ImageForm::PositionIndependent; }
     uint64_t sizeOfHeaders() const { return static_cast<uint64_t>(count) * (hasRecords() ? sizeof(ImageStringRecord) : sizeof(ImageStringHeader)); }
     uint64_t sizeOfList() const { return static_cast<uint64_t>(numberOfListedWords) * sizeof(uint32_t); }
+    uint32_t numberOfStringWords() const { return ofStrings->numberOfWords() - endOfIdentifiers; }
 
     ImageForm form { ImageForm::Absolute };
+    const StringNumbers* ofStrings { nullptr };
+    const StringConstantNumbering* constants { nullptr };
     Vector<uint32_t> byString;
     Vector<uint32_t> listedWordIndexes;
+    Vector<uint8_t> codedTexts;
+    Vector<ImageOtherIdentifier> otherIdentifiers;
+    uint32_t endOfIdentifiers { 0 };
     uint32_t count { 0 };
     uint32_t numberOfListedWords { 0 };
     uint64_t largestNumberNeeded { 0 };
@@ -378,41 +423,23 @@ static size_t countFunctionsWithCode(const Typed::Program& program, const Linked
     return count;
 }
 
-static size_t countFunctionsInImage(const Typed::Program& program, const LinkedFunctions& functions)
+static Vector<uint32_t> measureSideTablesOfFunctions(const SideTables& sideTables, bool hasPositions, const ParallelLoops& loops)
 {
-    size_t count = program.functions.size() + functions.fusedCallEntries().size();
-    for (const CompiledCode& code : functions)
-        count += code.unit.role != Typed::CodeRole::Body;
-    return count;
-}
-
-static Vector<uint32_t> measureSideTablesOfFunctions(const SideTables& sideTables, std::span<const Vector<uint8_t>> callSites, bool hasPositions, const ParallelLoops& loops)
-{
-    size_t numberOfFunctions = callSites.size();
-    RELEASE_ASSERT(sideTables.offsets.size() == numberOfFunctions && sideTables.flags.size() == numberOfFunctions);
-    Vector<uint32_t> sizes(FillWith { }, numberOfFunctions, 0);
-    const uint8_t* streams = sideTables.bytes.span().data();
+    size_t numberOfFunctions = sideTables.sizes.size();
+    Vector<uint32_t> sizes = sideTables.sizes;
+    if (!hasPositions)
+        return sizes;
     const uint8_t* positions = sideTables.positions.span().data();
     size_t numberOfGroups = PositionIndex::numberOfEntriesFor(numberOfFunctions);
     forEachIndexInParallel(loops, static_cast<unsigned>(numberOfGroups), [&](unsigned group) {
-        const uint8_t* cursor = nullptr;
-        if (hasPositions) {
-            uint32_t placeOfFirstEntry;
-            memcpy(&placeOfFirstEntry, positions + group * sizeof(uint32_t), sizeof(uint32_t));
-            cursor = positions + numberOfGroups * sizeof(uint32_t) + placeOfFirstEntry;
-        }
+        const uint8_t* cursor = PositionIndex::firstEntry(positions, group, numberOfFunctions);
         size_t first = static_cast<size_t>(group) * PositionIndex::functionsBetween;
         size_t end = std::min(numberOfFunctions, first + PositionIndex::functionsBetween);
         for (size_t position = first; position < end; ++position) {
-            SideTableParts parts = SideTableParts::read(ImageFunction::create(sideTables.offsets[position], 0, sideTables.flags[position]), streams);
-            uint64_t size = parts.frameRanges.size() + parts.handlers.size() + callSites[position].size();
-            if (cursor) {
-                const uint8_t* entry = cursor;
-                PositionsHead head = PositionsHead::read(cursor);
-                cursor += head.size;
-                size += cursor - entry;
-            }
-            sizes[position] = clampTo<uint32_t>(size);
+            const uint8_t* entry = cursor;
+            PositionsHead head = PositionsHead::read(cursor);
+            cursor += head.size;
+            sizes[position] += static_cast<uint32_t>(cursor - entry);
         }
     });
     return sizes;
@@ -443,16 +470,27 @@ static TextRecords textRecordsIn(const Vector<uint8_t>& strings, const Vector<ui
     };
 }
 
-static StringHeaderNumbers numberStringHeaders(const TextRecords& text, std::span<const StringID> stringsInOrderOfText, ImageForm form)
+static StringHeaderNumbers numberStringHeaders(const TextRecords& text, const ImageNumbers& imageNumbers, ImageForm form)
 {
     StringHeaderNumbers numbers;
     numbers.form = form;
+    numbers.ofStrings = &imageNumbers.stringNumbers();
+    numbers.constants = &imageNumbers.stringConstants();
     numbers.byString.fill(0, text.strings.size());
     if (numbers.hasRecords())
         numbers.listedWordIndexes.fill(0, text.strings.size());
     uint64_t count = text.identifiers.size();
+    numbers.endOfIdentifiers = static_cast<uint32_t>(text.identifiers.size());
+    RELEASE_ASSERT(numbers.endOfIdentifiers <= numbers.ofStrings->numberOfWords());
+    for (uint32_t number = 0; number < text.identifiers.size(); ++number) {
+        StringID textOfIdentifier = text.identifiers[number].text();
+        bool isOther = text.identifiers[number].kind() != PropertyKeyKind::Text;
+        if (textOfIdentifier && isOther)
+            numbers.otherIdentifiers.append({ number, numbers.ofStrings->requiredNumberOf(textOfIdentifier) + 1 });
+        RELEASE_ASSERT(isOther || !number || numbers.ofStrings->requiredNumberOf(textOfIdentifier) == number);
+    }
     uint64_t numberOfListedWords = 0;
-    for (size_t index : listStringsInOrderOfText(text.strings.size(), stringsInOrderOfText)) {
+    for (size_t index : listStringsInOrderOfText(text.strings.size(), imageNumbers.stringsInOrderOfText())) {
         const ImageString& string = text.strings[index];
         bool needsRecord = numbers.hasRecords() && string.hasHeader() && string.range(text.longStrings).length;
         if (needsRecord && !ImageListedString::fitsOneWord(string.range(text.longStrings))) {
@@ -465,13 +503,29 @@ static StringHeaderNumbers numberStringHeaders(const TextRecords& text, std::spa
             numbers.byString[index] = static_cast<uint32_t>(count++);
             continue;
         }
+        if (numbers.constants->isPlaced(StringID(static_cast<uint32_t>(index))))
+            continue;
         numbers.byString[index] = static_cast<uint32_t>(numberOfListedWords);
         numberOfListedWords += ImageListedString::numberOfWords(string.range(text.longStrings)) + string.hasListedHash();
     }
     numbers.count = static_cast<uint32_t>(count);
     numbers.numberOfListedWords = static_cast<uint32_t>(numberOfListedWords);
-    numbers.largestNumberNeeded = std::max(count, numberOfListedWords);
+    numbers.largestNumberNeeded = std::max<uint64_t>({ count, numberOfListedWords, imageNumbers.stringNumbers().coded().size() });
     return numbers;
+}
+
+static Vector<uint8_t> encodeCodedTexts(const Typed::StringTable& strings, const StringNumbers& numbers, BuildContext& context)
+{
+    Vector<std::span<const uint8_t>> texts(numbers.coded().size(), [&](size_t index) {
+        return strings[numbers.coded()[index]];
+    });
+    Vector<uint8_t> bytes = CodedTexts::encode(texts.span(), context.parallelLoops());
+    if (checksImageWhileBuilding(context)) {
+        CodedTexts coded(bytes.span(), static_cast<uint32_t>(texts.size()));
+        for (uint32_t number = 0; number < texts.size(); ++number)
+            RELEASE_ASSERT(equalSpans(std::span<const uint8_t>(coded.at(number).span()), texts[number]));
+    }
+    return bytes;
 }
 
 [[nodiscard]] static bool checkStringHeaderNumbers(const StringHeaderNumbers& numbers, BuildContext& context)
@@ -493,11 +547,11 @@ static std::optional<ImageExtent> computeImageExtent(const ImageSections& sectio
         if (static_cast<ImageSection>(index) == ImageSection::StringHeaders)
             size = stringHeaders.sizeOfHeaders();
         else if (static_cast<ImageSection>(index) == ImageSection::Strings)
-            size = size / sizeof(ImageString) * sizeof(ImageStringWord);
+            size = static_cast<uint64_t>(stringHeaders.numberOfStringWords()) * sizeof(ImageStringWord) + stringHeaders.codedTexts.size();
         else if (static_cast<ImageSection>(index) == ImageSection::LongStrings)
             size = stringHeaders.sizeOfList();
         else if (static_cast<ImageSection>(index) == ImageSection::Identifiers)
-            size = size / sizeof(ImageIdentifier) * sizeof(ImageIdentifierWord);
+            size = ImageOtherIdentifier::offsetFor(size / sizeof(ImageIdentifier)) + stringHeaders.otherIdentifiers.sizeInBytes();
         bool isClonedByPages = static_cast<ImageSection>(index) == ImageSection::MethodTable && sections.programTables().instanceSizes.sizeOfMethodTable;
         tablesEnd = isClonedByPages ? WTF::roundUpToMultipleOf<imagePageSize>(tablesEnd) : WTF::roundUpToMultipleOf<imageSectionAlignment>(tablesEnd);
         extent.sections[index] = { static_cast<uint32_t>(tablesEnd), static_cast<uint32_t>(size) };
@@ -555,6 +609,8 @@ static void writeHeader(ImageHeader& header, const ImageWriterInputs& parts, con
     header.address = 0;
     header.executableSize = layout.executableSize;
     header.formatVersion = imageFormatVersion;
+    if (uint32_t units = context.numberOfUnitsOfStart())
+        header.sizeOfCodeOfStart = units < layout.bodyStarts.size() ? layout.bodyStarts[units] : layout.functionsEnd;
     header.options = context.recordedOptions();
     header.heap = { context.options().sizeClassProgression, MarkedBlockCage::shift, 0 };
     std::ranges::copy(extent.sections, header.sections);
@@ -574,17 +630,24 @@ static void writeHeader(ImageHeader& header, const ImageWriterInputs& parts, con
     OptionSet<ImageFlag> flags = flagsForUnseenCode(parts.facts, context.options());
     if (context.options().obfuscates())
         flags.add(ImageFlag::IsObfuscated);
+    if (context.options().recordsOrder())
+        flags.add(ImageFlag::RecordsOrder);
     header.numbers = {
         .lastShape = parts.plan.shapes().numberOfShapes(),
         .endOfClosureNumbers = functionNumbers.endOfClosureFunctions().index() - functionNumbers.firstClosureFunction().index(),
         .endOfIdentifiers = endOfIdentifiers,
         .endOfStringHeaders = stringHeaders.count,
+        .numberOfStringWords = stringHeaders.numberOfStringWords(),
+        .numberOfCodedTexts = static_cast<uint32_t>(stringHeaders.ofStrings->coded().size()),
+        .numberOfPlacedConstants = stringHeaders.constants->numberOfPlaced(),
     };
-    if (Typed::namesWaysToModuleObjects(parts.program))
+    if (Typed::reachesModuleObjects(parts.program))
         flags.add(ImageFlag::ShowsWaysBetweenModuleObjects);
-    if (std::ranges::any_of(parts.program.modules, [](const Typed::Module& module) { return module.kind != Typed::ModuleKind::CommonJs && module.flags.contains(Typed::ModuleFlags::RunsAgain); }))
+    if (std::ranges::any_of(parts.program.modules, [](const Typed::Module& module) { return module.kind != Typed::ModuleKind::CommonJs && module.flags.contains(Typed::ModuleFlags::MayBeReevaluated); }))
         flags.add(ImageFlag::RunsEntryPointsAgain);
-    if (std::ranges::any_of(parts.program.modules, [](const Typed::Module& module) { return module.flags.contains(Typed::ModuleFlags::IsShownByEntryOfCache); }))
+    if (!parts.program.moduleInstances.isEmpty() || std::ranges::any_of(parts.program.modules, [](const Typed::Module& module) { return module.flags.contains(Typed::ModuleFlags::IsReloadable); }))
+        flags.add(ImageFlag::HasReloadableModules);
+    if (std::ranges::any_of(parts.program.modules, [](const Typed::Module& module) { return module.flags.contains(Typed::ModuleFlags::IsExposedByRequireCache); }))
         flags.add(ImageFlag::ShowsEntriesOfRequireCache);
     header.flags = flags.toRaw();
     for (size_t entry : parts.entriesUsed)
@@ -633,6 +696,15 @@ static std::span<T> sectionIn(std::span<uint8_t> image, const ImageExtent& exten
     return spanReinterpretCast<T>(image.subspan(extent[section].offset, extent[section].size));
 }
 
+static ImageStringWord wordOfString(const TextRecords& text, const StringHeaderNumbers& numbers, size_t index)
+{
+    const ImageString& string = text.strings[index];
+    ImageStringWord word = string.inImage(numbers.byString[index]);
+    if (string.hasText() && string.range(text.longStrings).length < 2)
+        word.bits |= ImageString::isShorterThanTwoFlag;
+    return word;
+}
+
 static void writeStrings(std::span<uint8_t> image, const TextRecords& text, const StringHeaderNumbers& numbers, const ImageExtent& extent, const ParallelLoops& loops)
 {
     std::span<ImageStringRecord> records;
@@ -641,21 +713,29 @@ static void writeStrings(std::span<uint8_t> image, const TextRecords& text, cons
         records = sectionIn<ImageStringRecord>(image, extent, ImageSection::StringHeaders);
     else
         headers = sectionIn<ImageStringHeader>(image, extent, ImageSection::StringHeaders);
-    std::span stringsInImage = sectionIn<ImageStringWord>(image, extent, ImageSection::Strings);
+    std::span stringsInImage = sectionIn<ImageStringWord>(image, extent, ImageSection::Strings).first(numbers.numberOfStringWords());
+    memcpySpan(image.subspan(extent[ImageSection::Strings].offset + stringsInImage.size_bytes()), numbers.codedTexts.span());
     std::span listedStrings = sectionIn<uint32_t>(image, extent, ImageSection::LongStrings);
-    std::span identifiersInImage = sectionIn<ImageIdentifierWord>(image, extent, ImageSection::Identifiers);
+    std::span identifiersInImage = sectionIn<uint8_t>(image, extent, ImageSection::Identifiers);
     for (size_t number = 0; number < text.identifiers.size(); ++number)
-        identifiersInImage[number] = text.identifiers[number].inImage();
+        identifiersInImage[number] = text.identifiers[number].word(0).byteInImage();
+    memcpySpan(identifiersInImage.subspan(ImageOtherIdentifier::offsetFor(text.identifiers.size())), asBytes(numbers.otherIdentifiers.span()));
     forEachRangeOfIndicesInParallel(loops, text.strings.size(), [&](size_t first, size_t end) {
         for (size_t index = first; index < end; ++index) {
             const ImageString& string = text.strings[index];
-            stringsInImage[index] = string.inImage(numbers.byString[index]);
+            if (std::optional<uint32_t> number = numbers.ofStrings->numberOf(StringID(static_cast<uint32_t>(index))); number && *number < numbers.ofStrings->numberOfWords()) {
+                ImageStringWord word = wordOfString(text, numbers, index);
+                if (*number >= numbers.endOfIdentifiers)
+                    stringsInImage[*number - numbers.endOfIdentifiers] = word;
+                else
+                    RELEASE_ASSERT((word.bits & ~(ImageString::is16BitFlag | ImageString::isShorterThanTwoFlag)) == ImageStringWord::ofIdentifier(*number).bits);
+            }
             if (!string.hasText())
                 continue;
             ImageLongString range = string.range(text.longStrings);
-            if (range.length < 2)
-                stringsInImage[index].bits |= ImageString::isShorterThanTwoFlag;
             if (!string.hasHeader()) {
+                if (numbers.constants->isPlaced(StringID(static_cast<uint32_t>(index))))
+                    continue;
                 ImageListedString::write(listedStrings.subspan(numbers.byString[index]), range);
                 if (string.hasListedHash())
                     listedStrings[numbers.byString[index] + ImageListedString::numberOfWords(range)] = string.hashOrIdentifierNumber();
@@ -685,13 +765,21 @@ static void writeStrings(std::span<uint8_t> image, const TextRecords& text, cons
     });
 }
 
-static void writeWordsOfStringConstants(std::span<uint8_t> image, const ImageExtent& extent)
+static void writeWordsOfStringConstants(std::span<uint8_t> image, const TextRecords& text, const StringHeaderNumbers& numbers, const ImageExtent& extent)
 {
-    std::span stringsInImage = sectionIn<ImageStringWord>(image, extent, ImageSection::Strings);
     std::span constants = sectionIn<uint32_t>(image, extent, ImageSection::StringConstants);
-    size_t count = constants.size() / 2;
-    for (size_t number = 0; number < count; ++number)
-        constants[number] = stringsInImage[constants[count + number]].bits;
+    const uint32_t numberOfConstants = numbers.constants->count();
+    const uint32_t numberOfPlaced = numbers.constants->numberOfPlaced();
+    RELEASE_ASSERT(constants.size() == static_cast<size_t>(numberOfConstants) + numberOfPlaced);
+    for (uint32_t number = 0; number < numberOfPlaced; ++number) {
+        const ImageString& string = text.strings[constants[number]];
+        ImageLongString range = string.range(text.longStrings);
+        RELEASE_ASSERT(!string.hasHeader() && string.hasListedHash() && !string.is16Bit() && ImagePlacedString::fits(range));
+        constants[number] = ImagePlacedString::wordFor(range);
+        constants[numberOfConstants + number] = string.hashOrIdentifierNumber();
+    }
+    for (uint32_t& constant : constants.subspan(numberOfPlaced, numberOfConstants - numberOfPlaced))
+        constant = wordOfString(text, numbers, constant).bits;
 }
 
 static void writeRangeOfShapeSets(std::span<uint8_t> image, const CodeLinkerInputs& linker, const ImageExtent& extent)
@@ -740,18 +828,21 @@ static Vector<uint8_t> writeImage(const ImageWriterInputs& parts, PhaseTimes& ti
     times.didFinish("copy sections"_s);
 
     writeStrings(image.mutableSpan(), text, stringHeaders, *extent, loops);
-    writeWordsOfStringConstants(image.mutableSpan(), *extent);
+    writeWordsOfStringConstants(image.mutableSpan(), text, stringHeaders, *extent);
     writeRangeOfShapeSets(image.mutableSpan(), parts.linker, *extent);
     times.didFinish("write strings"_s);
 
-    linkCode(parts.linker, image.mutableSubspan(extent->codeOffset, layout.codeSize), context);
+    CodeLinkerInputs linker = parts.linker;
+    linker.strings = text.strings;
+    linker.longStrings = text.longStrings;
+    linkCode(linker, image.mutableSubspan(extent->codeOffset, layout.codeSize), context);
     times.didFinish("link code"_s);
 
     checkImageIsReadOnly(image.subspan(extent->codeOffset, layout.codeSize), parts.ffiStubs, layout, context);
     if (context.diagnostics().hasErrors())
         return { };
     context.statistics().count(StatisticID::TableBytesEmitted, extent->tablesEnd);
-    context.statistics().count(StatisticID::TextBytesEmitted, (*extent)[ImageSection::Text].size);
+    context.statistics().count(StatisticID::StringBytesEmitted, (*extent)[ImageSection::Text].size);
     return image;
 }
 
@@ -777,7 +868,7 @@ BuiltImage buildImage(ImageInputs&& inputs, BuildContext& context)
     ImageNumbers& numbers = *result.numbers;
 
     ResolvedCallees callees;
-    size_t numberOfFunctionsInImage = 0;
+    NumberingInputs numberingInputs { program, inputs.facts, inputs.plan, functions };
     runLanes(context.parallelLoops(), {
         [&] {
             StepTimes steps(context, nameOfLaneSteps);
@@ -792,13 +883,17 @@ BuiltImage buildImage(ImageInputs&& inputs, BuildContext& context)
             StepTimes steps(context, nameOfLaneSteps);
             callees = resolveCallees(functions, inputs.plan, context);
             steps.didFinish("resolve callees"_s);
-            numberOfFunctionsInImage = countFunctionsInImage(program, functions);
-            steps.didFinish("count functions"_s);
+            ImageNumbersBuilder::numberFunctions(numberingInputs, numbers, context);
+            steps.didFinish("number functions"_s);
         },
     });
     times.didFinish("lanes in front of the mentions"_s);
     if (diagnostics.hasErrors())
         return result;
+
+    Vector<FinalJump> finalJumpsInOrder;
+    if (!context.orderFile().empty())
+        finalJumpsInOrder = orderCodeByFiles(inputs.program, inputs.plan, numbers.functions(), result.functions, callees, context);
 
     std::optional<CodeIndex> index;
     unsigned codeGranuleShift = 0;
@@ -814,7 +909,7 @@ BuiltImage buildImage(ImageInputs&& inputs, BuildContext& context)
     EncodedText text;
     StringHeaderNumbers stringHeaders;
     Vector<uint8_t> namesOfSites;
-    Vector<Vector<uint8_t>> callSites;
+    Vector<Vector<PrefixSymbol>> callSites;
     SideTables sideTables;
     const bool hasPositions = !context.options().obfuscates();
 
@@ -823,17 +918,15 @@ BuiltImage buildImage(ImageInputs&& inputs, BuildContext& context)
         compiledRegExps = compileRegExps(program, numbers.regExpRequests(), context);
         steps.didFinish("compile regular expressions"_s);
     };
-    auto layOutAndDescribeRegExps = [&] {
+    auto layOutRegExps = [&] {
         StepTimes steps(context, nameOfLaneSteps);
         std::optional<RegExpSection> section = layOutRegExpSection(compiledRegExps.results.span(), context.assemblerPolicy(), templates, &context);
         if (!section)
             return;
         regExpSection = WTF::move(*section);
-        regExps = encodeRegExpRecords({ numbers.regExpRequests(), compiledRegExps, regExpSection }, context);
-        steps.didFinish("lay out and describe regular expressions"_s);
+        steps.didFinish("lay out regular expressions"_s);
     };
 
-    NumberingInputs numberingInputs { program, inputs.facts, inputs.plan, functions };
     std::optional<GatheredMentions> mentions;
     std::optional<NamesOfTables> namesOfTables;
     runLanes(context.parallelLoops(), {
@@ -855,7 +948,7 @@ BuiltImage buildImage(ImageInputs&& inputs, BuildContext& context)
         },
         [&] {
             StepTimes steps(context, nameOfLaneSteps);
-            callSites = encodeCallSites(functions, numberOfFunctionsInImage, context);
+            callSites = encodeCallSites(functions, numbers.functions(), inputs.plan.conventions(), context);
             steps.didFinish("encode call sites"_s);
             if (diagnostics.hasErrors())
                 return;
@@ -863,21 +956,20 @@ BuiltImage buildImage(ImageInputs&& inputs, BuildContext& context)
             steps.didFinish("encode side tables"_s);
             if (diagnostics.hasErrors())
                 return;
-            result.sideTableBytes = measureSideTablesOfFunctions(sideTables, callSites.span(), hasPositions, context.parallelLoops());
+            result.sideTableBytes = measureSideTablesOfFunctions(sideTables, hasPositions, context.parallelLoops());
             steps.didFinish("measure side tables"_s);
         },
         [&] {
             StepTimes steps(context, nameOfLaneSteps);
             codeGranuleShift = chooseCodeGranuleShift(functions, context);
             steps.didFinish("choose code granules"_s);
-            finalJumps = findFinalJumps(functions, callees, context);
+            finalJumps = finalJumpsInOrder.isEmpty() ? findFinalJumps(functions, callees, context) : WTF::move(finalJumpsInOrder);
             steps.didFinish("find final jumps"_s);
         },
     });
     times.didFinish("lanes beside the numbering"_s);
     if (diagnostics.hasErrors())
         return result;
-    RELEASE_ASSERT(numbers.functions().numberOfFunctions() == numberOfFunctionsInImage);
 
     auto runLanesBehindNumbersInFunctions = [&] {
     runLanes(context.parallelLoops(), {
@@ -888,11 +980,11 @@ BuiltImage buildImage(ImageInputs&& inputs, BuildContext& context)
             if (mayUseFFI(inputs.facts, context.options()))
                 ffiStubs = generateFFIStubs(context);
             steps.didFinish("generate FFI stubs"_s);
-            webAssembly = compileWebAssemblyModules(program, templates, context, &numbers.namedStrings());
+            webAssembly = compileWebAssemblyModules(program, templates, context, &numbers.otherStringsWithText(), WTF::move(inputs.earlyWasmModules), &functions);
             steps.didFinish("compile WebAssembly modules"_s);
             farInstanceWords = findFarInstanceWords(functions, numbers, context);
             steps.didFinish("find far words of the instance"_s);
-            namesOfSites = encodeNamesOfSites(numbers);
+            namesOfSites = encodeNamesOfSites(numbers, context);
             steps.didFinish("encode names of sites"_s);
             if (checksImageWhileBuilding(context)) {
                 checkUncheckedStackUsage(functions, callees, context);
@@ -925,6 +1017,11 @@ BuiltImage buildImage(ImageInputs&& inputs, BuildContext& context)
             steps.didFinish("collect called shared code"_s);
             if (!calledSharedCode || diagnostics.hasErrors())
                 return;
+            bool someWordLeadsToStartOfModule = std::ranges::any_of(functions.fusedCallEntries(), [&](const FusedCallEntry& fused) {
+                return inputs.plan.conventions().callEntryIsNumberOfModuleStart(fused.unit.function);
+            });
+            if (someWordLeadsToStartOfModule)
+                calledSharedCode->stubKeys.append(startModuleThatRunTimeNames());
             result.sharedCode = generateSharedCode(WTF::move(*calledSharedCode), stubCatalogOfImage, inputs.entriesUsedByFunctions, context);
             steps.didFinish("generate shared code"_s);
         },
@@ -959,16 +1056,22 @@ BuiltImage buildImage(ImageInputs&& inputs, BuildContext& context)
             steps.didFinish("encode text"_s);
             if (diagnostics.hasErrors())
                 return;
-            stringHeaders = numberStringHeaders(textRecordsIn(text.strings, text.longStrings, text.identifiers), numbers.stringsInOrderOfText(), context.recordedOptions().form());
+            stringHeaders = numberStringHeaders(textRecordsIn(text.strings, text.longStrings, text.identifiers), numbers, context.recordedOptions().form());
+            stringHeaders.codedTexts = encodeCodedTexts(program.strings, numbers.stringNumbers(), context);
             steps.didFinish("number string headers"_s);
         },
         [&] {
             compileRegExpsOfImage();
             if (!diagnostics.hasErrors())
-                layOutAndDescribeRegExps();
+                layOutRegExps();
         },
     });
     times.didFinish("lanes in front of the layout of code"_s);
+    if (diagnostics.hasErrors())
+        return result;
+
+    regExps = encodeRegExpRecords({ numbers.regExpRequests(), compiledRegExps, regExpSection, numbers.stringNumbers() }, context);
+    times.didFinish("describe regular expressions"_s);
     if (diagnostics.hasErrors())
         return result;
 
@@ -1013,8 +1116,8 @@ BuiltImage buildImage(ImageInputs&& inputs, BuildContext& context)
                 .functions = functions,
                 .numbers = numbers,
                 .layout = result.layout,
+                .sharedCode = result.sharedCode,
                 .index = *index,
-                .sideTableFlags = sideTables.flags.span(),
                 .sideTableOffsets = sideTables.offsets.span(),
                 .programTables = sections.programTables(),
                 .hasPositions = hasPositions,
@@ -1044,7 +1147,7 @@ BuiltImage buildImage(ImageInputs&& inputs, BuildContext& context)
     context.statistics().count(StatisticID::FrameMapBytesEmitted, sections[ImageSection::FrameMaps].size());
     sections[ImageSection::ClosureWords] = WTF::move(functionTables.closureWords);
     sections[ImageSection::MethodTable] = WTF::move(functionTables.methodTable);
-    sections[ImageSection::Positions] = WTF::move(sideTables.positions);
+    sections[ImageSection::Positions] = hasPositions ? WTF::move(sideTables.positions) : bytesOf(listModulesOfRuntimeFunctions(program, inputs.plan.conventions(), inputs.bodyFacts.functionsWithFrames));
     sections[ImageSection::SideTables] = WTF::move(sideTables.bytes);
     sections[ImageSection::SharedCodeCopies] = bytesOf(Vector<uint32_t>(result.layout.sharedCodeCopies));
     sections[ImageSection::Strings] = WTF::move(text.strings);

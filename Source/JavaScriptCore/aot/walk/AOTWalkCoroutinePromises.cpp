@@ -98,13 +98,13 @@ static ValueID allocationOfPromiseInCoroutinePromises(const Walker& walker, Refe
     if (!promise || !promise.isValue())
         return { };
     const Code& code = walker.code();
-    ValueID made = rootOfCellInSweptCode(code, promise.id());
+    ValueID made = underlyingCellOf(code, promise.id());
     return !code.isConstant(made) && code.at(made).opcode == Opcode::NewPromise ? made : ValueID();
 }
 
 static bool isFirstToMentionPromiseInCoroutinePromises(const BodyIndex& index, const BodyValue& resolution)
 {
-    ValueID promise = index.valueBehindCasts(resolution.as<Opcode::ResolvePromise>().promiseOperand());
+    ValueID promise = index.stripCasts(resolution.as<Opcode::ResolvePromise>().promiseOperand());
     if (!promise || index.isParameter(promise) || index.hasIrreducibleFlow() || index.loopOf(index.blockOf(promise)) != index.loopOf(index.blockOf(resolution.id())))
         return false;
     while (ValueID onlyUser = index.onlyUsingValue(promise)) {
@@ -138,12 +138,13 @@ static Reference buildPromiseOfRealmInCoroutinePromises(Walker& walker, const Bo
     return promise;
 }
 
-static void buildResolutionInCoroutinePromises(Walker& walker, Reference promise, Reference value, Origin origin)
+static void buildResolutionInCoroutinePromises(Walker& walker, Reference promise, Reference value, Origin origin, bool valueHasFailedTestForNoThen = false)
 {
     Draft resolution = draftInCoroutinePromises(walker, Opcode::ResolvePromise, origin);
     resolution.setPromiseOperand(promise);
     resolution.setValueOperand(value);
-    if (!walker.has(Mechanism::TypedOperations) || !isProvenToHaveNoThen(walker, value)) {
+    resolution.setValueHasFailedTestForNoThen(valueHasFailedTestForNoThen);
+    if (!walker.has(Mechanism::TypedOperations) || !leansOnProofOfNoThen(walker, value, origin)) {
         walker.build(WTF::move(resolution));
         return;
     }
@@ -166,7 +167,7 @@ static void resolveInCoroutinePromises(Walker& walker, Reference promise, Refere
         return;
     }
 
-    if (isProvenToHaveNoThen(walker, value)) {
+    if (leansOnProofOfNoThen(walker, value, origin)) {
         buildFulfillmentInCoroutinePromises(walker, promise, value, origin);
         ValueID made = standsForWhatCallGives ? allocationOfPromiseInCoroutinePromises(walker, promise) : ValueID();
         if (!made || walker.isUnreachable() || !walker.has(Mechanism::EscapeAnalysis))
@@ -188,20 +189,56 @@ static void resolveInCoroutinePromises(Walker& walker, Reference promise, Refere
     BlockID looksUp = walker.addBlock(BlockFrequency::Rare);
     BlockID meet = walker.addBlock();
     walker.branch(hasNoThen, stores, looksUp);
-    walker.noteGuessOpened();
+    walker.recordSpeculation();
 
     walker.continueIn(stores);
     buildFulfillmentInCoroutinePromises(walker, promise, value, origin);
     walker.jumpTo(meet);
 
     walker.continueIn(looksUp);
-    buildResolutionInCoroutinePromises(walker, promise, value, origin);
+    buildResolutionInCoroutinePromises(walker, promise, value, origin, true);
     walker.jumpTo(meet);
 }
 
 void resolvePromiseThatNothingHasTaken(Walker& walker, Reference promise, Reference value, bool mayTest, Origin origin)
 {
     resolveInCoroutinePromises(walker, promise, value, mayTest, true, origin);
+}
+
+bool buildReturnsOfPromise(Walker& walker, Reference value, Origin origin, const ScopedLambda<bool(Reference promise)>& buildReturn)
+{
+    auto returnPromise = [&](const auto& resolve) {
+        Reference promise = walker.build(draftInCoroutinePromises(walker, Opcode::NewPromise, origin));
+        if (!promise)
+            return false;
+        resolve(promise);
+        return buildReturn(promise);
+    };
+    auto fulfill = [&](Reference promise) {
+        buildFulfillmentInCoroutinePromises(walker, promise, value, origin);
+    };
+    bool isTyped = walker.has(Mechanism::TypedOperations);
+    if (isTyped && leansOnProofOfNoThen(walker, value, origin))
+        return returnPromise(fulfill);
+    Reference hasNoThen = isTyped && walker.has(Mechanism::Guesses) && walker.opensGuesses() ? buildTestForNoThen(walker, value, origin) : Reference();
+    if (!hasNoThen || !hasNoThen.isValue()) {
+        return returnPromise([&](Reference promise) {
+            buildResolutionInCoroutinePromises(walker, promise, value, origin);
+        });
+    }
+
+    BlockID fulfills = walker.addBlock();
+    BlockID looksUp = walker.addBlock(BlockFrequency::Rare);
+    walker.branch(hasNoThen, fulfills, looksUp);
+    walker.recordSpeculation();
+
+    walker.continueIn(fulfills);
+    if (!returnPromise(fulfill))
+        return false;
+    walker.continueIn(looksUp);
+    return returnPromise([&](Reference promise) {
+        buildResolutionInCoroutinePromises(walker, promise, value, origin, true);
+    });
 }
 
 Reference valueOfPromiseFulfilledHere(Walker& walker, Reference promise)
@@ -230,8 +267,9 @@ static Reference valueAwaitedInPlaceOfPromiseInCoroutinePromises(Walker& walker,
     if (!walker.has(Mechanism::EscapeAnalysis))
         return { };
     Reference value = valueOfPromiseFulfilledHere(walker, promise);
-    if (!value || !isListAsMade(walker, promise) || !findsConstructorOfPromisesInCoroutinePromises(walker, promise))
+    if (!value || !isKnownPristine(walker, promise) || !findsConstructorOfPromisesInCoroutinePromises(walker, promise))
         return { };
+    walker.verifyPristineObject(promise);
     return value;
 }
 
@@ -247,13 +285,13 @@ Reference buildAwaitOfWhatHasNoThen(Walker& walker, Reference awaited, std::span
     const Function& function = walker.program().at(walker.unit().function);
     if (Reference fulfilledWith = function.isModuleBody() ? Reference() : valueAwaitedInPlaceOfPromiseInCoroutinePromises(walker, awaited))
         awaited = fulfilledWith;
-    if (!isProvenToHaveNoThen(walker, awaited))
+    if (!leansOnProofOfNoThen(walker, awaited, origin))
         return { };
 
     Draft await = draftInCoroutinePromises(walker, Opcode::AwaitBySavingFrame, origin);
     await.setAwaitedOperand(awaited);
     await.setPromiseOperand(driver);
-    await.setHeldOperands(held);
+    await.setHeldOperands(heldForCells(walker, held).span());
 
     bool asksWhetherFrameMayGoOn = *kind == CoroutineKind::AsyncFunction && walker.isInLoop() && walker.has(Mechanism::Guesses) && walker.opensGuesses()
         && !walker.plan().moduleEvaluation().isBodyResumedByJobOfLoader(function);
@@ -267,7 +305,7 @@ Reference buildAwaitOfWhatHasNoThen(Walker& walker, Reference awaited, std::span
     BlockID suspends = walker.addBlock();
     BlockID goesOn = walker.addBlock();
     walker.branch(mayGoOn, goesOn, suspends);
-    walker.noteGuessOpened();
+    walker.recordSpeculation();
     walker.continueIn(suspends);
     walker.build(WTF::move(await));
     walker.state().invalidateHeap();
@@ -299,7 +337,7 @@ static bool buildResolvePromiseInCoroutinePromises(Walker& walker, const BodyVal
     if (!walker.has(Mechanism::TypedOperations))
         return false;
     bool nothingHasTakenPromise = nothingHasTakenPromiseInCoroutinePromises(walker, resolution, promise);
-    if (!nothingHasTakenPromise && !isProvenToHaveNoThen(walker, value))
+    if (!nothingHasTakenPromise && !leansOnProofOfNoThen(walker, value, walker.originOf(resolution)))
         return false;
 
     Origin origin = walker.originOf(resolution);
@@ -360,7 +398,7 @@ static bool buildCallOfPromiseResolveInCoroutinePromises(Walker& walker, const B
         return true;
     }
 
-    if (!isProvenToHaveNoThen(walker, value))
+    if (!leansOnProofOfNoThen(walker, value, origin))
         return false;
     Reference promise = buildPromiseOfRealmInCoroutinePromises(walker, call, origin);
     if (!promise)

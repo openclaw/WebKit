@@ -56,7 +56,7 @@ constexpr ImageFrame frameAtStubReturnSite(StubFrameKind kind)
     return kind == StubFrameKind::AtStubEntry ? ImageFrame::empty() : ImageFrame { };
 }
 
-ALWAYS_INLINE void* stackPointerOfCaller(const CallFrame* frame, unsigned bytesAboveReturnAddress = 0)
+ALWAYS_INLINE void* callerStackPointer(const CallFrame* frame, unsigned bytesAboveReturnAddress = 0)
 {
     return std::bit_cast<void*>(std::bit_cast<uintptr_t>(frame) + sizeof(CallerFrameAndPC) + bytesAboveReturnAddress);
 }
@@ -113,10 +113,10 @@ public:
     {
         auto* record = reinterpret_cast<const CallerFrameAndPC*>(m_frame.callFrame);
         CallFrame* framePointer = m_frame.hasFrameRecord ? record->callerFrame : m_frame.framePointer;
-        const void* pc = removeCodePtrTag(record->returnPC);
+        const void* pc = removeReturnAddressSignature(record->returnPC);
         CodeLocation code = m_image->locate(pc);
         ImageFrame imageFrame = imageFrameAt(code);
-        CallFrame* callFrame = frameAtReturnSite(imageFrame, stackPointerOfCaller(m_frame.callFrame, m_frame.bytesAboveReturnAddress), framePointer);
+        CallFrame* callFrame = frameAtReturnSite(imageFrame, callerStackPointer(m_frame.callFrame, m_frame.bytesAboveReturnAddress), framePointer);
         if (callFrame <= m_frame.callFrame || !m_stack.contains(callFrame)) {
             m_frame = { };
             return *this;
@@ -151,7 +151,7 @@ struct SampledRegisters {
 struct SampledTop {
     CallFrame* callFrame;
     const void* pc;
-    const void* callerPCOfFramelessTop;
+    const void* framelessTopCallerPC;
     CallFrame* framePointer { nullptr };
 };
 
@@ -201,8 +201,11 @@ struct CompiledFrame {
     JS_EXPORT_PRIVATE String sourceURL() const;
     JS_EXPORT_PRIVATE LineColumn lineColumn() const;
     JS_EXPORT_PRIVATE SourceOrigin sourceOrigin() const;
+    bool isOfBuiltin() const;
+    bool runsCodeOfFile() const;
     JS_EXPORT_PRIVATE bool isActivationOf(JSCell* function) const;
-    std::optional<ModuleID> moduleWhoseBodyRuns() const;
+    std::optional<ModuleID> evaluatingModule() const;
+    std::optional<ModuleID> sourceModule() const;
 
     Instance* instance { nullptr };
     CallFrame* callFrame { nullptr };
@@ -234,7 +237,7 @@ public:
     enum class OperationState : bool { MayNotHaveCalled, HasCalled };
     JS_EXPORT_PRIVATE static std::optional<CompiledFrameIterator> tryCreate(VM&, CallFrame* framePointer, const void* returnAddress, EntryFrame*, OperationState = OperationState::MayNotHaveCalled, void* stackPointer = nullptr);
     JS_EXPORT_PRIVATE static std::optional<CompiledFrameIterator> tryCreateAtTop(VM&);
-    static const void* findReturnAddressInFunctionAtTop(VM&);
+    static const void* topFrameReturnAddress(VM&);
     JS_EXPORT_PRIVATE static std::optional<CompiledFrameIterator> tryCreateAtCallerOf(VM&, CallFrame* callee, EntryFrame*);
 
     bool isAtEnd() const { return m_isAtEnd; }
@@ -270,6 +273,7 @@ public:
         ASSERT(!m_isAtEnd);
         return m_callSite;
     }
+    const HandlerRecord* exceptionHandler() const { return callSite().exceptionHandler(*m_image); }
 
     JS_EXPORT_PRIVATE void advance();
     JS_EXPORT_PRIVATE void advanceToCallerMachineFrame();
@@ -281,8 +285,8 @@ public:
     }
     JS_EXPORT_PRIVATE bool isAboveFramesThatWait() const;
     JS_EXPORT_PRIVATE bool isConstructCall();
-    JS_EXPORT_PRIVATE void listConstructedFunctionsThatLeft();
-    const std::optional<TraceFrame>& constructedFunctionThatLeft() const { return m_constructedFunctionThatLeft; }
+    JS_EXPORT_PRIVATE void collectElidedConstructorFrame();
+    const std::optional<TraceFrame>& elidedConstructorFrame() const { return m_elidedConstructorFrame; }
     bool hasNoMachineFrame() const { return m_hasNoMachineFrame; }
     bool isAtFirstReadSite() const { return m_cursor.isAtFirstReadSite && m_callSite.site.firstReadSite; }
     bool calleeWasEntered() const { return m_calleeWasEntered; }
@@ -291,6 +295,8 @@ public:
     EntryFrame* entryFrame() const { return m_cursor.entryFrame; }
     CallFrame* framePointer() const { return m_cursor.framePointer; }
     void* stackPointer() const { return m_cursor.stackPointer; }
+    void* rawReturnAddress() const { return m_cursor.rawPC; }
+    CallFrame* recordOfReturnAddress() const { return m_cursor.calleeFrame ? m_cursor.calleeFrame : std::bit_cast<CallFrame*>(std::bit_cast<uintptr_t>(m_cursor.stackPointer) - sizeof(CallerFrameAndPC)); }
     CallFrame* generatorStubFrameLeft() const { return m_cursor.generatorStubFrame; }
     CallFrame* asyncGeneratorStubFrameLeft() const { return m_cursor.asyncGeneratorStubFrame; }
     CallFrame* asyncGeneratorBodyFrameLeft() const { return m_cursor.asyncGeneratorBodyFrame; }
@@ -336,7 +342,7 @@ private:
     const CallSiteCache::Entry* findFunctionFrame(Cursor&, Exit&, RunEnd&);
     const CallSiteCache::Entry* findCallerFunctionFrame(Cursor&, Exit&, RunEnd&);
     void enterMachineFrame(const CallSiteCache::Entry*);
-    void listFunctionWhoseThisTheAdapterMakes();
+    void collectAdapterConstructorFrame();
     JS_EXPORT_PRIVATE void readFrame() const;
 
     VM* m_vm;
@@ -351,12 +357,14 @@ private:
     bool m_calleeWasEntered;
     bool m_isAtEnd { false };
     bool m_hasNoMachineFrame { false };
-    std::optional<TraceFrame> m_constructedFunctionThatLeft;
+    std::optional<TraceFrame> m_elidedConstructorFrame;
     Exit m_exit;
     RunEnd m_runEnd;
     InlineFrameReader m_inlineFrames;
 };
 static_assert(sizeof(CompiledFrameIterator) <= 1024);
+
+JS_EXPORT_PRIVATE bool findCallerOrigin(CompiledFrameIterator&, SourceOrigin&);
 
 } // namespace AOT
 } // namespace JSC

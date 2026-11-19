@@ -29,8 +29,7 @@ static_assert(!StraightEmitter::isResultRegister(registerOfValueInStraightAlloca
 
 static_assert([] {
     for (SlotRepresentation representation : allMembersOf<SlotRepresentation>) {
-        SlotTraits traits = traitsOf(representation);
-        if (traits.hasAbsent && traits.absentBits && traits.width != sizeof(uint32_t) && traits.width != sizeof(uint64_t))
+        if (bitsBeforeCreation(representation) && widthOf(representation) != sizeof(uint32_t) && widthOf(representation) != sizeof(uint64_t))
             return false;
     }
     return true;
@@ -55,7 +54,10 @@ static std::optional<uint64_t> bitsOfConstantInSlotOfStraightAllocation(SlotRepr
 {
     if (representation == SlotRepresentation::JSValue)
         return static_cast<uint64_t>(JSValue::encode(constant));
-    if (representation != SlotRepresentation::OptionalInt64 && representation != SlotRepresentation::OptionalDouble)
+    bool holdsInt32s = representation == SlotRepresentation::Int32 || representation == SlotRepresentation::OptionalInt32;
+    if (!holdsInt32s && representation != SlotRepresentation::OptionalInt64 && representation != SlotRepresentation::OptionalDouble)
+        return std::nullopt;
+    if (constant.isUndefinedOrNull() && !traitsOf(representation).hasUndefined)
         return std::nullopt;
     if (constant.isUndefined())
         return traitsOf(representation).undefinedBits;
@@ -73,6 +75,8 @@ static bool allocationListsFieldInStraightForm(StraightEmitter& emitter, FieldRe
     if (slot.storage != SlotStorage::Inline || slot.holdsAccessor || emitter.plan().layout(field.layout).holdsRawValueFromBirth(field.field))
         return false;
     if (facts.facts.contains(FieldFact::IsAccessor) || facts.slotType || slot.provenType)
+        return false;
+    if (!facts.formOfValue.isEmpty() && (emitter.index().isParameter(value) || emitter.index().opcodeOf(value) != Opcode::Absent))
         return false;
     if (slot.representation == SlotRepresentation::JSValue)
         return !slot.type;
@@ -100,7 +104,7 @@ static StubKey stubThatDefinesBehindStraightAllocation(StraightEmitter& emitter,
 {
     if (emitter.program().at(key).kind == PropertyKeyKind::CreatedSymbol && !emitter.plan().hasOneInstance())
         return putByIdOfSymbolOfRealm(PutMode::Define);
-    return emitter.plan().slots().hasColumn(key) ? AOT::putById(PutMode::Define) : putByIdHashed(PutMode::Define);
+    return putByIdHashed(PutMode::Define);
 }
 
 static void defineBehindStraightAllocation(StraightEmitter& emitter, const BodyValue& value, std::span<const PropertyKeyID> keys, std::span<const ValueID> values)
@@ -119,8 +123,7 @@ static void defineBehindStraightAllocation(StraightEmitter& emitter, const BodyV
 
 static bool isZeroWhileEmptyInStraightAllocation(const PlacedSlot& slot)
 {
-    SlotTraits traits = traitsOf(slot.representation);
-    return slot.storage != SlotStorage::Inline || !traits.hasAbsent || !traits.absentBits;
+    return slot.storage != SlotStorage::Inline || !bitsBeforeCreation(slot.representation);
 }
 
 static void storeWhatEmptySlotsHoldInStraightAllocation(StraightEmitter& emitter, const PlannedLayout& planned, std::span<const FieldIndex> listed)
@@ -132,15 +135,15 @@ static void storeWhatEmptySlotsHoldInStraightAllocation(StraightEmitter& emitter
         const PlacedSlot& slot = planned.slots[field];
         if (isZeroWhileEmptyInStraightAllocation(slot) || std::ranges::contains(listed, field))
             continue;
-        SlotTraits traits = traitsOf(slot.representation);
+        uint64_t bits = bitsBeforeCreation(slot.representation);
         CCallHelpers::Address address(cell, static_cast<int32_t>(slot.offset));
-        if (traits.width == sizeof(uint32_t)) {
-            jit.store32(CCallHelpers::TrustedImm32(static_cast<int32_t>(traits.absentBits)), address);
+        if (widthOf(slot.representation) == sizeof(uint32_t)) {
+            jit.store32(CCallHelpers::TrustedImm32(static_cast<int32_t>(bits)), address);
             continue;
         }
-        if (bitsInRegister != traits.absentBits) {
-            jit.move(CCallHelpers::TrustedImm64(static_cast<int64_t>(traits.absentBits)), registerOfValueInStraightAllocation);
-            bitsInRegister = traits.absentBits;
+        if (bitsInRegister != bits) {
+            jit.move(CCallHelpers::TrustedImm64(static_cast<int64_t>(bits)), registerOfValueInStraightAllocation);
+            bitsInRegister = bits;
         }
         jit.store64(registerOfValueInStraightAllocation, address);
     }
@@ -158,7 +161,7 @@ static void generateNewObject(StraightEmitter& emitter, const BodyValue& value)
     ValueID prototype = operation.prototypeOperand();
     std::span<const FieldIndex> fieldsAsWritten = operation.fields();
     std::span<const ValueID> valuesAsWritten = operation.valuesOperands();
-    if (fieldsAsWritten.size() != valuesAsWritten.size() || planned.cellsAreHandedBack || planned.liesOnlyInFrames) {
+    if (fieldsAsWritten.size() != valuesAsWritten.size() || planned.cellsAreHandedBack) {
         emitter.fail(value);
         return;
     }
@@ -200,7 +203,7 @@ static void generateNewObject(StraightEmitter& emitter, const BodyValue& value)
             }
         }
     }
-    bool canBeMade = hasSlots ? placed && !placed->isBornUnfinished : program.at(layout).kind == LayoutKind::Record;
+    bool canBeMade = hasSlots ? placed && !placed->isBornUnfinished && (prototype || program.at(layout).kind != LayoutKind::Instance || plan.slots().hasDirectInstances(layout)) : program.at(layout).kind == LayoutKind::Record;
     if (!canBeMade || (isEnvironment && numberListed != fields.size()) || (prototype && (!hasSlots || isEnvironment || !fields.isEmpty()))) {
         emitter.fail(value);
         return;
@@ -209,7 +212,7 @@ static void generateNewObject(StraightEmitter& emitter, const BodyValue& value)
     Vector<PropertyKeyID, 16> keysDefinedBehind;
     for (size_t index = numberListed; index < fields.size(); ++index) {
         PropertyKeyID key = keyDefinedBehindStraightAllocation(emitter, { layout, fields[index] });
-        if (!key || program.nameClassOf(key) == NameClass::Index || (hasSlots && !canLeaveSlot(plan.slot(layout, fields[index]).representation))) {
+        if (!key || program.nameClassOf(key) == NameClass::Index || (hasSlots && !mayBeCreatedByStore(plan.slot(layout, fields[index]).representation))) {
             emitter.fail(value);
             return;
         }
@@ -239,7 +242,11 @@ static void generateNewObject(StraightEmitter& emitter, const BodyValue& value)
                 const PlacedSlot& slot = plan.slot(layout, fields[index]);
                 CCallHelpers::Address address(cell, static_cast<int32_t>(slot.offset));
                 if (std::optional<JSValue> constant = emitter.constantOf(values[index])) {
-                    jit.store64(CCallHelpers::TrustedImm64(static_cast<int64_t>(*bitsOfConstantInSlotOfStraightAllocation(slot.representation, *constant))), address);
+                    uint64_t bits = *bitsOfConstantInSlotOfStraightAllocation(slot.representation, *constant);
+                    if (slot.width() == sizeof(uint32_t))
+                        jit.store32(CCallHelpers::TrustedImm32(static_cast<int32_t>(bits)), address);
+                    else
+                        jit.store64(CCallHelpers::TrustedImm64(static_cast<int64_t>(bits)), address);
                     continue;
                 }
                 emitter.load(values[index], registerOfValueInStraightAllocation);

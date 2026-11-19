@@ -48,7 +48,7 @@ const objectConversion = (forObject: b.ImplementationSpec) =>
 const ownKeyList = (kind: "Keys" | "Names" | "Symbols", key: b.TableType) =>
   ({
     args: { object: b.object.loose },
-    returns: b.instance("Array").holding({ element: key }).fresh.dense,
+    returns: b.instance("Array").exactly.holding({ element: key }).fresh.dense,
     capability: "js",
     throws: b.propagated,
     runsOnlyOperandCode: true,
@@ -99,6 +99,7 @@ const ownPropertyTest = (inlineBuiltin: string) =>
     runsOnlyOperandCode: true,
     uses: { this: [b.testedByKey(b.keyFrom("key")), ...b.ownPropertyTraps] },
     reads: ownProperties,
+    writes: madeByListingOfKeys,
     implementation: b.inline(inlineBuiltin, { otherwise: b.hostCall }),
   }) satisfies b.FunctionField;
 
@@ -231,19 +232,19 @@ export default b.declarations(
         reads: ownProperties,
         writes: memberGuards,
         privateAlias: true,
-        implementation: b.hostCall,
+        implementation: b.inline("ObjectDefineProperty", { otherwise: b.hostCall }),
       },
       entries: {
         args: { object: b.object.loose.refusing(b.null) },
-        returns: b.instance("Array").holding({ element: b.layoutOf("EntriesPair") }).fresh.dense,
+        returns: b.instance("Array").exactly.holding({ element: b.layoutOf("EntriesPair").fresh }).fresh.dense,
         capability: "js",
         throws: b.propagated,
         runsOnlyOperandCode: true,
-        uses: { object: [b.runs("OwnKeys", "OwnValues"), b.contentsStoredIn(b.nativeMemory)] },
+        uses: { object: [b.runs("OwnKeys", "OwnValues"), b.contentsStoredIn(b.resultElementField(1))] },
         writes: [...madeByListingOfKeys, ...closuresMadeAtFirstRead],
         implementation: b.inline("ObjectEntries"),
       },
-      freeze: integrityChange("Frozen", b.hostCall),
+      freeze: { ...integrityChange("Frozen", b.hostCall), boxedCallStub: "ObjectFreeze" },
       fromEntries: {
         args: { iterable: b.any },
         returns: b.object.unaliased,
@@ -320,6 +321,7 @@ export default b.declarations(
         runsOnlyOperandCode: true,
         uses: { object: [b.testedByKey(b.keyFrom("key")), ...b.ownPropertyTraps] },
         reads: ownProperties,
+        writes: madeByListingOfKeys,
         privateAlias: true,
         implementation: b.inline("ObjectHasOwn", { otherwise: b.hostCall }),
       },
@@ -331,9 +333,9 @@ export default b.declarations(
         boxedCallStub: "ObjectIs",
         implementation: b.inline("ObjectIs", { otherwise: b.hostCall }),
       },
-      isExtensible: integrityTest,
-      isFrozen: integrityTestOfProperties,
-      isSealed: integrityTestOfProperties,
+      isExtensible: { ...integrityTest, boxedCallStub: "ObjectIsExtensible" },
+      isFrozen: { ...integrityTestOfProperties, boxedCallStub: "ObjectIsFrozen" },
+      isSealed: { ...integrityTestOfProperties, boxedCallStub: "ObjectIsSealed" },
       keys: ownKeyList("Keys", b.string),
       preventExtensions: integrityChange("NonExtensible", b.hostCall),
       seal: integrityChange("Sealed", b.hostCall),
@@ -352,7 +354,7 @@ export default b.declarations(
       values: [
         {
           args: { object: b.object },
-          returns: b.instance("Array").fresh.dense,
+          returns: b.instance("Array").exactly.fresh.dense,
           capability: "js",
           throws: b.propagated,
           runsOnlyOperandCode: true,
@@ -363,7 +365,7 @@ export default b.declarations(
         },
         {
           args: { object: nonNullishPrimitive },
-          returns: b.instance("Array").holding({ element: b.string }).fresh.dense,
+          returns: b.instance("Array").exactly.holding({ element: b.string }).fresh.dense,
           capability: "heap",
           implementation: b.hostCall,
         },
@@ -384,9 +386,9 @@ export default b.declarations(
         runsOnlyOperandCode: true,
         uses: { this: b.inspected, value: [b.runs("PrototypeChain")] },
         reads: prototypeLink,
-        implementation: b.hostCall,
+        implementation: b.inline("ObjectIsPrototypeOf", { otherwise: b.hostCall }),
       },
-      propertyIsEnumerable: { ...ownPropertyTest("ObjectPropertyIsEnumerable"), writes: closuresMadeAtFirstRead },
+      propertyIsEnumerable: { ...ownPropertyTest("ObjectPropertyIsEnumerable"), writes: [...madeByListingOfKeys, ...closuresMadeAtFirstRead] },
       toLocaleString: {
         this: b.any.refusing(b.null),
         returns: b.any,

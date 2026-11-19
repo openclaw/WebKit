@@ -12,19 +12,24 @@
 #include "AOTClassPrototype.h"
 #include "AOTClosure.h"
 #include "AOTCompiledCallee.h"
+#include "AOTCompiledStructure.h"
 #include "AOTFunctionNames.h"
 #include "AOTFunctionTables.h"
 #include "AOTInstance.h"
 #include "AOTObject.h"
 #include "AOTObjectInternal.h"
 #include "AOTObjectModel.h"
+#include "AOTObjectWords.h"
 #include "AOTOperationArguments.h"
 #include "AOTOperationData.h"
 #include "AOTOperationScope.h"
 #include "AOTPendingStars.h"
 #include "AOTPropertyCaches.h"
+#include "AOTPropertyCachesAnswers.h"
 #include "AOTPropertyCachesKeys.h"
+#include "AOTPropertyWalk.h"
 #include "AOTRuntimeFunctions.h"
+#include "AOTRuntimeReporter.h"
 #include "AOTRuntimeTable.h"
 #include "AOTSlimClosure.h"
 #include "AOTState.h"
@@ -33,6 +38,7 @@
 #include "ButterflyInlines.h"
 #include "DeferTermination.h"
 #include "Error.h"
+#include "ErrorInstance.h"
 #include "ExceptionHelpers.h"
 #include "GetterSetter.h"
 #include "JSCInlines.h"
@@ -96,18 +102,46 @@ static JSObject* createExtraPropertiesWithElement(Instance* instance, uint32_t i
     return JSFinalObject::createWithButterfly(vm, instance->realm.extraPropertiesWithElementsStructure, butterfly);
 }
 
-static constexpr uint32_t maxIndexOfFirstElementStoredContiguously = 7;
 
-bool tryDefineElementOfCompiledObject(Instance* instance, JSObject* object, uint32_t index, JSValue value)
+static void rememberStructureWithFirstElement(Instance* instance, const CompiledStructure& before, const CompiledStructure& after, const JSObject& extra)
+{
+    Structure* withElements = instance->realm.extraPropertiesWithElementsStructure;
+    if (extra.structure() != withElements || !before.extraPropertiesSlot() || before.hasOtherPrototype() || before.hasKeyOrderOfOneObject())
+        return;
+    if (before.storedPrototype() != JSValue(instance->realm.objectPrototype) || before.typeInfoBlob() != after.typeInfoBlob())
+        return;
+    EncodedJSValue inPlaceOfPrototype = std::bit_cast<EncodedJSValue>(withElements);
+    std::span { instance->objects.prototypeTransitions, numberOfPrototypeTransitions }[indexOfPrototypeTransition(before.id().bits(), inPlaceOfPrototype)] = { inPlaceOfPrototype, before.id().bits(), after.id().bits() };
+}
+
+static bool mayAddElement(VM& vm, Object& object, uint32_t index)
+{
+    if (!object.state().objects->classes.mayNameMemberByIndex(object.layout()))
+        return admitsMutation(vm, object, ObjectMutation::AddProperty);
+    return object.mayAddExtraProperty(vm, Identifier::from(vm, index));
+}
+
+enum class ElementStore : bool { Defines, Sets };
+
+template<ElementStore store>
+static ALWAYS_INLINE bool tryStoreElementOfCompiledObject(Instance* instance, JSObject* object, uint32_t index, JSValue value)
 {
     Object* compiled = compiledObjectOrNull(object);
-    if (!compiled || compiled->isNotExtensible() || compiled->structure()->mayBePrototype() || compiled->layout().isClass())
+    if (!compiled || compiled->isNotExtensible() || compiled->structure()->mayBePrototype())
         return false;
     VM& vm = *instance->vm;
     JSObject* extra = compiled->extraProperties();
     if (extra && (!is<JSFinalObject>(extra) || extra->inSparseIndexingMode() || isCopyOnWrite(extra->indexingMode()) || extra->structure()->hasImmutableIndexedProperties()))
         return false;
+    bool isThere = extra && extra->canGetIndexQuickly(index);
+    if (!isThere) {
+        if (store == ElementStore::Sets && compiled->needsSlowPutIndexing())
+            return false;
+        if (!mayAddElement(vm, *compiled, index))
+            return true;
+    }
     if (!extra) {
+        const CompiledStructure* before = WTF::opaque(&compiled->compiledStructure());
         if (index <= maxIndexOfFirstElementStoredContiguously)
             extra = createExtraPropertiesWithElement(instance, index, value);
         else {
@@ -115,11 +149,26 @@ bool tryDefineElementOfCompiledObject(Instance* instance, JSObject* object, uint
             extra->putDirectIndex(instance->globalObject, index, value, 0, PutDirectIndexShouldThrow);
         }
         compiled->adoptExtraProperties(vm, extra);
+        rememberStructureWithFirstElement(instance, *before, compiled->compiledStructure(), *extra);
+        ensureStillAliveHere(before);
         return true;
     }
-    extra->putDirectIndex(instance->globalObject, index, value, 0, PutDirectIndexShouldThrow);
-    compiled->didChangeExtraProperties(vm);
+    StructureID structureBefore = extra->structureID();
+    if (!isThere || !extra->trySetIndexQuickly(vm, index, value))
+        extra->putDirectIndex(instance->globalObject, index, value, 0, PutDirectIndexShouldThrow);
+    if (extra->structureID() != structureBefore)
+        compiled->didChangeExtraProperties(vm);
     return true;
+}
+
+bool tryDefineElementOfCompiledObject(Instance* instance, JSObject* object, uint32_t index, JSValue value)
+{
+    return tryStoreElementOfCompiledObject<ElementStore::Defines>(instance, object, index, value);
+}
+
+bool trySetElementOfCompiledObject(Instance* instance, JSObject* object, uint32_t index, JSValue value)
+{
+    return tryStoreElementOfCompiledObject<ElementStore::Sets>(instance, object, index, value);
 }
 
 JSC_DEFINE_JIT_OPERATION(operationAOTDefineById, void, (Instance* instance, EncodedJSValue encodedObject, uint32_t name, EncodedJSValue value))
@@ -222,7 +271,8 @@ static bool tryDefineNameOfFunction(JSGlobalObject* globalObject, JSObject* func
             auto defined = asString(value)->tryGetValue();
             if (defined->isNull())
                 return false;
-            if (defined.data == initialNameProperty(closure->function()))
+            auto initial = initialNamePropertyString(vm, closure->state(), closure->function())->tryGetValue();
+            if (!initial->isNull() && defined.data == initial.data)
                 return true;
             closure->setNameProperty(vm, asString(value), attributesAtBirth);
         }
@@ -257,9 +307,31 @@ static NEVER_INLINE Object::LeavingProperty redefinedBy(JSGlobalObject* globalOb
     return { bits.hasValue ? valueOrGetter : wasAccessor ? jsUndefined() : current.valueOrAccessor, attributes | (isWritable ? PropertyAttribute::None : PropertyAttribute::ReadOnly) };
 }
 
+static NEVER_INLINE bool tryRedefineFieldInSlot(JSGlobalObject* globalObject, Object& compiled, const FieldData& field, JSValue value, PropertyDescriptorBits bits)
+{
+    unsigned attributes = compiled.attributesOf(field);
+    if (!bits.hasValue || field.isPrivate() || attributes & PropertyAttribute::DontDelete)
+        return false;
+    Object::LeavingProperty redefined = redefinedBy(globalObject, { jsUndefined(), attributes }, value, JSValue(), bits);
+    if (redefined.attributes == attributes)
+        return false;
+    compiled.moveFieldToExtraProperties(globalObject->vm(), field, redefined, SlotExitReason::Redefinition);
+    return true;
+}
+
+static ALWAYS_INLINE unsigned attributesOfDefinition(PropertyDescriptorBits bits)
+{
+    unsigned attributes = (bits.isEnumerable ? PropertyAttribute::None : PropertyAttribute::DontEnum) | (bits.isConfigurable ? PropertyAttribute::None : PropertyAttribute::DontDelete);
+    if (bits.hasGet || bits.hasSet)
+        return attributes | PropertyAttribute::Accessor;
+    return attributes | (bits.isWritable ? PropertyAttribute::None : PropertyAttribute::ReadOnly);
+}
+
 static bool tryDefineWithoutDescriptor(JSGlobalObject* globalObject, JSObject* object, PropertyName name, JSValue valueOrGetter, JSValue setter, PropertyDescriptorBits bits)
 {
     VM& vm = globalObject->vm();
+    if (isPreparedBeforeLookups(vm, name.uid()))
+        return false;
     Object* compiled = compiledObjectOrNull(object);
     if (object->type() == SlimClosureType && !parseIndex(name) && ReifiedSlimClosure::hasOrdinaryDefineOwnProperty(vm, name))
         uncheckedDowncast<SlimClosure>(object)->reify(vm);
@@ -267,21 +339,25 @@ static bool tryDefineWithoutDescriptor(JSGlobalObject* globalObject, JSObject* o
     if (!compiled && !canSkipDefineOwnProperty(vm, object, structure, name))
         return false;
     bool isAccessor = bits.hasGet || bits.hasSet;
-    unsigned attributes = (bits.isEnumerable ? PropertyAttribute::None : PropertyAttribute::DontEnum) | (bits.isConfigurable ? PropertyAttribute::None : PropertyAttribute::DontDelete);
-    if (isAccessor)
-        attributes |= PropertyAttribute::Accessor;
-    else if (!bits.isWritable)
-        attributes |= PropertyAttribute::ReadOnly;
-    if (compiled && !isAccessor) {
-        const AddedExtraProperty* added = compiled->state().propertyCaches->findAddedExtraProperty(structure->id(), name.uid());
-        if (added && added->attributes == attributes && compiled->tryRepeat(vm, *added, bits.hasValue ? valueOrGetter : jsUndefined()))
-            return true;
+    unsigned attributes = attributesOfDefinition(bits);
+    JSValue stored;
+    if (compiled) {
+        PropertyCaches& caches = *Instance::of(structure->realm())->state->propertyCaches;
+        const AddedExtraProperty* added = caches.findAddedExtraProperty(structure->id(), name.uid());
+        if (added && added->attributes == attributes) {
+            if (isAccessor) [[unlikely]] {
+                stored = GetterSetter::create(vm, globalObject, bits.hasGet ? valueOrGetter.getObject() : nullptr, setter.getObject());
+                added = caches.findAddedExtraProperty(structure->id(), name.uid());
+            }
+            if (added && compiled->tryRepeat(vm, *added, isAccessor ? stored : bits.hasValue ? valueOrGetter : jsUndefined()))
+                return true;
+        }
     }
     const FieldData* field = compiled ? compiled->fieldNamed(compiled->state(), name) : nullptr;
     if (field && field->isAccessor() && bits.hasGet && !bits.hasSet && valueOrGetter.isObject() && compiled->tryDefineAbsentGetterInSlot(vm, globalObject, *field, name.uid(), asObject(valueOrGetter), attributes))
         return true;
     if (field && compiled->isInSlot(*field))
-        return false;
+        return tryRedefineFieldInSlot(globalObject, *compiled, *field, valueOrGetter, bits);
     if (compiled && !field) {
         using Kind = Object::ExtraPropertyFound::Kind;
         Object::ExtraPropertyFound found = compiled->findExtraProperty(vm, name);
@@ -292,11 +368,12 @@ static bool tryDefineWithoutDescriptor(JSGlobalObject* globalObject, JSObject* o
             return true;
         }
     }
-    JSValue stored = bits.hasValue ? valueOrGetter : jsUndefined();
-    if (isAccessor)
+    if (!isAccessor)
+        stored = bits.hasValue ? valueOrGetter : jsUndefined();
+    else if (!stored)
         stored = GetterSetter::create(vm, globalObject, bits.hasGet ? valueOrGetter.getObject() : nullptr, setter.getObject());
     if (compiled)
-        return field ? compiled->tryDefineAbsentProperty(vm, field, name, stored, attributes) : compiled->tryAddAbsentExtraProperty(vm, name, stored, attributes);
+        return field ? compiled->tryDefineAbsentProperty(vm, field, name, stored, attributes) : compiled->tryAddAbsentExtraProperty(vm, name, stored, attributes, Object::MemoryOfAddedNames::WasAskedInVain);
     auto holdClosureBehindDefinition = makeScopeExit([&] {
         holdClosureToLackingName(vm, object, name.uid());
     });
@@ -343,6 +420,8 @@ static bool definesWithoutOtherCode(VM& vm, JSObject* object, PropertyName name,
         return true;
     if (define == JSArray::info()->methodTable.defineOwnProperty)
         return name != vm.propertyNames->length || !bits.hasValue || value.isUInt32();
+    if (define == ErrorInstance::info()->methodTable.defineOwnProperty)
+        return name != vm.propertyNames->stack && name != vm.propertyNames->line && name != vm.propertyNames->column && name != vm.propertyNames->sourceURL;
     for (const ClassInfo* info : { Closure::info(), SlimClosure::info(), ReifiedSlimClosure::info(), ClassPrototype::info(), JSFunction::info() }) {
         if (define == info->methodTable.defineOwnProperty)
             return true;
@@ -373,6 +452,27 @@ static bool tryDefineOwnPropertyFromBits(JSGlobalObject* globalObject, JSObject*
     RELEASE_AND_RETURN(scope, object->methodTable()->defineOwnProperty(object, globalObject, name, descriptorFromBits(valueOrGetter, setter, bits), false));
 }
 
+static ALWAYS_INLINE bool tryRepeatDefinition(JSGlobalObject* globalObject, JSObject* object, JSValue key, JSValue value, PropertyDescriptorBits bits)
+{
+    Object* compiled = bits.hasGet || bits.hasSet ? nullptr : compiledObjectOrNull(object);
+    if (!compiled)
+        return false;
+    PropertyCaches& caches = *compiled->state().propertyCaches;
+    UniquedStringImpl* name = nullptr;
+    if (key.isSymbol()) {
+        name = &asSymbol(key)->uid();
+        if (caches.preparationBeforeLookupsUnder(name))
+            return false;
+    } else if (StringImpl* text = key.isString() ? asString(key)->tryGetValueImpl() : nullptr; text && text->isAtom())
+        name = static_cast<UniquedStringImpl*>(text);
+    else
+        return false;
+    const AddedExtraProperty* added = caches.findAddedExtraProperty(compiled->structureID(), name);
+    if (!added || added->attributes != attributesOfDefinition(bits) || !descriptorObjectsInheritNoMembers(globalObject))
+        return false;
+    return compiled->tryRepeat(globalObject->vm(), *added, bits.hasValue ? value : jsUndefined());
+}
+
 JSC_DEFINE_JIT_OPERATION(operationAOTDefineOwnProperty, void, (Instance* instance, EncodedJSValue encodedObject, EncodedJSValue key, EncodedJSValue encodedValueOrGetter, EncodedJSValue encodedSetter, uint32_t descriptorBits))
 {
     AOT_OPERATION_BEGIN(instance, Entry::operationAOTDefineOwnProperty);
@@ -381,6 +481,8 @@ JSC_DEFINE_JIT_OPERATION(operationAOTDefineOwnProperty, void, (Instance* instanc
     JSValue setter = JSValue::decode(encodedSetter);
     auto bits = std::bit_cast<PropertyDescriptorBits>(descriptorBits);
     if (object.isObject()) [[likely]] {
+        if (tryRepeatDefinition(globalObject, asObject(object), JSValue::decode(key), valueOrGetter, bits))
+            OPERATION_RETURN(scope);
         Identifier converted;
         StringImpl* text = JSValue::decode(key).isString() ? asString(JSValue::decode(key))->tryGetValueImpl() : nullptr;
         if (!text || !text->isAtom()) {
@@ -395,8 +497,99 @@ JSC_DEFINE_JIT_OPERATION(operationAOTDefineOwnProperty, void, (Instance* instanc
             OPERATION_RETURN(scope);
     }
     JSObject* literal = constructObjectFromPropertyDescriptor(globalObject, descriptorFromBits(valueOrGetter, setter, bits));
-    callInEngine(instance, Builtins::ObjectDefineProperty, object, JSValue::decode(key), literal);
+    if (bits.isOfPropertyMap) {
+        auto name = JSValue::decode(key).toPropertyKey(globalObject);
+        OPERATION_RETURN_IF_EXCEPTION(scope);
+        JSObject* map = constructEmptyObject(globalObject);
+        map->putDirectMayBeIndex(globalObject, name, literal);
+        OPERATION_RETURN_IF_EXCEPTION(scope);
+        callInEngine(instance, Builtins::ObjectDefineProperties, object, map);
+    } else
+        callInEngine(instance, Builtins::ObjectDefineProperty, object, JSValue::decode(key), literal);
     OPERATION_RETURN(scope);
+}
+
+static ALWAYS_INLINE bool tryReadMembersOfDescriptor(JSGlobalObject* globalObject, JSValue description, PropertyWalk::DescriptorMembers& members)
+{
+    Object* described = description.isObject() ? compiledObjectOrNull(asObject(description)) : nullptr;
+    return described && described->getPrototypeDirect() == globalObject->objectPrototype() && descriptorObjectsInheritNoMembers(globalObject) && PropertyWalk::tryReadDescriptorMembers(described, members);
+}
+
+static bool tryReadDescriptor(const PropertyWalk::DescriptorMembers& members, JSValue& valueOrGetter, JSValue& setter, PropertyDescriptorBits& bits)
+{
+    auto [enumerable, configurable, value, writable, get, set] = members;
+    if ((enumerable && !enumerable.isBoolean()) || (configurable && !configurable.isBoolean()) || (writable && !writable.isBoolean()) || ((value || writable) && (get || set)))
+        return false;
+    valueOrGetter = value ? value : get ? get : jsUndefined();
+    setter = set ? set : jsUndefined();
+    bits = {
+        .hasValue = !!value, .hasWritable = !!writable, .isWritable = writable && writable.isTrue(),
+        .hasEnumerable = !!enumerable, .isEnumerable = enumerable && enumerable.isTrue(),
+        .hasConfigurable = !!configurable, .isConfigurable = configurable && configurable.isTrue(),
+        .hasGet = !!get, .hasSet = !!set, .isOfPropertyMap = 0, .unused = 0,
+    };
+    return true;
+}
+
+static ALWAYS_INLINE bool tryRepeatAccessorDefinition(JSGlobalObject* globalObject, JSObject* object, PropertyName name, const PropertyWalk::DescriptorMembers& members)
+{
+    auto [enumerable, configurable, value, writable, get, set] = members;
+    Object* compiled = get || set ? compiledObjectOrNull(object) : nullptr;
+    if (!compiled || value || writable || name.isSymbol() || !enumerable.isBoolean() || !configurable.isBoolean())
+        return false;
+    auto mayBeHalf = [](JSValue function) {
+        return !function || function.isUndefined() || (function.isCell() && isCompiledCalleeType(function.asCell()->type()));
+    };
+    if (!mayBeHalf(get) || !mayBeHalf(set))
+        return false;
+    auto halfOrNull = [](JSValue function) {
+        return function && function.isCell() ? uncheckedDowncast<JSObject>(function.asCell()) : nullptr;
+    };
+    unsigned attributes = PropertyAttribute::Accessor | (enumerable.isTrue() ? PropertyAttribute::None : PropertyAttribute::DontEnum) | (configurable.isTrue() ? PropertyAttribute::None : PropertyAttribute::DontDelete);
+    return compiled->tryRepeatAccessorDefinition(globalObject->vm(), globalObject, compiled->fieldNamed(compiled->state(), name), name, halfOrNull(get), halfOrNull(set), attributes);
+}
+
+JSC_DEFINE_JIT_OPERATION(operationAOTObjectDefineProperty, EncodedJSValue, (Instance* instance, EncodedJSValue encodedObject, EncodedJSValue encodedKey, EncodedJSValue encodedDescriptor))
+{
+    AOT_OPERATION_BEGIN(instance, Entry::operationAOTObjectDefineProperty);
+    JSValue target = JSValue::decode(encodedObject);
+    JSValue key = JSValue::decode(encodedKey);
+    JSValue description = JSValue::decode(encodedDescriptor);
+    if (!target.isObject()) [[unlikely]] {
+        throwTypeError(globalObject, scope, DefinePropertyOnNonObjectError);
+        OPERATION_RETURN(scope, encodedJSValue());
+    }
+    JSObject* object = asObject(target);
+    EnsureStillAliveScope keepsKey(key);
+    Identifier converted;
+    StringImpl* text = key.isString() ? asString(key)->tryGetValueImpl() : nullptr;
+    if (!text || !text->isAtom()) {
+        converted = key.toPropertyKey(globalObject);
+        OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
+        text = converted.impl();
+    }
+    PropertyName name(static_cast<UniquedStringImpl*>(text));
+    PropertyWalk::DescriptorMembers members;
+    if (tryReadMembersOfDescriptor(globalObject, description, members)) [[likely]] {
+        if (tryRepeatAccessorDefinition(globalObject, object, name, members))
+            OPERATION_RETURN(scope, encodedObject);
+        JSValue valueOrGetter;
+        JSValue setter;
+        PropertyDescriptorBits bits;
+        if (tryReadDescriptor(members, valueOrGetter, setter, bits)) {
+            if (tryRepeatDefinition(globalObject, object, key, valueOrGetter, bits))
+                OPERATION_RETURN(scope, encodedObject);
+            bool isDefined = tryDefineOwnPropertyFromBits(globalObject, object, name, valueOrGetter, setter, bits);
+            OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
+            if (isDefined)
+                OPERATION_RETURN(scope, encodedObject);
+        }
+    }
+    PropertyDescriptor descriptor;
+    toPropertyDescriptor(globalObject, description, descriptor);
+    OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
+    object->methodTable()->defineOwnProperty(object, globalObject, name, descriptor, true);
+    OPERATION_RETURN(scope, encodedObject);
 }
 
 static void defineAccessor(JSGlobalObject* globalObject, JSObject* object, PropertyName property, JSValue function, bool isEnumerable, bool isGetter)
@@ -545,14 +738,20 @@ JSC_DEFINE_JIT_OPERATION(operationAOTDefineMethod, void, (Instance* instance, JS
     MethodKind kind = static_cast<MethodKind>(bits.kind);
     if (bits.isUnderComputedKey)
         instance->state->objects->classes.holdDefinitionToNameInRecord(*classLayout, side, bits.index, key.impl(), member);
+    ClassTable& classes = instance->state->objects->classes;
+    bool isUnobserved = classes.isLaterEvaluation(*closure, *classLayout) && classes.hasNoGuardLeft(*classLayout, ClassSide::Prototype) && classes.hasNoGuardLeft(*classLayout, ClassSide::Static) && !parseIndex(key);
     {
-        ClassTable::MemberDefinition definition(instance->state->objects->classes, *classLayout, side, key.impl());
+        ClassTable::MemberDefinition definition(classes, *classLayout, side, key.impl());
         SetForScope prototypeBeingDefined(vm.aotState().classPrototypeBeingDefined, side == ClassSide::Prototype ? holder : nullptr);
+        SetForScope unobservedHolder(vm.aotState().unobservedClassHolder, isUnobserved ? holder : nullptr);
         if (!tryDefineClassMemberWithoutTransition(globalObject, *closure, *classLayout, holder, key, member, kind))
             defineMethod(globalObject, holder, key, member, kind);
     }
     OPERATION_RETURN_IF_EXCEPTION(scope);
-    instance->state->objects->classes.didDefineMember(vm, *classLayout, side, bits.index, holder, key.impl(), member);
+    if (isUnobserved)
+        countEvent(vm, Typed::RuntimeCounterID::UnobservedMembersDefined);
+    else
+        classes.didDefineMember(vm, *classLayout, side, bits.index, holder, key.impl(), member);
     OPERATION_RETURN(scope);
 }
 

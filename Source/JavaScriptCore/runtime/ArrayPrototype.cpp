@@ -58,7 +58,7 @@ JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncJoin);
 static JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncKeys);
 static JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncEntries);
 JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncPop);
-static JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncReverse);
+JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncReverse);
 JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncShift);
 JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncSlice);
 JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncSort);
@@ -66,7 +66,7 @@ JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncSplice);
 JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncUnShift);
 JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncIndexOf);
 static JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncLastIndexOf);
-static JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncConcat);
+JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncConcat);
 static JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncFill);
 static JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncToReversed);
 static JSC_DECLARE_HOST_FUNCTION(arrayProtoFuncToSorted);
@@ -239,7 +239,7 @@ ALWAYS_INLINE JSString* fastArrayJoin(JSGlobalObject* globalObject, JSObject* th
     return fastArrayJoin(globalObject, thisObject, separator, length, sawHoles, genericCase);
 }
 
-inline bool LEGACY_NODELETE canUseDefaultArrayJoinForToString(JSObject* thisObject)
+NODELETE inline bool canUseDefaultArrayJoinForToString(JSObject* thisObject)
 {
     JSGlobalObject* globalObject = thisObject->realmMayBeNull();
     if (!globalObject)
@@ -1939,7 +1939,8 @@ JSC_DEFINE_HOST_FUNCTION(arrayProtoFuncConcat, (JSGlobalObject* globalObject, Ca
                 JSArray* resultArray = uncheckedDowncast<JSArray>(result);
                 JSArray* otherArray = uncheckedDowncast<JSArray>(object);
                 unsigned startIndex = resultIndex;
-                bool success = resultArray->appendMemcpy(globalObject, vm, resultIndex, otherArray);
+                // A single copy would overwrite elements that the species constructor created with holes.
+                bool success = resultIndex >= resultArray->length() && resultArray->appendMemcpy(globalObject, vm, resultIndex, otherArray);
                 RETURN_IF_EXCEPTION(scope, encodedJSValue());
                 if (!success) {
                     moveArrayElements<ArrayFillMode::Empty>(globalObject, vm, resultArray, startIndex, otherArray, otherArray->length());
@@ -2390,7 +2391,7 @@ static uint64_t flatIntoArray(JSGlobalObject* globalObject, JSObject* target, JS
             RETURN_IF_EXCEPTION(scope, { });
         } else {
             if (targetIndex >= maxSafeIntegerAsUInt64()) [[unlikely]] {
-                throwTypeError(globalObject, scope, "flatten array exceeds 2**52 - 1");
+                throwTypeError(globalObject, scope, "flatten array exceeds 2**53 - 1");
                 return { };
             }
             target->putDirectIndex(globalObject, targetIndex, element, 0, PutDirectIndexShouldThrow);

@@ -12,6 +12,7 @@
 #include "AOTBuiltinTable.h"
 #include "AOTIRProgram.h"
 #include "AOTOperandKinds.h"
+#include "AOTSort.h"
 #include "AOTTypeNarrowing.h"
 #include <algorithm>
 #include <memory>
@@ -78,6 +79,12 @@ const BodyIndex& BodyIndexTable::build(FunctionID id, const Function& function, 
     return index;
 }
 
+void BodyIndexTable::adopt(FunctionID id, const BodyIndex& index)
+{
+    ASSERT(!has(id));
+    m_indexes[id.index()] = &index;
+}
+
 Vector<ConstructionStartInModule> BodyIndexTable::takeConstructionStarts()
 {
     size_t size = 0;
@@ -88,6 +95,14 @@ Vector<ConstructionStartInModule> BodyIndexTable::takeConstructionStarts()
     result.reserveInitialCapacity(size);
     for (const std::unique_ptr<Worker>& worker : m_workers)
         result.appendVector(std::exchange(worker->constructionStarts, { }));
+    return result;
+}
+
+Vector<EvaluationOfClass> BodyIndexTable::takeEvaluationsOfClasses()
+{
+    Vector<EvaluationOfClass> result;
+    for (const std::unique_ptr<Worker>& worker : m_workers)
+        result.appendVector(std::exchange(worker->evaluationsOfClasses, { }));
     return result;
 }
 
@@ -112,11 +127,11 @@ size_t BodyIndexTable::sizeInBytes() const
     }
     for (const std::unique_ptr<Worker>& worker : m_workers) {
         result += sizeof(Worker) + worker->allocatedBytes;
-        result += capacityInBytes(worker->chunks) + capacityInBytes(worker->constructionStarts);
-        result += capacityInBytes(worker->edges) + capacityInBytes(worker->retreatingEdges) + capacityInBytes(worker->argumentLinks);
+        result += capacityInBytes(worker->chunks) + capacityInBytes(worker->constructionStarts) + capacityInBytes(worker->evaluationsOfClasses);
+        result += capacityInBytes(worker->edges) + capacityInBytes(worker->retreatingEdges);
         result += capacityInBytes(worker->firstPredecessor) + capacityInBytes(worker->predecessors);
         result += capacityInBytes(worker->sizesOfSubtrees) + capacityInBytes(worker->nextNumbersBelow);
-        result += capacityInBytes(worker->worklist) + capacityInBytes(worker->loops) + capacityInBytes(worker->releaseHints) + capacityInBytes(worker->mentionsOfIterations);
+        result += capacityInBytes(worker->worklist) + capacityInBytes(worker->loops) + capacityInBytes(worker->mentionsOfIterations) + capacityInBytes(worker->blocks);
     }
     return result;
 }
@@ -160,11 +175,6 @@ static ValueID subjectOfBodyProof(const TestBehindBodyProofs& test, const BodyTe
     return test.value ? test.value.operand(operandIndex) : terminator.operand(operandIndex);
 }
 
-static constexpr OpcodeSet opcodesThatMayNameIterations {
-    Opcode::IteratorResume, Opcode::IteratorClose, Opcode::Await, Opcode::Yield, Opcode::InitialYield, Opcode::StepAsyncGenerator, Opcode::AwaitBySavingFrame, Opcode::AwaitCallBySavingFrame,
-    Opcode::YieldBySavingFrame, Opcode::AsyncGeneratorYield, Opcode::ReleaseHint
-};
-
 static bool takesBodyProofs(const BodyTerminator& terminator, uint32_t targetIndex)
 {
     TerminatorKind kind = terminator.kind();
@@ -181,161 +191,116 @@ BodyIndexBuilder::BodyIndexBuilder(const Function& function, BodyIndexTable::Wor
     RELEASE_ASSERT(function.hasBody());
 }
 
+BodyIndexBuilder::BodyIndexBuilder(const Function& function, BodyIndexTable& table, unsigned worker)
+    : BodyIndexBuilder(function, *table.m_workers[worker])
+{
+}
+
 const BodyIndex& BodyIndexBuilder::run()
 {
-    allocate();
+    begin();
     indexWords();
+    return finish();
+}
+
+const BodyIndex& BodyIndexBuilder::finish()
+{
+    m_index->m_opcodes = m_opcodes;
     adoptMentionsOfIterations();
-    findParametersReadByReleaseHintsAlone();
     computeDominators();
     numberDominatorTree();
-    m_index->m_blocksInDominatorOrder = m_blocksInDominatorOrder.first(m_blocks[entryBlock.index()].lastDominatorNumberBelow + 1);
+    m_index->m_numberOfReachableBlocks = m_blocks[entryBlock.index()].lastDominatorNumberBelow + 1;
     findLoops();
     adoptLoops();
+    adoptBlocks();
     return *m_index;
 }
 
-void BodyIndexBuilder::allocate()
+void BodyIndexBuilder::adoptBlocks()
+{
+    if (!m_hasNarrowNumbers) {
+        std::span<uint8_t> memory = m_worker.allocate(bytesOfArrayInBodyIndex<BlockPlace>(m_blocks.size()));
+        std::span<BlockPlace> blocks = takeArrayOfBodyIndex<BlockPlace>(memory, m_blocks.size());
+        std::ranges::copy(m_blocks, blocks.begin());
+        m_index->m_wideBlocks = blocks.data();
+        return;
+    }
+    using NarrowBlockPlace = BodyIndex::NarrowBlockPlace;
+    std::span<uint8_t> memory = m_worker.allocate(bytesOfArrayInBodyIndex<NarrowBlockPlace>(m_blocks.size()));
+    std::span<NarrowBlockPlace> blocks = takeArrayOfBodyIndex<NarrowBlockPlace>(memory, m_blocks.size());
+    std::ranges::transform(m_blocks, blocks.begin(), [](const BlockPlace& place) {
+        return NarrowBlockPlace(place);
+    });
+    m_index->m_narrowBlocks = blocks.data();
+    m_index->m_hasNarrowBlocks = true;
+}
+
+BodyIndex::RareParts& BodyIndexBuilder::ensureRareParts()
+{
+    if (!m_rareParts) {
+        std::span<uint8_t> memory = m_worker.allocate(bytesOfArrayInBodyIndex<BodyIndex::RareParts>(1));
+        m_rareParts = new (NotNull, takeArrayOfBodyIndex<BodyIndex::RareParts>(memory, 1).data()) BodyIndex::RareParts;
+        m_index->m_rareParts = m_rareParts;
+    }
+    return *m_rareParts;
+}
+
+void BodyIndexBuilder::begin()
 {
     const Body& body = m_function.body;
     size_t numberOfBlocks = body.numberOfBlocks();
     size_t numberOfValues = body.numberOfValues();
     RELEASE_ASSERT(body.words().size() < BodyIndex::isParameterBit);
 
+    m_hasNarrowNumbers = BodyIndex::fitsNarrowNumbers(body);
     std::span<uint8_t> memory = m_worker.allocate(bytesOfArrayInBodyIndex<BodyIndex>(1)
-        + bytesOfArrayInBodyIndex<BlockPlace>(numberOfBlocks)
         + bytesOfArrayInBodyIndex<BlockID>(numberOfBlocks)
-        + 2 * bytesOfArrayInBodyIndex<uint32_t>(numberOfValues)
+        + bytesOfArrayInBodyIndex<uint32_t>(numberOfValues)
+        + (m_hasNarrowNumbers ? bytesOfArrayInBodyIndex<uint16_t>(numberOfValues) : bytesOfArrayInBodyIndex<uint32_t>(numberOfValues))
         + bytesOfArrayInBodyIndex<uint8_t>(numberOfValues));
 
     m_index = new (NotNull, takeArrayOfBodyIndex<BodyIndex>(memory, 1).data()) BodyIndex;
-    m_blocks = takeArrayOfBodyIndex<BlockPlace>(memory, numberOfBlocks);
     m_blocksInDominatorOrder = takeArrayOfBodyIndex<BlockID>(memory, numberOfBlocks);
     m_placesOfValues = takeArrayOfBodyIndex<uint32_t>(memory, numberOfValues);
-    m_onlyUsersOfValues = takeArrayOfBodyIndex<uint32_t>(memory, numberOfValues);
+    if (m_hasNarrowNumbers)
+        m_narrowOnlyUsersOfValues = takeArrayOfBodyIndex<uint16_t>(memory, numberOfValues);
+    else
+        m_onlyUsersOfValues = takeArrayOfBodyIndex<uint32_t>(memory, numberOfValues);
     m_usesOfValues = takeArrayOfBodyIndex<uint8_t>(memory, numberOfValues);
 
-    std::uninitialized_default_construct(m_blocks.begin(), m_blocks.end());
+    m_worker.blocks.shrink(0);
+    m_worker.blocks.grow(numberOfBlocks);
+    m_blocks = m_worker.blocks.mutableSpan();
 
     m_index->m_body = body;
-    m_index->m_blocks = m_blocks;
-    m_index->m_placesOfValues = m_placesOfValues;
-    m_index->m_onlyUsersOfValues = m_onlyUsersOfValues;
-    m_index->m_usesOfValues = m_usesOfValues;
+    m_index->m_wideBlocks = m_blocks.data();
+    m_index->m_blocksInDominatorOrder = m_blocksInDominatorOrder.data();
+    m_index->m_placesOfValues = m_placesOfValues.data();
+    if (m_hasNarrowNumbers)
+        m_index->m_narrowOnlyUsersOfValues = m_narrowOnlyUsersOfValues.data();
+    else
+        m_index->m_onlyUsersOfValues = m_onlyUsersOfValues.data();
+    m_index->m_hasNarrowUsers = m_hasNarrowNumbers;
+    m_index->m_usesOfValues = m_usesOfValues.data();
 
     m_worker.edges.shrink(0);
     m_worker.retreatingEdges.shrink(0);
-    m_worker.argumentLinks.shrink(0);
     m_worker.firstPredecessor.shrink(0);
     m_worker.predecessors.shrink(0);
     m_worker.sizesOfSubtrees.shrink(0);
     m_worker.nextNumbersBelow.shrink(0);
     m_worker.worklist.shrink(0);
     m_worker.loops.shrink(0);
-    m_worker.releaseHints.shrink(0);
     m_worker.mentionsOfIterations.shrink(0);
 }
 
-ALWAYS_INLINE void BodyIndexBuilder::noteUse(ValueID used, BodyUseKind kind, uint32_t user)
-{
-    static_assert(static_cast<unsigned>(BodyUseKind::BlockSubject) < (1u << (8 - BodyIndex::bitsOfUseCount)));
-
-    uint8_t& uses = m_usesOfValues[used.index()];
-    uint32_t count = uses & BodyIndex::maxCountedUses;
-    if (!count) {
-        uses = static_cast<uint8_t>(static_cast<unsigned>(kind) << BodyIndex::bitsOfUseCount | 1);
-        m_onlyUsersOfValues[used.index()] = user;
-        return;
-    }
-    if (count < BodyIndex::maxCountedUses)
-        ++uses;
-}
-
-void BodyIndexBuilder::findParametersReadByReleaseHintsAlone()
-{
-    std::span<const BodyArgumentLink> links = m_worker.argumentLinks.span();
-    if (m_worker.releaseHints.isEmpty() || links.empty() || !m_function.isCoroutine())
-        return;
-
-    auto parameterFilledBy = [&](const BodyArgumentLink& link) -> std::optional<uint32_t> {
-        if (link.indexOfParameter >= m_index->block(link.to).numberOfParameters())
-            return std::nullopt;
-        return m_blocks[link.to.index()].firstParameter + link.indexOfParameter;
-    };
-
-    uint32_t numberOfValues = m_function.body.numberOfValues();
-    Vector<uint32_t> numberOfMentionsByHintsAndEdges;
-    numberOfMentionsByHintsAndEdges.fill(0, numberOfValues);
-    Vector<uint32_t> firstArgument;
-    firstArgument.fill(0, numberOfValues + 1);
-    for (ValueID hint : m_worker.releaseHints) {
-        if (ValueID released = m_index->value(hint).as<Opcode::ReleaseHint>().valueOperand())
-            ++numberOfMentionsByHintsAndEdges[released.index()];
-    }
-    for (const BodyArgumentLink& link : links) {
-        std::optional<uint32_t> parameter = parameterFilledBy(link);
-        if (!parameter)
-            continue;
-        ++numberOfMentionsByHintsAndEdges[link.argument.index()];
-        ++firstArgument[*parameter];
-    }
-    for (uint32_t index = 1; index <= numberOfValues; ++index)
-        firstArgument[index] += firstArgument[index - 1];
-    Vector<ValueID> arguments;
-    arguments.grow(firstArgument.last());
-    for (const BodyArgumentLink& link : links) {
-        if (std::optional<uint32_t> parameter = parameterFilledBy(link))
-            arguments[--firstArgument[*parameter]] = link.argument;
-    }
-
-    auto takesArguments = [&](uint32_t value) {
-        return firstArgument[value] != firstArgument[value + 1];
-    };
-    Vector<bool> isRead;
-    isRead.fill(false, numberOfValues);
-    Vector<uint32_t, 32> parametersToFollow;
-    auto noteRead = [&](uint32_t value) {
-        if (!std::exchange(isRead[value], true) && takesArguments(value))
-            parametersToFollow.append(value);
-    };
-    for (uint32_t value = 0; value < numberOfValues; ++value) {
-        uint32_t numberOfMentions = m_index->useCount(ValueID(value));
-        if (numberOfMentions == BodyIndex::maxCountedUses || numberOfMentions > numberOfMentionsByHintsAndEdges[value])
-            noteRead(value);
-    }
-    while (!parametersToFollow.isEmpty()) {
-        uint32_t parameter = parametersToFollow.takeLast();
-        for (uint32_t place = firstArgument[parameter]; place < firstArgument[parameter + 1]; ++place)
-            noteRead(arguments[place].index());
-    }
-
-    std::span<uint32_t> parametersThatNothingReads;
-    for (uint32_t value = 0; value < numberOfValues; ++value) {
-        if (isRead[value] || !takesArguments(value))
-            continue;
-        if (parametersThatNothingReads.empty()) {
-            size_t numberOfWords = (numberOfValues + BodyIndex::bitsPerWord - 1) / BodyIndex::bitsPerWord;
-            std::span<uint8_t> memory = m_worker.allocate(bytesOfArrayInBodyIndex<uint32_t>(numberOfWords));
-            parametersThatNothingReads = takeArrayOfBodyIndex<uint32_t>(memory, numberOfWords);
-            m_index->m_parametersReadByReleaseHintsAlone = parametersThatNothingReads;
-        }
-        parametersThatNothingReads[value / BodyIndex::bitsPerWord] |= 1u << (value % BodyIndex::bitsPerWord);
-    }
-}
-
-void BodyIndexBuilder::noteEdge(BlockID from, BodyTarget target, uint32_t targetIndex, bool isHandlerEdge)
+void BodyIndexBuilder::fileEdge(BlockID from, BodyTarget target, uint32_t targetIndex, bool isHandlerEdge)
 {
     BodyUseKind kind = isHandlerEdge ? BodyUseKind::HandlerArgument : BodyUseKind::EdgeArgument;
     BlockID to = target.block();
-    bool keepsLinks = m_function.isCoroutine();
-    uint32_t indexOfParameter = 0;
     for (ValueID argument : target.arguments()) {
-        if (argument) {
-            noteUse(argument, kind, from.index());
-            if (keepsLinks)
-                m_worker.argumentLinks.append(BodyArgumentLink { argument, from, to, indexOfParameter });
-        }
-        ++indexOfParameter;
+        if (argument)
+            fileUse(argument, kind, from.index());
     }
 
     m_worker.edges.append(BodyFlowEdge { from, to });
@@ -353,7 +318,7 @@ void BodyIndexBuilder::noteEdge(BlockID from, BodyTarget target, uint32_t target
         place.flags |= BodyIndex::IsEnteredByHandlerEdge;
 }
 
-void BodyIndexBuilder::noteProofs(const BodyBlock& from, const BodyTerminator& terminator)
+void BodyIndexBuilder::fileProofs(BlockID from, const BodyTerminator& terminator)
 {
     TestBehindBodyProofs test = findTestBehindBodyProofs(*m_index, terminator);
     if (test.proof == Proof::None)
@@ -365,30 +330,46 @@ void BodyIndexBuilder::noteProofs(const BodyBlock& from, const BodyTerminator& t
         if (!proofs.empty() && takesBodyProofs(terminator, targetIndex)) {
             for (uint32_t operandIndex : proofs) {
                 if (ValueID subject = subjectOfBodyProof(test, terminator, operandIndex))
-                    noteUse(subject, BodyUseKind::EdgeProof, from.id().index());
+                    fileUse(subject, BodyUseKind::EdgeProof, from.index());
             }
         }
         ++targetIndex;
     }
 }
 
+void BodyIndexBuilder::fileWhatFewOperationsBring(const BodyValue& value, BlockID block)
+{
+    const Body& body = m_function.body;
+    auto isIteratorOpen = [&](ValueID named) {
+        uint32_t place = m_placesOfValues[named.index()];
+        return place && !(place & BodyIndex::isParameterBit) && body.operationAt(place, named).opcode() == Opcode::IteratorOpen;
+    };
+
+    if (value.opcode() == Opcode::NewClass)
+        m_worker.evaluationsOfClasses.append(EvaluationOfClass { m_index, value.id() });
+    if (opcodesThatMayNameIterationsInBodyIndex.contains(value.opcode())) {
+        value.forEachOperand([&](ValueID operand, uint32_t) {
+            if (isIteratorOpen(operand))
+                m_worker.mentionsOfIterations.append({ operand, value.id(), block });
+        });
+    }
+    if (value.words()[0] & Wire::WrittenPositionFollows) {
+        std::optional<ConstructionStart> start = value.constructionStart();
+        if (start && m_function.module)
+            m_worker.constructionStarts.append(ConstructionStartInModule { m_function.module, *start });
+    }
+}
+
 void BodyIndexBuilder::indexWords()
 {
-    static_assert(sizeof(Wire::ParameterHead) == sizeof(uint32_t));
-
     const Body& body = m_function.body;
     const UnitIDRemap* unit = &body.unit();
     const uint32_t* firstWord = body.words().data();
     uint32_t numberOfBlocks = body.numberOfBlocks();
     uint32_t numberOfValues = body.numberOfValues();
-    OpcodeSet opcodes;
 
     auto offsetOf = [&](const uint32_t* word) {
         return static_cast<uint32_t>(word - firstWord);
-    };
-    auto isIteratorOpen = [&](ValueID named) {
-        uint32_t place = m_placesOfValues[named.index()];
-        return place && !(place & BodyIndex::isParameterBit) && body.operationAt(place, named).opcode() == Opcode::IteratorOpen;
     };
 
     BodyBlock block = body.entry();
@@ -396,62 +377,43 @@ void BodyIndexBuilder::indexWords()
         BlockID id(blockIndex);
         uint32_t firstParameter = block.firstParameter().index();
         RELEASE_ASSERT(static_cast<uint64_t>(firstParameter) + block.numberOfParameters() + block.numberOfValues() <= numberOfValues);
-        m_worker.valuesGoneOver += block.numberOfParameters() + block.numberOfValues();
-
-        BlockPlace& place = m_blocks[blockIndex];
-        place.wordOffset = offsetOf(block.words());
-        place.firstParameter = firstParameter;
-
-        uint32_t placeOfParameter = BodyIndex::isParameterBit | (place.wordOffset + BodyBlock::numberOfHeadWords);
-        uint32_t firstValue = block.firstValue().index();
-        for (uint32_t parameter = firstParameter; parameter < firstValue; ++parameter)
-            m_placesOfValues[parameter] = placeOfParameter++;
-
+        fileBlock(id, offsetOf(block.words()), firstParameter, block.numberOfParameters(), block.numberOfValues());
         if (ValueID subject = block.subject())
-            noteUse(subject, BodyUseKind::BlockSubject, blockIndex);
+            fileUse(subject, BodyUseKind::BlockSubject, blockIndex);
 
         BodyValues::Iterator cursor = block.values().begin();
         for (uint32_t remaining = block.numberOfValues(); remaining--; ++cursor) {
             BodyValue value = *cursor;
             uint32_t user = value.id().index();
-            m_placesOfValues[user] = offsetOf(value.words());
-            opcodes.add(value.opcode());
+            fileOperation(value.id(), offsetOf(value.words()), value.opcode());
             value.forEachOperand([&](ValueID operand, uint32_t) {
-                noteUse(operand, BodyUseKind::Operand, user);
+                fileUse(operand, BodyUseKind::Operand, user);
             });
-            if (value.opcode() == Opcode::ReleaseHint) [[unlikely]]
-                m_worker.releaseHints.append(value.id());
-            if (opcodesThatMayNameIterations.contains(value.opcode())) [[unlikely]] {
-                value.forEachOperand([&](ValueID operand, uint32_t) {
-                    if (isIteratorOpen(operand))
-                        m_worker.mentionsOfIterations.append({ operand, value.id(), id });
-                });
-            }
-            if (value.words()[0] & Wire::WrittenPositionFollows) [[unlikely]] {
-                std::optional<ConstructionStart> start = value.constructionStart();
-                if (start && m_function.module)
-                    m_worker.constructionStarts.append(ConstructionStartInModule { m_function.module, *start });
-            }
+            if (opcodesInBodyIndex.contains(value.opcode()) || value.words()[0] & Wire::WrittenPositionFollows) [[unlikely]]
+                fileWhatFewOperationsBring(value, id);
         }
 
         BodyTerminator terminator(cursor.words(), unit, id);
-        place.wordOffsetOfTerminator = offsetOf(terminator.words());
+        fileTerminator(id, offsetOf(terminator.words()));
         terminator.forEachOperand([&](ValueID operand, uint32_t) {
-            noteUse(operand, BodyUseKind::TerminatorOperand, blockIndex);
+            fileUse(operand, BodyUseKind::TerminatorOperand, blockIndex);
         });
         uint32_t targetIndex = 0;
-        for (BodyTarget target : terminator.targets())
-            noteEdge(id, target, targetIndex++, false);
+        bool someTargetBringsProofs = false;
+        for (BodyTarget target : terminator.targets()) {
+            fileEdge(id, target, targetIndex++, false);
+            someTargetBringsProofs |= !target.proofs().empty();
+        }
         if (block.hasHandler())
-            noteEdge(id, block.handler(), 0, true);
-        noteProofs(block, terminator);
+            fileEdge(id, block.handler(), 0, true);
+        if (someTargetBringsProofs)
+            fileProofs(id, terminator);
 
         block = BodyBlock(terminator.end(), nullptr, unit, BlockID(blockIndex + 1), block.endOfValues());
     }
 
     RELEASE_ASSERT(block.words() == firstWord + body.words().size());
     RELEASE_ASSERT(block.firstParameter().index() == numberOfValues);
-    m_index->m_opcodes = opcodes;
 }
 
 void BodyIndexBuilder::adoptMentionsOfIterations()
@@ -460,13 +422,13 @@ void BodyIndexBuilder::adoptMentionsOfIterations()
     if (found.empty())
         return;
 
-    std::ranges::stable_sort(found, { }, [](const BodyMentionOfIteration& mention) {
+    AOT::stableSort(found, { }, [](const BodyMentionOfIteration& mention) {
         return mention.open.index();
     });
     std::span<uint8_t> memory = m_worker.allocate(bytesOfArrayInBodyIndex<BodyMentionOfIteration>(found.size()));
     std::span<BodyMentionOfIteration> mentions = takeArrayOfBodyIndex<BodyMentionOfIteration>(memory, found.size());
     std::ranges::copy(found, mentions.begin());
-    m_index->m_mentionsOfIterations = mentions;
+    ensureRareParts().mentionsOfIterations = mentions;
 }
 
 void BodyIndexBuilder::adoptLoops()
@@ -495,9 +457,11 @@ void BodyIndexBuilder::adoptLoops()
     for (size_t place = 0; place < found.size(); ++place) {
         if (LoopID parent = found[place].parent) {
             outermostAround[place] = outermostAround[parent.index()];
+            found[place].outermost = LoopID(outermostAround[place]);
             continue;
         }
         outermostAround[place] = place;
+        found[place].outermost = LoopID(place);
         nextMember[place] = numberOfBlocksInLoops;
         numberOfBlocksInLoops += found[place].numberOfMembers;
     }
@@ -551,11 +515,12 @@ void BodyIndexBuilder::adoptLoops()
         });
     }
     std::ranges::copy(found, loops.begin());
-    m_index->m_loops = loops;
-    m_index->m_membersOfLoops = members;
+    BodyIndex::RareParts& rareParts = ensureRareParts();
+    rareParts.loops = loops;
+    rareParts.membersOfLoops = members;
 }
 
-ValueID BodyIndex::valueBehindCastsFrom(ValueID id) const
+ValueID BodyIndex::stripCastsSlow(ValueID id) const
 {
     while (!isParameter(id)) {
         BodyValue definition = value(id);
@@ -574,7 +539,7 @@ std::optional<BodyEdgeResult> BodyIndex::edgeResult(BlockID from, uint32_t targe
     return edgeResult(terminator, targetIndex, terminator.targets()[targetIndex], proofIndex);
 }
 
-std::optional<BodyEdgeResult> BodyIndex::edgeResult(const BodyTerminator& terminator, uint32_t targetIndex, BodyTarget target, uint32_t proofIndex) const
+std::optional<BodyEdgeResult> BodyIndex::edgeResultOfAnyTerminator(const BodyTerminator& terminator, uint32_t targetIndex, BodyTarget target, uint32_t proofIndex) const
 {
     if (!takesBodyProofs(terminator, targetIndex))
         return std::nullopt;
@@ -598,7 +563,7 @@ std::optional<BodyEdgeResult> BodyIndex::edgeResult(const BodyTerminator& termin
         result.isOnTakenEdge = !targetIndex;
     } else
         result.caseIndex = targetIndex;
-    result.parameter = ValueID(m_blocks[target.block().index()].firstParameter + static_cast<uint32_t>(target.arguments().size()) + proofIndex);
+    result.parameter = ValueID(firstParameterOf(target.block()) + static_cast<uint32_t>(target.arguments().size()) + proofIndex);
     return result;
 }
 

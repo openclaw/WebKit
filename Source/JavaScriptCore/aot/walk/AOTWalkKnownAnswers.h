@@ -10,6 +10,7 @@
 #include "AOTCode.h"
 #include "AOTEffects.h"
 #include "AOTSharedArray.h"
+#include "AOTThreadBlockCache.h"
 #include <bit>
 #include <span>
 #include <wtf/ScopedLambda.h>
@@ -153,6 +154,15 @@ public:
                 functor(held);
         }
     }
+    void forEachNotSharedWith(const ListOfAnswersUntilEnded& other, NOESCAPE const Invocable<void(uint32_t number)> auto& functor) const
+    {
+        m_places.forEachStretchNotSharedWith(other.m_places, [&](uint32_t begin, uint32_t end) {
+            for (uint32_t place = begin; place < end; ++place) {
+                if (uint32_t held = m_places[place]; !(held & hasEnded))
+                    functor(held);
+            }
+        });
+    }
     void removeAllMatching(NOESCAPE const Invocable<bool(uint32_t number)> auto& ends)
     {
         for (uint32_t place = 0; place < m_places.size(); ++place) {
@@ -209,6 +219,7 @@ public:
     AnswersOfWalk() = default;
 
     void clear();
+    void releaseRoom();
     void takeRoomOf(AnswersOfWalk& former)
     {
         takeRoom(m_answers, former.m_answers);
@@ -350,7 +361,7 @@ public:
     void setTable(AnswersOfWalk& table) { m_table = &table; }
     AnswersOfWalk* table() const { return m_table; }
 
-    bool isEmpty() const { return !m_held || (m_held->forGood.isEmpty() && m_held->outcomes.isEmpty() && m_held->conversions.isEmpty() && m_held->untilSuspension.isEmpty() && m_held->untilEnded.isEmpty() && m_held->onFreshHolders.isEmpty()); }
+    ALWAYS_INLINE bool isEmpty() const { return !m_held || (m_held->forGood.isEmpty() && m_held->outcomes.isEmpty() && m_held->conversions.isEmpty() && m_held->untilSuspension.isEmpty() && m_held->untilEnded.isEmpty() && m_held->onFreshHolders.isEmpty()); }
     uint32_t size() const { return m_held ? m_held->forGood.size() + m_held->outcomes.size() + m_held->conversions.size() + m_held->untilSuspension.size() + m_held->untilEnded.size() + m_held->onFreshHolders.size() : 0; }
     ALWAYS_INLINE void clear()
     {
@@ -385,6 +396,17 @@ public:
     void note(std::span<const uint32_t> wordsOfKey, AnswersOfWalk::PlaceOfKey, const KnownAnswer&, const LocationMasks& restsOn, bool mayBeNumbered, bool holderIsFresh);
     void end(std::span<const uint32_t> wordsOfKey);
 
+    void forEachNoteAbout(Reference holder, uint8_t kind, NOESCAPE const Invocable<void(uint64_t noted)> auto& functor) const
+    {
+        if (!m_held)
+            return;
+        m_held->untilEnded.forEach([&](uint32_t number) {
+            const KnownAnswer& answer = m_table->at(number);
+            if (answer.family == KnownAnswer::Family::Note && answer.note == kind && answer.holder == holder)
+                functor(answer.noted);
+        });
+    }
+
     void noteOutcome(Reference condition, bool isTrue)
     {
         if (!m_table)
@@ -399,7 +421,7 @@ public:
     void noteConversion(Reference value, Representation wanted, Reference converted, bool endsAtSuspension);
     Reference findConversion(Reference value, Representation wanted) const;
 
-    void endWhatIsWritten(const Effects& effects, const WalkState& state)
+    ALWAYS_INLINE void endWhatIsWritten(const Effects& effects, const WalkState& state)
     {
         if (!m_held)
             return;
@@ -410,6 +432,21 @@ public:
     }
     void endWhatIsWritten(const Effects&, NOESCAPE const AsksWhetherAnswerEnds& ends);
     void endWhatIsWrittenIn(Reference holder, const Effects&);
+    void forEachHolderOfAnswerAboutFreshHolderLackingIn(const KnownAnswers& arriving, NOESCAPE const Invocable<void(Reference holder)> auto& functor) const
+    {
+        if (!m_held || m_held->onFreshHolders.isEmpty())
+            return;
+        if (!arriving.m_held) {
+            m_held->onFreshHolders.forEach([&](uint32_t number) {
+                functor(m_table->at(number).holder);
+            });
+            return;
+        }
+        m_held->onFreshHolders.forEachNotSharedWith(arriving.m_held->onFreshHolders, [&](uint32_t number) {
+            if (!arriving.m_held->onFreshHolders.contains(number))
+                functor(m_table->at(number).holder);
+        });
+    }
     void holderHasLeft(Reference holder);
     void holderIsFreshAgain(Reference holder);
     void endWhatIsNotFresh(const WalkState& state)
@@ -423,6 +460,10 @@ public:
 
 private:
     struct Held {
+        Held() { }
+        static void* operator new(size_t) { return ThreadBlockCache<Held, KindOfBlocks::HeldByKnownAnswers>::allocate(); }
+        static void operator delete(void* held) { ThreadBlockCache<Held, KindOfBlocks::HeldByKnownAnswers>::free(held); }
+
         SetOfAnswersForGood forGood;
         SetOfAnswersForGood untilSuspension;
         SetOfAnswersForGood outcomes;

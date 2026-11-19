@@ -10,10 +10,12 @@
 
 #include "AOTInstance.h"
 #include "AOTRuntimeTable.h"
+#include "AOTState.h"
 #include "AOTVMState.h"
 #include "JSCInlines.h"
 #include "LocalAllocatorInlines.h"
 #include <algorithm>
+#include <array>
 #include <wtf/StdLibExtras.h>
 #include <wtf/UnalignedAccess.h>
 #include <wtf/text/StringImpl.h>
@@ -37,21 +39,6 @@ static ALWAYS_INLINE EndOfText& endOfTextIn(StringImpl& characters)
 }
 
 using CompactFibers = JSRopeString::CompactFibers;
-static_assert(sizeof(JSRopeString) == 4 * sizeof(uint64_t) && JSRopeString::offsetOfFiber0() == sizeof(uint64_t) && JSRopeString::offsetOfLength() == 2 * sizeof(uint64_t) && JSRopeString::offsetOfFiber2() == 3 * sizeof(uint64_t));
-static_assert(CompactFibers::shiftOfFiber1LowerInLengthWord == 32 && CompactFibers::widthOfFiber1LowerInLengthWord == 32 && CompactFibers::shiftOfFiber2InUpperWord == 16);
-
-static ALWAYS_INLINE uint64_t wordOfRope(const JSString* rope, ptrdiff_t offset)
-{
-    return WTF::unalignedLoad<uint64_t>(std::bit_cast<const uint8_t*>(rope) + offset);
-}
-
-static ALWAYS_INLINE JSString* firstPartOf(const JSString* rope) { return std::bit_cast<JSString*>(wordOfRope(rope, JSRopeString::offsetOfFiber0()) & JSRopeString::stringMask); }
-static ALWAYS_INLINE JSString* secondPartOf(const JSString* rope)
-{
-    constexpr uint64_t upperBitsOfSecondPart = (1ull << CompactFibers::shiftOfFiber2InUpperWord) - 1;
-    return std::bit_cast<JSString*>(wordOfRope(rope, JSRopeString::offsetOfLength()) >> CompactFibers::shiftOfFiber1LowerInLengthWord | (wordOfRope(rope, JSRopeString::offsetOfFiber2()) & upperBitsOfSecondPart) << CompactFibers::widthOfFiber1LowerInLengthWord);
-}
-static ALWAYS_INLINE JSString* thirdPartOf(const JSString* rope) { return std::bit_cast<JSString*>(wordOfRope(rope, JSRopeString::offsetOfFiber2()) >> CompactFibers::shiftOfFiber2InUpperWord); }
 
 static ALWAYS_INLINE JSString* createSubstringOfBuffer(Instance& instance, VM& vm, JSString* buffer, uint32_t offset, uint32_t length, bool is8Bit)
 {
@@ -196,9 +183,18 @@ static ALWAYS_INLINE void writePieces(StringImpl& buffer, uint32_t position, std
     endOfTextIn(buffer) = position;
 }
 
+static ALWAYS_INLINE void resolveLastingPieces(std::span<JSString* const> pieces)
+{
+    for (JSString* piece : pieces) {
+        if (piece->isNonSubstringRope() && piece->cellState() != CellState::DefinitelyWhite && piece->length() <= maxLengthOfPieceWrittenByStub) [[unlikely]]
+            uncheckedDowncast<JSRopeString>(piece)->resolveRopeWithoutGC();
+    }
+}
+
 JSString* tryAppendToGrowingText(Instance& instance, JSString* text, std::span<JSString* const> pieces)
 {
     ASSERT(text->isRope() && text->length() >= minLengthOfGrowingText);
+    resolveLastingPieces(pieces);
     VM& vm = *instance.vm;
     uint32_t length = text->length();
     uint64_t lengthOfPieces = 0;
@@ -210,10 +206,22 @@ JSString* tryAppendToGrowingText(Instance& instance, JSString* text, std::span<J
     if (!lengthOfPieces)
         return text;
 
+    constexpr uint64_t maxLengthPerAddition = 256;
+    constexpr uint64_t lengthInAdvance = 64 * maxLengthPerAddition;
+    constexpr uint32_t additionsPerQuestion = 16;
+    if (lengthOfPieces > lengthInAdvance)
+        return nullptr;
     uint32_t numberOfAdditions = 0;
     JSString* bottom = text;
-    for (; bottom->isNonSubstringRope(); bottom = firstPartOf(bottom))
-        ++numberOfAdditions;
+    auto areAdditionsLong = [&] {
+        return length - bottom->length() + lengthOfPieces > lengthInAdvance + numberOfAdditions * maxLengthPerAddition;
+    };
+    for (; bottom->isNonSubstringRope(); bottom = firstPartOf(bottom)) {
+        if (!(++numberOfAdditions % additionsPerQuestion) && areAdditionsLong())
+            return nullptr;
+    }
+    if (numberOfAdditions && areAdditionsLong())
+        return nullptr;
 
     if (JSString* buffer = bottom->isRope() ? bufferThatEndsWith(instance, bottom) : nullptr) {
         StringImpl& characters = *buffer->tryGetValueImpl();
@@ -240,14 +248,109 @@ JSString* tryAppendToGrowingText(Instance& instance, JSString* text, std::span<J
     if (!buffer)
         return nullptr;
     StringImpl& characters = *buffer->tryGetValueImpl();
-    if (is8Bit) {
-        text->resolveToBuffer(std::span { charactersOf<Latin1Character>(characters) + start, length });
-        writePieces<Latin1Character>(characters, start + length, pieces);
-    } else {
-        text->resolveToBuffer(std::span { charactersOf<char16_t>(characters) + start, length });
-        writePieces<char16_t>(characters, start + length, pieces);
-    }
+    auto writeText = [&]<typename CharacterType>(CharacterType* room) {
+        writeWhatWasAddedTo(bottom, text, room + start + length);
+        writeString(room + start, bottom);
+        writePieces<CharacterType>(characters, start + length, pieces);
+    };
+    if (is8Bit)
+        writeText(charactersOf<Latin1Character>(characters));
+    else
+        writeText(charactersOf<char16_t>(characters));
     return createSubstringOfBuffer(instance, vm, buffer, start, static_cast<uint32_t>(lengthOfAll), is8Bit);
+}
+
+void noteResolvedText(Instance& instance, const JSString* text)
+{
+    instance.state->growingFlatText.lastResolved = text->tryGetValueImpl();
+}
+
+template<typename CharacterType>
+static bool tryResolveInGrowingBuffer(Instance& instance, JSRopeString* rope, StringImpl& text, std::span<JSString* const> pieces)
+{
+    constexpr bool is8Bit = std::is_same_v<CharacterType, Latin1Character>;
+    GrowingFlatText& growing = instance.state->growingFlatText;
+    uint32_t length = rope->length();
+    uint32_t lengthOfText = text.length();
+    const CharacterType* characters = charactersOf<CharacterType>(text);
+    if (growing.buffer && growing.buffer->tryGetValueImpl()->is8Bit() == is8Bit) {
+        StringImpl& room = *growing.buffer->tryGetValueImpl();
+        EndOfText end = endOfTextIn(room);
+        const CharacterType* start = charactersOf<CharacterType>(room);
+        if (characters > start && characters + lengthOfText == start + end && length - lengthOfText <= room.length() - end) {
+            writePieces<CharacterType>(room, end, pieces);
+            rope->resolveBySharing(StringImpl::createSubstringSharingImpl(room, static_cast<unsigned>(characters - start), length).get());
+            return true;
+        }
+    }
+    uint32_t header = lengthOfBufferHeader(is8Bit);
+    uint64_t capacity = header + 2 * static_cast<uint64_t>(length);
+    constexpr uint32_t minConsecutiveResolves = 3;
+    growing.consecutiveResolves = growing.lastResolved == &text ? growing.consecutiveResolves + 1 : 0;
+    if (growing.consecutiveResolves < minConsecutiveResolves || capacity > JSString::MaxLength)
+        return false;
+    JSString* buffer = tryCreateTextBuffer(*instance.vm, is8Bit, static_cast<uint32_t>(capacity));
+    if (!buffer)
+        return false;
+    StringImpl& room = *buffer->tryGetValueImpl();
+    copyCharacters(charactersOf<CharacterType>(room) + header, text);
+    writePieces<CharacterType>(room, header + lengthOfText, pieces);
+    growing.buffer = buffer;
+    rope->resolveBySharing(StringImpl::createSubstringSharingImpl(room, header, length).get());
+    return true;
+}
+
+bool tryResolveInGrowingBuffer(Instance& instance, JSRopeString* rope)
+{
+    constexpr uint32_t minLengthPerAddition = 8;
+    constexpr unsigned maxRopesAddedAtOnce = 4;
+    bool is8Bit = rope->is8Bit();
+    std::array<JSString*, 2 * maxRopesAddedAtOnce> added;
+    size_t firstAdded = added.size();
+    StringImpl* text = nullptr;
+    for (const JSString* current = rope; !text; current = firstPartOf(current)) {
+        if (current->isSubstring() || firstAdded < 2)
+            return false;
+        for (JSString* part : { thirdPartOf(current), secondPartOf(current) }) {
+            if (!part)
+                continue;
+            if (is8Bit && !part->is8Bit())
+                return false;
+            added[--firstAdded] = part;
+        }
+        text = firstPartOf(current)->tryGetValueImpl();
+    }
+    uint32_t length = rope->length();
+    uint32_t lengthOfText = text->length();
+    if (text->is8Bit() != is8Bit || lengthOfText < minLengthOfGrowingText || (length - lengthOfText) > lengthOfText / minLengthPerAddition)
+        return false;
+    std::span<JSString* const> pieces = std::span { added }.subspan(firstAdded);
+    return is8Bit ? tryResolveInGrowingBuffer<Latin1Character>(instance, rope, *text, pieces) : tryResolveInGrowingBuffer<char16_t>(instance, rope, *text, pieces);
+}
+
+bool tryResolveInOwnBuffer(Instance& instance, JSRopeString* rope)
+{
+    ASSERT(rope->length() >= minLengthSharedWithBuffer);
+    JSString* bottom = rope;
+    while (bottom->isNonSubstringRope())
+        bottom = firstPartOf(bottom);
+    JSString* buffer = bottom != rope && bottom->isRope() ? bufferThatEndsWith(instance, bottom) : nullptr;
+    if (!buffer)
+        return false;
+    StringImpl& characters = *buffer->tryGetValueImpl();
+    uint32_t end = endOfTextIn(characters);
+    uint32_t lengthAdded = rope->length() - bottom->length();
+    if (lengthAdded > characters.length() - end || rope->is8Bit() != characters.is8Bit())
+        return false;
+    uint32_t offset = end - bottom->length();
+    if (characters.is8Bit()) [[likely]]
+        writeWhatWasAddedTo(bottom, rope, charactersOf<Latin1Character>(characters) + end + lengthAdded);
+    else
+        writeWhatWasAddedTo(bottom, rope, charactersOf<char16_t>(characters) + end + lengthAdded);
+    endOfTextIn(characters) = end + lengthAdded;
+    instance.state->growingFlatText.buffer = buffer;
+    rope->resolveBySharing(StringImpl::createSubstringSharingImpl(characters, offset, rope->length()).get());
+    return true;
 }
 
 bool canGrowInPlace(Instance& instance, JSString* text)

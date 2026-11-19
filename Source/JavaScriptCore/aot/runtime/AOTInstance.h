@@ -49,6 +49,9 @@ namespace AOT {
 
 class Image;
 struct CaseConversions;
+struct DoubleStringCache;
+struct QuotedStringCache;
+struct SortedStorage;
 struct ImageFunction;
 struct ImageRegExp;
 struct ImageStringRecord;
@@ -122,6 +125,7 @@ struct InstanceHeader {
     uint32_t barrierThreshold;
     uint8_t mutatorShouldBeFenced;
     uint8_t awaitMustSuspend;
+    uint8_t regExpsAreRecompiled;
     uint64_t slimClosureHeaders[numberOfSlimClosureKinds];
     void* closureCells;
     void* singleCharacterStrings;
@@ -129,6 +133,9 @@ struct InstanceHeader {
     int64_t notCellMask;
     JSGlobalObject* globalObject;
     uintptr_t cellCageBase;
+    uint64_t barrierHeaderThreshold;
+    static constexpr unsigned numberOfTypeStrings = 8;
+    JSCell* typeStrings[numberOfTypeStrings];
 };
 
 struct ImageWords {
@@ -152,10 +159,18 @@ struct ImageWords {
     const uint16_t* fieldRecordIndices;
     const uint64_t* classAccessors;
     const uint64_t* data;
-    const FunctionKindData* closureFunctionKinds;
+    const uint16_t* closureFactNumbers;
     const ImageRegExp* regExps;
     const uint8_t* regExpCode;
-    const uint32_t* functionStarts;
+    const uint16_t* functionSteps;
+    const uint32_t* functionStartGroups;
+    const ClosureFacts* closureFacts;
+    uint64_t endOfIdentifiers;
+    uint64_t numberOfPlacedConstants;
+    const uint32_t* hashesOfPlacedConstants;
+    const ReturnedCaptureData* returnedCaptures;
+    uint64_t capacityOfReturnedCaptures;
+    uint8_t* statics;
 };
 
 struct LazyStringWords {
@@ -163,9 +178,10 @@ struct LazyStringWords {
     uint64_t capacity;
 };
 
-enum class InlineAllocation : unsigned { Promise, Map, BoundFunction, BigInt, RegExpObject, NullPrototypeObject, RegExpMatchesArray, Set, GetterSetter, Arguments, MappedArguments, DefaultFinalObject };
-static constexpr unsigned numberOfInlineAllocations = 12;
-static_assert(static_cast<unsigned>(InlineAllocation::DefaultFinalObject) + 1 == numberOfInlineAllocations);
+enum class InlineAllocation : unsigned { Promise, Map, BoundFunction, BigInt, RegExpObject, NullPrototypeObject, RegExpMatchesArray, Set, GetterSetter, Arguments, MappedArguments, DefaultFinalObject, SmallNullPrototypeObject, MapIterator, SetIterator, ArrayIterator, Proxy, WeakMap, WeakSet };
+static constexpr unsigned numberOfInlineAllocations = 19;
+static_assert(static_cast<unsigned>(InlineAllocation::WeakSet) + 1 == numberOfInlineAllocations);
+static constexpr unsigned smallObjectInlineCapacity = 2;
 
 struct InlineAllocationData {
     void* allocator;
@@ -178,6 +194,7 @@ struct TypedArrayAllocation {
     uint64_t elementSize;
     uint64_t unused;
 };
+void prepareTypedArrayAllocation(Instance*, TypedArrayType);
 
 struct AllocationWords {
     static constexpr unsigned numberOfTypedArrayAllocations = 16;
@@ -230,6 +247,7 @@ struct RealmWords {
     const ClassInfo* const* instanceClassInfos;
     uint32_t boundFunctionStructureID;
     uint32_t hostFunctionStructureID;
+    uint32_t atomListStructureID;
     EncodedJSValue linkTimeConstants[JSC::numberOfLinkTimeConstants];
     const void* smallIntStrings;
     const void* intStrings;
@@ -238,9 +256,14 @@ struct RealmWords {
     const void* keysOfPairs;
     uint64_t keyOfPairMask;
     CaseConversions* caseConversions;
+    QuotedStringCache* quotedStringCache;
+    SortedStorage* sortedStorage;
     MicrotaskQueue* microtaskQueue;
     JSCell* functionOfEngineOverCompiledFunction;
     JSCell* compiledFunctionUnderFunctionOfEngine;
+    DoubleStringCache* doubleStrings;
+    static constexpr unsigned numberOfImmediates = JSValue::ValueUndefined + 1;
+    JSString* stringsOfImmediates[numberOfImmediates];
 };
 
 struct HeapWords {
@@ -253,15 +276,26 @@ struct IterationWords {
     JSCell* emptyEnumerator;
     JSCell* functionThatAppendsIterable;
     JSCell* functionThatTakesFromIterable;
+    JSCell* structureOfMatchIteratorPrototype;
+    JSCell* structureOfPrototypeAbove;
+    JSCell* nextOfMatchIterator;
+    JSCell* iteratorOfPrototypeAbove;
+    int32_t placeOfNext;
+    int32_t placeOfIterator;
 };
 
 struct CollationWords {
     const uint8_t* ducetLevel1Weights;
 };
 
+struct DefaultCollatorWords {
+    const uint8_t* knownLevel1Weights;
+};
+
 struct NumberWords {
     const double* powersOfTen;
     uint64_t hashSecrets[2];
+    uint64_t keyMultiplierOfTables;
 };
 
 #define FOR_EACH_AOT_INSTANCE_PART_BY_KIND(v, writtenOnce) \
@@ -292,6 +326,7 @@ struct NumberWords {
     v(shortArrays, ShortArrayWords) \
     writtenOnce(emptyTable, EmptyTableWords) \
     writtenOnce(collation, CollationWords) \
+    v(defaultCollator, DefaultCollatorWords) \
     v(effectsNet, EffectsNetWords)
 #define FOR_EACH_AOT_INSTANCE_PART(v) FOR_EACH_AOT_INSTANCE_PART_BY_KIND(v, v)
 
@@ -392,6 +427,7 @@ struct Instance : InstanceHeader {
     SlotHandlers& slotHandlers() { return propertyCaches.handlers; }
 #endif
     static constexpr ptrdiff_t offsetOfSlotHandlers(SlotHandlerTable);
+    static constexpr ptrdiff_t offsetOfAnswerHandlers(AnswerHandlerTable);
 
     std::span<BoxedCallEntry, StubWords::numberOfBoxedCallEntries> boxedCalls() { return std::span<BoxedCallEntry, StubWords::numberOfBoxedCallEntries> { reinterpret_cast<BoxedCallEntry*>(reinterpret_cast<uint8_t*>(this) + offsetOfBoxedCalls()), StubWords::numberOfBoxedCallEntries }; }
     static constexpr ptrdiff_t offsetOfBoxedCalls();
@@ -404,7 +440,7 @@ struct Instance : InstanceHeader {
     void visitRoots(Visitor& visitor)
     {
         JSCell* const cells[] = { realm.objectPrototype, realm.functionPrototypeCall, realm.boundFunctionExecutable, realm.emptyExtraPropertiesStructure, realm.extraPropertiesWithElementsStructure, realm.emptyArgumentList, realm.functionOfEngineOverCompiledFunction, realm.compiledFunctionUnderFunctionOfEngine };
-        for (JSCell* function : { iteration.functionThatAppendsIterable, iteration.functionThatTakesFromIterable }) {
+        for (JSCell* function : { iteration.functionThatAppendsIterable, iteration.functionThatTakesFromIterable, iteration.structureOfMatchIteratorPrototype, iteration.structureOfPrototypeAbove, iteration.nextOfMatchIterator, iteration.iteratorOfPrototypeAbove }) {
             if (function)
                 visitor.appendUnbarriered(function);
         }
@@ -436,6 +472,11 @@ constexpr ptrdiff_t Instance::offsetOfSlotHandlers(SlotHandlerTable table)
     constexpr ptrdiff_t offsetOfHandlers = AOT_INSTANCE_OFFSET(propertyCaches.handlers);
 #endif
     return offsetOfHandlers + static_cast<ptrdiff_t>(static_cast<unsigned>(table) * numberOfSlotKindsWithHandlers * sizeof(void*));
+}
+
+constexpr ptrdiff_t Instance::offsetOfAnswerHandlers(AnswerHandlerTable table)
+{
+    return offsetOfSlotHandlers(static_cast<SlotHandlerTable>(numberOfSlotHandlerTables + static_cast<unsigned>(table)));
 }
 
 constexpr ptrdiff_t Instance::offsetOfBoxedCalls()

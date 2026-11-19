@@ -52,7 +52,7 @@ void nameWhatConstantTablesName(const TableInputs& inputs, const GatheredMention
 template<typename Item>
 static void setConstantTableOfWords(TableEncoder& encoder, ProgramTableIndex table, std::span<const Item> items, const Invocable<uint32_t(const Item&)> auto& wordOf)
 {
-    encoder.part.setTableWrittenInPlace<uint32_t>(table, items.size(), [&](std::span<uint32_t> words) {
+    encoder.part.setTableInPlace<uint32_t>(table, items.size(), [&](std::span<uint32_t> words) {
         forEachRangeOfIndicesInParallel(encoder.build.parallelLoops(), items.size(), [&](size_t first, size_t end) {
             for (size_t place = first; place < end; ++place)
                 words[place] = wordOf(items[place]);
@@ -105,9 +105,11 @@ static Vector<uint32_t> listConstantAndUnlockedBuiltinMembers(const TableEncoder
         unlockedMembers.set(member.index());
 
     Vector<uint32_t> words;
-    words.reserveInitialCapacity(constantMembers.size() + unlockedMembers.bitCount() + 2 * program.openedNames.size());
+    words.reserveInitialCapacity(constantMembers.size() + encoder.numbers.membersAskedByByteAlone().size() + unlockedMembers.bitCount() + 2 * program.openedNames.size());
     for (BuiltinID member : constantMembers)
         words.append(member.index());
+    for (BuiltinID member : encoder.numbers.membersAskedByByteAlone())
+        words.append(member.index() | ProgramTables::memberAskedByByteAlone);
     for (size_t member : unlockedMembers)
         words.append(static_cast<uint32_t>(member) | ProgramTables::unlockedBuiltinMember);
     for (const Typed::OpenedName& opened : program.openedNames)
@@ -128,16 +130,33 @@ static Vector<uint32_t> listNamesTakenForAbsent(const TableEncoder& encoder)
     return numbers;
 }
 
+static Vector<uint64_t> listLockedAbsentNames(const TableEncoder& encoder)
+{
+    const Typed::Program& program = encoder.program;
+    Vector<uint64_t> names;
+    for (auto [holder, key] : program.lockedAbsentNames())
+        names.append(ProgramTables::encodeAbsentName(holder.index(), ProgramTables::numberOfNameTakenForAbsent(program.string(program.at(key).text))));
+    AOT::sortInLine(names);
+    names.shrink(std::unique(names.begin(), names.end()) - names.begin());
+    return names;
+}
+
 void encodeConstantTables(TableEncoder& encoder)
 {
     const ImageNumbers& numbers = encoder.numbers;
     StepTimes times(encoder.build, "image: constant tables"_s);
-    setConstantTableOfWords(encoder, ProgramTableIndex::builtinCells, numbers.builtinCells(), [](BuiltinCellKey key) {
-        return key.encoded();
+    std::span<const BuiltinCellKey> builtinCells = numbers.builtinCells();
+    bool swapsFirstTwo = builtinCells.size() > 1 && AOT::hasFlag(encoder.build.options().injectedFaults, Wire::FaultInjection::SwapBuiltinCellNumbers);
+    encoder.part.setTableInPlace<uint32_t>(ProgramTableIndex::builtinCells, builtinCells.size(), [&](std::span<uint32_t> words) {
+        for (size_t place = 0; place < words.size(); ++place)
+            words[place] = builtinCells[swapsFirstTwo && place < 2 ? 1 - place : place].encoded();
+        if (std::ranges::adjacent_find(words, std::ranges::greater_equal { }) != words.end())
+            encoder.fail("TableNotSorted"_s, { }, "builtinCells"_s);
     });
     encoder.part.setTable(ProgramTableIndex::eagerBuiltinCells, numbers.eagerBuiltinCells());
     encoder.part.setTable(ProgramTableIndex::constantAndUnlockedBuiltinMembers, listConstantAndUnlockedBuiltinMembers(encoder));
     encoder.part.setTable(ProgramTableIndex::namesTakenForAbsent, listNamesTakenForAbsent(encoder));
+    encoder.part.setTable(ProgramTableIndex::lockedAbsentNames, listLockedAbsentNames(encoder));
     setConstantTableOfWords(encoder, ProgramTableIndex::bigIntConstants, numbers.bigIntConstants(), [&](StringID digits) {
         return encoder.stringNumber(digits);
     });

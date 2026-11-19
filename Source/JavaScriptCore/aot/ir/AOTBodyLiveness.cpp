@@ -77,7 +77,7 @@ private:
 
     void readWhatValueHolds(ValueID value, uint32_t position)
     {
-        ValueID definition = m_index.valueBehindCasts(value);
+        ValueID definition = m_index.stripCasts(value);
         if (m_index.isParameter(definition))
             return;
         BodyValue made = m_index.value(definition);
@@ -91,17 +91,8 @@ private:
 
     void readArguments(BodyTarget target, uint32_t position)
     {
-        if (!m_index.holdsParametersReadByReleaseHintsAlone()) [[likely]] {
-            for (ValueID argument : target.arguments()) {
-                if (argument)
-                    read(argument, position);
-            }
-            return;
-        }
-        uint32_t parameter = m_index.block(target.block()).firstParameter().index();
         for (ValueID argument : target.arguments()) {
-            ValueID taker(parameter++);
-            if (argument && !m_index.isReadByReleaseHintsAlone(taker))
+            if (argument)
                 read(argument, position);
         }
     }
@@ -346,8 +337,6 @@ uint32_t BodyLivenessSolver::collectLiveAtHead(const BodyBlock& block)
         read(operand, end);
     });
     for (BodyValue value : block.values()) {
-        if (value.opcode() == Opcode::ReleaseHint) [[unlikely]]
-            continue;
         value.forEachOperand([&](ValueID operand, uint32_t) {
             read(operand, value.id().index());
         });
@@ -428,19 +417,97 @@ void BodyLivenessSolver::raiseLastUsesOfWhatIsLiveAtHeads()
 
 } // anonymous namespace
 
+void BodyLiveness::countHeadsWhereLive(std::span<const BlockID> blocks, std::span<uint32_t> numbersByValue) const
+{
+    struct Place {
+        uint32_t set;
+        uint32_t base;
+    };
+    Vector<uint32_t> numbersOfBranches;
+    Vector<uint32_t> numbersOfWords;
+    numbersOfBranches.fill(0, m_data->branches.size());
+    numbersOfWords.fill(0, m_data->words.size());
+    Vector<Place> places;
+    Vector<Place> placesBelow;
+    auto add = [&](uint32_t level, uint32_t set, uint32_t base, uint32_t number, Vector<Place>& list) {
+        if (!set)
+            return;
+        uint32_t& numberOfSet = level ? numbersOfBranches[set] : numbersOfWords[set];
+        if (!numberOfSet)
+            list.append({ set, base });
+        numberOfSet += number;
+    };
+    for (BlockID block : blocks)
+        add(m_data->levels, m_data->liveAtHeads[block.index()], 0, 1, places);
+    for (uint32_t level = m_data->levels; level; --level) {
+        placesBelow.shrink(0);
+        for (Place place : places) {
+            for (uint32_t branch = 0; branch < BodyLivenessData::numberOfBranches; ++branch)
+                add(level - 1, m_data->branches[place.set][branch], place.base + (branch << BodyLivenessData::shiftOf(level - 1)), numbersOfBranches[place.set], placesBelow);
+        }
+        std::swap(places, placesBelow);
+    }
+    for (Place place : places) {
+        for (uint64_t word = m_data->words[place.set]; word; word &= word - 1)
+            numbersByValue[place.base + std::countr_zero(word)] += numbersOfWords[place.set];
+    }
+}
+
 void BodyLiveness::compute(const BodyIndex& index)
 {
     m_index = &index;
-    m_data = index.m_liveness.load(std::memory_order_acquire);
+    m_data = index.m_liveness.load();
     if (m_data)
         return;
 
     BodyLivenessSolver(index, false, { }, m_ownData, m_scratch).run();
     auto* made = new BodyLivenessData { Vector<uint32_t>(m_ownData.lastUses.span()), Vector<uint32_t>(m_ownData.liveAtHeads.span()), Vector<BodyLivenessData::Branches>(m_ownData.branches.span()), Vector<uint64_t>(m_ownData.words.span()), m_ownData.levels };
-    if (index.m_liveness.compare_exchange_strong(m_data, made, std::memory_order_acq_rel, std::memory_order_acquire))
+    if (index.m_liveness.compare_exchange_strong(m_data, made))
         m_data = made;
     else
         delete made;
+}
+
+GeneratorFrameLayout::GeneratorFrameLayout(const BodyIndex& index)
+{
+    BodyLiveness liveness;
+    liveness.compute(index);
+    BitVector isListed(index.numberOfValues());
+    for (uint32_t number = 0; number < index.numberOfBlocks(); ++number) {
+        BodyBlock block = index.block(BlockID(number));
+        if (!index.isReachable(block.id()))
+            continue;
+        for (BodyValue operation : block.values()) {
+            if (operation.opcode() != Opcode::Yield)
+                continue;
+            Suspension suspension { operation.id(), block.id(), { } };
+            BitVector isReadInBlock(index.numberOfValues());
+            auto noteRead = [&](ValueID value, auto...) {
+                if (value)
+                    isReadInBlock.set(value.index());
+            };
+            for (BodyValue later : block.values()) {
+                if (later.id().index() > operation.id().index())
+                    later.forEachOperand(noteRead);
+            }
+            block.terminator().forEachOperand(noteRead);
+            auto isReadBehind = [&](ValueID value) {
+                return isReadInBlock.get(value.index()) || (block.hasHandler() && (liveness.isLiveAtHead(value, block.handler().block()) || std::ranges::find(block.handler().arguments(), value) != block.handler().arguments().end()))
+                    || std::ranges::any_of(block.terminator().targets(), [&](BodyTarget target) {
+                        return liveness.isLiveAtHead(value, target.block()) || std::ranges::find(target.arguments(), value) != target.arguments().end();
+                    });
+            };
+            liveness.forEachLiveAcross(operation.id(), block.id(), [&](ValueID value) {
+                if ((!index.isParameter(value) && isRematerialized(index.opcodeOf(value))) || !isReadBehind(value))
+                    return;
+                suspension.values.append(value);
+                isListed.quickSet(value.index());
+            });
+            suspensions.append(WTF::move(suspension));
+        }
+    }
+    for (size_t value : isListed)
+        values.append(ValueID(static_cast<uint32_t>(value)));
 }
 
 } } } // namespace JSC::AOT::Typed

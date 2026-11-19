@@ -45,6 +45,7 @@ public:
     bool hasFastPath() const { return !m_fastFields.isEmpty(); }
     void clearAcceptedStructures() const { m_acceptedStructureIDs.fill(0); }
     const LayoutData& layout() const { return m_layout; }
+    uint32_t orderAndCount() const { return m_orderAndCount; }
 
     enum AcceptedValues : uint8_t {
         AcceptsInt32 = 1 << 0,
@@ -97,6 +98,9 @@ private:
     mutable Vector<uint32_t> m_acceptedStructureIDs;
     Allocator m_allocator;
     size_t m_allocationSize { 0 };
+    uint8_t m_acceptedByConsecutiveWords { 0 };
+    uint8_t m_numberOfBodyWords { 0 };
+    uint32_t m_orderAndCount { 0 };
     bool m_namesEveryFieldOfBirth { false };
 };
 
@@ -108,7 +112,9 @@ public:
     static std::unique_ptr<ObjectBuilderPlan> tryCreatePlan(State&, const LayoutData&, std::span<UniquedStringImpl* const> names);
     static std::unique_ptr<ObjectBuilderPlan> tryCreatePlanOfSmallestRecord(State&, std::span<UniquedStringImpl* const> names, bool (*accepts)(const ObjectBuilderPlan&));
 
-    static JSObject* tryBuild(VM&, const ObjectBuilderPlan&, Structure*, const EncodedJSValue* values);
+    static JSObject* tryBuild(VM&, const ObjectBuilderPlan&, Structure*, const EncodedJSValue* values, const uint8_t* kinds, uint8_t kindsOfAll);
+    static JSObject* copyWords(VM&, const ObjectBuilderPlan&, JSObject* source);
+    template<typename CopyObject> static JSObject* tryCopy(VM&, const ObjectBuilderPlan&, JSObject* source, uint64_t fieldsWithObjects, const CopyObject& copyObject);
 
 private:
     static bool tryStoreSlow(const ObjectBuilderPlan&, uint8_t* cell, size_t index, JSValue);

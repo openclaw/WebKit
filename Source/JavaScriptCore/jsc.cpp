@@ -318,7 +318,7 @@ public:
     }
 
     std::span<const uint8_t> data() const { return m_data.span(); }
-    int32_t LEGACY_NODELETE index() const { return m_index; }
+    NODELETE int32_t index() const { return m_index; }
 
     // Every recipient worker gets this same Message and deserializes from it concurrently, which
     // is safe because the side channels (other than arrayBufferContents) are read-only.
@@ -355,7 +355,7 @@ public:
     
     void enqueue(const AbstractLocker&, RefPtr<Message>);
     RefPtr<Message> dequeue();
-    bool LEGACY_NODELETE isMain() const { return m_isMain; }
+    NODELETE bool isMain() const { return m_isMain; }
 
     static Worker& current();
 
@@ -716,7 +716,7 @@ void StopWatch::stop()
     m_stopTime = MonotonicTime::now();
 }
 
-long LEGACY_NODELETE StopWatch::getElapsedMS()
+NODELETE long StopWatch::getElapsedMS()
 {
     return (m_stopTime - m_startTime).millisecondsAs<long>();
 }
@@ -759,7 +759,7 @@ public:
         return Structure::create(vm, nullptr, prototype, TypeInfo(GlobalObjectType, StructureFlags), info());
     }
 
-    static RuntimeFlags LEGACY_NODELETE javaScriptRuntimeFlags(const JSGlobalObject*) { return RuntimeFlags::createAllEnabled(); }
+    NODELETE static RuntimeFlags javaScriptRuntimeFlags(const JSGlobalObject*) { return RuntimeFlags::createAllEnabled(); }
 
     static void getOwnPropertyNames(JSObject* object, JSGlobalObject* globalObject, PropertyNameArrayBuilder& propertyNames, DontEnumPropertiesMode mode)
     {
@@ -790,7 +790,7 @@ private:
         }
 
         bool contains(UniquedStringImpl* name) const { return m_names.contains(name); }
-        const UncheckedKeyHashSet<UniquedStringImpl*>& LEGACY_NODELETE names() const { return m_names; }
+        NODELETE const UncheckedKeyHashSet<UniquedStringImpl*>& names() const { return m_names; }
 
     private:
         Vector<AtomString> m_strings; // To keep the UniqueStringImpls alive.
@@ -1185,7 +1185,7 @@ private:
 STATIC_ASSERT_ISO_SUBSPACE_SHARABLE(GlobalObject, JSGlobalObject);
 
 static bool supportsRichSourceInfo = true;
-static bool LEGACY_NODELETE shellSupportsRichSourceInfo(const JSGlobalObject*)
+NODELETE static bool shellSupportsRichSourceInfo(const JSGlobalObject*)
 {
     return supportsRichSourceInfo;
 }
@@ -1247,7 +1247,7 @@ JSC_DEFINE_CUSTOM_SETTER(testCustomValueSetter, (JSGlobalObject* lexicalGlobalOb
     return GlobalObject::testCustomSetterImpl(lexicalGlobalObject, thisObject, encodedValue, "_testCustomValueSetter"_s);
 }
 
-static char16_t LEGACY_NODELETE pathSeparator()
+NODELETE static char16_t pathSeparator()
 {
 #if OS(WINDOWS)
     return '\\';
@@ -1300,7 +1300,7 @@ static URL currentWorkingDirectory()
 // FIXME: We may wish to support module specifiers beginning with a (back)slash on Windows. We could either:
 // - align with V8 and SM:  treat '/foo' as './foo'
 // - align with PowerShell: treat '/foo' as 'C:/foo'
-static bool LEGACY_NODELETE isAbsolutePath(StringView path)
+NODELETE static bool isAbsolutePath(StringView path)
 {
 #if OS(WINDOWS)
     // Just look for local drives like C:\.
@@ -1384,8 +1384,8 @@ Identifier GlobalObject::moduleLoaderResolve(JSGlobalObject* globalObject, JSMod
         return key;
 
 #if ENABLE(AOT)
-    // Bun: the loader asks for a module of an image by its key.
-    if (AOT::Shell::isKeyOfCompiledModule(key.string()))
+    // Bun: the loader requests a compiled module by its key.
+    if (AOT::Shell::isCompiledModuleKey(key.string()))
         return key;
 #endif
 
@@ -1432,12 +1432,12 @@ Identifier GlobalObject::moduleLoaderResolve(JSGlobalObject* globalObject, JSMod
         return resolvePath(currentWorkingDirectory());
 
 #if ENABLE(AOT)
-    // Bun: the key of a module of an image is its path.
-    if (AOT::Shell::isKeyOfCompiledModule(referrer.string())) {
+    // Bun: a compiled module's key is its path.
+    if (AOT::Shell::isCompiledModuleKey(referrer.string())) {
         Identifier resolved = resolvePath(URL::fileURLWithFileSystemPath(referrer.string()));
         RETURN_IF_EXCEPTION(scope, { });
         String path = URL({ }, resolved.string()).fileSystemPath();
-        return AOT::Shell::isKeyOfCompiledModule(path) ? Identifier::fromString(vm, path) : resolved;
+        return AOT::Shell::isCompiledModuleKey(path) ? Identifier::fromString(vm, path) : resolved;
     }
 #endif
 
@@ -1448,7 +1448,7 @@ Identifier GlobalObject::moduleLoaderResolve(JSGlobalObject* globalObject, JSMod
 }
 
 template<typename Vector>
-static void LEGACY_NODELETE convertShebangToJSComment(Vector& buffer)
+NODELETE static void convertShebangToJSComment(Vector& buffer)
 {
     if (buffer.size() >= 2) {
         if (buffer[0] == '#' && buffer[1] == '!')
@@ -1674,7 +1674,7 @@ private:
     {
     }
 
-    bool LEGACY_NODELETE cacheEnabled() const { return m_cacheEnabled; }
+    NODELETE bool cacheEnabled() const { return m_cacheEnabled; }
 
     mutable RefPtr<CachedBytecode> m_cachedBytecode;
     const bool m_cacheEnabled;
@@ -1749,7 +1749,7 @@ JSPromise* GlobalObject::moduleLoaderFetch(JSGlobalObject* globalObject, JSModul
     RETURN_IF_EXCEPTION(scope, promise->rejectWithCaughtException(vm, scope));
 
 #if ENABLE(AOT)
-    // Bun: an image has the modules that it names.
+    // Bun: an image contains every module that it names.
     if (!attributes) {
         JSPromise* compiled = AOT::Shell::fetchCompiledModule(globalObject, moduleKey);
         RETURN_IF_EXCEPTION(scope, promise->rejectWithCaughtException(vm, scope));
@@ -2542,7 +2542,7 @@ class JSCMemoryFootprint : public JSDestructibleObject {
     using Base = JSDestructibleObject;
 public:
     template<typename CellType, SubspaceAccess>
-    static CompleteSubspace* LEGACY_NODELETE subspaceFor(VM& vm)
+    NODELETE static CompleteSubspace* subspaceFor(VM& vm)
     {
         return &vm.destructibleObjectSpace();
     }
@@ -2984,7 +2984,7 @@ class JSFileDescriptor : public JSDestructibleObject {
     using Base = JSDestructibleObject;
 public:
     template<typename CellType, SubspaceAccess>
-    static CompleteSubspace* LEGACY_NODELETE subspaceFor(VM& vm)
+    NODELETE static CompleteSubspace* subspaceFor(VM& vm)
     {
         return &vm.destructibleObjectSpace();
     }
@@ -3015,7 +3015,7 @@ public:
         static_cast<JSFileDescriptor*>(thisObject)->~JSFileDescriptor();
     }
 
-    FILE* LEGACY_NODELETE descriptor() const { return m_descriptor; }
+    NODELETE FILE* descriptor() const { return m_descriptor; }
 
     DECLARE_INFO;
 
@@ -4278,7 +4278,7 @@ static void startTimeoutTimer(Seconds duration)
 // jsc shell test timeouts (i.e. crashDueToJSCShellTimeout is present in crash stack
 // traces) from other crashes.
 NO_RETURN_DUE_TO_CRASH NEVER_INLINE void crashDueToJSCShellTimeout();
-void LEGACY_NODELETE crashDueToJSCShellTimeout()
+NODELETE void crashDueToJSCShellTimeout()
 {
     CRASH();
 }
@@ -4828,7 +4828,7 @@ void CommandLine::parseArguments(int argc, char** argv, int start)
 {
     Options::AllowUnfinalizedAccessScope scope;
     Options::initialize([] {
-        Options::useSharedArrayBuffer() = true;
+        Options::alwaysUseSharedArrayBuffer() = true;
 #if PLATFORM(IOS_FAMILY) && !PLATFORM(APPLETV) && !PLATFORM(WATCHOS)
         Options::crashIfCantAllocateJITMemory() = true;
 #endif
@@ -5307,7 +5307,7 @@ int jscmain(int argc, char** argv)
         Options::AllowUnfinalizedAccessScope scope;
         processConfigFile(Options::configFile(), "jsc"_s);
 #if ENABLE(AOT)
-        AOT::Shell::enableGlobalsOfBuiltinTable();
+        AOT::Shell::enableBuiltinTableGlobals();
 #endif
     }
 

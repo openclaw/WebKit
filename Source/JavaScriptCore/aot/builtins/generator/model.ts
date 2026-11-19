@@ -41,6 +41,7 @@ import type {
   SharingMode,
   TargetPlatform,
   TypedResultForm,
+  WordOfCell,
 } from "./vocabulary.ts";
 
 export const builtinFlags = [
@@ -210,6 +211,12 @@ export interface ModelType {
   parts: readonly ModelTypePart[];
 }
 
+export const resultFieldLayouts = (type: ModelType, isOfElements: boolean): ModelLayout[] =>
+  type.parts.flatMap(part => {
+    if (!isOfElements) return part.part === "Layout" ? [part.layout] : [];
+    return part.part === "Instance" ? part.contents.flatMap(contents => resultFieldLayouts(contents.type, false)) : [];
+  });
+
 export type ModelPlace =
   | { place: "None" }
   | { place: "Operand"; operand: ModelOperand }
@@ -218,7 +225,7 @@ export type ModelPlace =
   | { place: "OwnValues"; operand: ModelOperand }
   | { place: "Result" }
   | { place: "ResultSlot"; slot: ModelSlot }
-  | { place: "ResultField"; index: number; holdsOnlyWhatIsStored: boolean }
+  | { place: "ResultField"; index: number; holdsOnlyWhatIsStored: boolean; isOfElements: boolean }
   | { place: "NewValue"; type: ModelType; holdsWhatIsThrown: boolean }
   | { place: "NativeMemory" }
   | { place: "Prototype"; operand: ModelOperand }
@@ -535,6 +542,7 @@ export interface ModelBuiltin {
   constant: ModelConstant | null;
   isAddedAtFirstRead: boolean;
   isAddedAsEnumerable: boolean;
+  canBeListed: boolean;
   isCreatedInSomeRuns: boolean;
   namesFoundAbove: readonly ModelName[];
   hostNumber: number;
@@ -551,8 +559,9 @@ export interface ModelSlot {
   indexInType: number | null;
   holds: ModelType | null;
   internalField: number | null;
-  holdsWhatStepsHandOut: boolean;
+  holdsStepValues: boolean;
   holdsWhatIsThrown: boolean;
+  wordOfCell: WordOfCell;
 }
 
 export interface ModelTypeName {
@@ -578,6 +587,7 @@ export interface ModelClass {
   isNeverPristine: boolean;
   pristineTest: PristineTest;
   hasClosureInstances: boolean;
+  isFollowedBesideUnseenObject: boolean;
   instancesAreEntries: boolean;
   keepsStructuresOfClassesBelow: boolean;
   definesCharactersOnNewInstances: boolean;

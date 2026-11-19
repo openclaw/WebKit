@@ -13,10 +13,22 @@
 namespace JSC { namespace AOT {
 
 constexpr StubKey callWithArray(CallPosition position = CallPosition::Ordinary) { return StubKey(StubFamily::CallWithArray).withForm(static_cast<uint8_t>(position)); }
+constexpr StubKey callWithList() { return StubKey(StubFamily::CallWithList); }
+constexpr StubKey callWithWordsAndArray(unsigned numberOfWords, CallPosition position = CallPosition::Ordinary)
+{
+    RELEASE_ASSERT_UNDER_CONSTEXPR_CONTEXT(numberOfWords && numberOfWords < numberOfArgumentGPRs);
+    return StubKey(StubFamily::CallWithWordsAndArray).withForm(static_cast<uint8_t>(position)).withCount(numberOfWords);
+}
 constexpr StubKey tailCallWithList() { return StubKey(StubFamily::TailCallWithList); }
-constexpr StubKey superConstructWithArray() { return StubKey(StubFamily::SuperConstructWithArray); }
+constexpr StubKey constructWithArray(ConstructSyntax syntax) { return StubKey(StubFamily::ConstructWithArray).withForm(static_cast<uint8_t>(syntax)); }
+constexpr StubKey superConstructWithArray() { return constructWithArray(ConstructSyntax::SuperCall); }
 constexpr StubKey callFromArgumentListFrame() { return StubKey(StubFamily::CallFromArgumentListFrame); }
 constexpr StubKey returnFromArgumentListFrame() { return StubKey(StubFamily::ReturnFromArgumentListFrame); }
+constexpr StubKey callFromArgumentListFrameWithWords(unsigned numberOfWords, unsigned bytesAboveFrameRecord)
+{
+    RELEASE_ASSERT_UNDER_CONSTEXPR_CONTEXT(numberOfWords && numberOfWords <= StubKey::maxCount && (!bytesAboveFrameRecord || bytesAboveFrameRecord == sizeOfSpilledArgumentRegisters));
+    return StubKey(StubFamily::CallFromArgumentListFrameWithWords).withForm(!!bytesAboveFrameRecord).withCount(numberOfWords);
+}
 
 static constexpr unsigned maxListLengthCopiedTwice = 4096;
 

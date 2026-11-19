@@ -62,7 +62,7 @@ static ALWAYS_INLINE IntegerRange integerRangeOf(const Operation* operation, uns
     return computeIntegerRange(operation, levelsOfChildren);
 }
 
-static IntegerRange computeIntegerRange(const Operation* operation, unsigned levelsOfChildren)
+static ALWAYS_INLINE IntegerRange computeIntegerRange(const Operation* operation, unsigned levelsOfChildren)
 {
     Type type = operation->type();
     IntegerRange widest = widestIntegerRangeOf(type);
@@ -128,6 +128,8 @@ static IntegerRange computeIntegerRange(const Operation* operation, unsigned lev
     }
 
     case Add: {
+        if (isDecodedReference(operation))
+            return { int64_t { 1 } << 32, static_cast<int64_t>(bitsOfDecodedReference) };
         IntegerRange left = rangeOfChild(0);
         IntegerRange right = rangeOfChild(1);
         return integerRangeOrWidest(type, CheckedInt64(left.min) + CheckedInt64(right.min), CheckedInt64(left.max) + CheckedInt64(right.max));
@@ -228,6 +230,9 @@ public:
         auto addsConstant = [](const Operation* sum) {
             return sum->opcode() == Add && sum->child(1)->hasInt() && !sum->isNarrowReference();
         };
+        auto isShiftOf = [](const Operation* shift, const Operation* shifted) {
+            return (shift->opcode() == Shl || shift->opcode() == SShr || shift->opcode() == ZShr) && shift->child(0) == shifted;
+        };
 
         if (right->hasInt()) {
             if (left->hasInt())
@@ -256,9 +261,9 @@ public:
             return nullptr;
         if (addsConstant(left) && addsConstant(right))
             return m_builder.binary(Add, m_builder.binary(Add, left->child(0), right->child(0)), constant(bitsOf(left->child(1)) + bitsOf(right->child(1))));
-        if (addsConstant(left))
+        if (addsConstant(left) && !isShiftOf(right, left->child(0)))
             return m_builder.binary(Add, m_builder.binary(Add, left->child(0), right), left->child(1));
-        if (addsConstant(right))
+        if (addsConstant(right) && !isShiftOf(left, right->child(0)))
             return m_builder.binary(Add, m_builder.binary(Add, left, right->child(0)), right->child(1));
         return nullptr;
     }

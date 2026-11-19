@@ -23,8 +23,12 @@ public:
 private:
     ElementAccessEmitter& elements() { return emitter<ElementAccessEmitter>(); }
     Operand lengthResult(const InlineCall&, Integer length);
+    bool isTestedAgain(ValueID array);
     void pushOne(const InlineCall&, CellPointer array);
-    Operand pushOutOfLine(const InlineCall&, CellPointer array, ValueID pushed);
+    void pushSeveral(const InlineCall&, CellPointer array);
+    Operand pushOutOfLine(const InlineCall&, CellPointer array, ValueID pushed, Representation);
+    void prefetchPushedCell(const InlineCall&, ValueID pushed);
+    void reserveForRemainingIterations(const InlineCall&, const CodeGenerator::PushesInLoop&, CellPointer array, Word32 length, LBasicBlock done);
 };
 
 static_assert(sizeof(ArrayStorageBuiltinEmitter) == sizeof(OperationEmitter));

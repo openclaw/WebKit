@@ -22,6 +22,7 @@
 #include "AOTWasmModules.h"
 #include "JSCPtrTag.h"
 #include "JSLock.h"
+#include "Options.h"
 #include "VM.h"
 #include "WasmCodeInImage.h"
 #include "WasmHandlerInfo.h"
@@ -31,6 +32,7 @@
 #include <bmalloc/Gigacage.h>
 #include <wtf/BitVector.h>
 #include <wtf/DataLog.h>
+#include <wtf/SetForScope.h>
 
 namespace JSC { namespace AOT {
 
@@ -62,6 +64,16 @@ constexpr uint8_t catchModule[] = {
     0x03, 0x03, 0x02, 0x00, 0x01,
     0x0d, 0x03, 0x01, 0x00, 0x00,
     0x0a, 0x14, 0x02, 0x04, 0x00, 0x08, 0x00, 0x0b, 0x0d, 0x00, 0x06, 0x7f, 0x10, 0x00, 0x41, 0x01, 0x07, 0x00, 0x41, 0x02, 0x0b, 0x0b,
+};
+
+constexpr uint8_t indirectCallModule[] = {
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x16, 0x02, 0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x07, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f,
+    0x03, 0x03, 0x02, 0x00, 0x01,
+    0x04, 0x04, 0x01, 0x70, 0x00, 0x01,
+    0x07, 0x1d, 0x03, 0x06, 0x63, 0x61, 0x6c, 0x6c, 0x65, 0x65, 0x00, 0x00, 0x08, 0x69, 0x6e, 0x64, 0x69, 0x72, 0x65, 0x63, 0x74, 0x00, 0x01, 0x05, 0x74, 0x61, 0x62, 0x6c, 0x65, 0x01, 0x00,
+    0x09, 0x07, 0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x00,
+    0x0a, 0x1a, 0x02, 0x04, 0x00, 0x20, 0x00, 0x0b, 0x13, 0x00, 0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x20, 0x03, 0x20, 0x04, 0x20, 0x05, 0x20, 0x06, 0x11, 0x00, 0x00, 0x0b,
 };
 
 constexpr uint8_t moduleWithoutFunctions[] = {
@@ -204,7 +216,7 @@ static void testSectionWithDifferentModules()
     Vector<uint64_t> statistics = context.statistics().values();
     AOT_TEST_CHECK(statistics[static_cast<unsigned>(StatisticID::WasmCodeBytesEmitted)] == section.code.size());
     AOT_TEST_CHECK(statistics[static_cast<unsigned>(StatisticID::WasmFunctionsCompiled)] == 4);
-    AOT_TEST_CHECK(statistics[static_cast<unsigned>(StatisticID::WasmCodeBytesOfSecondCopies)] < section.code.size());
+    AOT_TEST_CHECK(statistics[static_cast<unsigned>(StatisticID::WasmSecondCopyBytesEmitted)] < section.code.size());
     AOT_TEST_CHECK(holdsOneRecordOf(modulesOf(section), std::span<const uint8_t>(callModule)));
     AOT_TEST_CHECK(holdsOneRecordOf(modulesOf(section), std::span<const uint8_t>(catchModule)));
     for (const Wasm::ModuleInImage& module : modulesOf(section)) {
@@ -238,13 +250,20 @@ static void testEveryFunctionHasCode()
     AOT_TEST_CHECK(!module.usesVectors);
 }
 
+static void testIndirectCallWithSixArgumentsHasCode()
+{
+    Wasm::ModuleForImage module = compileModuleWithCode(indirectCallModule);
+    AOT_TEST_CHECK(module.functions[trapping].size() == 2);
+    checkFunctionsLieInCode(module, module.functions[trapping]);
+}
+
 static void testModuleWithoutMemoryHasOneFlavor()
 {
     Wasm::ModuleForImage module = compileModuleWithCode(callModule);
     AOT_TEST_CHECK(module.functions[checking].isEmpty());
 }
 
-static void testFlavorsShareWhatDoesNotTellThemApart()
+static void testMemoryModuleHasCopyPerFlavor()
 {
     Wasm::ModuleForImage module = compileModuleWithCode(memoryModule);
     AOT_TEST_CHECK(module.functions[trapping].size() == 3 && module.functions[checking].size() == 3);
@@ -253,9 +272,8 @@ static void testFlavorsShareWhatDoesNotTellThemApart()
 
     AOT_TEST_CHECK(module.functions[trapping][0].entry != module.functions[checking][0].entry);
     AOT_TEST_CHECK(module.functions[trapping][0].size < module.functions[checking][0].size);
-    AOT_TEST_CHECK(module.functions[trapping][1].entry == module.functions[checking][1].entry);
+    AOT_TEST_CHECK(module.functions[trapping][1].entry != module.functions[checking][1].entry);
     AOT_TEST_CHECK(module.functions[trapping][2].entry != module.functions[checking][2].entry);
-    AOT_TEST_CHECK(module.functions[trapping][2].size == module.functions[checking][2].size);
 }
 
 static void testHandlersLieInTheirFunction()
@@ -273,9 +291,32 @@ static void testHandlersLieInTheirFunction()
     AOT_TEST_CHECK(handler.code > catcher.entry && handler.code < catcher.entry + catcher.size);
 }
 
+static Vector<uint8_t> moduleOfSwitches(uint8_t numberOfFunctions)
+{
+    static constexpr uint8_t body[] = {
+        0x34, 0x00,
+        0x02, 0x40, 0x02, 0x40, 0x02, 0x40, 0x02, 0x40, 0x02, 0x40, 0x02, 0x40,
+        0x20, 0x00, 0x0e, 0x0a, 0x00, 0x00, 0x01, 0x01, 0x02, 0x02, 0x03, 0x03, 0x04, 0x04, 0x05,
+        0x0b, 0x41, 0x00, 0x0f, 0x0b, 0x41, 0x01, 0x0f, 0x0b, 0x41, 0x02, 0x0f, 0x0b, 0x41, 0x03, 0x0f, 0x0b, 0x41, 0x04, 0x0f,
+        0x0b, 0x41, 0x05, 0x0b,
+    };
+    static_assert(body[0] == sizeof(body) - 1);
+    size_t sizeOfCodeSection = 1 + numberOfFunctions * sizeof(body);
+    RELEASE_ASSERT(numberOfFunctions < 0x7f && sizeOfCodeSection >= 0x80 && sizeOfCodeSection < 0x4000);
+    Vector<uint8_t> module { 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f };
+    module.appendList({ static_cast<uint8_t>(0x03), static_cast<uint8_t>(numberOfFunctions + 1), numberOfFunctions });
+    for (uint8_t function = 0; function < numberOfFunctions; ++function)
+        module.append(static_cast<uint8_t>(0x00));
+    module.appendList({ static_cast<uint8_t>(0x0a), static_cast<uint8_t>((sizeOfCodeSection & 0x7f) | 0x80), static_cast<uint8_t>(sizeOfCodeSection >> 7), numberOfFunctions });
+    for (uint8_t function = 0; function < numberOfFunctions; ++function)
+        module.append(std::span<const uint8_t>(body));
+    return module;
+}
+
 static void testSameBytesEachTime()
 {
-    for (std::span<const uint8_t> source : { std::span<const uint8_t>(callModule), std::span<const uint8_t>(memoryModule), std::span<const uint8_t>(catchModule) }) {
+    Vector<uint8_t> switchModule = moduleOfSwitches(16);
+    for (std::span<const uint8_t> source : { std::span<const uint8_t>(callModule), std::span<const uint8_t>(memoryModule), std::span<const uint8_t>(catchModule), std::span<const uint8_t>(switchModule.span()) }) {
         Wasm::ModuleForImage first = compileModuleWithCode(source);
         Wasm::ModuleForImage second = compileModuleWithCode(source);
         AOT_TEST_CHECK(first.code == second.code);
@@ -285,10 +326,28 @@ static void testSameBytesEachTime()
     }
 }
 
+static void testDumpLeavesCodeAsItIs()
+{
+    Vector<uint8_t> codeWithoutDump = compileModuleWithCode(indirectCallModule).code;
+    SetForScope dumps(Options::dumpOMGDisassembly(), true);
+    AOT_TEST_CHECK(compileModuleWithCode(indirectCallModule).code == codeWithoutDump);
+}
+
+#if ENABLE(RETURN_ADDRESS_SIGNING)
+static void testReturnFollowsAuthentication()
+{
+    constexpr uint32_t authenticationAndReturn[] = { 0xd50323ff, 0xd65f03c0 }; // AUTIBSP, RET
+    Wasm::ModuleForImage module = compileModuleWithCode(indirectCallModule);
+    AOT_TEST_CHECK(std::ranges::any_of(module.functions[trapping], [&](const Wasm::FunctionInImage& function) {
+        return !std::ranges::search(module.code.span().subspan(function.entry, function.size), asBytes(std::span(authenticationAndReturn))).empty();
+    }));
+}
+#endif
+
 static RelocatableCode codeThatCalls(std::optional<uint32_t> symbol)
 {
     BuildContext context(makeDefaultCompileOptions());
-    CCallHelpers jit;
+    ImageAssembler jit;
     RelocationRecorder recorder(jit, context.assemblerPolicy());
     if (symbol)
         recorder.call({ SymbolSpace::WebAssembly, *symbol });
@@ -362,10 +421,14 @@ static void testPointerTableSlots()
     slots.append(Wasm::ImagePointerTable::wasmToJSCallee);
     slots.append(Wasm::ImagePointerTable::restoreFrameCallee);
     slots.append(Wasm::ImagePointerTable::restoreFrameReturnAddress);
+    slots.append(Wasm::ImagePointerTable::throwFromFaultHandler);
     slots.append(Wasm::ImagePointerTable::structureIDBase);
 #if GIGACAGE_ENABLED
     slots.append(Wasm::ImagePointerTable::primitiveGigacageDisableRequest);
     slots.append(Wasm::ImagePointerTable::primitiveGigacageBase);
+#endif
+#if ENABLE(RETURN_ADDRESS_SIGNING)
+    slots.append(Wasm::ImagePointerTable::signedRestoreFrameReturnAddress);
 #endif
     for (uint32_t function = 0; function < table.numberOfFunctions; ++function)
         slots.append(table.callee(Wasm::FunctionCodeIndex(function)));
@@ -437,10 +500,15 @@ std::span<const NativeTest> webAssemblyImageTests()
         { "webassembly-image/section-with-different-modules"_s, testSectionWithDifferentModules },
         { "webassembly-image/module-imported-twice-is-compiled-once"_s, testModuleImportedTwiceIsCompiledOnce },
         { "webassembly-image/every-function-has-code"_s, testEveryFunctionHasCode },
+        { "webassembly-image/indirect-call-with-six-arguments-has-code"_s, testIndirectCallWithSixArgumentsHasCode },
         { "webassembly-image/module-without-memory-has-one-flavor"_s, testModuleWithoutMemoryHasOneFlavor },
-        { "webassembly-image/flavors-share-what-does-not-tell-them-apart"_s, testFlavorsShareWhatDoesNotTellThemApart },
+        { "webassembly-image/memory-module-has-copy-per-flavor"_s, testMemoryModuleHasCopyPerFlavor },
         { "webassembly-image/handlers-lie-in-their-function"_s, testHandlersLieInTheirFunction },
         { "webassembly-image/same-bytes-each-time"_s, testSameBytesEachTime },
+        { "webassembly-image/dump-leaves-code-as-it-is"_s, testDumpLeavesCodeAsItIs },
+#if ENABLE(RETURN_ADDRESS_SIGNING)
+        { "webassembly-image/return-follows-authentication"_s, testReturnFollowsAuthentication },
+#endif
         { "webassembly-image/call-goes-to-copy-of-its-flavor"_s, testCallGoesToCopyOfItsFlavor },
         { "webassembly-image/call-of-unknown-symbol-is-refused"_s, testCallOfUnknownSymbolIsRefused },
         { "webassembly-image/pointer-table-slots"_s, testPointerTableSlots },

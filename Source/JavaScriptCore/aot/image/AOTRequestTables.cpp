@@ -17,6 +17,8 @@
 #include "AOTOperationData.h"
 #include "AOTPlan.h"
 #include "AOTRemovableFeature.h"
+#include "AOTFieldTable.h"
+#include "AOTPrefetchStep.h"
 #include "AOTSort.h"
 #include "AOTVector.h"
 #include <optional>
@@ -31,7 +33,7 @@ namespace JSC { namespace AOT {
 template<typename... Records>
 static constexpr bool fillWholeWordsOfRequestTable = ((!(sizeof(Records) % sizeof(uint32_t)) && alignof(Records) == alignof(uint32_t)) && ...);
 
-static_assert(fillWholeWordsOfRequestTable<NewClassRequest, TemplateObjectRequest, TemplateObjectRequest::Part, DirectEvalRequest, EvalBindingData, DataRequest, CollectionDataRequest>);
+static_assert(fillWholeWordsOfRequestTable<NewClassRequest, TemplateObjectRequest, TemplateObjectRequest::Part, DirectEvalRequest, EvalBindingData, DataRequest, CollectionDataRequest, ImportChecksRequest, ImportChecksRequest::Check, PrefetchRequest, PrefetchRequest::Step>);
 
 static constexpr bool limitOfRequestTableIs(LimitID limit, uint64_t width)
 {
@@ -87,6 +89,22 @@ static std::optional<size_t> sizeOfRecordInRequestTable(const Typed::Program& pr
         if (words.size_bytes() < sizeof(FormatPatternHeader) || reinterpretCastSpanStartTo<const FormatPatternHeader>(asBytes(words)).constructorArgumentsOffset >= words.size_bytes())
             return std::nullopt;
         return words.size_bytes();
+    case RequestKind::ImportChecks:
+        if (words.empty() || words.size() % 2)
+            return std::nullopt;
+        for (size_t index = 0; index < words.size(); index += 2) {
+            if (words[index] >= program.variables.size() || words[index + 1] >= program.moduleFailures.size())
+                return std::nullopt;
+        }
+        return sizeof(ImportChecksRequest) + sizeof(ImportChecksRequest::Check) * (words.size() / 2);
+    case RequestKind::Prefetch:
+        if (words.empty() || words.size() % 2)
+            return std::nullopt;
+        for (size_t index = 0; index < words.size(); index += 2) {
+            if (PrefetchStep::decode(words[index + 1]).kind == PrefetchStep::Kind::Field && words[index] >= program.types.numberOfPropertyKeys())
+                return std::nullopt;
+        }
+        return sizeof(PrefetchRequest) + sizeof(PrefetchRequest::Step) * (words.size() / 2);
     }
     return std::nullopt;
 }
@@ -160,6 +178,13 @@ void nameWhatRequestTablesName(const TableInputs& inputs, const GatheredMentions
         case RequestKind::CollectionData:
             break;
         case RequestKind::FormatPattern:
+        case RequestKind::ImportChecks:
+            break;
+        case RequestKind::Prefetch:
+            for (size_t index = 0; index < words.size(); index += 2) {
+                if (PrefetchStep::decode(words[index + 1]).kind == PrefetchStep::Kind::Field)
+                    names.keys.set(words[index]);
+            }
             break;
         }
     }
@@ -279,8 +304,9 @@ static void encodeEvalBindingOfRequest(const TableEncoder& encoder, const Typed:
     data.kind = static_cast<uint32_t>(binding.kind);
     data.depth = checkedEvalBindingAmount(encoder, LimitID::MaxEvalBindingDepth, binding.depth, binding.layout);
     data.operand = EvalBindingData::noOperand;
-    data.function = operandOfDirectEvalRequest(binding.function);
-    data.setter = operandOfDirectEvalRequest(binding.setter);
+    bool namesBindings = binding.kind == EvalBindingKind::PrivateMethod || binding.kind == EvalBindingKind::PrivateAccessor;
+    data.function = namesBindings ? binding.function.value_or(EvalBindingData::noOperand) : operandOfDirectEvalRequest(binding.function);
+    data.setter = namesBindings ? binding.setter.value_or(EvalBindingData::noOperand) : operandOfDirectEvalRequest(binding.setter);
     data.privateKey = 0;
     data.slot = SlotData::create(0, SlotRepresentation::JSValue);
     if (!evalBindingHasCompleteLocation(encoder.program, binding)) {
@@ -349,6 +375,14 @@ static uint32_t sharedStorageOfDataRequest(const TableEncoder& encoder, DataID d
         return DataRequest::noSharedStorage;
     case Typed::DataEncoding::ReadOnlyTree:
         return DataRequest::noSharedStorage;
+    case Typed::DataEncoding::TreeWithOwnStorage:
+        return DataRequest::rootHasOwnStorage;
+    case Typed::DataEncoding::SharedObject:
+        if (!encoder.program.at(data).root.tryAs<Typed::DataNode::Object>() || !hasWordForDataOfRequest(statics.dataStorageOffsets, data)) {
+            failForDataOfRequest(encoder, "constant data that is to be one object is none, or has no word for it"_s, data);
+            return DataRequest::noSharedStorage;
+        }
+        return statics.dataStorageOffsets[data.index()];
     case Typed::DataEncoding::CopyOnWriteArray: {
         const auto* array = encoder.program.at(data).root.tryAs<Typed::DataNode::Array>();
         if (!array) {
@@ -384,6 +418,32 @@ static void encodeFormatPatternRequest(std::span<const uint32_t> words, std::spa
         : callRemovable<RemovableFeature::IntlDateTimeFormat, RemovedFeatureStub::Abort, digestOfThisICU>();
     header.digestOfICU[0] = digest ? static_cast<uint32_t>(*digest) : 0;
     header.digestOfICU[1] = digest ? static_cast<uint32_t>(*digest >> 32) : 0;
+}
+
+static void encodeImportChecksRequest(const TableEncoder& encoder, std::span<const uint32_t> variablesAndFailures, std::span<uint8_t>& bytes)
+{
+    consumeAndReinterpretCastTo<ImportChecksRequest>(bytes).count = static_cast<uint32_t>(variablesAndFailures.size() / 2);
+    for (size_t index = 0; index < variablesAndFailures.size(); index += 2) {
+        const PlacedVariable& variable = encoder.numbers.statics().variables[variablesAndFailures[index]];
+        if (!variable.hasWordInStatics())
+            encoder.fail("an import that is checked has no word"_s, VariableID(variablesAndFailures[index]));
+        auto& check = consumeAndReinterpretCastTo<ImportChecksRequest::Check>(bytes);
+        check.offsetInStatics = variable.offset;
+        check.failure = variablesAndFailures[index + 1];
+    }
+}
+
+static void encodePrefetchRequest(const TableEncoder& encoder, std::span<const uint32_t> keysAndSteps, std::span<uint8_t>& bytes)
+{
+    consumeAndReinterpretCastTo<PrefetchRequest>(bytes).count = static_cast<uint32_t>(keysAndSteps.size() / 2);
+    for (size_t index = 0; index < keysAndSteps.size(); index += 2) {
+        auto& step = consumeAndReinterpretCastTo<PrefetchRequest::Step>(bytes);
+        step.step = PrefetchStep::decode(keysAndSteps[index + 1]);
+        if (step.step.kind != PrefetchStep::Kind::Field)
+            continue;
+        uint32_t name = encoder.identifierNumber(PropertyKeyID(keysAndSteps[index]), "in the steps of a prefetch"_s);
+        step.name = FieldTableEntry::hasColumn(name) ? name : FieldTableEntry::noName;
+    }
 }
 
 static void encodeTableOfRequests(TableEncoder& encoder)
@@ -439,6 +499,12 @@ static void encodeTableOfRequests(TableEncoder& encoder)
         }
         case RequestKind::FormatPattern:
             encodeFormatPatternRequest(words, bytes);
+            break;
+        case RequestKind::ImportChecks:
+            encodeImportChecksRequest(encoder, words, bytes);
+            break;
+        case RequestKind::Prefetch:
+            encodePrefetchRequest(encoder, words, bytes);
             break;
         }
         RELEASE_ASSERT(bytes.empty());

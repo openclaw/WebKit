@@ -35,6 +35,7 @@ using ArgumentMoves = ListOfUnit<uint64_t, 8>;
 
 inline constexpr uint64_t hasImmediate = 1ull << 32;
 inline constexpr uint64_t immediateIsMention = 1ull << 33;
+inline constexpr uint64_t mentionNamesSiblingOfCallee = 1ull << 34;
 inline constexpr size_t numberOfHeaderWords = 2;
 
 inline void appendArgumentMove(ArgumentMoves& moves, GPRReg destination, ArgumentSource source, uint64_t payload)
@@ -162,10 +163,18 @@ struct RememberedStubKey {
     GPRReg immediateGPR;
 };
 
-struct RememberedStubKeys {
-    static constexpr unsigned logOfNumberOfKeys = 8;
+struct CachedStubIndex {
+    uint64_t bits;
+    uint32_t unit;
+    uint32_t index;
+};
 
-    std::array<RememberedStubKey, 1u << logOfNumberOfKeys> keys;
+struct RememberedStubKeys {
+    static constexpr unsigned logOfNumberOfKeys = 10;
+
+    std::array<RememberedStubKey, 1u << logOfNumberOfKeys> keys { };
+    std::array<CachedStubIndex, 1u << logOfNumberOfKeys> indexCache { };
+    uint32_t unit { 0 };
 };
 
 class StubCalls {
@@ -178,21 +187,28 @@ public:
     uint32_t call(CCallHelpers&, StubKey, std::optional<uint32_t> immediate, OptionalIndex site, const ArgumentMoves&, OptionalIndex firstReadSite = { });
     uint32_t callWithImmediateOfSite(CCallHelpers&, StubKey, std::optional<uint32_t> immediate, OptionalIndex site, const ArgumentMoves&);
     uint32_t call(CCallHelpers&, StubKey, NumberedImmediate, OptionalIndex site, const ArgumentMoves&, OptionalIndex firstReadSite = { });
-    void enterNextStubInFront(Reg filledByCallee)
+    void enterNextStubInFront(Reg filledByCallee, Reg movedIntoResultByCallee)
     {
         RELEASE_ASSERT(filledByCallee);
         m_registerFilledInFrontOfNextCall = filledByCallee;
+        m_registerMovedIntoResultInFrontOfNextCall = movedIntoResultByCallee;
     }
+    void callWithoutReturnSite(CCallHelpers&, StubKey);
     void callForTwoReads(CCallHelpers&, StubKey, OptionalIndex firstRead, OptionalIndex secondRead);
     void tailCall(CCallHelpers&, StubKey);
+    void emitPrecedingTailCall(CCallHelpers&, StubKey);
     void tailCall(CCallHelpers&, StubKey, uint32_t immediate);
     void tailCall(CCallHelpers&, StubKey, NumberedImmediate);
     void callFunction(CCallHelpers&, Typed::CodeUnit callee, uint16_t entry, OptionalIndex site);
-    void callRegister(CCallHelpers&, GPRReg address, OptionalIndex site);
+    uint32_t callRegister(CCallHelpers&, GPRReg address, OptionalIndex site);
     void jumpToFunction(CCallHelpers&, Typed::CodeUnit callee, uint16_t entry);
     void moveAddressOfFunction(Typed::CodeUnit callee, uint16_t entry, GPRReg destination);
+#if ENABLE(RETURN_ADDRESS_SIGNING)
+    void moveSignedAddressOfFunction(Typed::CodeUnit callee, uint16_t entry);
+#endif
     void moveAddressOfStub(CCallHelpers&, StubKey, std::optional<uint32_t> immediate, GPRReg destination);
 
+    void routeTransfersThroughEnd();
     void describeCalls(std::span<const Relocation>, CodeBody&, LinkBuffer* = nullptr);
 
 private:
@@ -204,16 +220,19 @@ private:
     ResolvedKey resolveKey(StubKey, std::optional<uint32_t> immediate) const;
     StubKey prepare(CCallHelpers&, StubKey, std::optional<uint32_t> immediate);
     CodeSymbol prepare(StubKey, NumberedImmediate);
-    uint32_t indexOf(StubKey, std::optional<uint32_t> mentionOfImmediate = std::nullopt);
+    uint32_t indexOf(StubKey);
+    uint32_t indexOf(StubKey, std::optional<uint32_t> mentionOfImmediate);
     uint32_t indexOf(Typed::CodeUnit);
     uint32_t emitCall(CCallHelpers&, StubKey called, CodeSymbol, const RecordedCall&);
     Reg m_registerFilledInFrontOfNextCall;
+    Reg m_registerMovedIntoResultInFrontOfNextCall;
     void emitJump(CodeSymbol);
 
     const StubCatalog& m_catalog;
     RelocationRecorder& m_relocations;
     std::unique_ptr<RememberedStubKeys> m_ownRememberedKeys;
     RememberedStubKeys& m_rememberedKeys;
+    const uint32_t m_unit;
     Vector<RecordedCall, 32> m_calls;
     Vector<StubKey> m_stubKeys;
     Vector<std::optional<uint32_t>, 16> m_mentionsOfImmediates;

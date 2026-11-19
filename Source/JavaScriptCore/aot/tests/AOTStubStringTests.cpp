@@ -7,6 +7,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTImageText.h"
 #include "AOTSchemaRuntimeOperations.h"
 #include "AOTStubRunner.h"
 #include "AOTStubTestSupport.h"
@@ -202,7 +203,11 @@ private:
         for (bool isStrict : { false, true }) {
             Answer answer = runWithoutOperation(JSC::AOT::equal(isStrict), m_first.address(), m_second.address());
             AOT_TEST_CHECK(answer.result == equality.result && answer.numberOfLeafCalls == equality.numberOfLeafCalls);
+            Answer answerOfNarrowEntry = runWithoutOperation(nullableStringsAreEqual(isStrict), m_first.address(), m_second.address());
+            AOT_TEST_CHECK(answerOfNarrowEntry.result == equality.result && answerOfNarrowEntry.numberOfLeafCalls == equality.numberOfLeafCalls);
         }
+        Answer equalityOfNullable = runWithoutOperation(stringEqualsNullable(), m_first.address(), m_second.address());
+        AOT_TEST_CHECK(equalityOfNullable.result == equality.result && equalityOfNullable.numberOfLeafCalls == equality.numberOfLeafCalls);
         Answer answerInFlags = runWithoutOperation(strictEqualInFlags(), m_first.address(), m_second.address());
         AOT_TEST_CHECK(answerInFlags.result == equality.result && answerInFlags.numberOfLeafCalls == equality.numberOfLeafCalls);
 
@@ -320,6 +325,44 @@ static void testSameCellsAndImpls()
     AOT_TEST_CHECK(equality.result == 1 && !equality.numberOfLeafCalls);
 }
 
+static void testNullableStrings()
+{
+    ComparisonStubs stubs;
+    Ref<StringImpl> impl = StringImpl::create("the same characters"_s);
+    Ref<StringImpl> otherImpl = StringImpl::create("some other characters"_s);
+    FakeString cell = FakeString::flat(impl.get());
+    FakeString cellOfSameImpl = FakeString::flat(impl.get());
+    FakeString otherCell = FakeString::flat(otherImpl.get());
+    FakeString rope = FakeString::rope(impl->length());
+    const uint64_t undefined = JSValue::encode(jsUndefined());
+    const uint64_t null = JSValue::encode(jsNull());
+
+    struct Case {
+        uint64_t first;
+        uint64_t second;
+        uint64_t isStrictlyEqual;
+        uint64_t isLooselyEqual;
+    };
+    const Case cases[] = {
+        { undefined, undefined, 1, 1 }, { null, null, 1, 1 }, { undefined, null, 0, 1 }, { null, undefined, 0, 1 },
+        { cell.address(), undefined, 0, 0 }, { undefined, cell.address(), 0, 0 }, { cell.address(), null, 0, 0 }, { null, cell.address(), 0, 0 },
+        { rope.address(), undefined, 0, 0 }, { null, rope.address(), 0, 0 },
+        { cell.address(), cell.address(), 1, 1 }, { rope.address(), rope.address(), 1, 1 }, { cell.address(), cellOfSameImpl.address(), 1, 1 }, { cell.address(), otherCell.address(), 0, 0 },
+    };
+    for (const Case& compared : cases) {
+        for (bool isStrict : { false, true }) {
+            ComparisonStubs::Answer narrow = stubs.runWithoutOperation(nullableStringsAreEqual(isStrict), compared.first, compared.second);
+            AOT_TEST_CHECK(narrow.result == (isStrict ? compared.isStrictlyEqual : compared.isLooselyEqual) && !narrow.numberOfLeafCalls);
+        }
+        if (compared.first != undefined && compared.first != null) {
+            ComparisonStubs::Answer ofNullable = stubs.runWithoutOperation(stringEqualsNullable(), compared.first, compared.second);
+            AOT_TEST_CHECK(ofNullable.result == compared.isStrictlyEqual && !ofNullable.numberOfLeafCalls);
+        }
+        ComparisonStubs::Answer general = stubs.runWithoutOperation(JSC::AOT::equal(true), compared.first, compared.second);
+        AOT_TEST_CHECK(general.result == compared.isStrictlyEqual);
+    }
+}
+
 static void testAtoms()
 {
     ComparisonStubs stubs;
@@ -331,6 +374,16 @@ static void testAtoms()
     Ref<StringImpl> copy = StringImpl::create(text.span8());
     Ref<StringImpl> otherCopy = StringImpl::create(otherText.span8());
     AOT_TEST_CHECK(atom.impl()->isAtom() && otherAtom.impl()->isAtom() && !copy->isAtom() && !otherCopy->isAtom());
+    auto headerOf = [](const AtomString& ofText, StringImpl::StringKind kind) {
+        std::span<const Latin1Character> characters = ofText.impl()->span8();
+        return ImageStringHeader::create(std::bit_cast<uint64_t>(characters.data()), characters.size(), ofText.impl()->existingHash(), false, kind);
+    };
+    ImageStringHeader header = headerOf(atom, StringImpl::StringNormal);
+    ImageStringHeader otherHeader = headerOf(otherAtom, StringImpl::StringNormal);
+    ImageStringHeader otherHeaderOfName = headerOf(otherAtom, StringImpl::StringAtom);
+    auto implOf = [](ImageStringHeader& ofImage) {
+        return reinterpret_cast<StringImpl*>(&ofImage);
+    };
 
     struct Case {
         StringImpl* first;
@@ -345,6 +398,16 @@ static void testAtoms()
         { copy.ptr(), atom.impl(), true, true },
         { atom.impl(), otherCopy.ptr(), false, true },
         { copy.ptr(), otherCopy.ptr(), false, true },
+        { implOf(header), implOf(header), true, false },
+        { implOf(header), implOf(otherHeader), false, false },
+        { implOf(otherHeaderOfName), implOf(header), false, false },
+        { implOf(header), atom.impl(), true, true },
+        { atom.impl(), implOf(header), true, true },
+        { implOf(header), copy.ptr(), true, true },
+        { implOf(header), otherAtom.impl(), false, true },
+        { otherCopy.ptr(), implOf(header), false, true },
+        { implOf(otherHeaderOfName), atom.impl(), false, false },
+        { implOf(otherHeaderOfName), otherCopy.ptr(), true, true },
     };
     for (const Case& testCase : cases) {
         FakeString first = FakeString::flat(*testCase.first);
@@ -380,7 +443,8 @@ static void testRopes()
     const std::pair<const FakeString*, const FakeString*> pairsOfSameLength[] = { { &flat, &rope }, { &rope, &flat }, { &rope, &otherRope } };
     for (auto [first, second] : pairsOfSameLength) {
         checkLeftToOperation(stubs.runner(), stringsAreEqual(), Entry::operationAOTStringsAreEqual, *first, *second, { 0, 1 });
-        checkLeftToOperation(stubs.runner(), distinctStringsAreEqual(), Entry::operationAOTStringsAreEqual, *first, *second, { 0, 1 });
+        for (StubKey equality : { distinctStringsAreEqual(), stringEqualsNullable(), nullableStringsAreEqual(true), nullableStringsAreEqual(false) })
+            checkLeftToOperation(stubs.runner(), equality, Entry::operationAOTStringsAreEqual, *first, *second, { 0, 1 });
         for (StubKey strictEqual : { JSC::AOT::equal(true), strictEqualInFlags() })
             checkLeftToOperation(stubs.runner(), strictEqual, Entry::operationAOTStringsAreEqual, *first, *second, { 0, 1 }, true);
     }
@@ -519,6 +583,7 @@ std::span<const NativeTest> stubStringTests()
         { "stubs/string-comparison-common-prefixes"_s, ImageTests::whenExecutable<testCommonPrefixes> },
         { "stubs/string-comparison-order-of-wide-units"_s, ImageTests::whenExecutable<testOrderOfWideUnits> },
         { "stubs/string-comparison-same-cells-and-impls"_s, ImageTests::whenExecutable<testSameCellsAndImpls> },
+        { "stubs/string-comparison-nullable-strings"_s, ImageTests::whenExecutable<testNullableStrings> },
         { "stubs/string-comparison-atoms"_s, ImageTests::whenExecutable<testAtoms> },
         { "stubs/string-comparison-ropes"_s, ImageTests::whenExecutable<testRopes> },
     };

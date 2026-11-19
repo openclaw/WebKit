@@ -52,7 +52,7 @@ size_t imageAlignment()
     return imagePageSize;
 }
 
-size_t peakResidentMegabytesOfProcess()
+size_t processPeakResidentMegabytes()
 {
     return PhaseTimes::takePeakResidentMegabytes().ofProcess;
 }
@@ -219,6 +219,7 @@ private:
         Wire::ResultSection::ObfuscatedSites,
         Wire::ResultSection::BytesByForm,
         Wire::ResultSection::BytesByModule,
+        Wire::ResultSection::InlinedStrings,
     };
 
     bool hasErrors() const { return m_context.diagnostics().hasErrors(); }
@@ -243,6 +244,8 @@ private:
     CompiledProgram m_compiled;
     std::optional<BuiltImage> m_built;
     bool m_planIsChecked { false };
+    std::unique_ptr<Typed::TypeOrigins> m_typeOrigins;
+    std::unique_ptr<EarlyWasmModules> m_earlyWasmModules;
 };
 
 void BuildDriver::read(std::span<const uint8_t> bytes)
@@ -323,15 +326,32 @@ void BuildDriver::runStagesAfterRead()
     if (makesImage && m_context.threadCount() > 1)
         m_prepared.checkOfPlan = CheckOfPlan::LeftToCaller;
 
-    if (!prepare())
-        return;
-    if (!makesImage && !m_prepared.compileInputs->walk.options.takesNotes && !walkJudgesSomethingOfProgramForDriver(*m_prepared.program, m_context.parallelLoops()))
-        return;
-    if (!compile())
-        return;
-    if (m_prepared.compileInputs->walk.options.takesNotes)
-        explain();
-    if (makesImage && !hasErrors())
+    if (hasFlag(m_context.options().reports, Wire::ReportSet::Flow) && hasFlag(m_context.options().reports, Wire::ReportSet::AccessCounts)) {
+        m_context.askOfFlowAtRest([this](const Typed::LinkFlow& flow) {
+            m_typeOrigins = Typed::traceTypeOrigins(flow);
+        });
+    }
+
+    auto analyzeAndCompile = [&] {
+        if (!prepare())
+            return false;
+        if (!makesImage && !m_prepared.compileInputs->walk.options.takesNotes && !walkJudgesSomethingOfProgramForDriver(*m_prepared.program, m_context.parallelLoops()))
+            return false;
+        if (!compile())
+            return false;
+        if (m_prepared.compileInputs->walk.options.takesNotes)
+            explain();
+        return true;
+    };
+    bool isCompiled = false;
+    if (makesImage && !m_prepared.program->webAssemblyModules.isEmpty()) {
+        runLanes(m_context.parallelLoops(), {
+            [&] { isCompiled = analyzeAndCompile(); },
+            [&] { m_earlyWasmModules = compileWebAssemblyFiles(*m_prepared.program, m_context); },
+        });
+    } else
+        isCompiled = analyzeAndCompile();
+    if (isCompiled && makesImage && !hasErrors())
         buildImageFromCode();
 }
 
@@ -406,7 +426,7 @@ void BuildDriver::explain()
 {
     {
         PhaseTimes times(m_context, Stage::GenerateCode);
-        writeExplainSections(*m_prepared.program, m_compiled.notes.span(), m_context, m_output);
+        writeExplainSections(*m_prepared.program, m_compiled.notes.span(), m_typeOrigins.get(), m_context, m_output);
         times.didFinish("write the records of --explain"_s);
         destroyNotes();
         times.didFinish("destroy notes"_s);
@@ -439,6 +459,7 @@ void BuildDriver::buildImageFromCode()
         .functions = WTF::move(m_compiled.functions),
         .bodyFacts = WTF::move(bodyFacts),
         .entriesUsedByFunctions = m_compiled.entriesUsed,
+        .earlyWasmModules = WTF::move(m_earlyWasmModules),
     }, m_context));
     if (hasErrors())
         return;
@@ -523,26 +544,26 @@ void logTimeToEnterEngine(const BuildContext& context, MonotonicTime entered)
     dataLog(toUTF8CString("AOT phase times: ReadAndVerify | enter the engine | wall ", (MonotonicTime::now() - entered).milliseconds(), " ms\n"));
 }
 
-template<typename Switches>
-Typed::Mechanisms withoutMechanismsThatOptionsWithhold(Typed::Mechanisms mechanisms, Switches testing)
-{
-    if (AOT::hasFlag(testing, Wire::TestingSwitch::KeepsCellsOutOfFrames))
-        mechanisms.remove(Typed::Mechanism::CellsInFrames);
-    return mechanisms;
-}
-
 std::unique_ptr<CompileOutput> compileBytesWithBuildDriver(std::span<const uint8_t> program, const Wire::CompileOptions& options, const HostThreadPool* hostPool, const ProgramOwner& owner, Typed::Mechanisms mechanisms)
 {
     MonotonicTime entered = MonotonicTime::now();
     auto output = makeUnique<CompileOutput>();
     runOnBuildThread([&] {
-        BuildContext context(options, hostPool);
-        context.setFunctionTexts(owner.functionTexts);
-        BuildDriver driver(context, *output, owner);
-        driver.setMechanisms(withoutMechanismsThatOptionsWithhold(mechanisms, options.testing));
-        logTimeToEnterEngine(context, entered);
-        driver.read(program);
-        driver.run();
+        RefPtr<BackgroundJobs> jobs;
+        {
+            BuildContext context(options, hostPool);
+            jobs = &context.backgroundJobs();
+            context.setFunctionSources(owner.functionSources);
+            context.setStringEncoders(owner.stringEncoders);
+            context.setOrderFile(owner.orderFile);
+            BuildDriver driver(context, *output, owner);
+            driver.setMechanisms(withoutMechanismsThatOptionsWithhold(mechanisms, options.testing));
+            logTimeToEnterEngine(context, entered);
+            driver.read(program);
+            driver.run();
+        }
+        if constexpr (ASAN_ENABLED)
+            jobs->waitUntilAllHaveRun();
     });
     return output;
 }

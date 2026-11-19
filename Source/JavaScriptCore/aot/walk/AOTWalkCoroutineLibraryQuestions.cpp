@@ -27,7 +27,7 @@ bool answerLibraryQuestionOfCoroutines(Walker&, const BodyValue&);
 
 static constexpr OpcodeSet makersOfArraysOfLibraryQuestions {
     Opcode::NewArray, Opcode::Data, Opcode::NewTemplateObject, Opcode::CreateRest,
-    Opcode::NewContiguousArray, Opcode::NewArrayLike,
+    Opcode::NewContiguousArray, Opcode::SortKeyArray, Opcode::NewArrayLike,
 };
 
 static void bindAnswerOfLibraryQuestion(Walker& walker, const BodyValue& question, bool answer)
@@ -65,10 +65,11 @@ static bool answerWhetherIteratorIsReadUnseenOfLibraryQuestions(Walker& walker, 
 
     if (!holdsOnlyArraysOfLibraryQuestions(types, type) || !walker.program().builtins().mayHavePristineInstances(BuiltinClasses::Array))
         return false;
-    if (!isListAsMade(walker, value))
+    if (!isKnownPristine(walker, value))
         return false;
-    if (!listsAreIteratedUnseen(walker))
+    if (!isArrayIteratorProtocolIntact(walker))
         return false;
+    walker.verifyPristineObject(value);
     bindAnswerOfLibraryQuestion(walker, question, true);
     return true;
 }
@@ -110,7 +111,7 @@ static std::optional<bool> hasCellKindOfArraysOfLibraryQuestions(Walker& walker,
 
     const Code& code = walker.code();
     if (value.isValue() && holdsOnlyArraysOfLibraryQuestions(types, id)) {
-        ValueID made = rootOfCellInSweptCode(code, value.id());
+        ValueID made = underlyingCellOf(code, value.id());
         if (!code.isConstant(made) && makersOfArraysOfLibraryQuestions.contains(code.at(made).opcode))
             return true;
     }

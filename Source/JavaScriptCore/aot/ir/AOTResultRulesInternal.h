@@ -18,10 +18,12 @@ TypeID naturalTypeOfOperands(const TypingContext&, Opcode, NaturalTable, Operand
 TypeID numberResultOf(TypeArena&, Opcode, OperandTypes);
 TypeID integerQuotientType(TypeArena&, Range dividends, Range divisors, QuotientRounding);
 TypeID wholeRemainderType(TypeArena&, Range dividends, Range divisors);
+TypeID wholeProductType(TypeArena&, Range multiplicands, Range multipliers);
+std::optional<Range> rangeOfProduct(Range multiplicands, Range multipliers);
 
 inline constexpr OpcodeSet opcodesRefinedBeyondFixedNatural {
     Opcode::URShift, Opcode::ToNumber, Opcode::StrictEq, Opcode::ToBoolean, Opcode::LogicalNot, Opcode::ToString, Opcode::ToPropertyKey,
-    Opcode::ToObject, Opcode::ToThis, Opcode::TypeTest, Opcode::GetTypedArrayElement, Opcode::GetStringLength, Opcode::DivideIntegers, Opcode::RemainderOfIntegers, Opcode::ToInt32,
+    Opcode::ToObject, Opcode::ToThis, Opcode::TypeTest, Opcode::GetTypedArrayElement, Opcode::GetTypedArrayLength, Opcode::GetMirroredLength, Opcode::GetDataViewElement, Opcode::GetStringLength, Opcode::DivideIntegers, Opcode::RemainderOfIntegers, Opcode::MultiplyIntegers, Opcode::MultiplyAddIntegers, Opcode::RemainderByReciprocal, Opcode::WholeDivisor, Opcode::RemainderByWholeDivisor, Opcode::ToInt32,
     Opcode::ToUint32, Opcode::ToIntegerOrInfinity, Opcode::ToLength, Opcode::IntegerBound, Opcode::GetSuperBase
 };
 inline const OpcodeSet& opcodesWithNaturalTypeRefinedByOperation() { return opcodesRefinedBeyondFixedNatural; }
@@ -37,7 +39,7 @@ TypeID tryTypeOfDeferringSlotContents(const TypingContext&, LayoutSetID receiver
 TypeID tryTypeAcceptedBySlots(const TypingContext&, LayoutSetID receivers, PropertyKeyID);
 TypeID tryTypeOfContentsRead(const TypingContext&, TypeID container, ContentsSlot);
 TypeID tryTypeOfElementRead(const TypingContext&, TypeID container, TypeID key);
-TypeID tryTypeOfArrayElementRead(const TypingContext&, TypeID array, ArrayStorage storage, bool findsElement, bool readsHoleAsNaN);
+TypeID tryTypeOfArrayElementRead(const TypingContext&, TypeID array, ArrayStorage storage, bool admitsInt32Storage, bool findsElement, bool readsHoleAsNaN);
 TypeID tryTypeOfAwaited(const TypingContext&, TypeID awaited);
 
 struct ResultRules {
@@ -65,8 +67,6 @@ struct ResultRules {
     template<typename Operation> TypeID declared(const Operation&, ModuleID);
     template<typename Operation> TypeID declared(const Operation& operation, TypeID type)
     {
-        if (opcodeOf(operation) == Opcode::AssumeType)
-            return operands[0] ? context.types.intersectionOf(operands[0], type) : type;
         return opcodeOf(operation) == Opcode::Unspecified ? context.types.withPrimitives(type, Primitive::Unspecified) : type;
     }
     template<typename Operation> TypeID declared(const Operation&, BuiltinOverloadID, uint32_t resultIndex);

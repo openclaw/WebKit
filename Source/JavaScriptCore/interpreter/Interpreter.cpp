@@ -163,7 +163,9 @@ static ALWAYS_INLINE JSValue evaluateDirectEvalAt(JSGlobalObject* globalObject, 
     }
 
     if (globalObject->trustedTypesEnforcement() != TrustedTypesEnforcement::None && !isTrusted) [[unlikely]] {
-        bool canCompileStrings = globalObject->globalObjectMethodTable()->canCompileStrings(globalObject, CompilationType::DirectEval, programString->value(globalObject).data, *vm.emptyList);
+        auto programSource = programString->value(globalObject);
+        RETURN_IF_EXCEPTION(scope, { });
+        bool canCompileStrings = globalObject->globalObjectMethodTable()->canCompileStrings(globalObject, CompilationType::DirectEval, programSource.data, *vm.emptyList);
         RETURN_IF_EXCEPTION(scope, { });
         if (!canCompileStrings) [[unlikely]] {
             throwException(globalObject, scope, createEvalError(globalObject, "Refused to evaluate a string as JavaScript because this document requires a 'Trusted Type' assignment."_s));
@@ -173,7 +175,9 @@ static ALWAYS_INLINE JSValue evaluateDirectEvalAt(JSGlobalObject* globalObject, 
 
     TopCallFrameSetter topCallFrame(vm, site.callFrame);
     if (!globalObject->evalEnabled() && globalObject->trustedTypesEnforcement() != TrustedTypesEnforcement::EnforcedWithEvalEnabled) [[unlikely]] {
-        globalObject->globalObjectMethodTable()->reportViolationForUnsafeEval(globalObject, programString->value(globalObject).data);
+        auto programSource = programString->value(globalObject);
+        RETURN_IF_EXCEPTION(scope, { });
+        globalObject->globalObjectMethodTable()->reportViolationForUnsafeEval(globalObject, programSource.data);
         throwException(globalObject, scope, createEvalError(globalObject, globalObject->evalDisabledErrorMessage()));
         return { };
     }
@@ -371,9 +375,39 @@ unsigned sizeFrameForVarargs(JSGlobalObject* globalObject, CallFrame* callFrame,
         throwStackOverflowError(globalObject, scope);
         return 0;
     }
-    
+
     return length;
 }
+
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+unsigned sizeFrameForVarargsWithSpread(JSGlobalObject* globalObject, CallFrame* callFrame, VM& vm, JSValue* values, unsigned argc, const BitVector& bitVector, unsigned numUsedStackSlots)
+{
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    CheckedUint32 checkedLength = 0;
+    for (unsigned i = 0; i < argc; ++i) {
+        if (bitVector.get(i)) {
+            JSCellButterfly* array = uncheckedDowncast<JSCellButterfly>(values[-static_cast<int>(i)]);
+            checkedLength += array->publicLength();
+        } else
+            checkedLength += 1U;
+    }
+
+    if (checkedLength.hasOverflowed() || checkedLength > maxArguments) [[unlikely]] {
+        throwStackOverflowError(globalObject, scope);
+        return 0;
+    }
+
+    unsigned length = checkedLength;
+    CallFrame* calleeFrame = calleeFrameForVarargs(callFrame, numUsedStackSlots, length + 1);
+    if (!vm.ensureJSStackCapacityFor(calleeFrame->registers())) [[unlikely]] {
+        throwStackOverflowError(globalObject, scope);
+        return 0;
+    }
+
+    return length;
+}
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
@@ -473,6 +507,83 @@ void setupVarargsFrameAndSetThis(JSGlobalObject* globalObject, CallFrame* callFr
     setupVarargsFrame(globalObject, callFrame, newCallFrame, arguments, firstVarArgOffset, length);
     newCallFrame->setThisValue(thisValue);
 }
+
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+void setupVarargsFrameWithSpread(JSGlobalObject* globalObject, CallFrame* callFrame, CallFrame* newCallFrame, JSValue* values, unsigned argc, const BitVector& bitVector, unsigned length)
+{
+    VirtualRegister calleeFrameOffset(newCallFrame - callFrame);
+    JSValue* dest = std::bit_cast<JSValue*>(&callFrame->r(calleeFrameOffset + CallFrame::argumentOffset(0)));
+
+    for (unsigned i = 0; i < argc; ++i) {
+        JSValue value = values[-static_cast<int>(i)];
+        if (bitVector.get(i)) {
+            JSCellButterfly* array = uncheckedDowncast<JSCellButterfly>(value);
+            unsigned n = array->publicLength();
+            array->copyToArguments(globalObject, dest, 0, n);
+            dest += n;
+        } else
+            *dest++ = value;
+    }
+
+    newCallFrame->setArgumentCountIncludingThis(length + 1);
+}
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+
+void setupVarargsFrameWithSpreadAndSetThis(JSGlobalObject* globalObject, CallFrame* callFrame, CallFrame* newCallFrame, JSValue thisValue, JSValue* values, unsigned argc, const BitVector& bitVector, unsigned length)
+{
+    setupVarargsFrameWithSpread(globalObject, callFrame, newCallFrame, values, argc, bitVector, length);
+    newCallFrame->setThisValue(thisValue);
+}
+
+// A buffer slot is a spread iff it is a JSCellButterfly (user values never are), so no bitVector.
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+unsigned sizeFrameForVarargsWithSpreadBuffer(JSGlobalObject* globalObject, CallFrame* callFrame, VM& vm, JSValue* buffer, unsigned argc, unsigned numUsedStackSlots)
+{
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    ActiveScratchBufferScope activeScratchBufferScope(ScratchBuffer::fromData(buffer), argc);
+
+    CheckedUint32 checkedLength = 0;
+    for (unsigned i = 0; i < argc; ++i) {
+        if (JSCellButterfly* array = dynamicDowncast<JSCellButterfly>(buffer[i]))
+            checkedLength += array->publicLength();
+        else
+            checkedLength += 1U;
+    }
+
+    if (checkedLength.hasOverflowed() || checkedLength > maxArguments) [[unlikely]] {
+        throwStackOverflowError(globalObject, scope);
+        return 0;
+    }
+
+    unsigned length = checkedLength;
+    CallFrame* calleeFrame = calleeFrameForVarargs(callFrame, numUsedStackSlots, length + 1);
+    if (!vm.ensureJSStackCapacityFor(calleeFrame->registers())) [[unlikely]] {
+        throwStackOverflowError(globalObject, scope);
+        return 0;
+    }
+
+    return length;
+}
+
+void setupVarargsFrameWithSpreadBuffer(JSGlobalObject* globalObject, CallFrame* callFrame, CallFrame* newCallFrame, JSValue* buffer, unsigned argc, unsigned length)
+{
+    ActiveScratchBufferScope activeScratchBufferScope(ScratchBuffer::fromData(buffer), argc);
+    VirtualRegister calleeFrameOffset(newCallFrame - callFrame);
+    JSValue* dest = std::bit_cast<JSValue*>(&callFrame->r(calleeFrameOffset + CallFrame::argumentOffset(0)));
+
+    for (unsigned i = 0; i < argc; ++i) {
+        JSValue value = buffer[i];
+        if (JSCellButterfly* array = dynamicDowncast<JSCellButterfly>(value)) {
+            unsigned n = array->publicLength();
+            array->copyToArguments(globalObject, dest, 0, n);
+            dest += n;
+        } else
+            *dest++ = value;
+    }
+
+    newCallFrame->setArgumentCountIncludingThis(length + 1);
+}
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 
 void setupForwardArgumentsFrame(JSGlobalObject*, CallFrame* execCaller, CallFrame* execCallee, uint32_t length)
 {
@@ -662,6 +773,7 @@ void Interpreter::getAsyncStackTrace(JSCell* owner, Vector<StackFrame>& results,
         return context;
     };
 
+    SmallSet<JSCell*> visitedCombinators;
     auto getParentGenerator = [&](JSCell* gen) -> JSCell* {
         JSPromise* awaitedPromise = asyncFunctionPromise(gen);
         JSValue promiseContext = getContextValueFromPromise(awaitedPromise);
@@ -672,6 +784,9 @@ void Interpreter::getAsyncStackTrace(JSCell* owner, Vector<StackFrame>& results,
         // handle simple `await`
         if (auto* generator = asyncFunctionIn(promiseContext))
             return generator;
+
+        if (!promiseContext.isCell() || !visitedCombinators.add(promiseContext.asCell()).isNewEntry)
+            return nullptr;
 
         // handle `Promise.all`, `Promise.allSettled`, and `Promise.any`
         if (auto* globalContext = dynamicDowncast<JSPromiseCombinatorsGlobalContext>(promiseContext)) {
@@ -841,7 +956,7 @@ void Interpreter::getStackTrace(JSCell* owner, Vector<StackFrame>& results, size
 
 #if ENABLE(AOT)
     if (vm.hasCompiledCode()) [[unlikely]] {
-        if (skippedFrames < framesToSkip && vm.aotState().frameOfImportThatAsksLoader == callFrame) [[unlikely]]
+        if (skippedFrames < framesToSkip && vm.aotState().importFrameInLoader == callFrame) [[unlikely]]
             ++skippedFrames;
         if (caller || !AOT::tryGetStackTrace(vm, owner, results, framesToSkip - skippedFrames, maxStackSize, filter))
             appendStackTrace(owner, results, { .callFrame = callFrame, .framesToSkip = framesToSkip - skippedFrames, .caller = caller, .filter = filter }, maxStackSize);
@@ -1031,7 +1146,7 @@ void Interpreter::appendStackTrace(JSCell* owner, Vector<StackFrame>& results, c
                 start.compiledFramesBelow->emplace(visitor.compiledFrames());
             return IterationStatus::Done;
         }
-        if (auto classFrame = AOT::tryGetFrameOfClassCalledWithoutNew(vm, visitor->callFrame())) [[unlikely]] {
+        if (auto classFrame = AOT::tryGetClassCallWithoutNewFrame(vm, visitor->callFrame())) [[unlikely]] {
             appendIfWanted(StackFrame(*classFrame));
             previousEntryFrame = currentEntryFrame;
             previousEntryFrameStackTraceInsertPos = results.size();
@@ -1108,7 +1223,6 @@ void Interpreter::appendStackTrace(JSCell* owner, Vector<StackFrame>& results, c
 
 String Interpreter::stackTraceAsString(VM& vm, const Vector<StackFrame>& stackTrace)
 {
-    // FIXME: JSStringJoiner could be more efficient than StringBuilder here.
     static constexpr unsigned expectedLengthOfFrame = 96;
     StringBuilder builder;
     builder.reserveCapacity(std::min<size_t>(stackTrace.size() * expectedLengthOfFrame, String::MaxLength));
@@ -1117,7 +1231,7 @@ String Interpreter::stackTraceAsString(VM& vm, const Vector<StackFrame>& stackTr
         if (i != stackTrace.size() - 1)
             builder.append('\n');
     }
-    return builder.toString();
+    return WTF::move(builder).toString();
 }
 
 ALWAYS_INLINE static HandlerInfo* findExceptionHandler(StackVisitor& visitor, CodeBlock* codeBlock, RequiredHandler requiredHandler)
@@ -1221,6 +1335,24 @@ bool Interpreter::isExceptionCaughtByUserCatchClause()
     });
     return result;
 }
+
+#if ENABLE(AOT)
+// Checks the first frame that isExceptionCaughtByUserCatchClause() visits, if it is the interpreter's. The record that an operation of compiled
+// code publishes as the top frame is not a CallFrame: its return address is in compiled code, but not after a stub's call of a function.
+bool Interpreter::isCaughtByInterpretedTopFrame()
+{
+    VM& vm = this->vm();
+    CallFrame* top = vm.topCallFrame;
+    auto compiledCode = AOT::compiledCodeOf(vm);
+    const void* returnPC = top->returnPCForInspection();
+    if (std::bit_cast<uintptr_t>(returnPC) - std::bit_cast<uintptr_t>(compiledCode.data()) < compiledCode.size() && !AOT::isCallStubReturnSite(vm, returnPC))
+        return false;
+    if (top->isZombieFrame() || top->isNativeCalleeFrame())
+        return false;
+    CodeBlock* codeBlock = top->codeBlock();
+    return codeBlock && isCatchingHandlerUserCatchClause(codeBlock->unlinkedCodeBlock(), top->bytecodeIndex()).value_or(false);
+}
+#endif
 
 CatchInfo::CatchInfo(const HandlerInfo* handler, CodeBlock* codeBlock)
 {
@@ -1816,7 +1948,7 @@ NEVER_INLINE JSValue Interpreter::executeBoundCall(VM& vm, JSBoundFunction* func
 ALWAYS_INLINE JSValue Interpreter::executeCallImpl(VM& vm, JSObject* function, const CallData& callData, JSValue thisValue, JSCell* context, const ArgList& args)
 {
 #if ENABLE(AOT)
-    // It says that it entered the VM by itself. Nothing waits behind it here, so this frame is gone during the call.
+    // callCompiledCode() sets vm.didEnterVM itself. This frame can be gone during the call.
     if (callData.type == CallData::Type::Compiled)
         return AOT::callCompiledCode(vm, function, callData, thisValue, context, args);
 #endif

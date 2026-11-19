@@ -231,13 +231,21 @@ export default b.declarations(
         implementation: b.inline("CallStringConstructor", { otherwise: b.hostCall }),
       },
     ],
-    construct: {
-      args: { value: b.string.loose.optional },
-      returns: b.instance("String").fresh,
-      capability: "heap",
-      throws: b.propagated,
-      implementation: b.hostCall,
-    },
+    construct: [
+      {
+        args: { value: b.string },
+        returns: b.instance("String").fresh,
+        capability: "heap",
+        implementation: b.hostCall,
+      },
+      {
+        args: { value: b.string.loose.optional },
+        returns: b.instance("String").fresh,
+        capability: "heap",
+        throws: b.propagated,
+        implementation: b.hostCall,
+      },
+    ],
     static: {
       fromCharCode: {
         args: { codeUnits: b.f64.loose.rest },
@@ -245,7 +253,7 @@ export default b.declarations(
         capability: "heap",
         throws: b.propagated,
         deterministic: true,
-        implementation: b.inline("StringFromCharCode", { max: 1, otherwise: b.hostCall }),
+        implementation: b.inline("StringFromCharCode", { max: 4, otherwise: b.hostCall }),
       },
       fromCodePoint: {
         args: { codePoints: b.any.rest },
@@ -296,6 +304,7 @@ export default b.declarations(
       },
       charCodeAt: {
         ...indexedRead("StringCharCodeAt", "pos", b.f64),
+        range: { rule: "CodeUnitOrNaN", operand: "pos" },
         privateAlias: true,
         length: 1,
         boxedCallStub: "StringCharCodeAt",
@@ -380,6 +389,8 @@ export default b.declarations(
           uses: { this: characters, that: characters, locales: localeList, options: collatorOptions },
           reads: ["ExternalState"],
           usesFeature: "IntlCollation",
+          length: 1,
+          boxedCallStub: "StringLocaleCompare",
           nativeSymbols: ["stringProtoFuncLocaleCompare"],
           implementation: b.inline("StringLocaleCompare", { otherwise: b.hostCall }),
         },

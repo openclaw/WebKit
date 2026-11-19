@@ -10,11 +10,12 @@
 
 #include "AOTEffectsDeclared.h"
 #include "AOTOpcodeSets.h"
+#include "AOTWalkStrings.h"
 #include <algorithm>
 
 namespace JSC { namespace AOT { namespace Typed {
 
-static bool storeMayLeaveErrorOwedForPolls(Opcode opcode)
+static ALWAYS_INLINE bool storeMayLeaveErrorOwedForPolls(Opcode opcode)
 {
     if (opcode == Opcode::PropSet)
         return true;
@@ -89,7 +90,7 @@ void Walker::noteRecordBuiltForPolls(ValueID id, const Draft& draft, const Effec
 
     bool pollsOnRareWay = false;
     if (speaksOfLoopsAround) {
-        bool standsOnRareWay = mayBuildPoll && !m_numberOfCopiesBuiltForSize && m_code.at(m_block).frequency == BlockFrequency::Rare && familyOf(draft.opcode) != OperationFamily::Exception;
+        bool standsOnRareWay = mayBuildPoll && !m_coldCopyDepth && m_code.at(m_block).frequency == BlockFrequency::Rare && familyOf(draft.opcode) != OperationFamily::Exception;
         uint32_t numberOfLoops = std::min<uint32_t>(m_openLoops.size(), m_numberOfLoopsThatMayBeLeft);
         bool isSettled = false;
         for (size_t frameIndex = m_frames.size(); frameIndex-- && !isSettled;) {
@@ -103,6 +104,8 @@ void Walker::noteRecordBuiltForPolls(ValueID id, const Draft& draft, const Effec
                 OpenLoop& open = m_openLoops.changeable(place - 1);
                 if (open.likelyTurnMayCollect)
                     isSettled = true;
+                else if (!standsOnRareWay && m_makesLetterOfStep && !isStoreThatMayOwe)
+                    open.lettersMadeInLikelyTurns.append(id);
                 else if (!standsOnRareWay)
                     open.likelyTurnMayCollect = true;
                 else if (open.pollInFront) {
@@ -125,10 +128,10 @@ void Walker::noteRecordBuiltForPolls(ValueID id, const Draft& draft, const Effec
     build(WTF::move(poll));
 }
 
-void Walker::buildPollInFrontOfLoop(BlockID inputHead, const LoopPreview& preview)
+void Walker::buildPollInFrontOfLoop(BlockID inputHead, const LoopPreview& preview, std::span<const Reference> entering)
 {
     m_pollInFrontOfLoopBeingEntered = { };
-    if (!has(Mechanism::Handlers) || preview.effects.maySuspend || m_numberOfCopiesBuiltForSize || isUnreachable() || !isUnderHandler())
+    if (!has(Mechanism::Handlers) || preview.effects.maySuspend || m_coldCopyDepth || isUnreachable() || !isUnderHandler())
         return;
 
     size_t frameIndex = m_frames.size() - 1;
@@ -139,6 +142,9 @@ void Walker::buildPollInFrontOfLoop(BlockID inputHead, const LoopPreview& previe
 
     if (head.hasHandler())
         noteStateAtHeadForHandler();
+    flattenStringsReadByLoop(*this, inputHead, entering, m_origin);
+    if (m_hasFailed || isUnreachable())
+        return;
     Draft poll(Opcode::LoopHint, m_origin);
     poll.setThrowsOwedError(true);
     Reference built = build(WTF::move(poll));
@@ -187,7 +193,9 @@ void Walker::settleFateOfPoll(const OpenLoop& loop)
     if (around)
         around->likelyTurnMayCollect |= loop.likelyTurnMayCollect;
 
-    if (!loop.numberOfEdgesThatCameRound && has(Mechanism::Folding)) {
+    BlockID inputHead = m_frames[loop.frame].index->loop(loop.loop).head;
+    bool isEnteredAgain = findReentry(loop.frame, inputHead) || m_loopsWithSideExits.contains(std::pair { loop.frame, inputHead });
+    if (!loop.numberOfEdgesThatCameRound && !isEnteredAgain && has(Mechanism::Folding)) {
         drop(loop.poll);
         drop(loop.pollInFront);
         if (around)
@@ -196,14 +204,16 @@ void Walker::settleFateOfPoll(const OpenLoop& loop)
     }
 
     bool pollLeavesHandler = loop.poll && m_code.at(m_code.blockOf(loop.poll)).handler && loop.pollInFront && !loop.likelyTurnMayCollect && loop.numberOfEdgesThatCameRound;
-    if (!pollLeavesHandler) {
+    if (!pollLeavesHandler || (!loop.lettersMadeInLikelyTurns.isEmpty() && !loop.pollsInFrontOfLoopsInside.isEmpty())) {
         drop(loop.pollInFront);
         return;
     }
     m_code.addFateOfPoll(loop.poll, FateOfPoll::LeavesHandler);
+    for (ValueID letter : loop.lettersMadeInLikelyTurns)
+        m_code.addFateOfPoll(loop.poll, FateOfPoll::LeavesHandler, letter);
     for (ValueID poll : loop.pollsInFrontOfLoopsInside)
         drop(poll);
-    if (around)
+    if (around && loop.lettersMadeInLikelyTurns.isEmpty())
         around->pollsInFrontOfLoopsInside.append(loop.pollInFront);
 }
 

@@ -32,6 +32,8 @@
 #include "JSCInlines.h"
 #include "JSMapInlines.h"
 #include "JSSetInlines.h"
+#include "JSWeakMap.h"
+#include "JSWeakSet.h"
 #include "MarkedBlockCage.h"
 #include "ObjectConstructor.h"
 #include <wtf/DataLog.h>
@@ -56,7 +58,7 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTAllocateSlowFromTemplate, JSCell*,
         vm.heap.cage().tryTakeBackOutOfMemoryError(vm);
     State& state = *instance->state;
     JSCell* cell = state.objects->structures.allocateAsCompiledCodeDoes(vm, allocation);
-    const AllocationData& row = state.tables.allocations()[allocation];
+    const AllocationData row = state.tables.allocations()[allocation];
     size_t offsetOfBody = row.shape < state.tables.firstEnvironmentShape ? offsetOfFirstField : offsetOfFirstEnvironmentVariable;
     memcpySpan(std::span { reinterpret_cast<uint8_t*>(cell) + offsetOfBody, row.size() - offsetOfBody }, std::span { body, row.size() - offsetOfBody });
     OPERATION_RETURN(scope, newCellForCompiledCode(vm, cell));
@@ -217,6 +219,8 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTMoveClosureToHeap, JSCell*, (Insta
     }
 AOT_DEFINE_NEW_COLLECTION(operationAOTNewMap, Map, mapStructure)
 AOT_DEFINE_NEW_COLLECTION(operationAOTNewSet, Set, setStructure)
+AOT_DEFINE_NEW_COLLECTION(operationAOTNewWeakMap, WeakMap, weakMapStructure)
+AOT_DEFINE_NEW_COLLECTION(operationAOTNewWeakSet, WeakSet, weakSetStructure)
 #undef AOT_DEFINE_NEW_COLLECTION
 
 JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTBarrierSlow, void, (Instance* instance, JSCell* cell))
@@ -232,6 +236,12 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTRememberElement, void, (Instance* 
         instance->vm->heap.writeBarrierSlowPath(owner, value.asCell());
     else
         instance->vm->writeBarrierSlowPath(owner);
+}
+
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTRememberObjects, void, (Instance* instance, JSCell* first, JSCell* second))
+{
+    instance->vm->writeBarrier(first);
+    instance->vm->writeBarrier(second);
 }
 
 JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTStringConstant, JSCell*, (Instance* instance, uint32_t index))
@@ -268,18 +278,18 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTBuiltinCell, JSCell*, (Instance* i
     OPERATION_RETURN(scope, cell);
 }
 
-JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTMethodCalledBoxed, JSCell*, (Instance* instance, uint32_t form))
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTMethodCalledBoxed, JSCell*, (Instance* instance, uint32_t builtin))
 {
     AOT_OPERATION_BEGIN_WITHOUT_COLLECTION(instance, Entry::operationAOTMethodCalledBoxed);
-    const BuiltinTable& table = BuiltinTable::singleton();
-    JSCell* method = nullptr;
-    for (uint32_t index = 0; index < table.builtinCount() && !method; ++index) {
-        BuiltinID builtin(index);
-        if (table.canonicalID(builtin) == builtin && table.boxedCallStubOf(builtin) == static_cast<BuiltinBoxedStub>(form))
-            method = instance->state->builtinCells->findObject(builtin);
-    }
+    JSCell* method = instance->state->builtinCells->findObject(BuiltinID(builtin));
     RELEASE_ASSERT(method);
     OPERATION_RETURN(scope, method);
+}
+
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTFunctionOfBuiltinAsBuilt, JSCell*, (Instance* instance, uint32_t form))
+{
+    AOT_OPERATION_BEGIN_WITHOUT_COLLECTION(instance, Entry::operationAOTFunctionOfBuiltinAsBuilt);
+    OPERATION_RETURN(scope, instance->state->builtinCells->findFunctionAsBuilt(static_cast<BuiltinBoxedStub>(form)));
 }
 
 JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTBigIntConstant, EncodedJSValue, (Instance* instance, uint32_t index))
@@ -318,6 +328,7 @@ JSC_DEFINE_JIT_OPERATION(operationAOTNewTemplateObject, JSCell*, (Instance* inst
     OPERATION_RETURN_IF_EXCEPTION(scope, nullptr);
     cooked->putDirect(vm, vm.propertyNames->raw, raw, PropertyAttribute::ReadOnly | PropertyAttribute::DontEnum | PropertyAttribute::DontDelete);
     objectConstructorFreeze(globalObject, cooked);
+    RELEASE_ASSERT(cooked->getDirect(firstOutOfLineOffset) == raw);
     instance->state->modules->didMakeTemplateObject(ModuleID(module), offsetOfCell);
     OPERATION_RETURN(scope, cooked);
 }

@@ -23,16 +23,16 @@ struct NameCandidate {
     NumberedIdentifier identifier;
     bool hasPromisedColumn { false };
     bool isEngineSymbol { false };
-    bool isOnlyCompared { false };
     uint32_t numberOfFunctions { 0 };
     FunctionByModule firstFunction;
 
-    bool isLookedUpByCode() const { return !isOnlyCompared && (numberOfFunctions || firstFunction.function); }
+    bool isLookedUpByCode() const { return numberOfFunctions || firstFunction.function; }
 };
 
 struct NamesAndStringsToNumber {
     Vector<NameCandidate> names;
     BitVector numberedConstants;
+    Vector<StringID> codedStrings;
     Vector<FunctionByModule> firstFunctionsNamingTexts;
 };
 

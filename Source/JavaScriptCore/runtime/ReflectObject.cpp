@@ -58,6 +58,24 @@ namespace JSC {
 
 STATIC_ASSERT_IS_TRIVIALLY_DESTRUCTIBLE(ReflectObject);
 
+bool reportIfLocked(JSObject* holder, PropertyName propertyName, PropertyDescriptor& descriptor)
+{
+#if ENABLE(AOT)
+    if (!descriptor.isDataDescriptor() || !descriptor.writable())
+        return false;
+    ImmutablePropertyNames* names = holder->structure()->listedImmutablePropertyNames();
+    if (!names || !names->refusesWrite(propertyName.uid()) || !AOT::RuntimeHooks::isReportedAsReadOnly(holder, propertyName.uid()))
+        return false;
+    descriptor.setWritable(false);
+    return true;
+#else
+    UNUSED_PARAM(holder);
+    UNUSED_PARAM(propertyName);
+    UNUSED_PARAM(descriptor);
+    return false;
+#endif
+}
+
 const ClassInfo ReflectObject::s_info = { "Reflect"_s, &Base::s_info, &reflectObjectTable, nullptr, CREATE_METHOD_TABLE(ReflectObject) };
 
 /* Source for ReflectObject.lut.h
@@ -119,7 +137,7 @@ JSC_DEFINE_HOST_FUNCTION(reflectObjectConstruct, (JSGlobalObject* globalObject, 
         return JSValue::encode(throwTypeError(globalObject, scope, "Reflect.construct requires the second argument be an object"_s));
 
 #if ENABLE(AOT)
-    // Bytecode spreads the list of `Reflect.construct(f, list)` itself, and throws before it reads an element of a list that does not fit the stack. Compiled code calls this function.
+    // Bytecode spreads the argument list of `Reflect.construct(f, list)` itself and throws before it reads any element of a list that does not fit on the stack. Compiled code calls this function instead.
     if (vm.hasCompiledCode()) {
         uint64_t length = toLength(globalObject, argumentsObject);
         RETURN_IF_EXCEPTION(scope, (arguments.overflowCheckNotNeeded(), encodedJSValue()));
@@ -292,7 +310,7 @@ JSC_DEFINE_HOST_FUNCTION(reflectObjectDeleteProperty, (JSGlobalObject* globalObj
 }
 
 #if ENABLE(AOT)
-static bool isPrototypeRefusedByLanguage(JSObject* object, JSValue prototype)
+static bool isPrototypeRejectedBySpec(JSObject* object, JSValue prototype)
 {
     if (object->structure()->isImmutablePrototypeExoticObject() || !object->isStructureExtensible())
         return true;
@@ -321,8 +339,8 @@ JSC_DEFINE_HOST_FUNCTION(reflectObjectSetPrototypeOf, (JSGlobalObject* globalObj
 
     bool shouldThrowIfCantSet = false;
 #if ENABLE(AOT)
-    // As Reflect.defineProperty(), Reflect.set() and Reflect.deleteProperty(): in a compiled test run what a locked built-in refuses throws, however the test writes it. What the language refuses by itself answers false.
-    if (object->structure()->hasImmutablePrototype() && !isPrototypeRefusedByLanguage(object, proto)) [[unlikely]] {
+    // Same as Reflect.defineProperty(), Reflect.set() and Reflect.deleteProperty(): in a compiled test run, a change that a locked built-in rejects throws no matter how the test makes it. A change that the specification itself rejects returns false.
+    if (object->structure()->hasImmutablePrototype() && !isPrototypeRejectedBySpec(object, proto)) [[unlikely]] {
         ImmutablePropertyNames* names = object->structure()->listedImmutablePropertyNames();
         shouldThrowIfCantSet = names ? names->throwsFromReflect() : AOT::RuntimeHooks::reflectThrowsOnLockedProperty(object);
     }

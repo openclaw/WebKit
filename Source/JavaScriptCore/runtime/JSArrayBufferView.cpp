@@ -26,6 +26,7 @@
 #include "config.h"
 #include "JSArrayBufferView.h"
 
+#include "AOTRuntimeHooks.h"
 #include "GenericTypedArrayViewInlines.h"
 #include "JSCInlines.h"
 #include "JSGenericTypedArrayViewInlines.h"
@@ -271,15 +272,26 @@ JSArrayBuffer* JSArrayBufferView::possiblySharedJSBuffer(JSGlobalObject* globalO
     return nullptr;
 }
 
+void JSArrayBufferView::didMoveStorage()
+{
+#if ENABLE(AOT)
+    if (VM& vm = this->vm(); vm.hasCompiledCode())
+        AOT::RuntimeHooks::didMoveStorageOf(vm, this);
+#endif
+}
+
 void JSArrayBufferView::detachFromArrayBuffer()
 {
-    Locker locker { cellLock() };
-    RELEASE_ASSERT(hasArrayBuffer());
-    RELEASE_ASSERT(!isShared());
-    m_length = 0;
-    m_byteOffset = 0;
-    m_vector.clear();
-    realm()->notifyArrayBufferDetaching();
+    {
+        Locker locker { cellLock() };
+        RELEASE_ASSERT(hasArrayBuffer());
+        RELEASE_ASSERT(!isShared());
+        m_length = 0;
+        m_byteOffset = 0;
+        m_vector.clear();
+        realm()->notifyArrayBufferDetaching();
+    }
+    didMoveStorage();
 }
 
 ArrayBuffer* JSArrayBufferView::slowDownAndWasteMemory()
@@ -345,6 +357,7 @@ ArrayBuffer* JSArrayBufferView::slowDownAndWasteMemory()
         WTF::storeStoreFence();
         setMode(WastefulTypedArray); // Fast and Oversize views cannot become resizable here.
     }
+    didMoveStorage();
     heap->addReference(this, buffer.get(), bytesAlreadyReported);
 
     return buffer.unsafeGet();

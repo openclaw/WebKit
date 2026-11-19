@@ -65,6 +65,7 @@ public:
     static bool isExtensible(JSObject*, JSGlobalObject*) { return true; }
     static bool setPrototype(JSObject*, JSGlobalObject*, JSValue, bool shouldThrowIfCantSet);
 
+    uint32_t upperHalfOfWord() const { return static_cast<uint32_t>(m_word >> 32); }
     uint32_t closureNumber() const { return ClosureWord::closureNumberOf(m_word); }
     FunctionID function() const { return functionOfClosureWord(m_word); }
     FunctionKindData kind() const { return kindOfClosureNumber(closureNumber()); }
@@ -131,7 +132,6 @@ public:
     static bool getOwnPropertySlot(JSObject*, JSGlobalObject*, PropertyName, PropertySlot&);
     static void getOwnSpecialPropertyNames(JSObject*, JSGlobalObject*, PropertyNameArrayBuilder&, DontEnumPropertiesMode);
     static bool put(JSCell*, JSGlobalObject*, PropertyName, JSValue, PutPropertySlot&);
-    static bool deleteProperty(JSCell*, JSGlobalObject*, PropertyName, DeletePropertySlot&);
     static bool defineOwnProperty(JSObject*, JSGlobalObject*, PropertyName, const PropertyDescriptor&, bool shouldThrow);
     static bool setPrototype(JSObject*, JSGlobalObject*, JSValue, bool shouldThrowIfCantSet);
     static bool hasOrdinaryDefineOwnProperty(VM&, PropertyName);

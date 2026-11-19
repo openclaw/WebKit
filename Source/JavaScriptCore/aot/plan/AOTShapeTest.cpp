@@ -8,6 +8,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
 #include "AOTCellFormat.h"
 #include "AOTIRProgram.h"
 #include "AOTLayout.h"
@@ -23,7 +24,6 @@
 #include <optional>
 #include <span>
 #include <wtf/BitSet.h>
-#include <wtf/BitVector.h>
 #include <wtf/HashMap.h>
 #include <wtf/MathExtras.h>
 #include <wtf/StdLibExtras.h>
@@ -658,7 +658,7 @@ static void encodePagedDistanceTable(DistancesByShape& result, std::span<const D
 
 static void encodeFlatDistanceTable(DistancesByShape& result, std::span<const DistanceOfShapes> members, uint32_t firstShape)
 {
-    result.table = Vector<uint8_t>(FillWith { }, static_cast<size_t>(result.lastShape - firstShape + 1) << result.logBytesPerDistance, static_cast<uint8_t>(0));
+    result.table = Vector<uint8_t>(FillWith { }, static_cast<size_t>(result.lastShape - firstShape + 1) << result.logBytesPerDistance, std::numeric_limits<uint8_t>::max());
     for (const DistanceOfShapes& member : members) {
         for (uint32_t shape = member.shapes.first; shape < member.shapes.end(); ++shape)
             writeDistanceTableElement(result.table.mutableSpan(), result.lastShape - shape, result.logBytesPerDistance, member.distance);
@@ -668,15 +668,15 @@ static void encodeFlatDistanceTable(DistancesByShape& result, std::span<const Di
 static DistancesByShape encodeDistancesOfStretches(std::span<const DistanceOfShapes> members, DistancesByComparison&& byComparison, DistanceForm form)
 {
     std::span<const DistanceOfShapes> stretches = byComparison.stretches.span();
-    DistancesByShape result { .form = form, .lastShape = stretches.back().shapes.end() - 1 };
+    DistancesByShape result { .form = form, .lastShape = stretches.back().shapes.end() - 1, .numberOfShapes = stretches.back().shapes.end() - stretches.front().shapes.first };
     if (form == DistanceForm::Comparisons) {
         result.comparisons = WTF::move(byComparison);
         return result;
     }
 
     uint32_t greatestDistance = std::ranges::max(stretches, { }, &DistanceOfShapes::distance).distance;
-    RELEASE_ASSERT(greatestDistance <= std::numeric_limits<uint16_t>::max());
-    result.logBytesPerDistance = greatestDistance > std::numeric_limits<uint8_t>::max();
+    RELEASE_ASSERT(greatestDistance < std::numeric_limits<uint16_t>::max());
+    result.logBytesPerDistance = greatestDistance >= std::numeric_limits<uint8_t>::max();
     if (form == DistanceForm::FlatTable) {
         encodeFlatDistanceTable(result, members, stretches.front().shapes.first);
         return result;
@@ -767,6 +767,8 @@ static OptionSet<ObjectMutation> mutationsRuledOutForShapeTest(const Program& pr
         if (!layout.possibleChanges.contains(change))
             ruledOut.add(mutation);
     }
+    if (!layout.hasDirectInstances)
+        ruledOut.add(ObjectMutation::ConstructDirectly);
     uint32_t numberDeclared = static_cast<uint32_t>(program.at(id).fields.size());
     for (uint32_t field = 0; field < numberDeclared; ++field) {
         if (!fieldAt(program, declarationOf(program, { id, field })).form.isEmpty())

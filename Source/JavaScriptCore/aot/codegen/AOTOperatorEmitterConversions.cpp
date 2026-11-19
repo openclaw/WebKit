@@ -8,6 +8,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTCastEmitter.h"
 #include "AOTConstantEmitter.h"
 #include "AOTConversionEmitter.h"
 #include "AOTIRProgram.h"
@@ -46,9 +47,9 @@ public:
             operand = boxCell(operand.as<CellPointer>());
 
         StringEmitter& strings = emitter<StringEmitter>();
-        auto orByOperation = [&](Condition isConvertedInLine, const auto& convertInLine) {
+        auto orByOperation = [&](Condition isConvertedInLine, const auto& convertInLine, bool keepsEveryRegister = true) {
             return either<CellPointer>(isConvertedInLine, convertInLine, [&] {
-                return callToString(context, operand.as<Boxed>(), { .isOnRarePath = true });
+                return callToString(context, operand.as<Boxed>(), { .isOnRarePath = keepsEveryRegister });
             });
         };
         switch (form) {
@@ -86,11 +87,13 @@ public:
             return orByOperation(isCell(operand.as<Boxed>()), [&] {
                 return unboxCell(operand.as<Boxed>());
             });
-        case OperatorForm::NullableNumber:
+        case OperatorForm::NullableNumber: {
             m_out.noteFormOf(conversionsToString, Form::Closed, StateOfKnowledge::NullableNumber);
+            bool mayBeFractionInLoop = (type.primitives & Primitive::Double) && context.block() && generator().isInLoop(context.block());
             return orByOperation(isInt32(operand.as<Boxed>()), [&] {
                 return strings.integerToString(context, unboxInt32(operand.as<Boxed>()));
-            });
+            }, !mayBeFractionInLoop);
+        }
         case OperatorForm::MayBeString:
         case OperatorForm::MayBeStringOrNumber:
             return convertPossibleString(context, operand.as<Boxed>(), type, form);
@@ -118,6 +121,21 @@ public:
     CellPointer convertAddend(const OperationContext& context, ValueID id)
     {
         return convertByType(context, get(id), typeIDOf(id));
+    }
+
+    StringEmitter::StringPart partOfConcatenation(const OperationContext& context, ValueID id)
+    {
+        if (StringID constant = emitter<StringEmitter>().findNumberedStringConstant(context, id))
+            return constant;
+        if (generator().isConversionLeftToConcatenation(id)) {
+            const Operation& conversion = operationAt(id);
+            if (conversion.opcode == Opcode::Add)
+                return StringEmitter::StringPart::toConvert(get(emitter<OperatorEmitter>().valueAddedToEmptyString(conversion)).as<Boxed>(), ConversionInConcatenation::Addition);
+            return StringEmitter::StringPart::toConvert(get(conversion.valueOperand()).as<Boxed>(), ConversionInConcatenation::ToString);
+        }
+        if (Operand operand = get(id); typeOf(id).isInt32() && (operand.representation == Representation::Int32 || operand.representation == Representation::Int64))
+            return StringEmitter::StringPart::ofInteger(operand.representation == Representation::Int32 ? signExtended(operand.as<Word32>()) : operand.as<Integer>());
+        return convertAddend(context, id);
     }
 
     CellPointer convertByType(const OperationContext& context, Operand operand, TypeID typeID)
@@ -151,8 +169,10 @@ private:
 
     CellPointer convertDouble(const OperationContext& context, Number value)
     {
+        if (!context.block() || !generator().usesLoopForms(context.block()))
+            return CellPointer(callStub(context, doubleToString(), { value.value() }).first);
         ConversionEmitter& conversions = emitter<ConversionEmitter>();
-        Word32 whole = low32(conversions.toInteger(value));
+        Word32 whole = conversions.truncateToWord(value);
         Integer bitsOfWhole = conversions.bitsOf(toNumber(whole));
         return selectByBranch<CellPointer>(equal(bitsOfWhole, conversions.bitsOf(value)), [&] {
             return emitter<StringEmitter>().integerToString(context, whole);
@@ -164,7 +184,7 @@ private:
     CellPointer convertPossibleString(const OperationContext& context, Boxed boxed, const Type& type, OperatorForm form)
     {
         static_assert(formDependsOnLoopOf(Opcode::ToString));
-        FormAtPlace named = formByLoopAlone(Opcode::ToString, stateOf(form), context.block() && generator().isInLoop(context.block()));
+        FormAtPlace named = formByLoopAlone(Opcode::ToString, stateOf(form), context.block() && generator().usesLoopForms(context.block()));
         m_out.noteFormOf(conversionsToString, named.form, stateOf(form), named.place);
         if (named.form != Form::Open)
             return CellPointer(callStub(context, unaryOperation(UnaryOperationForm::ToString), { boxed.value() }).first);
@@ -222,9 +242,45 @@ static Vector<uint32_t, 8> firstOccurrencesOfStrcatParts(std::span<const ValueID
     return firstOccurrences;
 }
 
+static bool isAnswerOfBooleanMethod(const BuiltinTable& table, const Operation& made)
+{
+    BuiltinID method = made.opcode == Opcode::Call ? made.methodOfReceiverAsMade() : BuiltinID();
+    if (!method)
+        return false;
+    std::span<const BuiltinOverload> overloads = table.overloadsOf(table.canonicalID(method));
+    return !overloads.empty() && std::ranges::all_of(overloads, [&](const BuiltinOverload& overload) {
+        BuiltinTypeID answer = overload.result.type;
+        return answer && table.at(answer).flags.isEmpty() && table.at(answer).primitives == OptionSet<BuiltinPrimitive> { BuiltinPrimitive::Boolean } && table.at(answer).parts.empty();
+    });
+}
+
+static bool isReadAtSite(const Code& code, ValueID value)
+{
+    while (code.at(value).opcode == Opcode::Narrowed && !code.isConstant(code.at(value).operand(0)))
+        value = code.at(value).operand(0);
+    return code.at(value).opcode == Opcode::GetValueAtSiteOrAbsent;
+}
+
+static bool isCountedTruth(const Code& code, ValueID truth)
+{
+    ValueID user = code.onlyUserOf(truth);
+    return user && (code.at(user).opcode == Opcode::ToNumber || code.at(user).opcode == Opcode::WidenInteger);
+}
+
 void OperatorEmitter::generateToBoolean(const ValueContext& value)
 {
+    if (tryGenerateRemainderTest(value))
+        return;
     ValueID tested = value->valueOperand();
+    if (tested == m_remainderKnownByTruth) {
+        m_out.noteForm(Form::Closed, StateOfKnowledge::Generic);
+        defineTest(value, m_truthOfRemainder);
+        return;
+    }
+    if (const CodeGenerator::CarriedSubstring* carried = generator().findCarriedSubstring(tested)) [[unlikely]] {
+        defineTest(value, isNotZero(Word32(carried->length)));
+        return;
+    }
     TruthinessEmitter& truthiness = emitter<TruthinessEmitter>();
     switch (value->form()) {
     case OperatorForm::Generic:
@@ -232,10 +288,21 @@ void OperatorEmitter::generateToBoolean(const ValueContext& value)
             Operand operand = get(tested);
             if (!operand.is<Boxed>())
                 m_out.noteForm(Form::Open, StateOfKnowledge::Bits);
-            truthiness.branchOnTruthiness(value, operand, typeOf(tested), value.branchTargets());
+            if (operand.is<Boxed>() && truthiness.tryDeferToShapeTest(value, operand.as<Boxed>()))
+                return;
+            const Operation& made = generator().code().at(tested);
+            bool expectsBoolean = value->expectsBoolean() || (generator().usesLoopForms(value.block()) && isAnswerOfBooleanMethod(m_program.builtins(), made));
+            bool isOfAnyKind = isReadAtSite(generator().code(), tested);
+            if (isOfAnyKind)
+                build().statistics().count(StatisticID::SiteTruthsToldInline);
+            truthiness.branchOnTruthiness(value, operand, typeOf(tested), value.branchTargets(), value->expectsObjectOrNothing(), value->expectsInt32OrNothing(), (callsByValue | OpcodeSet { Opcode::CallResolved }).contains(made.opcode), expectsBoolean, isOfAnyKind);
             return;
         }
         m_out.noteForm(Form::Closed, StateOfKnowledge::Generic);
+        if (isCountedTruth(generator().code(), value.id()) && generator().usesLoopForms(value.block()) && !(typeOf(tested).primitives & Primitive::Absent)) {
+            defineTest(value, truthiness.isTruthyOfAnyKind(value, in<Boxed>(tested)));
+            return;
+        }
         define(value, Condition(m_out.castToInt32(callStub(value, AOT::toBoolean(), { in<Boxed>(tested).value() }).first)));
         return;
     case OperatorForm::Integers:
@@ -243,6 +310,11 @@ void OperatorEmitter::generateToBoolean(const ValueContext& value)
     case OperatorForm::Bits:
     case OperatorForm::Booleans:
         m_out.noteForm(Form::Open, stateOf(value->form()));
+        if (ValueID check = generator().checkDeferredToTruthTest(value.id())) {
+            emitter<CastEmitter>().checkBooleanOrBranch(value, check);
+            if (value.isBranchCondition())
+                return;
+        }
         defineTest(value, truthiness.isTruthy(value, get(tested), typeOf(tested)));
         return;
     case OperatorForm::Unselected:
@@ -268,6 +340,52 @@ void OperatorEmitter::generateToBoolean(const ValueContext& value)
     defineTest(value, boolean(false));
 }
 
+ValueID OperatorEmitter::valueAddedToEmptyString(const Operation& sum)
+{
+    auto isEmptyString = [&](ValueID addend) {
+        StringID literal = singleStringLiteralOf(typeOf(addend));
+        return literal && literal == m_program.strings.emptyString();
+    };
+    if (isEmptyString(sum.leftOperand()))
+        return sum.rightOperand();
+    return isEmptyString(sum.rightOperand()) ? sum.leftOperand() : ValueID();
+}
+
+bool OperatorEmitter::leavesConversionToConcatenation(BlockID block, ValueID id, const Operation& conversion, std::span<const ValueID> operationsBehind)
+{
+    const bool isSum = conversion.opcode == Opcode::Add;
+    if (operationsBehind.empty() || m_code.useCountOf(id) != 1 || m_code.onlyUserOf(id) != operationsBehind.front() || (!isSum && generator().usesLoopForms(block)))
+        return false;
+    if (conversion.form() != OperatorForm::MayBeString && conversion.form() != OperatorForm::MayBeStringOrNumber)
+        return false;
+    ValueID operand = isSum ? valueAddedToEmptyString(conversion) : conversion.valueOperand();
+    if (!operand || representationOf(operand) != Representation::JSValue || typeOf(operand).isBoolean())
+        return false;
+    const Operation& concatenation = operationAt(operationsBehind.front());
+    if (concatenation.opcode != Opcode::Strcat || concatenation.isLikelyKey())
+        return false;
+    std::span<const ValueID> parts = concatenation.partsOperands();
+    if (parts.size() < 2 || parts[0] == parts[1])
+        return false;
+    auto mayRunCodeInConversion = [&](ValueID part) {
+        const Type& type = typeOf(part);
+        return part != id && (type.hasObjects() || type.primitives & Primitive::AnySymbol);
+    };
+    if (std::ranges::any_of(parts, mayRunCodeInConversion))
+        return false;
+    ValueContext context = generator().contextOf(block, operationsBehind.front());
+    std::span<const ValueID> joinedFirst = parts.first(std::min<size_t>(parts.size(), 3));
+    Vector<StringEmitter::StringPart, 3> joined;
+    std::optional<unsigned> converted;
+    for (unsigned index = 0; index < joinedFirst.size(); ++index) {
+        if (joinedFirst[index] == id)
+            converted = index;
+        StringID constant = emitter<StringEmitter>().findNumberedStringConstant(context, joinedFirst[index]);
+        joined.append(constant ? StringEmitter::StringPart(constant) : StringEmitter::StringPart(CellPointer()));
+    }
+    return converted && findConvertAndConcatenate({ StringEmitter::chooseConstants(joined.span()), static_cast<uint8_t>(joined.size()), static_cast<uint8_t>(*converted), isSum ? ConversionInConcatenation::Addition : ConversionInConcatenation::ToString });
+}
+
 void OperatorEmitter::generateToString(const ValueContext& value)
 {
     ValueID operand = value->valueOperand();
@@ -287,11 +405,11 @@ CellPointer OperatorEmitter::concatenationOfParts(const ValueContext& value)
     ToStringEmitter toStrings(generator());
     if (!value->isLikelyKey()) {
         Vector<uint32_t, 8> firstOccurrences = firstOccurrencesOfStrcatParts(parts);
-        Vector<CellPointer, 8> fibers;
+        Vector<StringEmitter::StringPart, 8> fibers;
         for (uint32_t index = 0; index < parts.size(); ++index) {
             uint32_t first = firstOccurrences[index];
             bool isConvertedAlready = first < index && !typeOf(parts[index]).hasObjects();
-            fibers.append(isConvertedAlready ? fibers[first] : toStrings.convertAddend(value, parts[index]));
+            fibers.append(isConvertedAlready ? fibers[first] : toStrings.partOfConcatenation(value, parts[index]));
         }
         return emitter<StringEmitter>().concatenate(value, fibers.span());
     }
@@ -314,11 +432,17 @@ Operand OperatorEmitter::addStrings(const ValueContext& value)
     ValueID right = value->rightOperand();
     bool resultIsBoxed = value.representation() == Representation::JSValue;
     switch (value->form()) {
-    case OperatorForm::Strings:
-        return strings.concatenate(value, { in<CellPointer>(left), in<CellPointer>(right) });
+    case OperatorForm::Strings: {
+        auto partOf = [&](ValueID operand) -> StringEmitter::StringPart {
+            if (StringID constant = strings.findNumberedStringConstant(value, operand))
+                return constant;
+            return in<CellPointer>(operand);
+        };
+        return strings.concatenate(value, { partOf(left), partOf(right) });
+    }
     case OperatorForm::StringAndPrimitive: {
-        CellPointer first = toStrings.convertAddend(value, left);
-        CellPointer second = toStrings.convertAddend(value, right);
+        StringEmitter::StringPart first = toStrings.partOfConcatenation(value, left);
+        StringEmitter::StringPart second = toStrings.partOfConcatenation(value, right);
         return strings.concatenate(value, { first, second });
     }
     case OperatorForm::NullableStrings: {
@@ -333,14 +457,10 @@ Operand OperatorEmitter::addStrings(const ValueContext& value)
         });
     }
     case OperatorForm::MayBeString: {
-        auto isEmptyString = [&](ValueID addend) {
-            StringID literal = singleStringLiteralOf(typeOf(addend));
-            return literal && literal == m_program.strings.emptyString();
-        };
-        bool emptyStringIsOnLeft = isEmptyString(left);
-        if (!emptyStringIsOnLeft && !isEmptyString(right))
+        ValueID addend = valueAddedToEmptyString(operationAt(value.id()));
+        if (!addend)
             break;
-        Boxed other = in<Boxed>(emptyStringIsOnLeft ? right : left);
+        Boxed other = in<Boxed>(addend);
         return unboxCell(Boxed(callStub(value, unaryOperation(UnaryOperationForm::AddToEmptyString), { other.value() }).first));
     }
     case OperatorForm::NullableStringAndPrimitive: {

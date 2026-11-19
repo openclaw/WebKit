@@ -29,10 +29,19 @@ public:
     };
 
     struct Snapshot {
-        bool isSet { false };
-        std::span<const RegisterBinding> bindings;
+        bool isSet() const { return first; }
+        std::span<const RegisterBinding> bindings() const { return { first, static_cast<size_t>(std::popcount(registers)) }; }
+        void set(const RegisterBinding* bindingsInOrderOfRegisters, RegisterMask registersBound)
+        {
+            ASSERT(bindingsInOrderOfRegisters);
+            first = bindingsInOrderOfRegisters;
+            registers = registersBound;
+        }
+
+        const RegisterBinding* first { nullptr };
         RegisterMask registers { 0 };
     };
+    static_assert(sizeof(Snapshot) == 16);
 
     void allocateBlock(Block*);
     void allocateOperation(Operation*);
@@ -174,6 +183,7 @@ public:
         if (!patch->findsOperandsInFrameWithoutRecord())
             m_allocation.m_holdsPatchThatCountsOnFrameRecord = true;
     }
+    void countSpilledFirstOperand() { ++m_allocation.m_numberOfSpilledFirstOperands; }
     ALWAYS_INLINE void noteFrameUse()
     {
         if (isInRareRegion()) {
@@ -181,9 +191,11 @@ public:
             return;
         }
         m_allocation.m_needsFrameOutsideRareRegions = true;
-        m_allocation.m_needsFrameAheadOfFramedPart |= m_isAheadOfFramedPart;
+        m_allocation.m_needsFrameAheadOfFramedPart |= m_isOutsideFramedPart;
     }
     void enterFramedPart();
+    void keepPointersThatWait(Position endOfWhatWaysLeadTo);
+    Position endOfWhatWaysLeadToFromSafepointsOfRareRegion() const;
     Position position() const { return m_position; }
     bool isInRareRegion() const { return m_rareRegion != noRareRegion; }
 
@@ -217,6 +229,7 @@ public:
         return use;
     }
     uint32_t findReadFromInList(const Operation* value, Position) const;
+    uint32_t findReadOutsideUnlikelyRegions(const Operation* value, Position) const;
     ALWAYS_INLINE uint32_t findReadFromAmongLaterReads(const Operation* value, uint32_t use, Position position) const
     {
         const Use* const uses = m_uses;
@@ -283,7 +296,7 @@ public:
     ALWAYS_INLINE RegisterMask registersThatMayBeTaken(Bank bank, RegisterMask allowed) const
     {
         RegisterMask registers = allowed & m_file.allocatableIn(bank);
-        if (m_isAheadOfFramedPart || isInRareRegion())
+        if (m_isOutsideFramedPart || isInRareRegion())
             registers &= ~m_file.calleeSaved | calleeSavesThatMayBeTaken();
         return registers;
     }
@@ -329,7 +342,16 @@ public:
     }
     Reg bringIntoRegister(Operation* value, RegisterMask allowed, Reg preferred);
     SpillIndex markSpilled(Operation* value);
-    SpillIndex addSpill(const SpillFacts&);
+    void keepRegisterForFarWords();
+    ALWAYS_INLINE SpillIndex addSpill(const SpillFacts& facts)
+    {
+        ASSERT(facts.value);
+        ASSERT(facts.begin != noPosition && facts.begin <= facts.end);
+        ASSERT(facts.width == Width32 || facts.width == Width64 || facts.width == Width128);
+        SpillIndex index = m_allocation.m_spills.size();
+        m_allocation.m_spills.append(m_arena, facts);
+        return index;
+    }
     ALWAYS_INLINE void noteCalleeSaveUse(Reg reg)
     {
         RegisterMask bit = maskOf(reg) & m_file.calleeSaved;
@@ -339,7 +361,7 @@ public:
         if (!isInRareRegion())
             m_calleeSavesTakenOutsideRareRegions |= bit;
         m_allocation.m_needsFrameOutsideRareRegions = true;
-        if (m_isAheadOfFramedPart)
+        if (m_isOutsideFramedPart)
             noteFrameUse();
     }
     ALWAYS_INLINE Reg hintOf(const Operation* value) const
@@ -356,10 +378,11 @@ public:
     void fixHeadOf(Block* target, Block* from);
     void fixHeadOf(Block* target, Block* from, const BlockPlace& placeOfTarget, KindOfHeadBeingFixed);
     void appendEdgeMoves(Block* from, unsigned successorIndex, const Snapshot& endOfFrom);
-    bool frameMayChangeOnEdge(const Block* from, const Block* target);
+    bool edgeMayChangeFrame(const Block* from, const Block* target);
     Block* splitEdge(Block* from, unsigned successorIndex, const Snapshot& endOfFrom);
     Position findFirstReadFromHeadOf(const Block*, const Operation* value);
-    bool listsRegistersAtHeadOf(const Block* block) const { return m_proc.checksAllocation() || m_order.of(block).isRare() || m_allocation.isHeadOfFramedPart(block); }
+    bool firstCallBehindHeadReadsValueElsewhere(const Block* target, Reg, const Operation* value);
+    bool listsRegistersAtHeadOf(const Block* block) const { return m_allocation.recordsWhatCheckersRead() || m_order.of(block).isRare() || m_allocation.isHeadOfFramedPart(block); }
     ArenaVector<std::span<const RegisterBinding>>& registersAtHeads() { return m_allocation.m_registersAtHead; }
     Snapshot takeSnapshot();
     void restore(const Snapshot&);
@@ -375,6 +398,10 @@ public:
     void noteOperandTakenBack(const Operation* sum, OperandTakenBack, Location otherOperand);
 
     void chooseRegistersKeptThroughLoop(const Loop&, bool movesMayWriteRegisters);
+    const Block* headOfLoopThatBlockOnlyLeadsBackTo(const Block*) const;
+    void dropWhatBlockThatLeadsBackNeitherReadsNorHandsOn(const Block*, const Block* headOfLoop);
+    void holdWhatHeadOfLoopHolds(const Block*, const Block* headOfLoop, Position limitOfDefinitions);
+    Reg takeRegisterOfValueThatLoopReadsBehindPhi(const Loop&, const Operation* phi);
     bool isReadInside(const Operation* value, const Loop&) const;
     void bringInWhatLoopReads(const Loop&, Position limitOfDefinitions);
     bool isKeptThroughLoopAround(Reg, const Operation* value, Position) const;
@@ -391,14 +418,10 @@ public:
     void placeFixedOperands(PatchOperation*, std::span<Location> locationsOfOperands, RegisterMask& locked);
     void vacate(RegisterMask clobbered, Position behind);
     RegisterMask takeScratchRegisters(Bank, unsigned count, RegisterMask& locked);
-    void releaseDeadValue(PatchOperation*);
-    void releaseChildrenLetGoByCallee(PatchOperation*, std::span<const Location> locationsOfOperands, Position early, RegisterMask locked);
-    RegisterMask clearPlacesOfValuesHandedTo(Operation* released, Position);
-    void findBlocksThatLeadToReadsOf(const Operation* value);
+    void findBlocksThatLeadToReadsOf(const Operation* value, uint32_t firstBlock);
+    uint32_t firstBlockOnWaysFrom(const Block*, const Operation* value);
     bool isReadOnSomeWayFromHeadOf(const Operation* value, const Block*);
-    bool isHeldAtHeadThatWayLeadsBackTo(const Operation* value) const;
-    bool isReadOnSomeWayOn(const Operation* value, Position);
-    RegisterMask registersWhereReleasedValueMayHaveWaited() const;
+    bool dominatesSomeReadBelowDefinitionOf(const Block*, const Operation* value);
 
     void enterRareRegion(uint32_t region);
     void leaveRareRegion();
@@ -410,18 +433,27 @@ public:
     void prepareSuspension(PatchOperation*);
     void findSpillsHeldAtSuspensions();
     void findGapsAheadOfLandingPads();
+    void findGapsAheadOfRarePhis();
 
     RegisterMask registersWhereCallInBlockTakesWhatLiesThere(const Block*) const;
     unsigned numberOfReadsThatWordWouldReload(const Operation*, Position end) const;
     void findFramedPart();
+    static bool hasImplicitReader(const ValueFacts& facts) { return facts.has(ValueFlag::LivesIntoLandingPad) || facts.has(ValueFlag::LivesAcrossSuspension) || facts.has(ValueFlag::IsKeptForCollector); }
+    bool hasImplicitReader(const SpillFacts&) const;
+    void findDeadSlots();
+    ALWAYS_INLINE Location placeToReadIn(SpillIndex spill) const
+    {
+        m_allocation.m_spills[spill].isRead = true;
+        return Location::spill(spill);
+    }
     void settleFramedPart();
     void standIn(const Block* block)
     {
         m_rareRegion = m_order.of(block).rareRegion;
-        m_isAheadOfFramedPart = isAheadOfFramedPart(block);
+        m_isOutsideFramedPart = isOutsideFramedPart(block);
     }
-    bool isAheadOfFramedPart(const Block* block) const { return m_allocation.hasFramedPart() && !m_allocation.isInFramedPart(block); }
-    bool headIsAheadOfFramedPart(const Block* block) const { return m_allocation.hasFramedPart() && (!m_allocation.isInFramedPart(block) || m_allocation.isHeadOfFramedPart(block)); }
+    bool isOutsideFramedPart(const Block* block) const { return m_allocation.hasFramedPart() && !m_allocation.isInFramedPart(block); }
+    ALWAYS_INLINE bool startsOutsideFramedPart(const Block* block) const { return m_allocation.hasFramedPart() && (!m_allocation.isInFramedPart(block) || m_allocation.isHeadOfFramedPart(block)); }
     bool isStoredAtHeadsOfFramedPart(const Operation* value) const
     {
         if (!m_allocation.hasFramedPart() || m_allocation.needsFrameAheadOfFramedPart() || value->hasNoPosition() || m_liveness.isSunk(value))
@@ -429,15 +461,15 @@ public:
         const Block* blockOfStore = value->endsBlock() ? value->owner()->successor(0).block() : value->owner();
         return !m_allocation.isInFramedPart(blockOfStore) && !m_order.of(blockOfStore).isRare();
     }
-    ALWAYS_INLINE bool spillHoldsValueIn(const Block* block, const Operation* value) const { return m_allocation.isSpilled(value) && !(isAheadOfFramedPart(block) && isStoredAtHeadsOfFramedPart(value)); }
-    ALWAYS_INLINE bool spillHoldsValueAtHeadOf(const Block* block, const Operation* value) const { return m_allocation.isSpilled(value) && !(headIsAheadOfFramedPart(block) && isStoredAtHeadsOfFramedPart(value)); }
+    ALWAYS_INLINE bool spillHoldsValueIn(const Block* block, const Operation* value) const { return m_allocation.isSpilled(value) && !(isOutsideFramedPart(block) && isStoredAtHeadsOfFramedPart(value)); }
+    ALWAYS_INLINE bool spillHoldsValueAtHeadOf(const Block* block, const Operation* value) const { return m_allocation.isSpilled(value) && !(startsOutsideFramedPart(block) && isStoredAtHeadsOfFramedPart(value)); }
     RegisterMask calleeSavesThatMayBeTaken() const
     {
-        if (m_isAheadOfFramedPart)
+        if (m_isOutsideFramedPart)
             return 0;
         return isInRareRegion() ? m_calleeSavesTakenOutsideRareRegions : m_file.calleeSaved;
     }
-    bool leavesValuesAcrossCallsToFramedPart() const { return m_isAheadOfFramedPart && !isInRareRegion(); }
+    bool leavesValuesAcrossCallsToFramedPart() const { return m_isOutsideFramedPart && !isInRareRegion(); }
     bool pointerWaitsForFramedPart(Operation* reference);
 
     Procedure& m_proc;
@@ -445,7 +477,7 @@ public:
     const Order& m_order;
     const Liveness& m_liveness;
     Allocation& m_allocation;
-    const RegisterFile m_file;
+    RegisterFile m_file;
     const ValueFacts* m_valueFacts { nullptr };
     const Use* m_uses { nullptr };
     uint64_t m_smallestPinnedConstant { UINT64_MAX };
@@ -503,13 +535,14 @@ public:
     RegisterMask m_argumentRegistersThatGiveWay { 0 };
     uint32_t m_rareRegion { noRareRegion };
     RegisterMask m_calleeSavesTakenOutsideRareRegions { 0 };
-    bool m_isAheadOfFramedPart { false };
+    bool m_isOutsideFramedPart { false };
     struct SafepointsAheadOfFramedPart {
         Position first;
         Position last;
         Position until;
     };
     ArenaVector<SafepointsAheadOfFramedPart> m_safepointsAheadOfFramedPart;
+    ArenaVector<Position> m_untilByRareRegion;
     struct ReferenceWhosePointerWaits {
         Operation* reference;
         SpillIndex pointer { noSpill };
@@ -521,11 +554,29 @@ public:
     using PhisInSpill = ArenaVector<Operation*>;
     ArenaVector<PhisInSpill*> m_phisInSpills;
     PhisInSpill& phisInSpill(SpillIndex);
+    SpillIndex findSpillOfDeadSource(const Operation* phi);
+    std::span<const SpillIndex> findSpillsThatPhisAreOnlyHandedOnTo(const Block*);
+    std::span<uint32_t> m_placesHandedOn;
     void letEdgesWritePhi(Operation* phi, SpillIndex, const BlockPlace& placeOfHead);
     ArenaVector<Reg> m_hints;
     ArenaVector<Position> m_knownReadsOutsideRareRegions;
+    struct SpillWrittenInBlock {
+        SpillIndex spill;
+        const Block* block;
+    };
+    ArenaVector<SpillWrittenInBlock> m_spillsWrittenInBlocks;
+    mutable ArenaVector<uint8_t> m_whetherValuesThatRareRegionsReadAreWorthCalleeSaveNotYetSaved;
+    struct WhetherHeadAroundHolds {
+        uint32_t loopWhoseHeadHolds { noLoop };
+        uint32_t loopFromWhichNoHeadHolds { noLoop };
+        RegisterMask registersHeld { 0 };
+        RegisterMask registersNotHeld { 0 };
+    };
+    ArenaVector<WhetherHeadAroundHolds> m_whetherHeadsAroundHold;
     BitSpan m_hasPassedOnHintsOfPhis;
     ArenaVector<uint32_t> m_firstReadsNotKnownOutOfReach;
+    uint64_t m_laterUsesScanned { 0 };
+    ArenaVector<uint32_t> m_lastReadsThatCounted;
     struct FirstReadFromHead {
         Position head { noPosition };
         Position read { noPosition };
@@ -533,9 +584,15 @@ public:
     ArenaVector<FirstReadFromHead> m_firstReadsFromHeads;
     mutable ArenaVector<uint32_t> m_numbersOfListsOfReads;
     mutable ArenaVector<std::span<const uint32_t>> m_listsOfReads;
+    mutable ArenaVector<uint32_t> m_numbersOfListsOutsideRareRegions;
+    mutable ArenaVector<std::span<const uint32_t>> m_listsOutsideRareRegions;
     ArenaVector<uint32_t> m_lastSearchThatReachedBlock;
+    ArenaVector<const Block*> m_blocksReachedBySearchForWays;
     uint32_t m_numberOfSearchesForWays { 0 };
+    size_t m_livenessSearchBlocksVisited { 0 };
     const Operation* m_valueOfLastSearchForWays { nullptr };
+    uint32_t m_firstBlockOfLastSearchForWays { 0 };
+    std::optional<bool> m_someLoopHasSideEntrance;
     ArenaVector<uint32_t> m_firstLoopsWhoseHeadsAreNotJudged;
     Position m_positionOfLastQuestionForLoopNotJudged { noPosition };
     Position m_beginOfFirstLoopNotJudged { noPosition };

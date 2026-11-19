@@ -25,6 +25,8 @@ inline constexpr StubRegister storedValueByIdRegister = StubRegister::A1;
 inline constexpr StubRegister keyCellRegister = StubRegister::A1;
 inline constexpr StubRegister storedValueByValRegister = StubRegister::A2;
 inline constexpr StubRegister valueStoredThroughProxyRegister = StubRegister::T10;
+
+void loadProxySlotKey(StubAssembler&, SlotForm, GPRReg header, GPRReg key, JumpList& isForNoProxies);
 #if CPU(X86_64)
 inline constexpr StubRegister readSiteCacheRegister = StubRegister::A1;
 inline constexpr StubRegister storeSiteCacheRegister = StubRegister::A2;
@@ -72,6 +74,7 @@ public:
     void loadFirstPayloadWord(StubAssembler&, GPRReg result) const;
     GPRReg registerOfFirstPayloadWord() const;
     void loadSecondPayloadWord(StubAssembler&, GPRReg result) const;
+    void loadVariableBase(StubAssembler&, GPRReg receiver, GPRReg result, GPRReg scratch) const;
     void loadPayloadBits(StubAssembler&, GPRReg result) const;
 
 private:
@@ -272,6 +275,16 @@ inline constexpr std::array<GPRReg, 2> registersThatWaysOnwardOfGetByIdLose { gp
 void jumpToSlotHandlerOfKind(StubAssembler&, SlotHandlerTable, GPRReg header, GPRReg kind);
 void linkToSlotExit(StubAssembler&, JumpList&, SlotHandlerTable, SlotExit);
 void linkToSlotCannot(StubAssembler&, JumpList&, SlotHandlerTable, SlotFinisher, const CachedSlot&);
+struct FieldExitBySlotRegisters {
+    GPRReg object;
+    GPRReg value;
+    GPRReg addressOfSlot;
+    GPRReg exit;
+    GPRReg scratch;
+    GPRReg extra;
+};
+void repeatFieldExitFoundBySlotAndReturn(StubAssembler&, const FieldExitBySlotRegisters&, JumpList& cannot);
+void storeToReplacedMemberAndReturn(StubAssembler&, GPRReg receiver, GPRReg identifierNumber, GPRReg value, GPRReg place, GPRReg word);
 
 void loadValueBySlot(StubAssembler&, const CachedSlot&, GPRReg receiver, GPRReg storage, GPRReg wordIndex, GPRReg result);
 void loadOwnValueBySlot(StubAssembler&, const CachedSlot&, GPRReg receiver, GPRReg storage, GPRReg wordIndex, GPRReg result);
@@ -283,6 +296,8 @@ void loadStaticsBase(StubAssembler&, GPRReg staticsBase, GPRReg roundedSizeOfSta
 
 void countSiteCacheMiss(StubAssembler&, GPRReg site, GPRReg scratch, JumpList& isDueForRefill);
 void countMissOfEmptySite(StubAssembler&, GPRReg site, GPRReg scratch, JumpList& isDueForFill);
+void countMissOfPlace(StubAssembler&, GPRReg distance, GPRReg scratch, JumpList& isSample);
+void goOnWhileSamplesOfPlaceAreLeftOut(StubAssembler&, GPRReg scratchOfCount, CCallHelpers::Label isCounted);
 void refillSiteCache(StubAssembler&, GPRReg receiver, GPRReg identifierNumber, GPRReg site, SlotAccess);
 
 inline constexpr unsigned receiverOperand = 0;

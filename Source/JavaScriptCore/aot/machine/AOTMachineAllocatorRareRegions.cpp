@@ -105,7 +105,7 @@ void Allocator::saveInRareRegion(Operation* value, Reg from)
     ASSERT(m_order.of(m_block).rareRegion == m_rareRegion);
 
     if (!from || m_valueIn[from.index()] != value) {
-        m_proc.fail(FailureKind::RegisterLacksItsValue, value);
+        m_proc.fail(FailureKind::WrongValueInRegister, value);
         return;
     }
 
@@ -144,18 +144,18 @@ void Allocator::giveUpFramedPartForReadOfSpill() const
 Location Allocator::memoryLocationOf(const Operation* value) const
 {
     SpillIndex spill = m_allocation.spillOf(value);
-    ASSERT(m_isAheadOfFramedPart == isAheadOfFramedPart(m_block));
-    if (spill != noSpill && (!m_isAheadOfFramedPart || spillHoldsValueIn(m_block, value)))
-        return Location::spill(spill);
+    ASSERT(m_isOutsideFramedPart == isOutsideFramedPart(m_block));
+    if (spill != noSpill && (!m_isOutsideFramedPart || spillHoldsValueIn(m_block, value)))
+        return placeToReadIn(spill);
     SpillIndex save = m_values[value->index()].saveInRareRegion;
     if (save != noSpill && (spill == noSpill || wayHasSavedInRareRegion(m_block, value)))
         return Location::spill(save);
     if (spill != noSpill) {
         giveUpFramedPartForReadOfSpill();
-        return Location::spill(spill);
+        return placeToReadIn(spill);
     }
 
-    m_proc.fail(FailureKind::RegisterLacksItsValue, value);
+    m_proc.fail(FailureKind::WrongValueInRegister, value);
     return Location();
 }
 
@@ -229,7 +229,7 @@ class SpillLivenessAtSuspensions {
     WTF_MAKE_NONCOPYABLE(SpillLivenessAtSuspensions);
 public:
     struct ListsOfAllocation {
-        uint64_t* spillsHeld;
+        uint64_t* liveSpills;
         const Reg* registerAtDefinition;
     };
 
@@ -440,7 +440,7 @@ NEVER_INLINE void SpillLivenessAtSuspensions::noteStoresOfPhis(const Block* bloc
 ALWAYS_INLINE void SpillLivenessAtSuspensions::hold(uint32_t suspension, SpillIndex spill)
 {
     const uint64_t bit = uint64_t { 1 } << (spill % 64);
-    m_lists.spillsHeld[suspension * m_numberOfWords + spill / 64] |= bit;
+    m_lists.liveSpills[suspension * m_numberOfWords + spill / 64] |= bit;
     m_isHeldAtSomeSuspension[spill / 64] |= bit;
 }
 
@@ -482,7 +482,6 @@ NEVER_INLINE void SpillLivenessAtSuspensions::passStepThatAccessesMemory(const S
             noteAccessInLine(step.sources[0].spillIndex(), false);
         return;
     case StepKind::Save:
-    case StepKind::ClearSpill:
     case StepKind::KeepPointer:
         if (step.destination.isSpill())
             noteAccessInLine(step.destination.spillIndex(), true);
@@ -631,7 +630,7 @@ void SpillLivenessAtSuspensions::followBackFromReads(uint32_t wordOfSpills)
         const PlaceOfSuspension* const places = m_places;
         const uint32_t* const endOfSuspensions = m_endOfSuspensions;
         uint64_t* const spillsNotAccessedBehind = m_spillsNotAccessedBehind;
-        uint64_t* const spillsHeld = m_lists.spillsHeld + wordOfSpills;
+        uint64_t* const liveSpills = m_lists.liveSpills + wordOfSpills;
         while (access) {
             const uint32_t block = accesses[access].block;
             uint64_t areAccessedBehind = 0;
@@ -639,7 +638,7 @@ void SpillLivenessAtSuspensions::followBackFromReads(uint32_t wordOfSpills)
             uint32_t suspension = endOfSuspensions[block];
             auto passSuspension = [&]() ALWAYS_INLINE_LAMBDA {
                 --suspension;
-                spillsHeld[suspension * numberOfWords] |= areReadNext;
+                liveSpills[suspension * numberOfWords] |= areReadNext;
                 areHeldSomewhere |= areReadNext;
                 spillsNotAccessedBehind[suspension] = ~areAccessedBehind;
             };
@@ -708,14 +707,14 @@ void SpillLivenessAtSuspensions::followBackFromReads(uint32_t wordOfSpills)
     {
         const PlaceOfSuspension* const places = m_places;
         const uint64_t* const spillsNotAccessedBehind = m_spillsNotAccessedBehind;
-        uint64_t* spillsHeldHere = m_lists.spillsHeld + wordOfSpills;
+        uint64_t* liveSpillsHere = m_lists.liveSpills + wordOfSpills;
         const uint32_t numberOfSuspensions = static_cast<uint32_t>(m_suspensions.size());
-        for (uint32_t suspension = 0; suspension < numberOfSuspensions; ++suspension, spillsHeldHere += numberOfWords) {
+        for (uint32_t suspension = 0; suspension < numberOfSuspensions; ++suspension, liveSpillsHere += numberOfWords) {
             const uint32_t block = places[suspension].block;
             uint64_t areHeld = areLiveAtEnd[block];
             if (areAccessed[block])
                 areHeld &= spillsNotAccessedBehind[suspension];
-            *spillsHeldHere |= areHeld;
+            *liveSpillsHere |= areHeld;
             areHeldSomewhere |= areHeld;
         }
     }
@@ -775,12 +774,12 @@ void Allocator::findSpillsHeldAtSuspensions()
     if (!numberOfSuspensions)
         return;
     const size_t numberOfWords = (static_cast<size_t>(m_allocation.m_spills.size()) + 63) / 64;
-    std::span<uint64_t> spillsHeld = m_arena.createSpan<uint64_t>(numberOfWords * numberOfSuspensions);
-    m_allocation.m_spillsHeldAtSuspension.reserve(m_arena, numberOfSuspensions);
+    std::span<uint64_t> liveSpills = m_arena.createSpan<uint64_t>(numberOfWords * numberOfSuspensions);
+    m_allocation.m_liveSpillsAtSuspension.reserve(m_arena, numberOfSuspensions);
     for (uint32_t suspension = 0; suspension < numberOfSuspensions; ++suspension)
-        m_allocation.m_spillsHeldAtSuspension.appendWithinCapacity(BitSpan(spillsHeld.subspan(suspension * numberOfWords, numberOfWords)));
+        m_allocation.m_liveSpillsAtSuspension.appendWithinCapacity(BitSpan(liveSpills.subspan(suspension * numberOfWords, numberOfWords)));
 
-    SpillLivenessAtSuspensions liveness(*this, { spillsHeld.data(), m_allocation.m_registerAtDefinition.begin() });
+    SpillLivenessAtSuspensions liveness(*this, { liveSpills.data(), m_allocation.m_registerAtDefinition.begin() });
     liveness.run();
     liveness.spillsHeldAtSomeSuspension().forEachSetBit([&](size_t spill) {
         m_allocation.m_spills[static_cast<SpillIndex>(spill)].livesAcrossSuspension = true;
@@ -815,6 +814,41 @@ static ALWAYS_INLINE void forEachSpillNamedIn(const Allocation& allocation, cons
     pass(steps[stepsOfBlock.terminator]);
 }
 
+void Allocator::findGapsAheadOfRarePhis()
+{
+    for (SpillFacts& spill : m_allocation.m_spills) {
+        const Operation* phi = spill.value;
+        if (!phi || phi->opcode() != Phi || spill.hasGap() || spill.isSharedByPhis || spill.isSaveInRareRegion || spill.isPointerBesideNarrowReference || spill.isStoredAtHeadOfFramedPart || spill.livesAcrossSuspension)
+            continue;
+        const BlockPlace& place = m_order.of(phi->owner());
+        const ValueFacts& facts = m_valueFacts[phi->index()];
+        if (!place.isRare() || facts.definition == noPosition || spill.begin >= facts.definition || facts.has(ValueFlag::IsKeptForCollector) || phi->owner()->isLandingPad())
+            continue;
+        Position first = facts.definition;
+        Position second = 0;
+        Position latest = 0;
+        for (const Block* predecessor : place.predecessors) {
+            Position behindMoves = m_order.endOf(predecessor);
+            first = std::min(first, behindMoves - 2);
+            if (behindMoves > facts.definition || behindMoves == latest)
+                continue;
+            if (behindMoves > latest)
+                second = std::exchange(latest, behindMoves);
+            else
+                second = std::max(second, behindMoves);
+        }
+        if (first != spill.begin || !latest)
+            continue;
+        bool isAheadOfLatest = second && latest - second > facts.definition - latest + 2;
+        Position begin = isAheadOfLatest ? second : latest;
+        Position end = isAheadOfLatest ? latest - 2 : facts.definition;
+        if (begin >= end || end > spill.end)
+            continue;
+        spill.beginOfGap = begin;
+        spill.endOfGap = end - 1;
+    }
+}
+
 void Allocator::findGapsAheadOfLandingPads()
 {
     constexpr uint32_t none = UINT32_MAX;
@@ -847,7 +881,7 @@ void Allocator::findGapsAheadOfLandingPads()
     uint32_t firstBlockWhereRangeBegins = numberOfBlocks;
     for (SpillIndex spill = 0; spill < numberOfSpills; ++spill) {
         const SpillFacts& facts = spills[spill];
-        if (facts.end < headOfFirstLandingPad || facts.livesAcrossSuspension || facts.isPointerBesideNarrowReference || facts.isSaveInRareRegion || facts.isStoredAtHeadOfFramedPart || facts.end <= facts.begin)
+        if (facts.end < headOfFirstLandingPad || facts.isPointerBesideNarrowReference || facts.isSaveInRareRegion || facts.isStoredAtHeadOfFramedPart || facts.end <= facts.begin)
             continue;
         if (facts.value->opcode() == Phi && (!m_allocation.registerAtDefinitionOf(facts.value).isSet() || m_allocation.isWrittenByEdges(facts.value)))
             continue;

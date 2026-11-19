@@ -43,7 +43,7 @@ void AllocationEmitter::generateNewRegExp(const ValueContext& value)
     OptionSet<Yarr::Flags> flags = toYarrFlags(value->regExpFlags());
 
     Wire::SourceLocation written = placeWhereLiteralObjectIsWritten(m_program, m_code, value.value()).value_or(noSourceLocation);
-    uint32_t sharedCell = m_mentions.regExpLiteralCell(written, pattern, flags);
+    uint32_t sharedCell = m_mentions.regExpLiteralCell(written, pattern, flags.toRaw());
 
     Word32 record = numberOf(m_mentions.regExp(pattern, flags));
     LValue sharedObject = m_out.load64(instanceWord(m_heaps.entire(AbstractHeap::AllocatorState), sharedCell));
@@ -98,7 +98,7 @@ void AllocationEmitter::generateNewSuppressedError(const ValueContext& value)
 bool AllocationEmitter::isListedByArgumentsObjectAlone(ValueID list) const
 {
     const Operation& made = m_code.at(list);
-    if (made.opcode != Opcode::NewArray || !m_facts.mechanisms().contains(Mechanism::EscapeAnalysis))
+    if (made.opcode != Opcode::NewArray || !m_code.has(Mechanism::EscapeAnalysis, m_facts))
         return false;
     if (made.storage() != AllocationStorage::Heap || !made.holes().empty())
         return false;

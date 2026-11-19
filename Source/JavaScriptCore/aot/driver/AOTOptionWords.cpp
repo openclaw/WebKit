@@ -10,6 +10,7 @@
 
 #include "AOTBuiltinTable.h"
 #include "AOTEffectsNet.h"
+#include "AOTFactFaults.h"
 #include "AOTMechanismWords.h"
 #include "AOTRuntimeTable.h"
 #include "AOTSchemaEnums.h"
@@ -104,8 +105,9 @@ static std::optional<E> findMember(StringView written)
 template<typename F>
 static void addFlag(F& set, F flag)
 {
-    static_assert(isFlagWord<F> && sizeof(F) == sizeof(uint32_t));
-    set = static_cast<F>(static_cast<uint32_t>(set) | static_cast<uint32_t>(flag));
+    static_assert(isFlagWord<F>);
+    using Word = std::underlying_type_t<F>;
+    set = static_cast<F>(static_cast<Word>(set) | static_cast<Word>(flag));
 }
 
 template<typename Functor>
@@ -130,34 +132,70 @@ static bool engineHonorsTestingSwitch(Wire::TestingSwitch testingSwitch)
 {
     switch (testingSwitch) {
     // Wrong rows on purpose, for the red control of the test of what native code answers: tests/answers/native-result-outside-its-row.ir. The reader of programs takes it.
-    case Wire::TestingSwitch::NativeCodeAnswersNullish:
+    case Wire::TestingSwitch::AssumeNullishHostResults:
     case Wire::TestingSwitch::CheckProofsAtRunTime:
     case Wire::TestingSwitch::CheckProofsAtEntries:
     case Wire::TestingSwitch::CheckProofsAtEntriesAndFields:
     // A false proof on purpose, for the red controls of that: tests/answers/false-proof-*.ir. Link takes it: CallInLinkCalls::callUnseen().
-    case Wire::TestingSwitch::UnseenCodeAnswersUndefined:
-    case Wire::TestingSwitch::WritesBodiesStraight:
+    case Wire::TestingSwitch::AssumeUnknownCallsReturnUndefined:
+    case Wire::TestingSwitch::ForceStraightCompilation:
     case Wire::TestingSwitch::DelayFlowRules:
     case Wire::TestingSwitch::DelayOtherFlowRules:
-    case Wire::TestingSwitch::KeepsCellsOutOfFrames:
-    case Wire::TestingSwitch::TestsEveryPosition:
+    case Wire::TestingSwitch::DisableFrameCells:
+    case Wire::TestingSwitch::CheckBoundsAtRunTime:
+    case Wire::TestingSwitch::CheckBoundsInEmittersOnly:
+    case Wire::TestingSwitch::SkipUnrollEntryChecks:
+    case Wire::TestingSwitch::SkipUnrollTripCountCheck:
+    case Wire::TestingSwitch::SkipUnrolledShapeChecks:
+    case Wire::TestingSwitch::CheckHoistedCallsAtRunTime:
+    case Wire::TestingSwitch::AssumeInlineBuiltinsPure:
+    case Wire::TestingSwitch::AssumeNoNaNStores:
+    case Wire::TestingSwitch::UseGenericOwnKeyReads:
+    case Wire::TestingSwitch::MisidentifyHoistedReadOperands:
     // A false bound on purpose, for the red control of that: isKnownToLieInsideList().
-    case Wire::TestingSwitch::PositionsAreTakenToLieInside:
-    case Wire::TestingSwitch::NoCalleeKeepsWhatItIsHanded:
-    case Wire::TestingSwitch::ArgumentsOfUnseenCodeDoNotLeave:
+    case Wire::TestingSwitch::AssumeIndexesInBounds:
+    case Wire::TestingSwitch::DropLengthCheckedReads:
+    case Wire::TestingSwitch::AssumeInvariantLoopBounds:
+    case Wire::TestingSwitch::AssumeInvariantArrayStorage:
+    case Wire::TestingSwitch::MisplaceUncheckedAccesses:
+    case Wire::TestingSwitch::MisplaceUncheckedReads:
+    case Wire::TestingSwitch::AssumeGuardsAndFacts:
+    case Wire::TestingSwitch::IgnoreAlternativeOverloads:
+    case Wire::TestingSwitch::IgnoreFreshArrayEscapes:
+    case Wire::TestingSwitch::SkipFencesAfterLateStores:
+    case Wire::TestingSwitch::AssumeUInt32Dividends:
+    case Wire::TestingSwitch::MisroundLoopBounds:
+    case Wire::TestingSwitch::TreatEqualIntegersAsLess:
+    case Wire::TestingSwitch::IgnoreMarksInShapeChecks:
+    case Wire::TestingSwitch::SkipInt32Reboxing:
+    case Wire::TestingSwitch::MisfoldBranchInSweep:
+    case Wire::TestingSwitch::DropEdgeInSweep:
+    case Wire::TestingSwitch::AssumeCalleesRetainNothing:
+    case Wire::TestingSwitch::AssumeArgumentsNeverEscape:
     case Wire::TestingSwitch::CheckEffectsAtRunTime:
     case Wire::TestingSwitch::CheckWalkAtRunTime:
-    case Wire::TestingSwitch::RowSaysLess:
-    case Wire::TestingSwitch::UndoLeavesExpectations:
-    case Wire::TestingSwitch::LaterUnitsOpenNoGuesses:
+    case Wire::TestingSwitch::CheckResultFreshnessAtRunTime:
+    case Wire::TestingSwitch::UnderstateEffects:
+    case Wire::TestingSwitch::DisableLaterUnitSpeculation:
     case Wire::TestingSwitch::IgnoreBranchHints:
     case Wire::TestingSwitch::ShuffleBlockFrequencies:
     case Wire::TestingSwitch::IgnoreExpectedTypes:
     case Wire::TestingSwitch::ShuffleExpectedTypes:
-    case Wire::TestingSwitch::FailGuesses:
-    case Wire::TestingSwitch::GiveLinkMore:
+    case Wire::TestingSwitch::FailSpeculations:
+    case Wire::TestingSwitch::WidenFlowNodes:
     case Wire::TestingSwitch::ShuffleChoices:
-    case Wire::TestingSwitch::OrderBlocksAgain:
+    case Wire::TestingSwitch::ForceFallbackBlockOrder:
+    case Wire::TestingSwitch::DropPatchOnlySaves:
+    case Wire::TestingSwitch::AssumeSpillSlotsDead:
+    case Wire::TestingSwitch::ForceWalkMode:
+    case Wire::TestingSwitch::AbortLoopVisits:
+    case Wire::TestingSwitch::IgnoreDormantMemberUpdates:
+    case Wire::TestingSwitch::TreatMemberCalleesAsUnknown:
+    case Wire::TestingSwitch::DisableFamilyReadShortcut:
+    case Wire::TestingSwitch::IgnoreEscapeAfterUnknownCall:
+    case Wire::TestingSwitch::TreatLiteralFieldsAsDefined:
+    case Wire::TestingSwitch::OverstateTypedArrayLength:
+    case Wire::TestingSwitch::CheckDictionaryReadProofs:
         return true;
     }
     RELEASE_ASSERT_NOT_REACHED();
@@ -166,23 +204,23 @@ static bool engineHonorsTestingSwitch(Wire::TestingSwitch testingSwitch)
 static bool drawsBySeed(Wire::TestingSwitch testingSwitch)
 {
     return testingSwitch == Wire::TestingSwitch::ShuffleBlockFrequencies || testingSwitch == Wire::TestingSwitch::ShuffleExpectedTypes
-        || testingSwitch == Wire::TestingSwitch::GiveLinkMore || testingSwitch == Wire::TestingSwitch::ShuffleChoices;
+        || testingSwitch == Wire::TestingSwitch::WidenFlowNodes || testingSwitch == Wire::TestingSwitch::ShuffleChoices;
 }
 
-static std::optional<String> takeSeedOfShuffles(Wire::CompileOptions& options, StringView written)
+static std::optional<String> parseShuffleSeed(Wire::CompileOptions& options, StringView written)
 {
     auto seed = parseNumber<uint32_t>(written);
     if (!seed)
         return notANumberSentence(written);
     if (!*seed)
-        return String("a seed is at least 1"_s);
-    if (options.seedOfShuffles && options.seedOfShuffles != *seed)
-        return String("one build draws by one seed"_s);
-    options.seedOfShuffles = *seed;
+        return String("a seed must be at least 1"_s);
+    if (options.shuffleSeed && options.shuffleSeed != *seed)
+        return String("a build takes only one seed"_s);
+    options.shuffleSeed = *seed;
     return std::nullopt;
 }
 
-static std::optional<String> takePeriodOfGuessesThatFail(Wire::CompileOptions& options, StringView written)
+static std::optional<String> parseSpeculationFailurePeriod(Wire::CompileOptions& options, StringView written)
 {
     auto [period, seed] = splitOptionText(written, ':');
     auto turns = parseNumber<uint32_t>(period);
@@ -190,11 +228,11 @@ static std::optional<String> takePeriodOfGuessesThatFail(Wire::CompileOptions& o
         return notANumberSentence(period);
     if (!*turns)
         return String("a guess fails one time in n, and n is at least 1"_s);
-    options.periodOfGuessesThatFail = *turns;
-    return seed ? takeSeedOfShuffles(options, *seed) : std::nullopt;
+    options.speculationFailurePeriod = *turns;
+    return seed ? parseShuffleSeed(options, *seed) : std::nullopt;
 }
 
-static std::optional<uint32_t> parseRowThatSaysLess(StringView written)
+static std::optional<uint32_t> parseUnderstatedEffects(StringView written)
 {
     auto [kind, rest] = splitOptionText(written, '/');
     if (!rest)
@@ -202,7 +240,7 @@ static std::optional<uint32_t> parseRowThatSaysLess(StringView written)
     auto [row, part] = splitOptionText(*rest, '/');
     if (!part)
         return std::nullopt;
-    Typed::RowThatSaysLess found;
+    Typed::UnderstatedEffects found;
     if (matchesName(*part, "RunsOtherCode"_s))
         found.part = Typed::PartOfEffects::RunsOtherCode;
     else if (matchesName(*part, "Collects"_s))
@@ -211,8 +249,24 @@ static std::optional<uint32_t> parseRowThatSaysLess(StringView written)
         found.part = Typed::PartOfEffects::Throws;
     else if (matchesName(*part, "ThrowsByRule"_s))
         found.part = Typed::PartOfEffects::ThrowsByRule;
+    else if (matchesName(*part, "RangeOfResult"_s))
+        found.part = Typed::PartOfEffects::RangeOfResult;
+    else if (matchesName(*part, "KindOfResult"_s))
+        found.part = Typed::PartOfEffects::KindOfResult;
+    else if (matchesName(*part, "ContentsOfResult"_s))
+        found.part = Typed::PartOfEffects::ContentsOfResult;
+    else if (matchesName(*part, "FreshnessOfResult"_s))
+        found.part = Typed::PartOfEffects::FreshnessOfResult;
+    else if (matchesName(*part, "TestsOfGuard"_s))
+        found.part = Typed::PartOfEffects::TestsOfGuard;
     else if (matchesName(*part, "ShapesKnown"_s))
         found.part = Typed::PartOfEffects::ShapesKnown;
+    else if (matchesName(*part, "ShapesOfField"_s))
+        found.part = Typed::PartOfEffects::ShapesOfField;
+    else if (matchesName(*part, "MiddleShapesOfField"_s))
+        found.part = Typed::PartOfEffects::MiddleShapesOfField;
+    else if (matchesName(*part, "WhatIsSeen"_s))
+        found.part = Typed::PartOfEffects::WritesObservableState;
     else if (auto heap = findMember<Typed::AbstractHeap>(*part)) {
         found.part = Typed::PartOfEffects::Writes;
         found.heap = *heap;
@@ -258,34 +312,102 @@ static std::optional<uint32_t> parseRowThatSaysLess(StringView written)
             return std::nullopt;
         found.kind = Typed::KindOfEffectsRow::Builtin;
         found.row = static_cast<uint16_t>(builtin);
-    } else
+    } else if (matchesName(kind, "RestartMark"_s) && row == "all"_s)
+        found.kind = Typed::KindOfEffectsRow::RestartMark;
+    else if (matchesName(kind, "RowOfLoop"_s) && row == "all"_s)
+        found.kind = Typed::KindOfEffectsRow::RowOfLoop;
+    else
+        return std::nullopt;
+    bool describesResult = found.part == Typed::PartOfEffects::RangeOfResult || found.part == Typed::PartOfEffects::KindOfResult || found.part == Typed::PartOfEffects::ContentsOfResult || found.part == Typed::PartOfEffects::FreshnessOfResult;
+    bool describesOperationRule = found.part == Typed::PartOfEffects::KindOfResult && found.kind == Typed::KindOfEffectsRow::Operation;
+    if (describesResult && found.kind != Typed::KindOfEffectsRow::Builtin && !describesOperationRule)
+        return std::nullopt;
+    if (found.part == Typed::PartOfEffects::TestsOfGuard && found.kind != Typed::KindOfEffectsRow::Callee)
         return std::nullopt;
     return found.encode();
+}
+
+static std::optional<String> parseForcedWalkMode(Wire::CompileOptions& options, StringView written)
+{
+    auto [way, numbers] = splitOptionText(written, ':');
+    options.forcedWalkMode = way == "NothingCarried"_s ? 1 : way == "Closed"_s ? 2 : 0;
+    if (!options.forcedWalkMode)
+        return String("ForceWalkMode takes NothingCarried or Closed, then :<n>:<seed> for one unit in n"_s);
+    auto [period, seed] = splitOptionText(numbers.value_or("1"_s), ':');
+    auto units = parseNumber<uint32_t>(period);
+    if (!units)
+        return notANumberSentence(period);
+    if (!*units)
+        return String("the walk mode is forced on one unit in n, and n must be at least 1"_s);
+    options.forcedWalkModePeriod = *units;
+    return seed ? parseShuffleSeed(options, *seed) : std::nullopt;
+}
+
+static std::optional<String> takeHearingsThatCutWalks(Wire::CompileOptions& options, StringView written)
+{
+    auto [period, phase] = splitOptionText(written, ':');
+    auto hearings = parseNumber<uint32_t>(period);
+    if (!hearings)
+        return notANumberSentence(period);
+    auto first = parseNumber<uint32_t>(phase.value_or("0"_s));
+    if (!first)
+        return notANumberSentence(*phase);
+    if (*first >= *hearings)
+        return String("AbortLoopVisits takes <n>:<k>: the k-th of every n operations aborts the visit, and k must be less than n"_s);
+    options.loopVisitAbortPeriod = *hearings;
+    options.loopVisitAbortPhase = *first;
+    return std::nullopt;
 }
 
 static std::optional<String> applyTesting(Wire::CompileOptions& options, const OptionWord& word, StringView value)
 {
     return forEachListedName(word.key, value, [&](StringView written) -> std::optional<String> {
         auto [name, numbers] = splitOptionText(written, ':');
+        if (auto injectedFault = findMember<Wire::FaultInjection>(name)) {
+            if (*injectedFault == Wire::FaultInjection::MisstateFact) {
+                auto [fact, seed] = splitOptionText(numbers.value_or(""_s), ':');
+                auto number = Typed::numberOfMisstatedFact(fact);
+                if (!number)
+                    return makeString(name, " takes <fact> or <fact>:<seed>"_s);
+                options.misstatedFact = *number;
+                if (auto sentence = seed ? parseShuffleSeed(options, *seed) : std::nullopt)
+                    return sentence;
+                numbers = std::nullopt;
+            }
+            if (numbers)
+                return makeString(name, " takes no number"_s);
+            addFlag(options.injectedFaults, *injectedFault);
+            return std::nullopt;
+        }
         auto testingSwitch = findMember<Wire::TestingSwitch>(name);
         if (!testingSwitch || !engineHonorsTestingSwitch(*testingSwitch))
             return unknownNameSentence(word.noun, name);
-        if (*testingSwitch == Wire::TestingSwitch::RowSaysLess) {
-            std::optional<uint32_t> row = numbers ? parseRowThatSaysLess(*numbers) : std::nullopt;
+        if (*testingSwitch == Wire::TestingSwitch::UnderstateEffects) {
+            std::optional<uint32_t> row = numbers ? parseUnderstatedEffects(*numbers) : std::nullopt;
             if (!row)
                 return makeString(name, " takes <kind>/<row>/<part>"_s);
-            options.rowThatSaysLess = *row;
+            options.understatedEffects = *row;
             numbers = std::nullopt;
         }
         if (drawsBySeed(*testingSwitch)) {
             if (!numbers)
                 return makeString(name, " takes a seed"_s);
-            if (auto sentence = takeSeedOfShuffles(options, *numbers))
+            if (auto sentence = parseShuffleSeed(options, *numbers))
                 return sentence;
             numbers = std::nullopt;
         }
-        if (*testingSwitch == Wire::TestingSwitch::FailGuesses) {
-            if (auto sentence = takePeriodOfGuessesThatFail(options, numbers.value_or("1"_s)))
+        if (*testingSwitch == Wire::TestingSwitch::FailSpeculations) {
+            if (auto sentence = parseSpeculationFailurePeriod(options, numbers.value_or("1"_s)))
+                return sentence;
+            numbers = std::nullopt;
+        }
+        if (*testingSwitch == Wire::TestingSwitch::ForceWalkMode) {
+            if (auto sentence = parseForcedWalkMode(options, numbers.value_or(""_s)))
+                return sentence;
+            numbers = std::nullopt;
+        }
+        if (*testingSwitch == Wire::TestingSwitch::AbortLoopVisits) {
+            if (auto sentence = takeHearingsThatCutWalks(options, numbers.value_or("1"_s)))
                 return sentence;
             numbers = std::nullopt;
         }
@@ -302,23 +424,26 @@ static void listTestingSwitches(PrintStream& out)
         if (engineHonorsTestingSwitch(testingSwitch))
             listValue(out, nameOf(testingSwitch));
     }
+    for (Wire::FaultInjection injectedFault : allMembersOf<Wire::FaultInjection>)
+        listValue(out, nameOf(injectedFault));
+    Typed::listMisstatedFacts(out);
 }
 
 static bool engineHonorsCheck(Wire::CheckSet check)
 {
     switch (check) {
     case Wire::CheckSet::Validate:
-    case Wire::CheckSet::ValidateReferences:
     case Wire::CheckSet::VerifyEachStage:
-    case Wire::CheckSet::ValidateReferenceGuards:
     case Wire::CheckSet::FlowFixpoint:
-    case Wire::CheckSet::LastWalksOfLoopsAlone:
-    case Wire::CheckSet::WalksOfLoopsThatFitAgain:
-    case Wire::CheckSet::FlowFindsNoLessFromMore:
+    case Wire::CheckSet::ReplayFinalLoopVisits:
+    case Wire::CheckSet::RepeatFittingLoopVisits:
+    case Wire::CheckSet::FlowMonotonicity:
         return true;
     case Wire::CheckSet::KeepGoing:
     case Wire::CheckSet::VerifyEachPass:
     case Wire::CheckSet::ValidateBackEnd:
+    case Wire::CheckSet::ValidateReferences:
+    case Wire::CheckSet::ValidateReferenceGuards:
     case Wire::CheckSet::UsedValuesAreListed:
     case Wire::CheckSet::ClaimsToBackEnd:
     case Wire::CheckSet::MovedLoads:

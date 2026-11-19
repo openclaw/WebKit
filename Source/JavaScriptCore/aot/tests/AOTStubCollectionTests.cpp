@@ -12,6 +12,7 @@
 #include "AOTSlotRepresentation.h"
 #include "AOTStubLeafConvention.h"
 #include "AOTStubRunner.h"
+#include "AOTStubsBoxedCalls.h"
 #include "AOTStubsCollections.h"
 #include "AOTVector.h"
 #include "CompleteSubspace.h"
@@ -28,6 +29,7 @@
 #include <bit>
 #include <optional>
 #include <span>
+#include <wtf/DataLog.h>
 #include <wtf/Noncopyable.h>
 #include <wtf/text/MakeString.h>
 #include <wtf/text/WTFString.h>
@@ -40,7 +42,7 @@ using Width = CompactTable::Width;
 using SlotKind = CompactTable::SlotKind;
 
 static uint64_t bitsOf(JSValue value) { return static_cast<uint64_t>(JSValue::encode(value)); }
-static unsigned hashOfBits(uint64_t bits) { return rapidHashMix64(bits); }
+static unsigned hashOfBits(uint64_t bits) { return CompactTable::hashOfKeyBits(bits); }
 
 namespace {
 
@@ -59,31 +61,12 @@ class FakeHeap {
     WTF_MAKE_NONCOPYABLE(FakeHeap);
 public:
     FakeHeap()
+        : m_memory(usableBytes)
     {
-        constexpr uintptr_t firstOffsetInCage = static_cast<uintptr_t>(minCell32) << cell32Shift;
-        m_memory.grow(2 * usableBytes + firstOffsetInCage + MarkedBlock::atomSize);
-        uintptr_t start = WTF::roundUpToMultipleOf<MarkedBlock::atomSize>(std::bit_cast<uintptr_t>(m_memory.mutableSpan().data()));
-        uintptr_t offsetInCage = start - MarkedBlockCage::baseOf(std::bit_cast<void*>(start));
-        if (offsetInCage < firstOffsetInCage)
-            start += firstOffsetInCage - offsetInCage;
-        else if (offsetInCage + usableBytes > MarkedBlockCage::maxSize)
-            start += MarkedBlockCage::maxSize - offsetInCage + firstOffsetInCage;
-        m_next = start;
-        m_end = start + usableBytes;
-        AOT_TEST_CHECK(m_end <= std::bit_cast<uintptr_t>(m_memory.mutableSpan().data()) + m_memory.size());
-        AOT_TEST_CHECK(MarkedBlockCage::baseOf(std::bit_cast<void*>(m_next)) == MarkedBlockCage::baseOf(std::bit_cast<void*>(m_end - 1)));
     }
 
-    uintptr_t cageBase() const { return MarkedBlockCage::baseOf(std::bit_cast<void*>(m_next)); }
-
-    uint8_t* allocate(size_t size)
-    {
-        uintptr_t result = m_next;
-        m_next += WTF::roundUpToMultipleOf<MarkedBlock::atomSize>(size);
-        AOT_TEST_CHECK(m_next <= m_end);
-        zeroSpan(std::span(std::bit_cast<uint8_t*>(result), size));
-        return std::bit_cast<uint8_t*>(result);
-    }
+    uintptr_t cageBase() const { return m_memory.cageBase(); }
+    uint8_t* allocate(size_t size) { return m_memory.allocate(size); }
 
     uint64_t createCell(JSType type, uint64_t payload = 0)
     {
@@ -112,10 +95,8 @@ public:
 private:
     static constexpr size_t usableBytes = MB;
 
-    Vector<uint8_t> m_memory;
+    CageMemory m_memory;
     Vector<String> m_texts;
-    uintptr_t m_next { 0 };
-    uintptr_t m_end { 0 };
 };
 
 class FakeTable {
@@ -256,6 +237,12 @@ struct TableSize {
 
 struct Collections {
     Collections()
+        : Collections(StubOptions { .targetFeatures = CPUFeatureSet::buildTarget() })
+    {
+    }
+
+    explicit Collections(const StubOptions& options)
+        : runner(options)
     {
         runner.instance().cellCageBase = heap.cageBase();
         runner.instance().allocation.cellSpace = m_cellSpace.bytes.data();
@@ -482,7 +469,10 @@ static Vector<uint64_t> createKeysComparedByBits(FakeHeap& heap, unsigned number
             keys.append(heap.createCell(SymbolType));
             break;
         case 2:
-            keys.append(hasNumbers ? bitsOf(jsNumber(static_cast<int32_t>(keys.size()) - 50)) : heap.createCell(JSFunctionType));
+            if (hasNumbers)
+                keys.append(keys.size() & 1 ? bitsOf(jsNumber(static_cast<int32_t>(keys.size()) - 50)) : bitsOf(jsNumber(keys.size() - 49.5)));
+            else
+                keys.append(heap.createCell(JSFunctionType));
             break;
         }
     }
@@ -502,7 +492,7 @@ static void checkKeysComparedByBits(Collections& collections, const TableSize& s
     }
     uint64_t map = collections.createOwner(JSMapType, mapTable.address());
     uint64_t set = collections.createOwner(JSSetType, setTable.address());
-    const uint64_t absentKeys[] = { heap.createCell(FinalObjectType), heap.createCell(SymbolType), bitsOf(jsBoolean(false)), bitsOf(jsNumber(123456)) };
+    const uint64_t absentKeys[] = { heap.createCell(FinalObjectType), heap.createCell(SymbolType), bitsOf(jsBoolean(false)), bitsOf(jsNumber(123456)), bitsOf(jsNumber(0.25)), bitsOf(jsNumber(1e300)) };
 
     for (KeyComparison comparison : comparisonsOfBits) {
         for (size_t i = 0; i < keys.size(); ++i) {
@@ -530,12 +520,18 @@ static void testKeysComparedByBits()
     }
 }
 
+static constexpr std::array numbersLeftToOperations { 3.0, -2147483648.0, -0.0, std::numeric_limits<double>::quiet_NaN() };
+static uint64_t bitsOfDouble(double number) { return bitsOf(JSValue(JSValue::EncodeAsDouble, number)); }
+
 static void testKeysLeftToOperations()
 {
     Collections collections;
     FakeTable table(collections.heap, 4, Width::Narrow, Width::Wide);
     uint64_t map = collections.createOwner(JSMapType, table.address());
-    for (uint64_t key : { bitsOf(jsNumber(0.5)), bitsOf(jsNaN()), collections.heap.createCell(HeapBigIntType) }) {
+    Vector<uint64_t> keys { collections.heap.createCell(HeapBigIntType) };
+    for (double number : numbersLeftToOperations)
+        keys.append(bitsOfDouble(number));
+    for (uint64_t key : keys) {
         checkLeftToOperation(collections, mapGet(KeyComparison::AnyValue), Entry::operationAOTMapGet, map, key);
         checkLeftToOperation(collections, mapHas(KeyComparison::AnyValue), Entry::operationAOTMapHas, map, key);
     }
@@ -814,29 +810,33 @@ static uint64_t& storageOf(uint64_t owner)
     return *std::bit_cast<uint64_t*>(static_cast<uintptr_t>(owner) + JSMap::offsetOfStorage());
 }
 
-static void checkCreatedTable(Collections& collections, KeyComparison comparison, const TableEntry& entry, Width keyWidth, Width valueWidth)
+static uint32_t& reservedCapacityOf(uint64_t owner) { return *std::bit_cast<uint32_t*>(static_cast<uintptr_t>(owner) + JSMap::offsetOfDeletedPrefix()); }
+
+static void checkCreatedTable(Collections& collections, KeyComparison comparison, const TableEntry& entry, Width keyWidth, Width valueWidth, uint32_t reservedCapacity)
 {
     FakeHeap& heap = collections.heap;
     bool hasValues = entry.value.has_value();
-    size_t size = CompactTable::initialSize(keyWidth, valueWidth);
+    uint32_t capacity = reservedCapacity > CompactTable::initialCapacity ? CompactTable::maxCapacityWithTags : CompactTable::initialCapacity;
+    size_t size = CompactTable::initialSize(keyWidth, valueWidth, capacity);
     uint8_t* room = heap.allocate(size);
     memsetSpan(std::span(room, size), 0xab);
     FakeAllocator allocator(size);
     allocator.makeRoomAt(std::bit_cast<uintptr_t>(room), size);
     collections.setAllocator(size, &allocator);
     uint64_t owner = collections.createOwner(hasValues ? JSMapType : JSSetType, 0);
+    reservedCapacityOf(owner) = reservedCapacity;
 
     StubRun run = runInsertion(collections, insertionStub(comparison, hasValues), owner, entry.key, entry.value);
     collections.setAllocator(size, nullptr);
     AOT_TEST_CHECK(!run.calledOperation && run.result == owner && !allocator.hasRoom());
-    AOT_TEST_CHECK(storageOf(owner) == std::bit_cast<uintptr_t>(room));
+    AOT_TEST_CHECK(storageOf(owner) == std::bit_cast<uintptr_t>(room) && !reservedCapacityOf(owner));
 
-    FakeTable table(heap, CompactTable::initialCapacity, keyWidth, valueWidth, room);
-    AOT_TEST_CHECK(table.header() == Collections::headerOfCreatedTables && table.capacityAndKinds() == CompactTable::initialCapacityAndKinds(keyWidth, valueWidth));
+    FakeTable table(heap, capacity, keyWidth, valueWidth, room);
+    AOT_TEST_CHECK(table.header() == Collections::headerOfCreatedTables && table.capacityAndKinds() == CompactTable::initialCapacityAndKinds(keyWidth, valueWidth, capacity));
     AOT_TEST_CHECK(table.used() == 1 && table.alive() == 1 && table.find(entry.key, entry.hash) == 0u);
     AOT_TEST_CHECK(table.keyAt(0) == entry.key && (!hasValues || table.valueAt(0) == *entry.value));
     AOT_TEST_CHECK(*reinterpret_cast<uint64_t*>(room + CompactTable::offsetOfIndex()) == entry.hash >> CompactTable::tagShiftOfTags);
-    for (uint32_t unused = 1; unused < CompactTable::initialCapacity; ++unused)
+    for (uint32_t unused = 1; unused < capacity; ++unused)
         AOT_TEST_CHECK(!table.keyAt(unused) && (!hasValues || !table.valueAt(unused)));
 
     if (hasValues)
@@ -844,6 +844,12 @@ static void checkCreatedTable(Collections& collections, KeyComparison comparison
     else
         checkAnswer(collections, setHas(comparison), owner, entry.key, bitsOf(jsBoolean(true)));
     checkAppendedEntry(collections, KeyComparison::Bits, owner, table, createEntryComparedByBits(bitsOf(jsBoolean(true)), hasValues ? std::optional(bitsOf(jsNull())) : std::nullopt));
+}
+
+static void checkCreatedTable(Collections& collections, KeyComparison comparison, const TableEntry& entry, Width keyWidth, Width valueWidth)
+{
+    for (uint32_t reservedCapacity : { 0u, CompactTable::initialCapacity - 1, CompactTable::initialCapacity + 1, CompactTable::maxCapacityWithTags })
+        checkCreatedTable(collections, comparison, entry, keyWidth, valueWidth, reservedCapacity);
 }
 
 static void testCreatedTables()
@@ -890,6 +896,9 @@ static void testTablesNotCreatedByStubs()
     uint64_t map = collections.createOwner(JSMapType, 0);
     for (uint64_t key : { heap.createRope(), bitsOf(jsNumber(0.5)), heap.createCell(HeapBigIntType) })
         checkInsertionLeftToOperation(collections, KeyComparison::AnyValue, map, { key, 0, object });
+    reservedCapacityOf(map) = CompactTable::maxCapacityWithTags + 1;
+    checkInsertionLeftToOperation(collections, KeyComparison::Bits, map, createEntryComparedByBits(object, object));
+    AOT_TEST_CHECK(reservedCapacityOf(map) == CompactTable::maxCapacityWithTags + 1);
     AOT_TEST_CHECK(!storageOf(map) && allocator.hasRoom());
 }
 
@@ -1195,8 +1204,10 @@ static void testDeletionsLeftToOperations()
         checkLeftToOperation(collections, mapDelete(comparison), Entry::operationAOTMapDelete, map, heap.createRope());
         checkLeftToOperation(collections, setDelete(comparison), Entry::operationAOTSetDelete, set, heap.createRope());
     }
-    for (uint64_t key : { bitsOf(jsNumber(0.5)), heap.createCell(HeapBigIntType) })
-        checkLeftToOperation(collections, mapDelete(KeyComparison::AnyValue), Entry::operationAOTMapDelete, map, key);
+    checkLeftToOperation(collections, mapDelete(KeyComparison::AnyValue), Entry::operationAOTMapDelete, map, heap.createCell(HeapBigIntType));
+    for (double number : numbersLeftToOperations)
+        checkLeftToOperation(collections, mapDelete(KeyComparison::AnyValue), Entry::operationAOTMapDelete, map, bitsOfDouble(number));
+    checkAnswer(collections, mapDelete(KeyComparison::AnyValue), map, bitsOf(jsNumber(0.5)), bitsOf(jsBoolean(false)));
     AOT_TEST_CHECK(table.copyOfBytes() == bytesBefore);
 
     uint64_t mapWithoutStorage = collections.createOwner(JSMapType, 0);
@@ -1205,9 +1216,74 @@ static void testDeletionsLeftToOperations()
     checkAnswer(collections, mapDelete(KeyComparison::Bits), mapWithoutStorage, heap.createCell(FinalObjectType), bitsOf(jsBoolean(false)));
 }
 
+template<uint32_t budget>
+static void testInstructionsInFrontOfMethodOfTableAtSite()
+{
+#if AOT_STUB_RUNNER_COUNTS_INSTRUCTIONS && CPU(X86_64) && !ASSERT_ENABLED
+    Collections collections(StubOptions { .hasOneInstance = true, .targetFeatures = CPUFeatureSet::buildTarget() });
+    collections.runner.setCountsInstructions(true);
+    std::array<uint16_t, 1> nameOfSite { 0 };
+    collections.runner.instance().image.namesOfSitesByDistance = reinterpret_cast<const uint8_t*>(nameOfSite.data());
+    FakeTable table(collections.heap, 4, Width::Narrow, Width::Wide);
+    Vector<StringKey> keys = appendStringKeys(collections, table, 3, false);
+    uint64_t map = collections.createOwner(JSMapType, table.address());
+    std::bit_cast<FakeCell*>(static_cast<uintptr_t>(map))->flags = static_cast<uint8_t>(JSMap::StructureFlags | IsPristine);
+    StubRun alone = collections.runner.run(mapGet(KeyComparison::AnyValue), { map, keys[0].cell });
+    StubRun throughDoor = collections.runner.runCall(callMethodOfBuiltinClassAtSite(BoxedCallForm::MapGet, 1), 0, map, { keys[0].cell }, 0);
+    AOT_TEST_CHECK(!alone.calledOperation && alone.result == keys[0].value && alone.instructionsInStubs);
+    AOT_TEST_CHECK(!throughDoor.calledOperation && throughDoor.result == keys[0].value && throughDoor.instructionsInStubs);
+    uint32_t inFront = *throughDoor.instructionsInStubs - *alone.instructionsInStubs;
+    if (inFront != budget)
+        dataLogLn("in front of the get of a map called at a site: ", inFront, " instructions, the budget is ", budget);
+    AOT_TEST_CHECK(inFront <= budget);
+#endif
+}
+
+template<uint32_t budget>
+static void testMethodOfNextClassAtSite()
+{
+    Collections collections(StubOptions { .hasOneInstance = true, .targetFeatures = CPUFeatureSet::buildTarget() });
+    std::array<uint16_t, 1> nameOfSite { 0 };
+    collections.runner.instance().image.namesOfSitesByDistance = reinterpret_cast<const uint8_t*>(nameOfSite.data());
+    FakeTable table(collections.heap, 4, Width::Narrow, Width::Wide);
+    Vector<StringKey> keys = appendStringKeys(collections, table, 3, false);
+    auto createAsMade = [&](JSType type, unsigned structureFlags, uint64_t storage) {
+        uint64_t owner = collections.createOwner(type, storage);
+        std::bit_cast<FakeCell*>(static_cast<uintptr_t>(owner))->flags = static_cast<uint8_t>(structureFlags | IsPristine);
+        return owner;
+    };
+    uint64_t set = createAsMade(JSSetType, JSSet::StructureFlags, table.address());
+    uint64_t map = createAsMade(JSMapType, JSMap::StructureFlags, table.address());
+    uint64_t emptySet = createAsMade(JSSetType, JSSet::StructureFlags, 0);
+    for (BoxedCallForm door : { BoxedCallForm::MapHas, BoxedCallForm::SetHas }) {
+        for (uint64_t owner : { set, map, emptySet }) {
+            if (door == BoxedCallForm::SetHas && owner == map)
+                continue;
+            for (const StringKey& key : keys) {
+                StubRun run = collections.runner.runCall(callMethodOfBuiltinClassAtSite(door, 1), 0, owner, { key.cell }, 0);
+                AOT_TEST_CHECK(!run.calledOperation && run.result == bitsOf(jsBoolean(owner != emptySet)));
+            }
+        }
+    }
+    StubRun got = collections.runner.runCall(callMethodOfBuiltinClassAtSite(BoxedCallForm::MapGet, 1), 0, map, { keys[1].cell }, 0);
+    AOT_TEST_CHECK(!got.calledOperation && got.result == keys[1].value);
+#if AOT_STUB_RUNNER_COUNTS_INSTRUCTIONS && CPU(X86_64) && !ASSERT_ENABLED
+    collections.runner.setCountsInstructions(true);
+    StubRun alone = collections.runner.run(setHas(KeyComparison::AnyValue), { set, keys[0].cell });
+    StubRun throughDoor = collections.runner.runCall(callMethodOfBuiltinClassAtSite(BoxedCallForm::MapHas, 1), 0, set, { keys[0].cell }, 0);
+    AOT_TEST_CHECK(alone.instructionsInStubs && throughDoor.instructionsInStubs);
+    uint32_t inFront = *throughDoor.instructionsInStubs - *alone.instructionsInStubs;
+    if (inFront != budget)
+        dataLogLn("in front of the has of a set called at a site: ", inFront, " instructions, the budget is ", budget);
+    AOT_TEST_CHECK(inFront <= budget);
+#endif
+}
+
 std::span<const NativeTest> stubCollectionTests()
 {
     static constexpr NativeTest tests[] = {
+        { "stubs/collections/the-has-of-a-set-called-at-a-site-through-the-door-of-maps"_s, ImageTests::whenExecutable<testMethodOfNextClassAtSite<8>> },
+        { "stubs/collections/instructions-in-front-of-the-get-of-a-map-called-at-a-site"_s, ImageTests::whenExecutable<testInstructionsInFrontOfMethodOfTableAtSite<6>> },
         { "stubs/collections/string-keys"_s, ImageTests::whenExecutable<testStringKeys> },
         { "stubs/collections/strings-beside-other-keys"_s, ImageTests::whenExecutable<testStringsBesideOtherKeys> },
         { "stubs/collections/keys-compared-by-bits"_s, ImageTests::whenExecutable<testKeysComparedByBits> },

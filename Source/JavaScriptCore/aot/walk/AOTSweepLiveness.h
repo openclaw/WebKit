@@ -20,6 +20,8 @@ inline constexpr uint8_t sweptBlockNeedsNoHandler = 1 << 2;
 inline constexpr uint8_t sweptBlockHandsOverArguments = 1 << 3;
 inline constexpr uint8_t sweptHandlerWasLookedAt = 1 << 4;
 inline constexpr uint8_t sweptHandlerOnlyThrowsOutOfUnit = 1 << 5;
+inline constexpr uint8_t sweptBlockDoesNothing = 1 << 6;
+inline constexpr uint8_t sweptBranchDecidesNothing = 1 << 7;
 
 inline EdgeID handlerOfSweptBlock(const Block& block, uint8_t state)
 {
@@ -29,19 +31,9 @@ inline EdgeID handlerOfSweptBlock(const Block& block, uint8_t state)
 inline bool isSweptEdgeTaken(const Code& code, const uint8_t* statesOfBlocks, EdgeID id, const Edge& edge)
 {
     uint8_t state = statesOfBlocks[edge.from.index()];
-    if (!(state & sweptBlockIsReached))
+    if (!(state & sweptBlockIsReached) || edge.isOpen())
         return false;
     return !(state & sweptBlockHasGivenUpHandler) || code.at(edge.from).handler != id;
-}
-
-ALWAYS_INLINE void forEachSweptBlockThatLeadsTo(const Code& code, const uint8_t* statesOfBlocks, BlockID block, NOESCAPE const Invocable<void(BlockID)> auto& functor)
-{
-    for (EdgeID id = code.at(block).firstEdgeIn(); id;) {
-        const Edge& edge = code.at(id);
-        if (isSweptEdgeTaken(code, statesOfBlocks, id, edge))
-            functor(edge.from);
-        id = edge.nextInto();
-    }
 }
 
 class SweepFlow {
@@ -280,25 +272,6 @@ inline void SweepFlow::findLoops(const Code& code, std::span<const uint32_t> fir
     }
 }
 
-struct PlaceWhereSweptValueIsLetGo {
-    ValueID value;
-    BlockID block;
-    bool isBehindCopiedBody { false };
-    BlockID blockOfValueNamedByHint { };
-};
-
-struct WayOfSweptValueLetGo {
-    ValueID value;
-    ValueID lastReader;
-    bool isRead { false };
-    bool isLiveAtHead { false };
-    bool isLiveAtEnd { false };
-    bool isLetGoAtHead { false };
-    bool isLetGoAtEnd { false };
-    bool isEnteredFromReader { false };
-    bool isSuspendedAtHead { false };
-};
-
 struct SweepLivenessStorage {
     struct ReadOfValue {
         ValueID value;
@@ -331,13 +304,6 @@ struct SweepLivenessStorage {
     Vector<PointAskedAbout> hints;
     Vector<PointAskedAbout> suspensions;
     SweepBits valuesToFollow;
-    Vector<PlaceWhereSweptValueIsLetGo> placesLetGo;
-    Vector<ValueID> hintsBehindLastUses;
-    Vector<ValueID> joinsLetGo;
-    Vector<WayOfSweptValueLetGo> waysOfValueLetGo;
-    Vector<ValueID> valuesLiveAtHeads;
-    Vector<ValueID> valuesLiveAtEnds;
-    Vector<BlockID> blocksToLookAbove;
 };
 
 } } } // namespace JSC::AOT::Typed

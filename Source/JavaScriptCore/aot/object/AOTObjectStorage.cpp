@@ -9,19 +9,27 @@
 #if ENABLE(AOT)
 
 #include "AOTCompileOptions.h"
+#include "AOTCompiledFrame.h"
 #include "AOTErrorMessages.h"
 #include "AOTHeapCacheRegistry.h"
+#include "AOTInliningAcrossFiles.h"
 #include "AOTInstance.h"
+#include "AOTModuleHost.h"
 #include "AOTObjectInternal.h"
 #include "AOTObjectModel.h"
 #include "AOTPendingStars.h"
 #include "AOTProgramIdentifiers.h"
+#include "AOTProgramStatics.h"
+#include "AOTRuntimeCheckFailure.h"
 #include "AOTState.h"
+#include "BuiltinExecutables.h"
 #include "BuiltinNames.h"
+#include "CodeBlock.h"
 #include "GetterSetter.h"
 #include "HeapAnalyzer.h"
 #include "HeapCellInlines.h"
 #include "JSCInlines.h"
+#include "StackVisitor.h"
 #include <bit>
 #include <wtf/DataLog.h>
 
@@ -44,8 +52,7 @@ Object* Object::create(VM& vm, Structure* structure, const LayoutData& layout, s
     zeroSpan(std::span { reinterpret_cast<uint8_t*>(object) + sizeof(JSCell), size - sizeof(JSCell) });
     bool isBornUnfinished = false;
     for (const FieldData& field : layout.fields()) {
-        SlotTraits traits = traitsOf(field.slot.representation());
-        if (!field.isOutOfLine() && traits.hasAbsent && traits.absentBits)
+        if (!field.isOutOfLine() && bitsBeforeCreation(field.slot.representation()))
             object->clear(field);
         isBornUnfinished |= field.isFilledAtBirth;
     }
@@ -83,7 +90,12 @@ void* Object::slotOf(const FieldData& field) const
 bool Object::isInSlot(const FieldData& field) const
 {
     const void* slot = slotOf(field);
-    return slot && !slotHoldsAbsent(field.slot.representation(), slot);
+    SlotRepresentation representation = field.slot.representation();
+    if (!slot || slotHoldsAbsent(representation, slot))
+        return false;
+    if (isListedOnlyByKeyOrder(representation) && readSlotBits(representation, slot) == bitsBeforeCreation(representation)) [[unlikely]]
+        return isInKeyOrder(state(), field);
+    return true;
 }
 
 bool Object::holdsEveryFieldHeldFilled() const
@@ -102,6 +114,8 @@ JSValue Object::read(const FieldData& field) const
         return isInSlot(field) ? const_cast<Object*>(this)->materializeDeferredClosure(vm(), field) : JSValue();
     const void* slot = slotOf(field);
     State& state = this->state();
+    if (isListedOnlyByKeyOrder(representation) && !isInSlot(field)) [[unlikely]]
+        return { };
     JSValue value = slot ? readSlot(representation, slot, state.instance) : JSValue();
     if (!value && field.flags & fieldMayExistWithoutStorage && isInKeyOrder(state, field) && !livesInExtraProperties(*state.instance.vm, *this, field))
         return jsUndefined();
@@ -124,7 +138,7 @@ bool Object::store(VM& vm, const FieldData& field, AcceptedValue accepted)
     return store(vm, field, accepted.value());
 }
 
-ALWAYS_INLINE void Object::willStoreMarker(const FieldData& field)
+ALWAYS_INLINE_INTO_OTHER_FILES void Object::willStoreMarker(const FieldData& field)
 {
     if (field.holdsRawValueFromBirth)
         setBearsMark(true);
@@ -210,7 +224,8 @@ template<typename Visitor>
 void Object::visitChildrenImpl(JSCell* cell, Visitor& visitor)
 {
     JSCell::visitChildren(cell, visitor);
-    visitFields(uncheckedDowncast<Object>(cell), visitor);
+    auto* object = uncheckedDowncast<Object>(cell);
+    visitFields(object, object->compiledStructure(), visitor);
 }
 
 DEFINE_VISIT_CHILDREN(Object);
@@ -237,7 +252,7 @@ void Object::analyzeHeap(JSCell* cell, HeapAnalyzer& analyzer)
         if (UniquedStringImpl* name = identifiers.tryGetIdentifierConcurrently(field.name))
             analyzer.analyzePropertyNameEdge(object, target, name);
     }
-    JSObject* extraProperties = object->extraProperties();
+    JSObject* extraProperties = extraPropertiesIfCreated(*object);
     if (!extraProperties)
         return;
     for (const auto& entry : extraProperties->structure()->getPropertiesConcurrently()) {
@@ -291,16 +306,78 @@ bool Extension::tryInsert(uint64_t granuleBits)
 
 [[noreturn]] static void crashOnFalseProof(const Object& object, ObjectMutation mutation, const FieldData* field)
 {
-    dataLog("AOT: ", nameOf(mutation), " of an object of layout L", object.layout().index);
-    if (field)
-        dataLog(", field ", object.indexOf(*field));
-    dataLogLn(": the compiler has proven that it never happens, and compiled code reads such objects without a look. This is a bug in Bun.");
+    RuntimeCheckFailure failure("object mutation check failed"_s);
+    failure.atTopCall(object.vm());
+    failure.detail(nameOf(mutation), " on ", reportedObjectName(object.layout()));
+    if (field && field->name && !field->isPrivate())
+        failure.detail(", property '", String(propertyNameOf(object.vm(), object, *field)), "'");
+    failure.detail(", but the compiler proved that this never happens");
+    failure.report();
     CRASH_WITH_INFO(std::bit_cast<uintptr_t>(&object));
 }
 
 void crashOnImpossibleMutation(VM&, const Object& object, ObjectMutation mutation)
 {
     crashOnFalseProof(object, mutation, nullptr);
+}
+
+bool isAskedByCodeThatInspectorBrought(VM& vm, const Object& object)
+{
+    return isAskedByCodeThatInspectorBrought(vm, object.state().instance);
+}
+
+static bool isOfInjectedScriptOfInspector(VM& vm, CodeBlock* codeBlock)
+{
+    SourceCode whole = vm.builtinExecutables()->injectedScriptSourceCreateInspectorInjectedScriptCodeSource();
+    const SourceCode& source = codeBlock->ownerExecutable()->source();
+    return source.provider() == whole.provider() && source.startOffset() >= whole.startOffset() && source.endOffset() <= whole.endOffset();
+}
+
+bool isAskedByCodeThatInspectorBrought(VM& vm, const Instance& instance, FrameThatAsks frameThatAsks)
+{
+    if (!hasFlag(instance.options().admitted(), AdmittedCode::Inspector))
+        return false;
+    bool isAskedByConsole = false;
+    bool textWithoutOriginAsks = false;
+    bool standsInEnteredFrame = frameThatAsks == FrameThatAsks::IsAboveTheTopFrame;
+    StackVisitor::visitWithCompiledFrames(vm.topCallFrame, vm, [&](StackVisitor& visitor) {
+        if (visitor->isCompiledFrame()) {
+            if (!std::exchange(standsInEnteredFrame, false))
+                return IterationStatus::Done;
+            CompiledFrameIterator& frames = visitor.compiledFrames();
+            frames.advanceToCallerMachineFrame();
+            return frames.isAtEnd() || frames.isAmongFramesThatWait() ? IterationStatus::Continue : IterationStatus::Done;
+        }
+        CodeBlock* codeBlock = visitor->codeBlock();
+        if (!codeBlock)
+            return IterationStatus::Continue;
+        if (codeBlock->unlinkedCodeBlock()->isBuiltinFunction()) {
+            if (!textWithoutOriginAsks || !isOfInjectedScriptOfInspector(vm, codeBlock))
+                return IterationStatus::Continue;
+            isAskedByConsole = true;
+            return IterationStatus::Done;
+        }
+        const SourceOrigin& origin = codeBlock->ownerExecutable()->sourceOrigin();
+        if (ScriptFetcher* fetcher = origin.fetcher(); fetcher && fetcher->fetcherType() == ScriptFetcher::Type::NodeVM)
+            return IterationStatus::Continue;
+        if (origin.isNull()) {
+            textWithoutOriginAsks = true;
+            return IterationStatus::Continue;
+        }
+        isAskedByConsole = !textWithoutOriginAsks && !(origin.url().protocolIsFile() && (findModule(origin.url().fileSystemPath()) || isOriginOfCompiledFile(instance, origin)));
+        return IterationStatus::Done;
+    }, false, StackVisitor::CompiledFrameVisit::EachRunOnce);
+    return isAskedByConsole;
+}
+
+bool refusesMutation(VM& vm, const Object& object, ObjectMutation mutation)
+{
+    if (!isAskedByCodeThatInspectorBrought(vm, object))
+        return false;
+    auto scope = DECLARE_THROW_SCOPE(vm);
+    if (!scope.exception())
+        throwTypeError(object.structure()->realm(), scope, changeThatCompiledCodeRulesOutMessage(mutation));
+    return true;
 }
 
 void crashOnImpossibleMutation(VM&, const Object& object, PropertyName, ObjectMutation mutation)
@@ -320,7 +397,7 @@ UniquedStringImpl* propertyNameOf(VM& vm, const Object& object, const FieldData&
 
 static JSObject* extraPropertiesThatMayHold(const Object& object, const FieldData& field)
 {
-    return isBoundByPendingStar(object, field).value_or(false) ? object.extraProperties() : extraPropertiesIfMade(object);
+    return isBoundByPendingStar(object, field).value_or(false) ? object.extraProperties() : extraPropertiesIfCreated(object);
 }
 
 FieldProperty findFieldProperty(VM& vm, const Object& object, const FieldData& field)
@@ -344,7 +421,7 @@ bool livesInExtraProperties(VM& vm, const Object& object, const FieldData& field
 {
     if (std::optional<bool> isBound = isBoundByPendingStar(object, field))
         return *isBound;
-    JSObject* extra = extraPropertiesIfMade(object);
+    JSObject* extra = extraPropertiesIfCreated(object);
     return extra && extra->getDirect(vm, propertyNameOf(vm, object, field));
 }
 
@@ -382,7 +459,7 @@ void didChangeOwnProperties(VM& vm, Object& object, VM::StructureChainIntegrityE
 
 bool interceptsIndexedAccesses(const Object& object)
 {
-    JSObject* extra = extraPropertiesIfMade(object);
+    JSObject* extra = extraPropertiesIfCreated(object);
     return extra && extra->structure()->mayInterceptIndexedAccesses();
 }
 
@@ -392,7 +469,7 @@ void didChangeIndexedProperties(VM& vm, Object& object, bool interceptedIndexedA
         object.structure()->realm()->haveABadTime(vm, &object);
 }
 
-const ClassInfo Environment::s_info = { "Environment"_s, nullptr, nullptr, nullptr, CREATE_METHOD_TABLE(Environment) };
+const ClassInfo Environment::s_info = { "JSLexicalEnvironment"_s, nullptr, nullptr, nullptr, CREATE_METHOD_TABLE(Environment) };
 
 static_assert(offsetOfEnvironmentShapeLowByte == JSCell::indexingTypeAndMiscOffset() && offsetOfEnvironmentShapeHighByte == JSCell::typeInfoFlagsOffset());
 
@@ -447,7 +524,8 @@ template<typename Visitor>
 void Environment::visitChildrenImpl(JSCell* cell, Visitor& visitor)
 {
     Base::visitChildren(cell, visitor);
-    visitFields(uncheckedDowncast<Environment>(cell), visitor);
+    auto* environment = uncheckedDowncast<Environment>(cell);
+    visitFields(environment, environment->layout(), visitor);
 }
 
 DEFINE_VISIT_CHILDREN(Environment);
@@ -463,12 +541,19 @@ void Environment::analyzeHeap(JSCell* cell, HeapAnalyzer& analyzer)
     Base::analyzeHeap(cell, analyzer);
     const ProgramIdentifiers& identifiers = *environment->vm().aotState().identifiers;
     uintptr_t cageBase = cageBaseOf(environment);
-    for (auto& variable : environment->layout().describedVariables()) {
+    const EnvironmentData& layout = environment->layout();
+    Instance* instance = layout.moduleAfterNone ? environment->structure()->realm()->aotInstance() : nullptr;
+    JSCell* environmentOfModule = instance ? instance->state->statics->environmentOfModule(layout.moduleAfterNone - 1) : nullptr;
+    if (environmentOfModule)
+        analyzer.analyzeEdge(environment, environmentOfModule, RootMarkReason::None);
+    for (auto& variable : layout.describedVariables()) {
         if (!traitsOf(variable.slot.representation()).holdsCell)
             continue;
         JSCell* target = cellInSlot(variable.slot.representation(), &environment->at<uint8_t>(variable.slot.offset), cageBase);
         UniquedStringImpl* name = target ? identifiers.nameInHeapSnapshots(&variable) : nullptr;
-        if (name)
+        if (name && environmentOfModule && variable.isVariableOfModule())
+            instance->state->statics->analyzeVariableOfModule(environmentOfModule, target, name, analyzer);
+        else if (name)
             analyzer.analyzeVariableNameEdge(environment, target, name);
     }
 }

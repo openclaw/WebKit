@@ -69,10 +69,12 @@ private:
     TypeID elementTypeOf(const InlineCall&, TypeLevel);
     ArrayStorageFormList candidateFormsOf(const InlineCall&);
     ElementAccessEmitter::FirstForm firstCandidateFormOf(const InlineCall&);
-    void forEachFormOrMiss(const InlineCall&, CellPointer array, IndexingType mask, const ScopedLambda<void(const ArrayStorageForm&)>&);
+    void forEachFormOrMiss(const InlineCall&, CellPointer array, IndexingType mask, const ScopedLambda<void(const ArrayStorageForm&)>&, std::optional<Word32> knownMode = std::nullopt);
+    void forEachReadForm(const InlineCall&, CellPointer array, IndexingType mask, std::optional<Word32> knownMode, const ScopedLambda<void(const ArrayStorageForm&)>&);
 
     void removeElementAtEnd(const InlineCall&, bool removesFirst);
     Operand removeFirstElement(const InlineCall&, const ArrayStorageForm&, const ArrayElements&, LBasicBlock isAbsent);
+    Operand shiftLongArray(const InlineCall&, const ArrayStorageForm&, const ArrayElements&, Integer length);
 
     bool resultGetsNamedProperties(const InlineCall&);
     bool resultIsExpectedToHoldDoubles(const InlineCall&);
@@ -94,14 +96,22 @@ private:
     void replaceElements(const InlineCall&, const InlineSplice&, const ArrayStorageForm&, std::span<const Operand> inserted);
     CellPointer copyRemovedElements(const InlineCall&, const InlineSplice&, const ArrayStorageForm&);
     Boxed spliceByOperation(const InlineCall&, LBasicBlock otherwise, const CallOptions&);
+    Word32 int32OrElse(ValueID, LBasicBlock otherwise);
+    void spliceDiscardingByOperation(const InlineCall&, LBasicBlock otherwise, const CallOptions&);
 
     Integer indexOfNumber(const InlineCall&, CellPointer array);
+    Integer indexOfInt32(const InlineCall&, CellPointer array);
+    Integer indexOfOptionalInt32(const InlineCall&, CellPointer array);
+    Integer indexOfBoxedInt32(const InlineCall&, CellPointer array, Boxed searched, std::optional<Integer> first);
     enum class HoleIs : bool { Nothing, Undefined };
     Integer indexOfValueComparedByIdentity(const InlineCall&, CellPointer array, HoleIs);
     Integer indexOfString(const InlineCall&, CellPointer array, CellPointer searched);
+    Integer indexOfAnyValue(const InlineCall&, CellPointer array, HoleIs);
+    Integer searchValueInLoop(const InlineCall&, CellPointer array, HoleIs);
     bool handlesSearch(const InlineCall&);
     Integer indexOfSearched(const InlineCall&, HoleIs);
-    void scanShortVector(const ArrayStorageForm&, CellPointer array, Operand searchedRawElement, Join<Integer>& found);
+    std::optional<Integer> firstIndexOfSearch(const InlineCall&);
+    void scanShortVector(const InlineCall&, const ArrayStorageForm*, CellPointer array, Operand searchedRawElement, std::optional<Integer> first, Join<Integer>& found);
 };
 
 static_assert(sizeof(ArrayBuiltinEmitter) == sizeof(OperationEmitter));

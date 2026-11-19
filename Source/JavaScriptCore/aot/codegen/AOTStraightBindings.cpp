@@ -97,9 +97,13 @@ static void generatePutEnvironmentField(StraightEmitter& emitter, const BodyValu
 {
     const GPRReg stored = StraightEmitter::temporary(1);
     const PlacedSlot& slot = emitter.plan().slot(value.layout(), value.field());
+    if (!emitter.resumesGenerator() && (slot.representation == SlotRepresentation::OptionalInt64 || slot.representation == SlotRepresentation::OptionalDouble)) {
+        emitter.fail(value);
+        return;
+    }
     const GPRReg environment = emitter.loadIntoResultRegister(value.environmentOperand());
     emitter.load(value.valueOperand(), stored);
-    if (!emitter.isConstant(value.valueOperand()) && !emitter.plan().layout(value.layout()).liesOnlyInFrames) {
+    if (!emitter.isConstant(value.valueOperand()) || emitter.resumesGenerator()) {
         emitter.storeSlot(environment, slot, stored);
         return;
     }
@@ -117,7 +121,7 @@ void StraightEmitter::generateBinding(const BodyValue& value)
         generateGetModuleVariable(*this, value);
         return;
     case Opcode::PutModuleVariable:
-        storeVariable(value.variable(), loadIntoResultRegister(value.valueOperand()));
+        storeVariable(value.variable(), value.valueOperand());
         return;
     case Opcode::GetEnvironmentField:
         generateGetEnvironmentField(*this, value);

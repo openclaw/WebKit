@@ -99,6 +99,7 @@ private:
 static_assert(sizeof(MemoryLocation) == 12);
 
 uint64_t maskOf(const Program&, const MemoryLocation&);
+uint64_t maskOfRead(const Program&, const MemoryLocation&);
 
 struct MemoryLocationDump {
     const Program& program;
@@ -167,11 +168,16 @@ public:
         }
     }
 
-    void add(const Program& program, const MemoryLocation& location) { add(location.heap(), location.isEntireHeap() ? entireHeap : Typed::maskOf(program, location)); }
+    ALWAYS_INLINE void add(const Program& program, const MemoryLocation& location) { add(location.heap(), location.isEntireHeap() ? entireHeap : Typed::maskOf(program, location)); }
 
     void add(const MemoryLocation&);
+    ALWAYS_INLINE void addRead(const Program& program, const MemoryLocation& location)
+    {
+        if (uint64_t mask = location.isEntireHeap() ? entireHeap : maskOfRead(program, location))
+            add(location.heap(), mask);
+    }
 
-    constexpr bool merge(const LocationMasks& other)
+    ALWAYS_INLINE constexpr bool merge(const LocationMasks& other)
     {
         bool changed = other.m_heaps & ~m_heaps;
         m_heaps |= other.m_heaps;
@@ -279,7 +285,7 @@ public:
             functor(heap, maskOf(heap));
     }
 
-    friend constexpr bool operator==(const LocationMasks& first, const LocationMasks& second)
+    friend ALWAYS_INLINE constexpr bool operator==(const LocationMasks& first, const LocationMasks& second)
     {
         return first.m_heaps == second.m_heaps && (!first.containsAny(indexedHeaps) || first.hasMasksOf(second));
     }
@@ -313,18 +319,24 @@ constexpr uint64_t locationMaskOfBit(std::optional<uint8_t> bit, uint32_t offset
     return uint64_t { 1 } << ((*bit + offset) & 63);
 }
 
+constexpr uint64_t cellHoldingElementsMask = uint64_t { 1 } << 63;
+
 constexpr uint64_t locationMaskOfElementBase(ElementBase base)
 {
     switch (base) {
     case ElementBase::Unknown:
         return LocationMasks::entireHeap;
     case ElementBase::Array:
+        return (uint64_t { 1 } << static_cast<unsigned>(base)) | cellHoldingElementsMask;
     case ElementBase::Arguments:
     case ElementBase::Object:
         return uint64_t { 1 } << static_cast<unsigned>(base);
     }
     RELEASE_ASSERT_NOT_REACHED_UNDER_CONSTEXPR_CONTEXT();
 }
+
+inline constexpr LocationMasks placesUnderLengthsOfLists { AbstractHeapSet { AbstractHeap::ArrayStorage, AbstractHeap::ArrayLengths } };
+inline constexpr LocationMasks slotsUnderInBoundsIndices { AbstractHeapSet { AbstractHeap::ArrayStorage, AbstractHeap::LoweredArrayLengths } };
 
 template<typename ProgramWithLocationBits>
 ALWAYS_INLINE uint64_t locationMaskIn(const ProgramWithLocationBits& program, const MemoryLocation& location)
@@ -363,6 +375,11 @@ ALWAYS_INLINE uint64_t locationMaskIn(const ProgramWithLocationBits& program, co
     case AbstractHeap::AllocatorState:
     case AbstractHeap::RuntimeState:
     case AbstractHeap::CalleesInFrames:
+    case AbstractHeap::ArrayLengths:
+    case AbstractHeap::ArrayCapacity:
+    case AbstractHeap::LoweredArrayLengths:
+    case AbstractHeap::ClassObjects:
+    case AbstractHeap::WrittenTypes:
         break;
     }
     RELEASE_ASSERT_NOT_REACHED();

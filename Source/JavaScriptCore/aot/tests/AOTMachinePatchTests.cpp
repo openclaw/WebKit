@@ -173,14 +173,6 @@ static uint32_t indexOfExecuteStepInPatchTest(const Allocation& allocation, cons
     return index;
 }
 
-static unsigned numberOfStepsInPatchTest(const Allocation& allocation, StepKind kind)
-{
-    unsigned result = 0;
-    for (const Step& step : allocation.steps())
-        result += step.kind == kind;
-    return result;
-}
-
 static PatchOperation* appendPatchTestIncrement(Output& out, Operation* operand, int32_t addend, PatchTestObservation& seen)
 {
     PatchOperation* patch = out.patch(Int64);
@@ -536,6 +528,83 @@ static void testMachinePatchEntersJoinThroughBlocksWithoutCode()
     AOT_TEST_CHECK(test.call<int64_t>(int64_t { 11 }) == 11);
 }
 
+static void testMachinePatchRareBlocksOfSameMovesStandOnce()
+{
+    TestProcedure test;
+    Output& out = test.out();
+    Operation* a = test.argumentGPR(0);
+    Operation* b = test.argumentGPR(1);
+    Block* next = out.newBlock();
+    Block* usual = out.newBlock();
+    Block* done = out.newBlock();
+
+    Operation* early = out.opaque(out.add(a, out.constInt64(7)));
+    ValueFromBlock fromEntry = out.anchor(early);
+    out.branch(out.testNonZero64(a, 1), rareEdge(done), normalEdge(next));
+    out.appendTo(next);
+    ValueFromBlock fromNext = out.anchor(early);
+    out.branch(out.testNonZero64(b, 1), rareEdge(done), normalEdge(usual));
+    out.appendTo(usual);
+    ValueFromBlock fromUsual = out.anchor(out.opaque(out.add(early, out.constInt64(100))));
+    out.jump(done);
+    out.appendTo(done);
+    out.ret(out.add(out.phi(Int64, fromEntry, fromNext, fromUsual), out.add(early, early)));
+
+    compileOrFail(test);
+    const Allocation& allocation = test.procedure().allocation();
+    Block* behindEntry = early->owner()->successor(0).block();
+    Block* behindNext = next->successor(0).block();
+    AOT_TEST_CHECK(behindEntry != done && behindNext != done && behindEntry != behindNext);
+    AOT_TEST_CHECK(behindEntry->successor(0).block() == done && behindNext->successor(0).block() == done);
+    for (Block* block : { behindEntry, behindNext })
+        AOT_TEST_CHECK(allocation.stepsOf(block).beginOfEdgeMoves < allocation.stepsOf(block).endOfEdgeMoves);
+    AOT_TEST_CHECK(allocation.numberOfOperationsAllocated() - test.procedure().numberOfOperationsEncoded() == behindNext->size());
+    AOT_TEST_CHECK(test.call<int64_t>(int64_t { 10 }, int64_t { 20 }) == 117 + 34);
+    AOT_TEST_CHECK(test.call<int64_t>(int64_t { 11 }, int64_t { 20 }) == 18 + 36);
+    AOT_TEST_CHECK(test.call<int64_t>(int64_t { 10 }, int64_t { 21 }) == 17 + 34);
+}
+
+static void testMachinePatchRareBlocksThatMakeOtherConstantsStandApart()
+{
+    TestProcedure test;
+    Output& out = test.out();
+    Operation* a = test.argumentGPR(0);
+    Operation* b = test.argumentGPR(1);
+    Block* second = out.newBlock();
+    Block* third = out.newBlock();
+    Block* usual = out.newBlock();
+    Block* done = out.newBlock();
+
+    Operation* early = out.opaque(out.add(a, out.constInt64(7)));
+    ValueFromBlock fromFirst = out.anchor(out.constInt64(0x1000000001));
+    out.branch(out.testNonZero64(a, 1), rareEdge(done), normalEdge(second));
+    out.appendTo(second);
+    ValueFromBlock fromSecond = out.anchor(out.constInt64(0x2000000002));
+    out.branch(out.testNonZero64(b, 1), rareEdge(done), normalEdge(third));
+    out.appendTo(third);
+    ValueFromBlock fromThird = out.anchor(out.constInt64(0x2000000002));
+    out.branch(out.testNonZero64(b, 2), rareEdge(done), normalEdge(usual));
+    out.appendTo(usual);
+    ValueFromBlock fromUsual = out.anchor(out.opaque(out.add(early, out.constInt64(100))));
+    out.jump(done);
+    out.appendTo(done);
+    out.ret(out.phi(Int64, fromFirst, fromSecond, fromThird, fromUsual));
+
+    compileOrFail(test);
+    const Allocation& allocation = test.procedure().allocation();
+    Block* behindThird = third->successor(0).block();
+    for (Block* block : { early->owner()->successor(0).block(), second->successor(0).block(), behindThird }) {
+        AOT_TEST_CHECK(block != done && block->successor(0).block() == done);
+        const BlockSteps& steps = allocation.stepsOf(block);
+        AOT_TEST_CHECK(steps.endOfEdgeMoves == steps.beginOfEdgeMoves + 1 && allocation.step(steps.beginOfEdgeMoves).kind == StepKind::Materialize);
+    }
+    AOT_TEST_CHECK(allocation.numberOfOperationsAllocated() - test.procedure().numberOfOperationsEncoded() == behindThird->size());
+    AOT_TEST_CHECK(test.call<int64_t>(int64_t { 10 }, int64_t { 4 }) == 117);
+    AOT_TEST_CHECK(test.call<int64_t>(int64_t { 11 }, int64_t { 4 }) == 0x1000000001);
+    AOT_TEST_CHECK(test.call<int64_t>(int64_t { 10 }, int64_t { 5 }) == 0x2000000002);
+    AOT_TEST_CHECK(test.call<int64_t>(int64_t { 10 }, int64_t { 6 }) == 0x2000000002);
+}
+
 static void testMachinePatchCheckHandsOverOperands()
 {
     constexpr double x = 6.5;
@@ -659,337 +728,6 @@ static void testMachinePatchFrameIsSetUpInRareRegion()
     AOT_TEST_CHECK(test.call<int64_t>(int64_t { 3 }) == 103);
 }
 
-static PatchOperation* appendPatchTestReleaseHint(Output& out, Operation* released, PatchTestObservation& seen, RegisterMask& cleared)
-{
-    PatchOperation* hint = out.patch(Void);
-    hint->append(released, ValueRep::ColdAny);
-    hint->effects = Effects::none();
-    hint->effects.writesLocalState = true;
-    hint->setReleasesDeadValues(true);
-    hint->setGenerator([&seen, &cleared](CCallHelpers& jit, const PatchParameters& params) {
-        recordPatchTestObservation(seen, params);
-        cleared = maskOf(params.value()->registersToRelease()) & ~params.usedRegistersMask();
-        forEachRegister(cleared, [&](Reg reg) {
-            jit.move(CCallHelpers::TrustedImm32(0), reg.gpr());
-        });
-    });
-    return hint;
-}
-
-static void testMachinePatchReleasesValueInRegister()
-{
-    TestProcedure test;
-    Output& out = test.out();
-    Operation* cell = out.opaque(out.add(test.argumentGPR(0), 5));
-    PatchTestObservation seen;
-    RegisterMask cleared = 0;
-    appendPatchTestReleaseHint(out, cell, seen, cleared);
-
-    PatchOperation* reader = out.patch(Int64);
-    reader->effects = Effects::none();
-    reader->setGenerator([&cleared](CCallHelpers& jit, const PatchParameters& params) {
-        AOT_TEST_CHECK(cleared);
-        jit.move(Reg::fromIndex(static_cast<unsigned>(std::countr_zero(cleared))).gpr(), params[0].gpr());
-    });
-    out.ret(reader);
-
-    compileOrFail(test);
-    AOT_TEST_CHECK(seen.runs == 1 && seen.reps.size() == 1 && seen.reps[0].isGPR() && (cleared & maskOf(seen.reps[0].reg())));
-    AOT_TEST_CHECK(!test.call<int64_t>(int64_t { 37 }));
-}
-
-static void testMachinePatchReleasesValueInFrame()
-{
-    constexpr int64_t a = 800;
-    TestProcedure test;
-    Output& out = test.out();
-    Operation* seed = test.argumentGPR(0);
-    unsigned count = numberOfRegistersInPatchTest(test, Bank::GP) + 2;
-
-    Operation* cell = out.opaque(out.add(seed, 5));
-    Operation* sum = addUpPatchTestValues(out, seed, definePatchTestValues(out, seed, count));
-    PatchTestObservation seen;
-    RegisterMask cleared = 0;
-    appendPatchTestReleaseHint(out, cell, seen, cleared);
-
-    PatchOperation* reader = out.patch(Int64);
-    reader->effects = Effects::none();
-    reader->setGenerator([&seen](CCallHelpers& jit, const PatchParameters& params) {
-        AllowMacroScratchRegisterUsage allowScratch(jit);
-        AOT_TEST_CHECK(seen.runs == 1 && seen.reps.size() == 1 && seen.reps[0].isStack() && params.frameIsSetUp());
-        jit.load64(CCallHelpers::Address(GPRInfo::callFrameRegister, seen.reps[0].offsetFromFP()), params[0].gpr());
-    });
-    out.ret(out.add(sum, reader));
-
-    compileOrFail(test);
-    const Allocation& allocation = test.procedure().allocation();
-    AOT_TEST_CHECK(allocation.isSpilled(cell));
-    AOT_TEST_CHECK(seen.reps[0] == ValueRep::stack(test.procedure().frame().offsetFromFPOf(allocation.spillOf(cell))));
-    AOT_TEST_CHECK(numberOfStepsInPatchTest(allocation, StepKind::ClearSpill) == 1);
-    for (const Step& step : allocation.steps())
-        AOT_TEST_CHECK(step.kind != StepKind::ClearSpill || step.destination == Location::spill(allocation.spillOf(cell)));
-    AOT_TEST_CHECK(test.call<uint64_t>(a) == a + sumOfPatchTestIntegers(a, count));
-}
-
-static void testMachinePatchReleasesNothingThatIsReadAgain()
-{
-    TestProcedure test;
-    Output& out = test.out();
-    Operation* cell = out.opaque(out.add(test.argumentGPR(0), 5));
-    PatchTestObservation seen;
-    RegisterMask cleared = 0;
-    appendPatchTestReleaseHint(out, cell, seen, cleared);
-    out.ret(cell);
-
-    compileOrFail(test);
-    AOT_TEST_CHECK(seen.runs == 1 && !cleared);
-    AOT_TEST_CHECK(!numberOfStepsInPatchTest(test.procedure().allocation(), StepKind::ClearSpill));
-    AOT_TEST_CHECK(test.call<int64_t>(int64_t { 37 }) == 42);
-}
-
-static void testMachinePatchReleasesRegisterOfAnotherName()
-{
-    TestProcedure test;
-    Output& out = test.out();
-    RegisterMask saved = registerFileOfPatchTest(test).calleeSaved & registerFileOfPatchTest(test).allocatableIn(Bank::GP);
-    AOT_TEST_CHECK(std::popcount(saved) >= 2);
-    Reg first = Reg::fromIndex(static_cast<unsigned>(std::countr_zero(saved)));
-    Reg second = Reg::fromIndex(static_cast<unsigned>(std::countr_zero(saved & (saved - 1))));
-    auto appendReader = [&](Operation* read, ValueRep rep, PatchTestObservation& seen) {
-        PatchOperation* reader = out.patch(Void);
-        reader->append(read, rep);
-        reader->effects = Effects::none();
-        reader->effects.writesLocalState = true;
-        reader->setGenerator([&seen](CCallHelpers&, const PatchParameters& params) {
-            recordPatchTestObservation(seen, params);
-        });
-    };
-
-    Block* made = out.newBlock();
-    Block* waited = out.newBlock();
-    Block* joined = out.newBlock();
-    Operation* part = out.opaque(out.add(test.argumentGPR(0), 1));
-    Operation* cell = out.opaque(out.add(test.argumentGPR(0), 5));
-    PatchOperation* call = appendPatchTestCallWithoutOperands(test);
-    call->append(part, ValueRep::reg(first));
-    call->append(cell, ValueRep::reg(second));
-    out.branch(out.testNonZero64(part, 1), normalEdge(made), normalEdge(waited));
-
-    out.appendTo(made);
-    PatchTestObservation seenBesideOther;
-    ValueFromBlock fromMade = out.anchor(out.opaque(out.add(part, 100)));
-    appendReader(cell, ValueRep::ColdAny, seenBesideOther);
-    out.jump(joined);
-
-    out.appendTo(waited);
-    PatchTestObservation seenWaiting;
-    appendReader(cell, ValueRep::SomeRegister, seenWaiting);
-    ValueFromBlock fromWaited = out.anchor(cell);
-    out.jump(joined);
-
-    out.appendTo(joined);
-    Operation* released = out.phi(Int64, fromMade, fromWaited);
-    appendPatchTestCallWithoutOperands(test)->append(released, ValueRep::reg(first));
-    PatchTestObservation seen;
-    RegisterMask cleared = 0;
-    appendPatchTestReleaseHint(out, released, seen, cleared);
-    PatchOperation* reader = out.patch(Int64);
-    reader->effects = Effects::none();
-    reader->setGenerator([&seenWaiting](CCallHelpers& jit, const PatchParameters& params) {
-        AOT_TEST_CHECK(seenWaiting.runs == 1 && seenWaiting.reps.size() == 1 && seenWaiting.reps[0].isGPR());
-        jit.move(seenWaiting.reps[0].gpr(), params[0].gpr());
-    });
-    out.ret(reader);
-
-    compileOrFail(test);
-    AOT_TEST_CHECK(maskOf(seenWaiting.reps[0].reg()) & saved);
-    AOT_TEST_CHECK(seen.runs == 1 && seen.reps.size() == 1 && seen.reps[0].isGPR() && seen.reps[0].reg() != seenWaiting.reps[0].reg());
-    AOT_TEST_CHECK((cleared & maskOf(seen.reps[0].reg())) && (cleared & maskOf(seenWaiting.reps[0].reg())));
-    AOT_TEST_CHECK(!test.call<int64_t>(int64_t { 36 }));
-    AOT_TEST_CHECK(!test.call<int64_t>(int64_t { 37 }));
-}
-
-static void testMachinePatchReleasesRegisterThatNativeCalleesAloneKeep()
-{
-    TestProcedure test;
-    Output& out = test.out();
-    RegisterFile file = registerFileOfPatchTest(test);
-    RegisterMask keptByNativeCalleesAlone = maskOf(RegisterSet::calleeSaveRegisters()) & ~file.calleeSaved & file.allocatableIn(Bank::GP);
-    if (!keptByNativeCalleesAlone)
-        return;
-    Reg waitedIn = Reg::fromIndex(static_cast<unsigned>(std::countr_zero(keptByNativeCalleesAlone)));
-
-    Operation* cell = out.opaque(out.add(test.argumentGPR(0), 5));
-    PatchOperation* callThatWritesNoRegister = out.patch(Void);
-    callThatWritesNoRegister->append(cell, ValueRep::reg(waitedIn));
-    callThatWritesNoRegister->clobberLate(callerSavedRegistersOfPatchTest(test));
-    callThatWritesNoRegister->setGenerator([](CCallHelpers&, const PatchParameters&) { });
-    PatchTestObservation seen;
-    RegisterMask cleared = 0;
-    appendPatchTestReleaseHint(out, cell, seen, cleared);
-    PatchOperation* reader = out.patch(Int64);
-    reader->effects = Effects::none();
-    reader->setGenerator([waitedIn](CCallHelpers& jit, const PatchParameters& params) {
-        jit.move(waitedIn.gpr(), params[0].gpr());
-    });
-    out.ret(reader);
-
-    compileOrFail(test);
-    AOT_TEST_CHECK(callerSavedRegistersOfPatchTest(test) & maskOf(waitedIn));
-    AOT_TEST_CHECK(seen.runs == 1 && (cleared & maskOf(waitedIn)));
-    AOT_TEST_CHECK(!test.call<int64_t>(int64_t { 37 }));
-}
-
-static void testMachinePatchClearsSpillThatAnotherArmReads()
-{
-    for (bool isReadBehindArms : { false, true }) {
-        TestProcedure test;
-        Output& out = test.out();
-        Block* releasing = out.newBlock();
-        Block* made = out.newBlock();
-        Block* waited = out.newBlock();
-        Block* joined = out.newBlock();
-        Block* reading = out.newBlock();
-        Block* done = out.newBlock();
-
-        Operation* a = test.argumentGPR(0);
-        Operation* cell = out.opaque(out.add(a, 5));
-        PatchOperation* call = out.patch(Void);
-        call->clobberLate(allocatableRegistersOfPatchTest(test));
-        call->setGenerator([](CCallHelpers&, const PatchParameters&) { });
-        out.branch(out.testNonZero64(a, 2), normalEdge(releasing), normalEdge(reading));
-
-        out.appendTo(releasing);
-        out.branch(out.testNonZero64(a, 1), normalEdge(made), normalEdge(waited));
-        out.appendTo(made);
-        ValueFromBlock fromMade = out.anchor(out.opaque(out.add(a, 100)));
-        out.jump(joined);
-        out.appendTo(waited);
-        ValueFromBlock fromWaited = out.anchor(cell);
-        out.jump(joined);
-
-        out.appendTo(joined);
-        PatchTestObservation seen;
-        RegisterMask cleared = 0;
-        PatchOperation* hint = appendPatchTestReleaseHint(out, out.phi(Int64, fromMade, fromWaited), seen, cleared);
-        PatchOperation* reader = out.patch(Int64);
-        reader->effects = Effects::none();
-        reader->setGenerator([cell](CCallHelpers& jit, const PatchParameters& params) {
-            AllowMacroScratchRegisterUsage allowScratch(jit);
-            jit.load64(CCallHelpers::Address(GPRInfo::callFrameRegister, params.frame().offsetFromFPOf(params.proc().allocation().spillOf(cell))), params[0].gpr());
-        });
-        ValueFromBlock fromJoined = out.anchor(reader);
-        out.jump(done);
-
-        out.appendTo(reading);
-        ValueFromBlock fromReading = out.anchor(out.add(cell, 1));
-        out.jump(done);
-
-        out.appendTo(done);
-        Operation* result = out.phi(Int64, fromJoined, fromReading);
-        out.ret(isReadBehindArms ? out.add(result, cell) : result);
-
-        compileOrFail(test);
-        Procedure& proc = test.procedure();
-        const Allocation& allocation = proc.allocation();
-        AOT_TEST_CHECK(allocation.isSpilled(cell) && proc.liveness().of(cell).lastUse > proc.order().latePositionOf(hint));
-        AOT_TEST_CHECK(numberOfStepsInPatchTest(allocation, StepKind::ClearSpill) == (isReadBehindArms ? 0u : 1u));
-        for (const Step& step : allocation.steps())
-            AOT_TEST_CHECK(step.kind != StepKind::ClearSpill || step.destination == Location::spill(allocation.spillOf(cell)));
-        AOT_TEST_CHECK(test.call<int64_t>(int64_t { 2 }) == (isReadBehindArms ? 14 : 0));
-        AOT_TEST_CHECK(test.call<int64_t>(int64_t { 3 }) == (isReadBehindArms ? 16 : 0));
-        AOT_TEST_CHECK(test.call<int64_t>(int64_t { 0 }) == (isReadBehindArms ? 11 : 6));
-    }
-}
-
-static void testMachinePatchSearchesForWaysThroughBlockSplitLate()
-{
-    TestProcedure test;
-    Output& out = test.out();
-    RegisterMask free = callerSavedRegistersOfPatchTest(test) & registerFileOfPatchTest(test).allocatableIn(Bank::GP);
-    AOT_TEST_CHECK(std::popcount(free) >= 2);
-    Reg first = Reg::fromIndex(static_cast<unsigned>(std::countr_zero(free)));
-    Reg second = Reg::fromIndex(static_cast<unsigned>(std::countr_zero(free & (free - 1))));
-    auto appendReader = [&](Operation* left, Reg placeOfLeft, Operation* right, Reg placeOfRight) {
-        PatchOperation* reader = out.patch(Void);
-        reader->append(left, ValueRep::reg(placeOfLeft));
-        reader->append(right, ValueRep::reg(placeOfRight));
-        reader->effects = Effects::none();
-        reader->effects.writesLocalState = true;
-        reader->setGenerator([](CCallHelpers&, const PatchParameters&) { });
-    };
-    Block* made = out.newBlock();
-    Block* waited = out.newBlock();
-    Block* joined = out.newBlock();
-    Block* arm = out.newBlock();
-    Block* behind = out.newBlock();
-    Block* madeAgain = out.newBlock();
-    Block* waitedAgain = out.newBlock();
-    Block* joinedAgain = out.newBlock();
-    Block* done = out.newBlock();
-
-    Operation* a = test.argumentGPR(0);
-    Operation* firstCell = out.opaque(out.add(a, 5));
-    Operation* secondCell = out.opaque(out.add(a, 6));
-    PatchOperation* call = out.patch(Void);
-    call->clobberLate(allocatableRegistersOfPatchTest(test));
-    call->setGenerator([](CCallHelpers&, const PatchParameters&) { });
-    out.branch(out.testNonZero64(a, 1), normalEdge(made), normalEdge(waited));
-
-    out.appendTo(made);
-    ValueFromBlock fromMade = out.anchor(out.opaque(out.add(a, 100)));
-    out.jump(joined);
-    out.appendTo(waited);
-    ValueFromBlock fromWaited = out.anchor(firstCell);
-    out.jump(joined);
-
-    out.appendTo(joined);
-    PatchTestObservation seenFirst;
-    RegisterMask clearedFirst = 0;
-    PatchOperation* firstHint = appendPatchTestReleaseHint(out, out.phi(Int64, fromMade, fromWaited), seenFirst, clearedFirst);
-    Operation* left = out.opaque(out.add(a, 7));
-    Operation* right = out.opaque(out.add(a, 8));
-    appendReader(left, first, right, second);
-    out.branch(out.testNonZero64(a, 2), normalEdge(arm), normalEdge(behind));
-
-    out.appendTo(arm);
-    appendReader(left, second, right, first);
-    out.jump(behind);
-
-    out.appendTo(behind);
-    Operation* mixed = out.opaque(out.add(left, out.add(right, right)));
-    out.branch(out.testNonZero64(a, 1), normalEdge(madeAgain), normalEdge(waitedAgain));
-    out.appendTo(madeAgain);
-    ValueFromBlock fromMadeAgain = out.anchor(out.opaque(out.add(a, 200)));
-    out.jump(joinedAgain);
-    out.appendTo(waitedAgain);
-    ValueFromBlock fromWaitedAgain = out.anchor(secondCell);
-    out.jump(joinedAgain);
-
-    out.appendTo(joinedAgain);
-    PatchTestObservation seenSecond;
-    RegisterMask clearedSecond = 0;
-    PatchOperation* secondHint = appendPatchTestReleaseHint(out, out.phi(Int64, fromMadeAgain, fromWaitedAgain), seenSecond, clearedSecond);
-    out.jump(done);
-
-    out.appendTo(done);
-    out.ret(out.add(out.add(firstCell, secondCell), mixed));
-
-    compileOrFail(test);
-    Procedure& proc = test.procedure();
-    const Order& order = proc.order();
-    const Allocation& allocation = proc.allocation();
-    Block* middle = joined->successor(1).block();
-    AOT_TEST_CHECK(middle != behind && order.of(middle).wasSplitLate && middle->index() > done->index());
-    AOT_TEST_CHECK(std::ranges::find(order.of(behind).predecessors, middle) != order.of(behind).predecessors.end());
-    AOT_TEST_CHECK(order.latePositionOf(firstHint) < order.headOf(middle) && order.headOf(middle) < order.latePositionOf(secondHint));
-    AOT_TEST_CHECK(allocation.isSpilled(firstCell) && proc.liveness().of(firstCell).lastUse > order.endOf(joined));
-    AOT_TEST_CHECK(allocation.isSpilled(secondCell) && proc.liveness().of(secondCell).lastUse > order.endOf(joinedAgain));
-    AOT_TEST_CHECK(seenFirst.runs == 1 && seenSecond.runs == 1 && !numberOfStepsInPatchTest(allocation, StepKind::ClearSpill));
-    for (int64_t argument : { 0, 1, 2, 3 })
-        AOT_TEST_CHECK(test.call<int64_t>(argument) == 5 * argument + 34);
-}
-
 static void testMachinePatchThatWantsTooManyRegisters()
 {
     TestProcedure test;
@@ -1092,17 +830,12 @@ static std::span<const NativeTest> listOfMachinePatchTests()
         { "machine/patch/clobbers-on-a-successor"_s, testMachinePatchClobbersOnSuccessor },
         { "machine/patch/successor-labels-and-fall-through"_s, testMachinePatchSuccessorLabelsAndFallThrough },
         { "machine/patch/enters-join-through-blocks-without-code"_s, testMachinePatchEntersJoinThroughBlocksWithoutCode },
+        { "machine/patch/rare-blocks-of-the-same-moves-stand-once"_s, testMachinePatchRareBlocksOfSameMovesStandOnce },
+        { "machine/patch/rare-blocks-that-make-other-constants-stand-apart"_s, testMachinePatchRareBlocksThatMakeOtherConstantsStandApart },
         { "machine/patch/check-hands-over-operands"_s, testMachinePatchCheckHandsOverOperands },
         { "machine/patch/checks-share-late-paths"_s, testMachinePatchChecksShareLatePaths },
         { "machine/patch/frame-is-set-up"_s, testMachinePatchFrameIsSetUp },
         { "machine/patch/frame-is-set-up-in-rare-region"_s, testMachinePatchFrameIsSetUpInRareRegion },
-        { "machine/patch/releases-value-in-register"_s, testMachinePatchReleasesValueInRegister },
-        { "machine/patch/releases-value-in-frame"_s, testMachinePatchReleasesValueInFrame },
-        { "machine/patch/releases-nothing-that-is-read-again"_s, testMachinePatchReleasesNothingThatIsReadAgain },
-        { "machine/patch/releases-register-of-another-name"_s, testMachinePatchReleasesRegisterOfAnotherName },
-        { "machine/patch/releases-register-that-native-callees-alone-keep"_s, testMachinePatchReleasesRegisterThatNativeCalleesAloneKeep },
-        { "machine/patch/clears-spill-that-another-arm-reads"_s, testMachinePatchClearsSpillThatAnotherArmReads },
-        { "machine/patch/searches-for-ways-through-block-split-late"_s, testMachinePatchSearchesForWaysThroughBlockSplitLate },
         { "machine/patch/wants-too-many-registers"_s, testMachinePatchThatWantsTooManyRegisters },
         { "machine/patch/question-of-an-entry-written-by-hand-asks-for-one-shape"_s, testMachinePatchQuestionOfEntryAsksForOneShape },
         { "machine/patch/question-of-an-entry-written-by-hand-asks-for-words"_s, testMachinePatchQuestionOfEntryAsksForWords },

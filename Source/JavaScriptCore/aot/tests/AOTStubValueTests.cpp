@@ -9,6 +9,8 @@
 
 #include "AOTStubRunner.h"
 #include "AOTClosureWord.h"
+#include "AOTPropertyCachesStringKeys.h"
+#include "AOTRuntimeType.h"
 #include "AOTSlimClosure.h"
 #include "AOTStubTestSupport.h"
 #include "AOTStubsClosures.h"
@@ -25,6 +27,7 @@
 #include <limits>
 #include <numeric>
 #include <span>
+#include <string_view>
 #include <wtf/text/StringImpl.h>
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
@@ -67,14 +70,14 @@ struct RopeAllocation {
     void leaveOnlyNextInterval()
     {
         room.bytes.fill(0);
-        room.at<uint64_t>(FreeCell::offsetOfScrambledBits()) = (static_cast<uint64_t>(sizeof(room.bytes)) << 32 | FakeAllocator::noNextInterval) ^ secretOfFreeList;
+        room.at<uint64_t>(FreeCell::offsetOfScrambledBits()) = (static_cast<uint64_t>(room.bytes.size()) << 32 | FakeAllocator::noNextInterval) ^ secretOfFreeList;
         allocator.makeRoomAt(0, 0);
         allocator.nextInterval() = room.address();
     }
 
     bool tookFirstCellOfNextInterval()
     {
-        return allocator.intervalStart() == room.address() + sizeOfRope && allocator.intervalEnd() == room.address() + sizeof(room.bytes) && allocator.nextInterval() == room.address() + FakeAllocator::noNextInterval;
+        return allocator.intervalStart() == room.address() + sizeOfRope && allocator.intervalEnd() == room.address() + room.bytes.size() && allocator.nextInterval() == room.address() + FakeAllocator::noNextInterval;
     }
 
     uint64_t word(unsigned index) { return room.at<uint64_t>(index * sizeof(uint64_t)); }
@@ -101,7 +104,7 @@ static void testRopesFromEveryStateOfTheFreeList()
             && ropes.word(2) == (second.address() << CompactFibers::shiftOfFiber1LowerInLengthWord | 5) && ropes.word(3) == second.address() >> CompactFibers::widthOfFiber1LowerInLengthWord;
     };
 
-    ropes.allocator.makeRoomAt(ropes.room.address(), sizeof(ropes.room.bytes));
+    ropes.allocator.makeRoomAt(ropes.room.address(), ropes.room.bytes.size());
     StubRun run = ropes.runner.run(concatenate(2), { first.address(), second.address() });
     AOT_TEST_CHECK(!run.calledOperation && run.result == ropes.room.address() && isRopeOfBoth());
     AOT_TEST_CHECK(ropes.allocator.intervalStart() == ropes.room.address() + sizeOfRope);
@@ -130,7 +133,7 @@ static void testSubstringsFromEveryStateOfTheFreeList()
             && ropes.word(3) == (string.address() >> CompactFibers::widthOfFiber1LowerInLengthWord | 2ull << CompactFibers::shiftOfFiber2InUpperWord);
     };
 
-    ropes.allocator.makeRoomAt(ropes.room.address(), sizeof(ropes.room.bytes));
+    ropes.allocator.makeRoomAt(ropes.room.address(), ropes.room.bytes.size());
     StubRun run = ropes.runner.run(substring(), { string.address(), 2, 5 });
     AOT_TEST_CHECK(!run.calledOperation && run.result == ropes.room.address() && isSubstring());
 
@@ -141,6 +144,46 @@ static void testSubstringsFromEveryStateOfTheFreeList()
     ropes.allocator.makeRoomAt(0, 0);
     ropes.allocator.nextInterval() = FakeAllocator::noNextInterval;
     AOT_TEST_CHECK(ropes.runner.run(substring(), { string.address(), 2, 5 }).calledOperation);
+}
+
+static void testJoinedTextCharacter()
+{
+    RopeAllocation ropes;
+    std::array<uint64_t, maxSingleCharacterString + 1> singleCharacterStrings;
+    std::iota(singleCharacterStrings.begin(), singleCharacterStrings.end(), 1);
+    ropes.runner.instance().singleCharacterStrings = singleCharacterStrings.data();
+    Ref<StringImpl> firstText = StringImpl::create("ab"_span);
+    Ref<StringImpl> secondText = StringImpl::create("cde"_span);
+    FakeFlatString first(firstText.get());
+    FakeFlatString second(secondText.get());
+    ropes.allocator.makeRoomAt(ropes.room.address(), ropes.room.bytes.size());
+    uint64_t joined = ropes.runner.run(concatenate(2), { first.address(), second.address() }).result;
+    constexpr std::string_view letters = "abcde";
+    for (uint64_t position = 0; position < letters.size(); ++position) {
+        StubRun run = ropes.runner.run(substring(), { joined, position, position + 1 });
+        AOT_TEST_CHECK(!run.calledOperation && run.result == singleCharacterStrings[letters[position]]);
+    }
+    Ref<StringImpl> longText = StringImpl::create("vwxyz"_span);
+    FakeFlatString whole(longText.get());
+    uint64_t piece = ropes.runner.run(substring(), { whole.address(), 1, 5 }).result;
+    StubRun run = ropes.runner.run(substring(), { piece, 2, 3 });
+    AOT_TEST_CHECK(!run.calledOperation && run.result == singleCharacterStrings['y']);
+}
+
+static void testLongPairKeyJoined()
+{
+    RopeAllocation ropes;
+    std::array<Latin1Character, StringKeyCache::maxCachedKeyLength + 1> letters;
+    letters.fill('x');
+    Ref<StringImpl> longText = StringImpl::create(std::span<const Latin1Character> { letters });
+    Ref<StringImpl> shortText = StringImpl::create("ab"_span);
+    FakeFlatString first(longText.get());
+    FakeFlatString second(shortText.get());
+    StubKey stub = concatenateKeyOfPair(ConcatenatedKeyForm::Name);
+    ropes.allocator.makeRoomAt(ropes.room.address(), ropes.room.bytes.size());
+    StubRun run = ropes.runner.run(stub, { first.address(), second.address() });
+    AOT_TEST_CHECK(!run.calledOperation && run.result == ropes.room.address() && ropes.word(1) == (first.address() | JSString::isRopeInPointer | JSRopeString::is8BitInPointer));
+    AOT_TEST_CHECK(ropes.runner.run(stub, { second.address(), second.address() }).calledOperation);
 }
 
 static void testTruthinessOfDoubles()
@@ -286,6 +329,147 @@ static void testClosuresThatPassTheCheckOfAProof()
         for (uint64_t closure : { asCreated.address(), changed.address() })
             AOT_TEST_CHECK(!runner.run(key, { closure, wordsWith(0) }).calledOperation);
     });
+
+    struct alignas(16) FakeFullClosure {
+        uint64_t address() const { return std::bit_cast<uintptr_t>(this); }
+
+        uint32_t structureID { 0 };
+        uint8_t indexingTypeAndMisc { 0 };
+        uint8_t type { CompiledClosureType };
+        uint8_t flags { 0 };
+        uint8_t cellState { 0 };
+        std::array<uint64_t, 7> words { };
+    };
+    static_assert(offsetOfClosureEntry % sizeof(uint64_t) == 0 && offsetOfClosureEntry < sizeof(FakeFullClosure));
+    auto fullClosureOf = [](uint32_t closureNumber) {
+        FakeFullClosure closure;
+        closure.words[offsetOfClosureEntry / sizeof(uint64_t) - 1] = static_cast<uint64_t>(ClosureWord::encodeUpperHalf(0, closureNumber, { })) << 32 | 9;
+        return closure;
+    };
+    FakeFullClosure full = fullClosureOf(number);
+    FakeFullClosure fullOfOtherFunction = fullClosureOf(otherNumber);
+    forEachRegisterVariant(checkProofOfClosure(), [&](StubKey key) {
+        AOT_TEST_CHECK(!runner.run(key, { full.address(), wordsWith(0) }).calledOperation);
+        AOT_TEST_CHECK(runner.run(key, { fullOfOtherFunction.address(), wordsWith(KindsOfProof::primitives) }).calledOperation);
+    });
+    JSGlobalObject* realm = std::exchange(runner.instance().globalObject, std::bit_cast<JSGlobalObject*>(static_cast<uintptr_t>(16)));
+    forEachRegisterVariant(checkProofOfClosure(), [&](StubKey key) {
+        AOT_TEST_CHECK(runner.run(key, { full.address(), wordsWith(KindsOfProof::primitives) }).calledOperation);
+        AOT_TEST_CHECK(!runner.run(key, { asCreated.address(), wordsWith(0) }).calledOperation);
+    });
+    runner.instance().globalObject = realm;
+}
+
+static void testTypesInTablesThatPassTheCheckOfAProof()
+{
+    namespace Primitive = Typed::Primitive;
+    struct alignas(16) FakeCell {
+        uint64_t address() const { return std::bit_cast<uintptr_t>(this); }
+
+        uint32_t structureID { 0 };
+        uint8_t indexingTypeAndMisc { 0 };
+        uint8_t type;
+        uint8_t flags { 0 };
+        uint8_t cellState { 0 };
+    };
+    static_assert(OBJECT_OFFSETOF(FakeCell, type) == JSCell::typeInfoTypeOffset());
+    auto bitsOf = [](JSValue value) {
+        return static_cast<uint64_t>(JSValue::encode(value));
+    };
+
+    constexpr uint32_t zeroOrWhole = 64;
+    constexpr uint32_t fromOneToNine = 128;
+    constexpr uint32_t listOrNumber = 192;
+    alignas(8) std::array<uint8_t, 256> tables { };
+    auto lay = [&](uint32_t offset, const auto& record) {
+        memcpy(tables.data() + offset, &record, sizeof(record));
+    };
+    lay(zeroOrWhole, RuntimeType { Primitive::Undefined | Primitive::False | Primitive::Integer | Primitive::WholeNumber | Primitive::String, RuntimeType::hasIntegerRange, 0, 0, 0 });
+    lay(zeroOrWhole + sizeof(RuntimeType), std::array<int64_t, 2> { 0, 0 });
+    lay(fromOneToNine, RuntimeType { Primitive::Integer, RuntimeType::hasIntegerRange, 0, 0, 0 });
+    lay(fromOneToNine + sizeof(RuntimeType), std::array<int64_t, 2> { 1, 9 });
+    lay(listOrNumber, RuntimeType { Primitive::Number, 0, 1, 1, 0 });
+    lay(listOrNumber + sizeof(RuntimeType), RuntimeCellTest::cellTypeIs(ArrayType, DerivedArrayType));
+
+    FakeCell string { .type = StringType };
+    FakeCell symbol { .type = SymbolType };
+    FakeCell list { .type = ArrayType };
+    FakeCell derivedList { .type = DerivedArrayType };
+    FakeCell plainObject { .type = FinalObjectType };
+    FakeCell cellOfNoKind { .type = CellType };
+    struct Case {
+        uint32_t type;
+        uint32_t kinds;
+        Vector<uint64_t> passInStub;
+        Vector<uint64_t> areLeftToRunTime;
+    };
+    const Case cases[] = {
+        { zeroOrWhole, Primitive::Undefined | Primitive::False | Primitive::String,
+            { bitsOf(jsUndefined()), bitsOf(jsBoolean(false)), string.address(), bitsOf(jsNumber(0)) },
+            { bitsOf(jsNumber(1)), bitsOf(jsNumber(-1)), bitsOfDouble(-0.0), bitsOfDouble(0.5), bitsOfDouble(PNaN), bitsOf(jsNull()), bitsOf(jsBoolean(true)), bitsOf(JSValue()), symbol.address(), plainObject.address(), cellOfNoKind.address(), static_cast<uint64_t>(JSValue::ValueNull | 1) } },
+        { zeroOrWhole, Primitive::Undefined | Primitive::False | Primitive::String | Primitive::Absent,
+            { bitsOf(JSValue()) },
+            { } },
+        { fromOneToNine, 0,
+            { bitsOf(jsNumber(1)), bitsOf(jsNumber(9)) },
+            { bitsOf(jsNumber(0)), bitsOf(jsNumber(10)), bitsOf(jsNumber(-1)), bitsOfDouble(1.5), bitsOf(jsUndefined()), string.address() } },
+        { listOrNumber, KindsOfProof::everyNumber,
+            { bitsOf(jsNumber(7)), bitsOfDouble(0.5), list.address(), derivedList.address() },
+            { plainObject.address(), string.address(), cellOfNoKind.address(), bitsOf(jsUndefined()), bitsOf(JSValue()) } },
+    };
+
+    StubCatalog catalog(StubOptions { });
+    StubRunner runner;
+    runner.instance().image.tables = reinterpret_cast<const ProgramTables*>(tables.data());
+    runner.recordCallsOf(Entry::operationAOTStopUnlessValueHasType);
+    forEachRegisterVariant(checkProofOfType(), [&](StubKey key) {
+        for (GPRReg reg : allocatableGPRs)
+            AOT_TEST_CHECK(!containsRegister(catalog.summaryOf(key).clobbered, reg));
+        for (const Case& tried : cases) {
+            uint64_t words = KindsOfProof::withSource(tried.kinds, Typed::ProofSource::Contents);
+            for (uint64_t value : tried.passInStub)
+                AOT_TEST_CHECK(!runner.run(key, { value, words, tried.type }).calledOperation);
+            for (uint64_t value : tried.areLeftToRunTime) {
+                StubRun run = runner.run(key, { value, words, tried.type });
+                AOT_TEST_CHECK(run.calledOperation && run.recordedArguments[0] == words && run.recordedArguments[1] == tried.type && run.recordedArguments[2] == value);
+            }
+        }
+    });
+}
+
+static void testLooseEqualityOfPrimitives()
+{
+    StubRunner runner;
+    auto bitsOf = [](JSValue value) {
+        return static_cast<uint64_t>(JSValue::encode(value));
+    };
+    const uint64_t primitives[] = {
+        bitsOf(jsNumber(0)), bitsOf(jsNumber(1)), bitsOf(jsNumber(-1)), bitsOfDouble(0.0), bitsOfDouble(-0.0), bitsOfDouble(1.0), bitsOfDouble(1.5), bitsOfDouble(PNaN), bitsOfDouble(-PNaN),
+        bitsOf(jsUndefined()), bitsOf(jsNull()), bitsOf(jsBoolean(true)), bitsOf(jsBoolean(false)),
+    };
+    auto numberOf = [](JSValue value) {
+        return value.isNumber() ? value.asNumber() : value.isTrue() ? 1 : 0;
+    };
+    for (uint64_t left : primitives) {
+        for (uint64_t right : primitives) {
+            JSValue leftValue = JSValue::decode(static_cast<EncodedJSValue>(left));
+            JSValue rightValue = JSValue::decode(static_cast<EncodedJSValue>(right));
+            const bool areEqual = leftValue.isUndefinedOrNull() || rightValue.isUndefinedOrNull() ? leftValue.isUndefinedOrNull() && rightValue.isUndefinedOrNull() : numberOf(leftValue) == numberOf(rightValue);
+            StubRun run = runner.run(equal(false), { left, right });
+            AOT_TEST_CHECK(!run.calledOperation && run.result == static_cast<uint64_t>(areEqual));
+        }
+    }
+
+    Ref<StringImpl> text = StringImpl::create("ab"_span);
+    FakeFlatString cell(text.get());
+    FakeFlatString object(text.get());
+    object.type = FinalObjectType;
+    for (uint64_t nullish : { bitsOf(jsUndefined()), bitsOf(jsNull()) }) {
+        AOT_TEST_CHECK(!runner.run(equal(false), { cell.address(), nullish }).calledOperation && !runner.run(equal(false), { nullish, cell.address() }).result);
+        AOT_TEST_CHECK(runner.run(equal(false), { object.address(), nullish }).calledOperation && runner.run(equal(false), { nullish, object.address() }).calledOperation);
+    }
+    for (uint64_t number : { bitsOf(jsNumber(1)), bitsOfDouble(1.5), bitsOf(jsBoolean(true)) })
+        AOT_TEST_CHECK(runner.run(equal(false), { cell.address(), number }).calledOperation && runner.run(equal(false), { number, cell.address() }).calledOperation);
 }
 
 static void testStrictEqualityInBothForms()
@@ -329,8 +513,24 @@ static void testStrictEqualityInBothForms()
         }
     }
 
-    FakeFlatString bigInt = cellOfType(HeapBigIntType);
-    FakeFlatString otherBigInt = cellOfType(HeapBigIntType);
+    const FakeBigInt zero({ });
+    const FakeBigInt otherZero({ });
+    const FakeBigInt five({ 5 });
+    const FakeBigInt otherFive({ 5 });
+    const FakeBigInt six({ 6 });
+    const FakeBigInt negativeFive({ 5 }, true);
+    const FakeBigInt fiveAndHighDigit({ 5, 1 });
+    const FakeBigInt sixAndHighDigit({ 6, 1 });
+    check(zero.address(), otherZero.address(), true);
+    check(five.address(), otherFive.address(), true);
+    check(five.address(), zero.address(), false);
+    check(five.address(), six.address(), false);
+    check(five.address(), negativeFive.address(), false);
+    check(five.address(), fiveAndHighDigit.address(), false);
+    check(fiveAndHighDigit.address(), sixAndHighDigit.address(), false);
+
+    FakeBigInt bigInt({ 5, 1 });
+    FakeBigInt otherBigInt({ 5, 2 });
     runner.recordCallsOf(Entry::operationAOTCompareStrictEq);
     for (uint64_t answer : { 0, 1 }) {
         runner.setResultOfRecordedOperation(answer);
@@ -369,15 +569,54 @@ static void testMovesOfFewBytes()
     }
 }
 
+static void testShiftArrayStart()
+{
+    constexpr size_t numberOfElements = 5;
+    constexpr uint16_t noProperties = std::numeric_limits<uint16_t>::max() - 1;
+    StubRunner runner;
+    runner.recordCallsOf(Entry::operationAOTShiftArrayStart);
+    FakeObject<sizeof(Structure)> structure;
+    runner.instance().prefix().structureIDBase = structure.address() & ~static_cast<uint64_t>(UINT32_MAX);
+    FakeObject<sizeof(JSObjectWithButterfly)> array;
+    array.setHeader(static_cast<uint32_t>(structure.address()), ArrayType);
+    std::array<uint64_t, 2 + numberOfElements> words;
+    auto runWith = [&](uint32_t bits, uint16_t maxOffset) {
+        structure.at<uint32_t>(Structure::bitFieldOffset()) = bits;
+        structure.at<uint16_t>(Structure::maxOffsetOffset()) = maxOffset;
+        words = { 3, uint64_t { 9 } << 32 | numberOfElements, 11, 12, 13, 14, 15 };
+        array.at<uint64_t>(JSObject::butterflyOffset()) = std::bit_cast<uintptr_t>(words.data() + 2);
+        return runner.run(shiftArrayStart(), { array.address() });
+    };
+    StubRun moved = runWith(Structure::s_hasElementsStartOffsetBits, noProperties);
+    AOT_TEST_CHECK(!moved.calledOperation && array.at<uint64_t>(JSObject::butterflyOffset()) == std::bit_cast<uintptr_t>(words.data() + 3));
+    AOT_TEST_CHECK(words[1] == 4 && words[2] == (uint64_t { 8 } << 32 | (numberOfElements - 1)) && words[3] == 12 && words[6] == 15);
+
+    auto isLeftToOperation = [&](uint32_t bits, uint16_t maxOffset) {
+        StubRun run = runWith(bits, maxOffset);
+        AOT_TEST_CHECK(run.numberOfRecordedCalls == 1 && run.recordedArguments[0] == array.address());
+        AOT_TEST_CHECK(array.at<uint64_t>(JSObject::butterflyOffset()) == std::bit_cast<uintptr_t>(words.data() + 2) && words[0] == 3 && words[2] == 11);
+    };
+    isLeftToOperation(0, noProperties);
+    isLeftToOperation(~Structure::s_hasElementsStartOffsetBits, noProperties);
+    isLeftToOperation(Structure::s_hasElementsStartOffsetBits, firstOutOfLineOffset);
+    runner.instance().mutatorShouldBeFenced = true;
+    isLeftToOperation(Structure::s_hasElementsStartOffsetBits, noProperties);
+}
+
 std::span<const NativeTest> stubValueTests()
 {
     static constexpr NativeTest tests[] = {
         { "stubs/move-few-bytes/every-length-and-overlap"_s, ImageTests::whenExecutable<testMovesOfFewBytes> },
+        { "stubs/shift-array-start/moves-the-start-of-the-elements"_s, ImageTests::whenExecutable<testShiftArrayStart> },
         { "stubs/concatenate/ropes-from-every-state-of-the-free-list"_s, ImageTests::whenExecutable<testRopesFromEveryStateOfTheFreeList> },
+        { "stubs/concatenate/long-key-of-pair"_s, ImageTests::whenExecutable<testLongPairKeyJoined> },
+        { "stubs/substring/one-character-of-joined-text"_s, ImageTests::whenExecutable<testJoinedTextCharacter> },
         { "stubs/substring/ropes-from-every-state-of-the-free-list"_s, ImageTests::whenExecutable<testSubstringsFromEveryStateOfTheFreeList> },
         { "stubs/to-boolean/doubles"_s, ImageTests::whenExecutable<testTruthinessOfDoubles> },
         { "stubs/check-proof-of-kinds/a-value-passes-where-its-kind-is-among-them-and-nowhere-else"_s, ImageTests::whenExecutable<testKindsThatPassTheCheckOfAProof> },
         { "stubs/check-proof-of-closure/the-closure-asked-for-passes-and-no-other-object"_s, ImageTests::whenExecutable<testClosuresThatPassTheCheckOfAProof> },
+        { "stubs/check-proof-of-type/what-the-record-accepts-passes-and-the-rest-is-left-to-the-run-time"_s, ImageTests::whenExecutable<testTypesInTablesThatPassTheCheckOfAProof> },
+        { "stubs/loose-equality-of-primitives"_s, ImageTests::whenExecutable<testLooseEqualityOfPrimitives> },
         { "stubs/equal/strict-in-the-register-and-in-the-flags"_s, ImageTests::whenExecutable<testStrictEqualityInBothForms> },
     };
     return tests;

@@ -44,7 +44,7 @@ static bool markModulesThatMayBeMockedInTestRunsOfProgram(const Program& program
         const Module& module = program.modules[index];
         if (mocked.quickGet(index) || module.requests.isEmpty() || !namesModuleInTestRunsOfProgram(program, module.requests[0].target))
             continue;
-        if (mocked.quickGet(module.requests[0].target.index()) && isFaceOfCommonJSFile(program, module))
+        if (mocked.quickGet(module.requests[0].target.index()) && isCommonJSFacade(program, module))
             mocked.quickSet(index);
     }
     return true;
@@ -62,7 +62,7 @@ static BitVector namespacesHandedOnInTestRunsOfProgram(const Program& program, c
     return handedOn;
 }
 
-static BitVector modulesThatLeadToMocksInTestRunsOfProgram(const Program& program, const BitVector& mocked)
+static BitVector findModulesReachingMocks(const Program& program, const BitVector& mocked)
 {
     size_t numberOfModules = program.modules.size();
     Vector<uint32_t> firstImporter;
@@ -109,7 +109,7 @@ MocksOfProgram findMocksOfProgram(const Program& program)
         return mocks;
     mocks.isAnyModuleMocked = true;
     mocks.namespacesHandedOnByMockedModules = namespacesHandedOnInTestRunsOfProgram(program, mocks.modulesThatMayBeMocked);
-    mocks.modulesThatLeadToMocks = modulesThatLeadToMocksInTestRunsOfProgram(program, mocks.modulesThatMayBeMocked);
+    mocks.modulesReachingMocks = findModulesReachingMocks(program, mocks.modulesThatMayBeMocked);
     return mocks;
 }
 
@@ -121,14 +121,14 @@ bool mayComeThroughMock(const Program& program, const MocksOfProgram& mocks, Mod
         return true;
     const auto& exports = program.at(exporter).exports;
     if (indexOfExport >= exports.size())
-        return mocks.modulesThatLeadToMocks.get(exporter.index());
+        return mocks.modulesReachingMocks.get(exporter.index());
 
     const ModuleExport& entry = exports[indexOfExport];
     switch (entry.kind) {
     case ModuleExportKind::Variable:
         if (!entry.variable || entry.variable.index() >= program.variables.size())
             return true;
-        if (program.at(entry.variable).module != exporter && mocks.modulesThatLeadToMocks.get(exporter.index()))
+        if (program.at(entry.variable).module != exporter && mocks.modulesReachingMocks.get(exporter.index()))
             return true;
         return false;
     case ModuleExportKind::Namespace:
@@ -141,6 +141,10 @@ bool mayComeThroughMock(const Program& program, const MocksOfProgram& mocks, Mod
         return false;
     case ModuleExportKind::Indirect:
         return mocks.isAnyModuleMocked;
+    case ModuleExportKind::Field:
+        if (!entry.layout || entry.layout.index() >= program.layouts.size())
+            return true;
+        return program.at(entry.layout).module != exporter && mocks.modulesReachingMocks.get(exporter.index());
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
@@ -198,23 +202,26 @@ static BitVector lostBuiltinsInTestRunsOfProgram(const Program& program, const L
     return lost;
 }
 
-static Vector<NameAddedByTests> takeNamesFoundInTestRunsOfProgram(const Program& program, LinkTables& tables)
+static Vector<NameAddedByTests> takeNamesFoundInTestRunsOfProgram(const Program& program, const ParallelLoops& loops, LinkTables& tables)
 {
     Vector<NameAddedByTests> names = std::exchange(tables.namesAddedByTests, { });
     const LookupsPastProgramObjects& lookups = tables.lookups;
     if (lookups.namesWrittenThroughLostBuiltinsBesideProduct.isEmpty() || lookups.lostBuiltins.isEmpty())
         return names;
-    BitVector lost = lostBuiltinsInTestRunsOfProgram(program, lookups);
-    for (size_t keyIndex : lookups.namesWrittenThroughLostBuiltinsBesideProduct) {
-        PropertyKeyID key(keyIndex);
-        if (program.at(key).kind != PropertyKeyKind::Text)
-            continue;
-        for (size_t holderIndex : lost) {
-            BuiltinID holder(static_cast<uint32_t>(holderIndex));
-            if (holderTakesNameInTestRun(program, holder, key))
-                names.append(NameAddedByTests { holder, program.at(key).text });
-        }
+    Vector<BuiltinID> lost;
+    for (size_t index : lostBuiltinsInTestRunsOfProgram(program, lookups))
+        lost.append(BuiltinID(static_cast<uint32_t>(index)));
+    Vector<PropertyKeyID> keys;
+    for (size_t index : lookups.namesWrittenThroughLostBuiltinsBesideProduct) {
+        if (program.at(PropertyKeyID(index)).kind == PropertyKeyKind::Text)
+            keys.append(PropertyKeyID(index));
     }
+    names.appendVector(collectInParallel<NameAddedByTests>(loops, static_cast<unsigned>(keys.size()), [&](unsigned index, Vector<NameAddedByTests>& found) {
+        for (BuiltinID holder : lost) {
+            if (holderTakesNameInTestRun(program, holder, keys[index]))
+                found.append(NameAddedByTests { holder, program.at(keys[index]).text });
+        }
+    }));
     sortNamesInTestRunsOfProgram(names);
     return names;
 }
@@ -226,8 +233,8 @@ void openNamesFoundByLink(Program& program, BuildContext& build, LinkTables& lin
     Vector<NameAddedByTests> followed = linked.namesAddedByTests;
     followed.appendVector(held.namesAddedByTests);
     sortNamesInTestRunsOfProgram(followed);
-    Vector<NameAddedByTests> opened = takeNamesFoundInTestRunsOfProgram(program, linked);
-    Vector<NameAddedByTests> leftShut = takeNamesFoundInTestRunsOfProgram(program, held);
+    Vector<NameAddedByTests> opened = takeNamesFoundInTestRunsOfProgram(program, build.parallelLoops(), linked);
+    Vector<NameAddedByTests> leftShut = takeNamesFoundInTestRunsOfProgram(program, build.parallelLoops(), held);
     leftShut.removeAllMatching([&](const NameAddedByTests& added) {
         return std::ranges::binary_search(opened, added);
     });
@@ -243,7 +250,7 @@ void openNamesFoundByLink(Program& program, BuildContext& build, LinkTables& lin
     Vector<UserDiagnostic> diagnostics;
     for (const NameAddedByTests& added : leftShut) {
         if (std::ranges::binary_search(followed, added) && (!program.isOpenedSomewhere(added.name) || !program.isOpened(added.holder, added.name)))
-            diagnostics.append(UserDiagnostic { .kind = UserDiagnosticKind::NameAddedToBuiltinWasNotOpened, .text = added.name });
+            diagnostics.append(UserDiagnostic { .kind = UserDiagnosticKind::UndetectedBuiltinAddition, .text = added.name });
     }
     build.diagnostics().append(WTF::move(diagnostics));
     openNamesThatTestsAdd(program, WTF::move(opened), { });
@@ -270,7 +277,7 @@ static bool isWrittenByUserInTestRunsOfProgram(const Program& program, ModuleID 
 static UserDiagnostic reportOfExportInTestRunsOfProgram(const Program& program, VariableID id)
 {
     const Variable& variable = program.at(id);
-    UserDiagnostic diagnostic { .kind = UserDiagnosticKind::SpiedExportWasNotOpened, .text = variable.name };
+    UserDiagnostic diagnostic { .kind = UserDiagnosticKind::UndetectedExportSpy, .text = variable.name };
     if (isWrittenByUserInTestRunsOfProgram(program, variable.module)) {
         diagnostic.location = { variable.module.index(), 0 };
         SourceLocation declaration = variable.function ? program.at(variable.function).declarationLocation() : noSourceLocation;
@@ -285,7 +292,14 @@ void finishFactsOfTestRun(const Program& program, BuildContext& build, FactTable
     if (!program.admitsReplacedBuiltins)
         return;
 
+    auto noteOpenMember = [&](BuiltinID member) {
+        const BuiltinTable& builtins = program.builtins();
+        if (BuiltinID holder = builtins.at(member).holder)
+            tables.builtinHoldersWithOpenMembers.set(builtins.canonicalID(holder).index());
+    };
+    std::ranges::for_each(program.unlockedBuiltins(), noteOpenMember);
     for (const BuiltinLeftOpen& open : tables.builtinMembersLeftOpen) {
+        noteOpenMember(open.member);
         if (open.reason != ReasonBuiltinStaysOpen::IsOpenToDebugger && !program.builtins().has(BuiltinMark::MayBeAbsent, open.member))
             tables.builtinMembersBehindWatch.set(open.member.index());
         if (!program.isLockLeftToProgram(open.member))
@@ -313,7 +327,7 @@ bool isFileOfProductInTestRun(const Program& program, FunctionID writer)
     if (!program.admitsReplacedBuiltins || !writer)
         return false;
     ModuleID module = program.at(writer).module;
-    return module && program.at(module).flags.contains(ModuleFlags::FindsBuiltinsReadOnly);
+    return module && program.at(module).flags.contains(ModuleFlags::HasReadOnlyBuiltins);
 }
 
 bool writeOpensNothingInTestRun(const Program& program, FunctionID writer, BuiltinID member)

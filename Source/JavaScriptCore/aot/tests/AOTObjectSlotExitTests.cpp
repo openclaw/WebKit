@@ -104,7 +104,7 @@ static const LayoutData& layoutNamed(LoadedProgram& program, ASCIILiteral name)
 {
     const ProgramTables& tables = program.state().tables;
     for (uint32_t shape = 1; shape < tables.firstEnvironmentShape; ++shape) {
-        if (tables.hasLayoutForShape(shape) && Image::current()->text().equals(StringID(tables.layoutForShape(shape).name), name))
+        if (tables.hasLayoutForShape(shape) && isNamedInTextOfLoadedProgram(tables.layoutForShape(shape), name))
             return tables.layoutForShape(shape);
     }
     failNativeTest(__FILE__, __LINE__, name.characters());
@@ -468,6 +468,18 @@ JSC_DEFINE_CUSTOM_GETTER(getHolder, (JSGlobalObject*, EncodedJSValue holder, Pro
     return holder;
 }
 
+static JSValue lastHolderSeenBySetter;
+static JSValue lastValueSeenBySetter;
+
+static JSC_DECLARE_CUSTOM_SETTER(setSeen);
+
+JSC_DEFINE_CUSTOM_SETTER(setSeen, (JSGlobalObject*, EncodedJSValue holder, EncodedJSValue value, PropertyName))
+{
+    lastHolderSeenBySetter = JSValue::decode(holder);
+    lastValueSeenBySetter = JSValue::decode(value);
+    return true;
+}
+
 static bool hasDirectProperty(LoadedProgram& program, JSObject* object, const Identifier& name, JSValue value, unsigned attributes)
 {
     unsigned foundAttributes = 0;
@@ -516,6 +528,25 @@ static void checkDefinitionsByNativeCode(LoadedProgram& program)
     AOT_TEST_CHECK(isCompiledObject(object) && object->get(program.realm(), lazy) == JSValue(object) && keysOf(program, object) == "b,c,d,a,lazy"_s);
     AOT_TEST_CHECK(put(program, object, lazy, jsNumber(9)) && hasOwnProperty(program, object, lazy, jsNumber(9), noAttributes));
     AOT_TEST_CHECK(object->shapeWord() == shapeWord);
+
+    Identifier stateful = Identifier::fromString(vm, "stateful"_s);
+    AOT_TEST_CHECK(object->putDirectCustomAccessor(vm, stateful, CustomGetterSetter::create(vm, getHolder, setSeen), static_cast<unsigned>(PropertyAttribute::CustomValue)));
+    AOT_TEST_CHECK(put(program, object, stateful, jsNumber(10)) && lastHolderSeenBySetter == JSValue(object) && lastValueSeenBySetter == jsNumber(10));
+    PropertyDescriptor valueAlone;
+    valueAlone.setValue(jsNumber(11));
+    AOT_TEST_CHECK(object->methodTable()->defineOwnProperty(object, program.realm(), stateful, valueAlone, false));
+    AOT_TEST_CHECK(lastHolderSeenBySetter == JSValue(object) && lastValueSeenBySetter == jsNumber(11) && object->get(program.realm(), stateful) == JSValue(object));
+    PropertyDescriptor sameValue;
+    sameValue.setValue(object);
+    AOT_TEST_CHECK(object->methodTable()->defineOwnProperty(object, program.realm(), stateful, sameValue, false) && lastValueSeenBySetter == jsNumber(11));
+    PropertyDescriptor hidden;
+    hidden.setValue(jsNumber(12));
+    hidden.setEnumerable(false);
+    AOT_TEST_CHECK(object->methodTable()->defineOwnProperty(object, program.realm(), stateful, hidden, false));
+    AOT_TEST_CHECK(lastValueSeenBySetter == jsNumber(11) && hasOwnProperty(program, object, stateful, jsNumber(12), dontEnum));
+    AOT_TEST_CHECK(isCompiledObject(object) && object->shapeWord() == shapeWord);
+    lastHolderSeenBySetter = { };
+    lastValueSeenBySetter = { };
 }
 
 static constexpr unsigned numberOfBagFields = 9;
@@ -637,7 +668,7 @@ static const KeyOrderTransition* findTransition(LoadedProgram& program, uint64_t
 static void checkTransitionTableGrows(LoadedProgram& program)
 {
     constexpr unsigned numberOfOrders = 4000;
-    constexpr uint32_t initialMask = 1023;
+    constexpr uint32_t initialMask = 511;
     AOT_TEST_CHECK(program.instance().objects.keyOrderTransitionMask == initialMask);
 
     Vector<KeyOrderTransition> seen;
@@ -649,7 +680,7 @@ static void checkTransitionTableGrows(LoadedProgram& program)
         createBag(program, order, [&](Object& bag, const FieldData& field, uint64_t wordsBefore) {
             AOT_TEST_CHECK(!bag.hasOutOfLineKeyOrder());
             KeyOrderTransition step { wordsBefore & orderCountAndShapeMask, slotKeyFor(field.slot.offset, field.isOutOfLine()), bag.orderWord() & orderAndCountMask };
-            std::optional<uint32_t> insideOrderOfImage = keyOrders.stepInsideOrderOfImage(bag.layout(), static_cast<uint32_t>(wordsBefore), bag.indexOf(field));
+            std::optional<uint32_t> insideOrderOfImage = keyOrders.stepInsideOrderOfImage(bag.layout(), static_cast<uint32_t>(wordsBefore) & orderAndCountMask, bag.indexOf(field));
             AOT_TEST_CHECK(!insideOrderOfImage || *insideOrderOfImage == step.orderAndCountAfter);
             (insideOrderOfImage ? seenInsideOrdersOfImage : seen).append(step);
         });

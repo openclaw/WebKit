@@ -49,9 +49,9 @@ private:
         Position late;
     };
 
-    bool fail(FailureKind kind, const Operation* operation)
+    bool fail(FailureKind kind, const Operation* operation, PlaceOfCheck check = PlaceOfCheck::here())
     {
-        m_proc.fail(kind, operation);
+        m_proc.fail(kind, operation, check);
         m_failed = true;
         return false;
     }
@@ -66,9 +66,11 @@ private:
     bool needsPointerBeside(const Operation*) const;
     bool isFrameAddress(const Operation*) const;
     bool isComputedFromFrameAddress(const Operation*) const;
+    bool isInnerPointer(const Operation* value) const { return value->has(OperationFlag::IsInnerPointer) || (!value->hasNoPosition() && m_joinsInnerPointers.get(value->index())); }
     const Operation* keeperOf(const Operation*) const;
 
     void findFrameAddresses();
+    void findJoinsOfInnerPointers();
     void findWatchedValues();
     void define(const Operation*, const Block*, Position);
     void noteRead(const Operation*, const Block*, Position);
@@ -82,8 +84,21 @@ private:
     }
     void put(Location location, const Operation* value)
     {
-        if (location.isRegister() && location.reg().index() < numberOfRegisters)
-            m_valueIn[location.reg().index()] = value;
+        if (!location.isRegister() || location.reg().index() >= numberOfRegisters)
+            return;
+        m_valueIn[location.reg().index()] = value;
+        if (value)
+            m_registersThatHoldValues |= maskOf(location.reg());
+        else
+            m_registersThatHoldValues &= ~maskOf(location.reg());
+    }
+
+    void clearRegisters(RegisterMask registers)
+    {
+        forEachRegister(registers & m_registersThatHoldValues, [&](Reg reg) {
+            m_valueIn[reg.index()] = nullptr;
+        });
+        m_registersThatHoldValues &= ~registers;
     }
 
     void enter(const Block*);
@@ -114,6 +129,8 @@ private:
         const Block* head;
     };
     ArenaVector<PointerKeptAtHead> m_pointersKeptAtHeads;
+    ArenaVector<uint32_t> m_pointersKeptInRareBlock;
+    const Block* m_rareBlockThatKeepsPointers { nullptr };
     ArenaVector<Read> m_reads;
     ArenaVector<LiveRange> m_liveRanges;
     ArenaVector<const Block*> m_blocksToEnter;
@@ -122,12 +139,13 @@ private:
     ArenaVector<uint32_t> m_rootOfSuspension;
     BitSpan m_isDisplaced;
     BitSpan m_isFrameAddress;
+    BitSpan m_joinsInnerPointers;
     ArenaVector<uint32_t> m_liveRangeIn;
     ArenaVector<uint32_t> m_firstLiveRangeIn;
-    BitSpan m_isCleared;
 
     const Block* m_block { nullptr };
     const Operation* m_valueIn[numberOfRegisters] { };
+    RegisterMask m_registersThatHoldValues { 0 };
     bool m_failed { false };
 };
 
@@ -148,9 +166,9 @@ CollectorRulesChecker::CollectorRulesChecker(Procedure& proc)
     m_rootOfSuspension.fill(m_arena, numberOfOperations, none);
     m_isDisplaced = BitSpan::create(m_arena, numberOfOperations);
     m_isFrameAddress = BitSpan::create(m_arena, numberOfOperations);
+    m_joinsInnerPointers = BitSpan::create(m_arena, numberOfOperations);
     m_liveRangeIn.fill(m_arena, proc.numberOfBlocks(), none);
     m_firstLiveRangeIn.fill(m_arena, proc.numberOfBlocks(), none);
-    m_isCleared = BitSpan::create(m_arena, m_spills.size());
 }
 
 bool CollectorRulesChecker::needsPointerBeside(const Operation* value) const
@@ -240,6 +258,30 @@ void CollectorRulesChecker::findFrameAddresses()
     } while (markedPhiAlreadyPassed);
 }
 
+void CollectorRulesChecker::findJoinsOfInnerPointers()
+{
+    if (!m_proc.traits().savesFrameOnSuspend)
+        return;
+
+    bool markedPhiAlreadyPassed;
+    do {
+        markedPhiAlreadyPassed = false;
+        for (const Block* block : m_order.blocksInOrder()) {
+            for (const Operation* operation : block->operations()) {
+                if (operation->opcode() == Select && (isInnerPointer(operation->child(1)) || isInnerPointer(operation->child(2))))
+                    m_joinsInnerPointers.set(operation->index());
+            }
+            for (const Operation* upsilon : block->upsilons()) {
+                const Operation* phi = upsilon->phi();
+                if (!phi || m_liveness.isDropped(upsilon) || m_joinsInnerPointers.get(phi->index()) || !isInnerPointer(upsilon->child(0)))
+                    continue;
+                m_joinsInnerPointers.set(phi->index());
+                markedPhiAlreadyPassed |= m_order.headOf(phi->owner()) <= m_order.headOf(block);
+            }
+        }
+    } while (markedPhiAlreadyPassed);
+}
+
 static bool holdsBitsOfItsChildren(const Operation* value)
 {
     switch (value->opcode()) {
@@ -297,7 +339,7 @@ void CollectorRulesChecker::define(const Operation* value, const Block* block, P
                 m_isDisplaced.set(index);
         }
     }
-    if (!needsPointerBeside(value) && !m_isFrameAddress.get(index) && !keeperOf(value))
+    if (!needsPointerBeside(value) && !m_isFrameAddress.get(index) && !m_joinsInnerPointers.get(index) && !keeperOf(value))
         return;
     m_watchedOf[index] = m_watched.size();
     m_watched.append(m_arena, WatchedValue { value, block, definition });
@@ -360,8 +402,7 @@ void CollectorRulesChecker::extendTo(uint32_t watched, const Block* block, Posit
 void CollectorRulesChecker::enter(const Block* block)
 {
     m_block = block;
-    for (const Operation*& held : m_valueIn)
-        held = nullptr;
+    clearRegisters(m_registersThatHoldValues);
     for (const RegisterBinding& binding : m_allocation.registersAtHeadOf(block))
         put(Location::reg(binding.reg), binding.value);
     if (!block->isEntry())
@@ -417,10 +458,6 @@ void CollectorRulesChecker::pass(const Step& step)
             m_saveOf[step.operation->index()] = spill;
         return;
     }
-    case StepKind::ClearSpill:
-        if (step.destination.isSpill() && step.destination.spillIndex() < m_spills.size())
-            m_isCleared.set(step.destination.spillIndex());
-        return;
     case StepKind::KeepPointer: {
         uint32_t watched = step.operation ? m_watchedOf[step.operation->index()] : none;
         if (watched == none || !step.destination.isSpill())
@@ -431,6 +468,14 @@ void CollectorRulesChecker::pass(const Step& step)
             m_watched[watched].pointerIsKeptInFramedPartAlone = isKeptInFramedPartAlone;
             if (isKeptInFramedPartAlone)
                 m_pointersKeptAtHeads.append(m_arena, PointerKeptAtHead { watched, m_block });
+        } else if (m_order.of(m_block).isRare() && m_allocation.hasFramedPart() && !m_allocation.isInFramedPart(m_block) && !m_allocation.isInFramedPart(m_watched[watched].block)) {
+            if (m_rareBlockThatKeepsPointers != m_block) {
+                m_rareBlockThatKeepsPointers = m_block;
+                m_pointersKeptInRareBlock.shrink(0);
+            }
+            m_pointersKeptInRareBlock.append(m_arena, watched);
+            m_watched[watched].pointerBeside = step.destination.spillIndex();
+            m_watched[watched].pointerIsKeptInFramedPartAlone = true;
         }
         return;
     }
@@ -457,10 +502,7 @@ void CollectorRulesChecker::execute(const Step& step)
     }
     if (patch && patch->isSuspension())
         overwritten |= ~m_registersKeptAtSuspensions;
-    for (unsigned index = 0; index < numberOfRegisters; ++index) {
-        if (overwritten >> index & 1)
-            m_valueIn[index] = nullptr;
-    }
+    clearRegisters(overwritten);
 
     if (!patch) {
         put(step.destination, operation);
@@ -515,6 +557,8 @@ bool CollectorRulesChecker::checkAcross(const Operation* value, const Safepoint&
     bool isSuspension = safepoint.patch->isSuspension();
     if (isSuspension && m_isFrameAddress.get(value->index()))
         return fail(FailureKind::FrameAddressAcrossSuspension, value);
+    if (isSuspension && m_joinsInnerPointers.get(value->index()))
+        return fail(FailureKind::InnerPointerWithoutOwner, value);
 
     const Operation* keeper = value;
     while (const Operation* next = keeperOf(keeper))
@@ -524,8 +568,10 @@ bool CollectorRulesChecker::checkAcross(const Operation* value, const Safepoint&
     if (needsPointerBeside(keeper)) {
         uint32_t watched = m_watchedOf[keeper->index()];
         bool hasPointer = watched != none && spillHolds(m_watched[watched].pointerBeside, keeper, true, safepoint)
-            && (!m_watched[watched].pointerIsKeptInFramedPartAlone || (m_allocation.isInFramedPart(m_block) && std::ranges::any_of(m_pointersKeptAtHeads, [&](const PointerKeptAtHead& kept) {
-                return kept.watched == watched && kept.head == m_allocation.headOfFramedPartAbove(m_block).block;
+            && (!m_watched[watched].pointerIsKeptInFramedPartAlone || (m_rareBlockThatKeepsPointers == m_block && std::ranges::find(m_pointersKeptInRareBlock, watched) != m_pointersKeptInRareBlock.end()) || (m_allocation.isInFramedPart(m_block) && m_allocation.everyHeadOfFramedPartAbove(m_block, [&](const Allocation::HeadOfFramedPart& head) {
+                return std::ranges::any_of(m_pointersKeptAtHeads, [&](const PointerKeptAtHead& kept) {
+                    return kept.watched == watched && kept.head == head.block;
+                });
             })));
         isKept = (hasPointer || !safepoint.patch->effects.mayCollect) && (!isSuspension || isRootOf(safepoint.patch, keeper));
     } else
@@ -537,24 +583,35 @@ bool CollectorRulesChecker::checkAcross(const Operation* value, const Safepoint&
 
 bool CollectorRulesChecker::spillHolds(SpillIndex spill, const Operation* value, bool holdsPointer, const Safepoint& safepoint) const
 {
-    if (spill >= m_spills.size() || m_isCleared.get(spill))
+    if (spill >= m_spills.size() || m_spills[spill].isDeadSlot)
         return false;
     const SpillFacts& facts = m_spills[spill];
     if (facts.value != value || facts.isPointerBesideNarrowReference != holdsPointer || facts.begin > safepoint.late || safepoint.late > facts.end)
         return false;
+    if (facts.isStoredAtHeadOfFramedPart) {
+        bool everyHeadAboveSavesIt = m_allocation.isInFramedPart(m_block) && m_allocation.everyHeadOfFramedPartAbove(m_block, [&](const Allocation::HeadOfFramedPart& head) {
+            for (uint32_t index = head.beginOfSteps; index < head.endOfSteps; ++index) {
+                if (m_allocation.step(index).destination == Location::spill(spill))
+                    return true;
+            }
+            return false;
+        });
+        if (!everyHeadAboveSavesIt)
+            return false;
+    }
     if (!safepoint.patch->isSuspension())
         return true;
     std::span<PatchOperation* const> suspensions = m_allocation.suspensions();
     auto listed = std::partition_point(suspensions.begin(), suspensions.end(), [&](const PatchOperation* candidate) {
         return m_order.latePositionOf(candidate) < safepoint.late;
     });
-    return listed != suspensions.end() && *listed == safepoint.patch && m_allocation.spillsHeldAt(static_cast<uint32_t>(listed - suspensions.begin())).get(spill);
+    return listed != suspensions.end() && *listed == safepoint.patch && m_allocation.liveSpillsAt(static_cast<uint32_t>(listed - suspensions.begin())).get(spill);
 }
 
 bool CollectorRulesChecker::isHeld(const Operation* value, const Safepoint& safepoint) const
 {
-    for (const Operation* held : m_valueIn) {
-        if (held == value)
+    for (RegisterMask registers = m_registersThatHoldValues; registers; registers &= registers - 1) {
+        if (m_valueIn[std::countr_zero(registers)] == value)
             return true;
     }
     return spillHolds(m_allocation.spillOf(value), value, false, safepoint) || spillHolds(m_saveOf[value->index()], value, false, safepoint);
@@ -563,6 +620,7 @@ bool CollectorRulesChecker::isHeld(const Operation* value, const Safepoint& safe
 bool CollectorRulesChecker::run()
 {
     findFrameAddresses();
+    findJoinsOfInnerPointers();
     findWatchedValues();
     for (uint32_t watched = m_watched.size(); watched--;)
         findLiveRangesOf(watched);

@@ -16,9 +16,12 @@
 #include "MarkedBlockCage.h"
 #include "MarkedSpace.h"
 #include <algorithm>
+#include <array>
 #include <optional>
 #include <span>
 #include <wtf/Atomics.h>
+#include <wtf/MathExtras.h>
+#include <wtf/PtrTag.h>
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
@@ -43,7 +46,7 @@ struct SuspendedMachineFrame {
 
     uint64_t* frame;
     const uint64_t* bottom;
-    void* resumeAddress;
+    void* resumeAddress; // As in the frame record of a callee of the frame.
     const SuspensionWords* words;
 };
 
@@ -89,21 +92,18 @@ public:
     static constexpr unsigned skippedPairsShift = liveSlotMapOffsetBits + savedRegisterBits;
     static constexpr unsigned skippedPairsBits = 4;
     static constexpr uint32_t manySkippedPairs = (1u << skippedPairsBits) - 1;
-    static constexpr unsigned clearedWordsShift = skippedPairsShift + skippedPairsBits;
-    static constexpr unsigned clearedWordsBits = 4;
-    static constexpr uint32_t maxClearedWords = (1u << clearedWordsBits) - 1;
-    static constexpr unsigned promiseLocationShift = clearedWordsShift + clearedWordsBits;
+    static constexpr unsigned promiseLocationShift = skippedPairsShift + skippedPairsBits;
     static constexpr unsigned promiseLocationBits = 16;
     static constexpr unsigned manySkippedPairsShift = promiseLocationShift + promiseLocationBits;
     static constexpr size_t maxNumberOfWords = UINT16_MAX;
     static_assert(manySkippedPairsShift + 16 <= 63 && !(maxNumberOfWords >> promiseLocationBits));
     static constexpr uint32_t numberOfWordsSkippedFor(uint32_t deadWordsAtBottom) { return deadWordsAtBottom & ~1u; }
-    static std::optional<uint64_t> siteWord(uint32_t liveSlotMapOffset, uint32_t promiseLocation, uint32_t savedRegistersOrPairs, uint32_t deadWordsAtBottom = 0, size_t numberOfWordsInFrame = 0, uint32_t clearedWords = 0)
+    static std::optional<uint64_t> siteWord(uint32_t liveSlotMapOffset, uint32_t promiseLocation, uint32_t savedRegistersOrPairs, uint32_t deadWordsAtBottom = 0, size_t numberOfWordsInFrame = 0)
     {
-        if (liveSlotMapOffset >> liveSlotMapOffsetBits || savedRegistersOrPairs >> savedRegisterBits || promiseLocation >> promiseLocationBits || numberOfWordsInFrame > maxNumberOfWords || deadWordsAtBottom > maxNumberOfWords || clearedWords > maxClearedWords)
+        if (liveSlotMapOffset >> liveSlotMapOffsetBits || savedRegistersOrPairs >> savedRegisterBits || promiseLocation >> promiseLocationBits || numberOfWordsInFrame > maxNumberOfWords || deadWordsAtBottom > maxNumberOfWords)
             return std::nullopt;
         uint64_t skippedPairs = numberOfWordsSkippedFor(deadWordsAtBottom) / 2;
-        uint64_t word = liveSlotMapOffset | savedRegistersOrPairs << liveSlotMapOffsetBits | clearedWords << clearedWordsShift | static_cast<uint64_t>(promiseLocation) << promiseLocationShift;
+        uint64_t word = liveSlotMapOffset | savedRegistersOrPairs << liveSlotMapOffsetBits | static_cast<uint64_t>(promiseLocation) << promiseLocationShift;
         if (skippedPairs < manySkippedPairs)
             return word | skippedPairs << skippedPairsShift;
         return word | static_cast<uint64_t>(manySkippedPairs) << skippedPairsShift | skippedPairs << manySkippedPairsShift;
@@ -125,7 +125,6 @@ public:
         uint32_t skippedPairs = static_cast<uint32_t>(siteWord >> skippedPairsShift) & manySkippedPairs;
         return 2 * (skippedPairs == manySkippedPairs ? static_cast<uint16_t>(siteWord >> manySkippedPairsShift) : skippedPairs);
     }
-    static constexpr uint32_t clearedWordsOf(uint64_t siteWord) { return static_cast<uint32_t>(siteWord >> clearedWordsShift) & maxClearedWords; }
 
     static SavedFrame* create(VM&, Instance&, CoroutineKind, size_t numberOfWords, uint32_t savedRegistersOrPairs, uint32_t skippedAtBottom);
     static SavedFrame* create(VM&, Instance&, CoroutineKind, const SuspendedMachineFrame&);
@@ -133,6 +132,8 @@ public:
     static SavedFrame* createForAsyncFunction(VM&, Instance&, const SuspendedMachineFrame&);
     static SavedFrame* createHeapFrame(VM&, Instance&, size_t numberOfWords, void* resumeAddress);
     static SavedFrame* forFrame(const Instance&, const uint64_t* frame);
+    static constexpr uint32_t generatorWord = 1;
+    void suspendAtYield(VM&, JSCell* generator, void* resumeAddress); // The caller has signed the address for this frame.
     void save(VM&, const SuspendedMachineFrame&, SuspensionKind);
     void willBeRestoredToStack()
     {
@@ -148,10 +149,17 @@ public:
     bool hasPassedAwaitOnStack() const { return m_flags & hasPassedAwaitOnStackFlag; }
     void notePassedAwaitOnStack() { m_flags |= hasPassedAwaitOnStackFlag; }
     bool goesOnInContextOfItsAwait() const { return m_flags & goesOnInContextOfItsAwaitFlag; }
+    void setGoesOnInContextOfItsAwait(bool goesOn)
+    {
+        m_flags = static_cast<uint8_t>((m_flags & ~goesOnInContextOfItsAwaitFlag) | (goesOn ? goesOnInContextOfItsAwaitFlag : 0));
+        m_asyncContext = JSValue::encode(jsUndefined());
+    }
     JSValue contextOfAwait() const { return m_asyncContext ? JSValue::decode(m_asyncContext) : jsUndefined(); }
     void setStepStatus(AsyncGeneratorStepStatus status) { m_flags = (m_flags & ~stepStatusMask) | static_cast<uint8_t>(status) << stepStatusShift; }
     AsyncGeneratorStepStatus stepStatus() const { return static_cast<AsyncGeneratorStepStatus>((m_flags & stepStatusMask) >> stepStatusShift); }
-    const void* resumeAddress() const { return m_resumeAddress; }
+    bool liesOnHeap() const { return m_numberOfSavedRegisterPairs & liesOnHeapBit; }
+    const void* resumeAddress() const { return removeReturnAddressSignature(m_resumeAddress); }
+    const void* modifierOfResumeAddress() const;
     std::optional<uint64_t> wordAt(uint32_t location) const;
 
     enum class Continuation : uint8_t { None, Promise, Waiter, CombinatorElement };
@@ -169,17 +177,19 @@ public:
     void reject(JSGlobalObject* globalObject, VM& vm, JSValue error) { settle(globalObject, vm, error, true); }
     JSPromise* ensurePromise(JSGlobalObject*, VM&);
 
-    void overwriteDeadWords(uint32_t versionAtVisit, const SavedFrameMap&, uint64_t replacement);
-
     static constexpr uint8_t isEnteredByJobLoopFlag = 1;
     static constexpr uint8_t isSuspendedAtYieldFlag = 2;
     static constexpr unsigned stepStatusShift = 2;
     static constexpr uint8_t stepStatusMask = 3 << stepStatusShift;
     static constexpr uint8_t hasPassedAwaitOnStackFlag = 16;
-    static constexpr uint8_t isHeapFrameFlag = 32;
     static constexpr uint8_t goesOnInContextOfItsAwaitFlag = 64;
+    static constexpr uint8_t liesOnHeapBit = 128;
+    static constexpr unsigned throwsIntoAwaitShift = 8;
     static constexpr uint32_t minWordsForStringMove = 32;
     static constexpr size_t maxWordsAllocatedInStub = (MarkedSpace::largeCutoff - 64) / sizeof(uint64_t);
+    // The resume address is signed with the address of its word and these bits on top, which no stack pointer has.
+    static constexpr uint16_t discriminatorOfResumeAddress = 0x7a5e;
+    static constexpr unsigned discriminatorShift = 48;
     static constexpr ptrdiff_t offsetOfNumberOfWords() { return OBJECT_OFFSETOF(SavedFrame, m_numberOfWords); }
     static constexpr ptrdiff_t offsetOfNumberOfWordsSkippedAtBottom() { return OBJECT_OFFSETOF(SavedFrame, m_numberOfWordsSkippedAtBottom); }
     static constexpr ptrdiff_t offsetOfVersion() { return OBJECT_OFFSETOF(SavedFrame, m_version); }
@@ -188,14 +198,19 @@ public:
     static constexpr ptrdiff_t offsetOfNumberOfSavedRegisterPairs() { return OBJECT_OFFSETOF(SavedFrame, m_numberOfSavedRegisterPairs); }
     static constexpr ptrdiff_t offsetOfFlags() { return OBJECT_OFFSETOF(SavedFrame, m_flags); }
     static constexpr ptrdiff_t offsetOfContinuation() { return OBJECT_OFFSETOF(SavedFrame, m_continuation); }
-    static constexpr ptrdiff_t offsetOfResumeAddress() { return OBJECT_OFFSETOF(SavedFrame, m_resumeAddress); }
+    static constexpr ptrdiff_t offsetOfResumeAddressForTesting() { return offsetOfResumeAddress(); }
     static constexpr ptrdiff_t offsetOfPromiseOrWaiter() { return OBJECT_OFFSETOF(SavedFrame, m_promiseOrWaiter); }
     static constexpr ptrdiff_t offsetOfAsyncContext() { return OBJECT_OFFSETOF(SavedFrame, m_asyncContext); }
     static constexpr ptrdiff_t offsetOfPreservedRegister() { return OBJECT_OFFSETOF(SavedFrame, m_preservedRegister); }
+    static constexpr ptrdiff_t offsetOfCapacityOfHeapFrame() { return offsetOfPreservedRegister(); }
     static constexpr ptrdiff_t offsetOfWords() { return sizeof(SavedFrame); }
     static constexpr size_t allocationSize(size_t numberOfWords) { return sizeof(SavedFrame) + numberOfWords * sizeof(uint64_t); }
 
 private:
+    // Generated code gets at the word through stubs/AOTSavedCodeAddresses.h.
+    friend struct ResumeAddressWord;
+    static constexpr ptrdiff_t offsetOfResumeAddress() { return OBJECT_OFFSETOF(SavedFrame, m_resumeAddress); }
+
     SavedFrame(VM& vm, Structure* structure, CoroutineKind kind, uint16_t numberOfWords, uint8_t savedRegistersOrPairs, uint16_t skippedAtBottom)
         : Base(vm, structure)
         , m_numberOfWords(numberOfWords)
@@ -220,8 +235,7 @@ private:
         ++m_version;
     }
     std::optional<SavedFrameMap> liveSlotMap(uint32_t offsetPlusOne) const;
-    void overwriteDeadWordsAtEndOfCollection(uint32_t versionAtVisit, const SavedFrameMap&);
-    template<typename Functor> bool forEachDeadWord(const SavedFrameMap&, const Functor&);
+    template<typename Visitor> NEVER_INLINE static void visitFieldsListedByLongMap(SavedFrame*, Visitor&, uint32_t version);
     std::optional<uint32_t> narrowReferenceAt(uint32_t narrowLocation) const;
     void settle(JSGlobalObject*, VM&, JSValue, bool isRejected);
     uint32_t combinatorIndex() const { return static_cast<uint32_t>(m_continuation) - static_cast<uint32_t>(Continuation::CombinatorElement); }
@@ -229,8 +243,6 @@ private:
     uint16_t m_numberOfWords;
     uint16_t m_numberOfWordsSkippedAtBottom;
     uint32_t m_version { 0 };
-    static constexpr uint32_t hasNoDeadWordsToOverwrite = 1u << 31;
-    static_assert(liveSlotMapOffsetBits < 31);
     uint32_t m_liveSlotMapOffsetPlusOne { 0 };
     CoroutineKind m_kind;
     Continuation m_continuation { Continuation::None };
@@ -248,6 +260,12 @@ static_assert(SavedFrame::offsetOfNumberOfWordsSkippedAtBottom() == SavedFrame::
 static_assert(SavedFrame::offsetOfKind() + 1 == SavedFrame::offsetOfContinuation() && SavedFrame::offsetOfContinuation() + 1 == SavedFrame::offsetOfNumberOfSavedRegisterPairs() && SavedFrame::offsetOfNumberOfSavedRegisterPairs() + 1 == SavedFrame::offsetOfFlags());
 static_assert(static_cast<uint32_t>(SavedFrame::Continuation::CombinatorElement) + SavedFrame::maxCombinatorElements <= UINT8_MAX + 1);
 static_assert(!static_cast<unsigned>(AsyncGeneratorStepStatus::Result) && numberOfEnumerators<AsyncGeneratorStepStatus> <= (SavedFrame::stepStatusMask >> SavedFrame::stepStatusShift) + 1);
+
+inline const void* SavedFrame::modifierOfResumeAddress() const
+{
+    constexpr uintptr_t bitsOfAddress = (1ull << discriminatorShift) - 1;
+    return std::bit_cast<const void*>((std::bit_cast<uintptr_t>(&m_resumeAddress) & bitsOfAddress) | static_cast<uintptr_t>(discriminatorOfResumeAddress) << discriminatorShift);
+}
 
 inline size_t SuspendedMachineFrame::numberOfWords() const
 {
@@ -282,41 +300,68 @@ ALWAYS_INLINE std::optional<uint32_t> SavedFrame::narrowReferenceAt(uint32_t nar
     return static_cast<uint32_t>(isInUpperHalf(narrowLocation) ? *word >> 32 : *word);
 }
 
-template<typename Functor>
-ALWAYS_INLINE bool SavedFrame::forEachDeadWord(const SavedFrameMap& map, const Functor& functor)
-{
-    uint32_t lastLocation = m_numberOfWords + numberOfWordsSkippedAtTop();
-    return map.forEachDeadWord(preservedRegister != InvalidGPRReg, numberOfWordsSkippedAtTop() + 1, lastLocation, [&](uint32_t location) {
-        return functor(location == locationInRegister ? m_preservedRegister : words()[lastLocation - location]);
-    });
-}
-
 template<typename Visitor>
 ALWAYS_INLINE void SavedFrame::visitFields(SavedFrame* saved, Visitor& visitor)
 {
     visitor.appendUnbarriered(saved->m_promiseOrWaiter);
     visitor.appendUnbarriered(JSValue::decode(saved->m_asyncContext));
-    if (saved->m_flags & isHeapFrameFlag) {
+    if (saved->liesOnHeap()) {
         for (uint32_t index = 0; index < saved->m_numberOfWords; ++index)
-            visitor.appendUnbarriered(JSValue::decode(static_cast<EncodedJSValue>(WTF::atomicLoad(&saved->words()[index], std::memory_order_relaxed))));
+            visitor.appendUnbarriered(JSValue::decode(static_cast<EncodedJSValue>(WTF::atomicLoad<MemoryOrder::Relaxed>(&saved->words()[index]))));
         return;
     }
     uint32_t version = saved->m_version;
     WTF::loadLoadFence();
+    uint32_t mapOffsetPlusOne = saved->m_liveSlotMapOffsetPlusOne;
+    if (version & 1) {
+        visitor.didRace(saved, "a SavedFrame is being written");
+        return;
+    }
+    uint64_t locations = 0;
+    if (mapOffsetPlusOne) {
+        std::optional<SavedFrameMap> map = saved->liveSlotMap(mapOffsetPlusOne);
+        std::optional<uint64_t> bits = map ? map->onlyValueBits() : std::nullopt;
+        if (!bits) {
+            visitFieldsListedByLongMap(saved, visitor, version);
+            return;
+        }
+        locations = *bits;
+    }
+    uint32_t skippedAtTop = saved->numberOfWordsSkippedAtTop();
+    uint32_t lastLocation = saved->m_numberOfWords + skippedAtTop;
+    bool isWellFormed = !(locations & ((2ull << skippedAtTop) - 2)) && (lastLocation >= 63 || !(locations >> (lastLocation + 1)));
+    if constexpr (preservedRegister == InvalidGPRReg)
+        isWellFormed &= !(locations & 1);
+    std::array<JSCell*, 64> cells;
+    unsigned numberOfCells = 0;
+    if (isWellFormed) [[likely]] {
+        const uint64_t* endOfWords = saved->words() + lastLocation;
+        for (; locations; locations &= locations - 1) {
+            unsigned location = ctz(locations);
+            JSValue value = JSValue::decode(static_cast<EncodedJSValue>(location == locationInRegister ? saved->m_preservedRegister : endOfWords[-static_cast<ptrdiff_t>(location)]));
+            if (value && value.isCell())
+                cells[numberOfCells++] = value.asCell();
+        }
+    }
+    WTF::loadLoadFence();
+    if (saved->m_version != version) {
+        visitor.didRace(saved, "a SavedFrame is being written");
+        return;
+    }
+    RELEASE_ASSERT(isWellFormed);
+    for (unsigned index = 0; index < numberOfCells; ++index)
+        visitor.appendUnbarriered(cells[index]);
+}
+
+template<typename Visitor>
+NEVER_INLINE void SavedFrame::visitFieldsListedByLongMap(SavedFrame* saved, Visitor& visitor, uint32_t version)
+{
     Vector<JSCell*, 32> cells;
     Vector<uint32_t, 8> narrowReferences;
-    std::optional<SavedFrameMap> mapOfDeadWordsToOverwrite;
     auto collectLiveCells = [&](uint32_t offsetPlusOne) {
         std::optional<SavedFrameMap> map = saved->liveSlotMap(offsetPlusOne);
         if (!map)
             return false;
-        if (!(offsetPlusOne & hasNoDeadWordsToOverwrite)) {
-            bool areAllZero = saved->forEachDeadWord(*map, [](uint64_t& word) {
-                return !word;
-            });
-            if (!areAllZero)
-                mapOfDeadWordsToOverwrite = map;
-        }
         bool hasAllValues = map->forEachValue([&](uint32_t location) {
             std::optional<uint64_t> word = saved->wordAt(location);
             if (!word)
@@ -347,10 +392,6 @@ ALWAYS_INLINE void SavedFrame::visitFields(SavedFrame* saved, Visitor& visitor)
         visitor.appendUnbarriered(referencedCell);
     for (uint32_t reference : narrowReferences)
         visitNarrowReference(visitor, saved, reference);
-    if constexpr (std::is_same_v<Visitor, SlotVisitor>) {
-        if (mapOfDeadWordsToOverwrite)
-            saved->overwriteDeadWordsAtEndOfCollection(version, *mapOfDeadWordsToOverwrite);
-    }
 }
 
 } } // namespace JSC::AOT

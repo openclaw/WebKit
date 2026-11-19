@@ -16,18 +16,26 @@
 namespace JSC { namespace AOT {
 
 constexpr StubKey ropeCharacters() { return StubKey(StubFamily::RopeCharacters); }
+constexpr StubKey substringCharacters() { return StubKey(StubFamily::SubstringCharacters); }
 constexpr StubKey flattenString() { return StubKey(StubFamily::FlattenString); }
+constexpr StubKey stringCodeUnitAt() { return StubKey(StubFamily::StringCodeUnitAt); }
 constexpr StubKey stringsAreEqual() { return StubKey(StubFamily::StringsAreEqual); }
 constexpr StubKey stringBuilderAppendString() { return StubKey(StubFamily::StringBuilderAppendString); }
 constexpr StubKey stringBuilderDiscard() { return StubKey(StubFamily::StringBuilderDiscard); }
 constexpr StubKey stackStringBuilderAppendString() { return StubKey(StubFamily::StackStringBuilderAppendString); }
 constexpr StubKey distinctStringsAreEqual() { return StubKey(StubFamily::DistinctStringsAreEqual); }
+constexpr StubKey stringEqualsValue() { return StubKey(StubFamily::StringEqualsValue); }
+constexpr StubKey stringEqualsNullable() { return StubKey(StubFamily::StringEqualsNullable); }
+constexpr StubKey nullableStringsAreEqual(bool isStrict) { return StubKey(isStrict ? StubFamily::NullableStringsAreEqual : StubFamily::NullableStringsAreLooselyEqual); }
 constexpr StubKey compareStrings() { return StubKey(StubFamily::CompareStrings); }
 constexpr StubKey integerToString() { return StubKey(StubFamily::IntegerToString); }
+constexpr StubKey doubleToString() { return StubKey(StubFamily::DoubleToString); }
 enum class ConcatenatedKeyForm : uint8_t { Key, Name };
 constexpr StubKey concatenateKeyOfPair(ConcatenatedKeyForm form) { return StubKey(StubFamily::ConcatenateKeyOfPair).withForm(static_cast<uint8_t>(form)); }
 constexpr StubKey substring() { return StubKey(StubFamily::Substring); }
+constexpr StubKey characterAt() { return StubKey(StubFamily::CharacterAt); }
 constexpr StubKey findCharacter8() { return StubKey(StubFamily::FindCharacter8); }
+constexpr StubKey findText8() { return StubKey(StubFamily::FindText8); }
 
 constexpr StubKey concatenate(unsigned count)
 {
@@ -35,14 +43,102 @@ constexpr StubKey concatenate(unsigned count)
     return StubKey(StubFamily::Concatenate).withCount(count);
 }
 
-static_assert(exists(ropeCharacters()) && exists(flattenString()));
+enum class ConstantsOfConcatenation : uint8_t { FirstOfTwo, SecondOfTwo, FirstOfThree, SecondOfThree, ThirdOfThree, FirstAndThirdOfThree };
+
+constexpr unsigned numberOfOperands(ConstantsOfConcatenation constants)
+{
+    return constants == ConstantsOfConcatenation::FirstOfTwo || constants == ConstantsOfConcatenation::SecondOfTwo ? 2 : 3;
+}
+
+constexpr bool isConstantOperand(ConstantsOfConcatenation constants, unsigned operand)
+{
+    switch (constants) {
+    case ConstantsOfConcatenation::FirstOfTwo:
+    case ConstantsOfConcatenation::FirstOfThree:
+        return !operand;
+    case ConstantsOfConcatenation::SecondOfTwo:
+    case ConstantsOfConcatenation::SecondOfThree:
+        return operand == 1;
+    case ConstantsOfConcatenation::ThirdOfThree:
+        return operand == 2;
+    case ConstantsOfConcatenation::FirstAndThirdOfThree:
+        return operand != 1;
+    }
+    return false;
+}
+
+enum class ConversionInConcatenation : uint8_t { ToString, Addition };
+
+struct ConvertingConcatenation {
+    std::optional<ConstantsOfConcatenation> constants;
+    uint8_t count;
+    uint8_t converted;
+    ConversionInConcatenation conversion;
+
+    friend constexpr bool operator==(const ConvertingConcatenation&, const ConvertingConcatenation&) = default;
+};
+
+inline constexpr ConvertingConcatenation convertingConcatenations[] = {
+    { ConstantsOfConcatenation::FirstOfTwo, 2, 1, ConversionInConcatenation::ToString },
+    { ConstantsOfConcatenation::SecondOfTwo, 2, 0, ConversionInConcatenation::ToString },
+    { ConstantsOfConcatenation::FirstOfThree, 3, 2, ConversionInConcatenation::ToString },
+    { ConstantsOfConcatenation::SecondOfThree, 3, 2, ConversionInConcatenation::ToString },
+    { ConstantsOfConcatenation::ThirdOfThree, 3, 1, ConversionInConcatenation::ToString },
+    { ConstantsOfConcatenation::FirstAndThirdOfThree, 3, 1, ConversionInConcatenation::ToString },
+    { std::nullopt, 2, 1, ConversionInConcatenation::ToString },
+    { std::nullopt, 3, 2, ConversionInConcatenation::ToString },
+    { ConstantsOfConcatenation::FirstOfTwo, 2, 1, ConversionInConcatenation::Addition },
+    { ConstantsOfConcatenation::SecondOfTwo, 2, 0, ConversionInConcatenation::Addition },
+    { std::nullopt, 2, 0, ConversionInConcatenation::Addition },
+    { std::nullopt, 2, 1, ConversionInConcatenation::Addition },
+    { ConstantsOfConcatenation::FirstOfThree, 3, 1, ConversionInConcatenation::Addition },
+    { ConstantsOfConcatenation::FirstOfThree, 3, 2, ConversionInConcatenation::Addition },
+    { ConstantsOfConcatenation::SecondOfThree, 3, 2, ConversionInConcatenation::Addition },
+    { ConstantsOfConcatenation::ThirdOfThree, 3, 1, ConversionInConcatenation::Addition },
+    { ConstantsOfConcatenation::FirstAndThirdOfThree, 3, 1, ConversionInConcatenation::Addition },
+    { std::nullopt, 3, 1, ConversionInConcatenation::Addition },
+    { std::nullopt, 3, 2, ConversionInConcatenation::Addition },
+};
+
+constexpr std::optional<StubKey> findConvertAndConcatenate(const ConvertingConcatenation& concatenation)
+{
+    for (uint8_t form = 0; form < std::size(convertingConcatenations); ++form) {
+        if (convertingConcatenations[form] == concatenation)
+            return StubKey(StubFamily::ConvertAndConcatenate).withForm(form);
+    }
+    return std::nullopt;
+}
+
+constexpr StubKey concatenateWithConstants(ConstantsOfConcatenation constants) { return StubKey(StubFamily::ConcatenateWithConstants).withForm(static_cast<uint8_t>(constants)); }
+enum class ConcatenatedInteger : uint8_t { StringThenInteger, IntegerThenString, StringIntegerString, StringsThenInteger, ConstantThenInteger, IntegerThenConstant, ConstantIntegerString, StringIntegerConstant, ConstantIntegerConstant, StringConstantInteger, ConstantStringInteger, IntegersAroundString, IntegersAroundConstant };
+constexpr StubKey concatenateInteger(ConcatenatedInteger form) { return StubKey(StubFamily::ConcatenateInteger).withForm(static_cast<uint8_t>(form)); }
+constexpr unsigned numberOfOperands(ConcatenatedInteger form)
+{
+    switch (form) {
+    case ConcatenatedInteger::StringThenInteger:
+    case ConcatenatedInteger::IntegerThenString:
+    case ConcatenatedInteger::ConstantThenInteger:
+    case ConcatenatedInteger::IntegerThenConstant:
+        return 2;
+    default:
+        return 3;
+    }
+}
+
+static_assert(descriptorOf(StubFamily::ConvertAndConcatenate).numberOfForms == std::size(convertingConcatenations));
+static_assert(exists(ropeCharacters()) && exists(substringCharacters()) && exists(flattenString()));
 static_assert(exists(stringsAreEqual()) && exists(compareStrings()) && exists(integerToString()) && exists(substring()));
 static_assert(exists(distinctStringsAreEqual()) && bodyOf(distinctStringsAreEqual()) == stringsAreEqual());
-static_assert(exists(findCharacter8()));
+static_assert(exists(stringEqualsValue()) && bodyOf(stringEqualsValue()) == stringsAreEqual());
+static_assert(exists(stringEqualsNullable()) && bodyOf(stringEqualsNullable()) == stringsAreEqual());
+static_assert(bodyOf(nullableStringsAreEqual(false)) == stringsAreEqual() && bodyOf(nullableStringsAreEqual(true)) == stringsAreEqual());
+static_assert(exists(findCharacter8()) && exists(stringCodeUnitAt()));
 static_assert(exists(concatenateKeyOfPair(ConcatenatedKeyForm::Key)) && exists(concatenateKeyOfPair(ConcatenatedKeyForm::Name)));
 static_assert(exists(concatenate(2)) && exists(concatenate(3)));
+static_assert(exists(concatenateWithConstants(ConstantsOfConcatenation::FirstAndThirdOfThree)) && !exists(concatenateWithConstants(static_cast<ConstantsOfConcatenation>(6))));
 static_assert(!exists(concatenate(2).withCount(1)) && !exists(concatenate(3).withCount(4)));
 
+inline constexpr int32_t maxLengthSearchedByBytes = 15;
 void returnResult(StubAssembler& jit, auto value)
 {
     jit.move(value, jit.result());
@@ -63,6 +159,19 @@ void branchOnOrderOfFlatStrings(StubAssembler&, const OrderedFlatStrings&, Macro
 PreludeExit emitToLowerCasePrelude(StubAssembler&);
 PreludeExit emitToUpperCasePrelude(StubAssembler&);
 PreludeExit emitStringLocaleComparePrelude(StubAssembler&);
+
+struct LocaleCompareRegisters {
+    GPRReg left;
+    GPRReg right;
+    GPRReg leftCharacters;
+    GPRReg rightCharacters;
+    GPRReg remaining;
+    GPRReg leftUnit;
+    GPRReg rightUnit;
+    GPRReg weights;
+};
+enum class CollatorCheck : bool { ByWeights, ByRealm };
+void emitLocaleCompareOfASCII(StubAssembler&, const LocaleCompareRegisters&, CollatorCheck, const ScopedLambda<void(int32_t)>& returnOrder, JumpList& needsCollator);
 
 void loadSubstringBaseAndOffset(StubAssembler&, GPRReg string, GPRReg base, GPRReg offset);
 void packSubstringFibers(StubAssembler&, GPRReg base, GPRReg offset, GPRReg length, GPRReg lengthWord);
@@ -116,7 +225,19 @@ struct ScannedBytes {
     GPRReg addendForFirst;
     GPRReg addendForLast;
 };
-void branchUnlessASCIIOutsideRange(StubAssembler&, const ScannedBytes&, uint8_t first, uint8_t last, MacroAssembler::JumpList& isNot);
+enum class CodeUnitWidth : uint8_t { EightBits, SixteenBits };
+void branchUnlessASCIIOutsideRange(StubAssembler&, const ScannedBytes&, uint8_t first, uint8_t last, MacroAssembler::JumpList& isNot, CodeUnitWidth = CodeUnitWidth::EightBits);
+struct AtomSearch {
+    GPRReg atom;
+    GPRReg cursor;
+    GPRReg end;
+    GPRReg element;
+    GPRReg scratch;
+};
+
+void searchForAtom(StubAssembler&, const AtomSearch&, MacroAssembler::JumpList& isFound, MacroAssembler::JumpList& isNotFound);
+void loadFirstCharactersOfRope(StubAssembler&, GPRReg string, GPRReg piece, GPRReg word, GPRReg characters, MacroAssembler::JumpList& isUnknown);
+[[nodiscard]] MacroAssembler::Jump branchIfSurvivedCollection(StubAssembler&, GPRReg string);
 void flattenSubject(StubAssembler&, GPRReg string, std::initializer_list<GPRReg> preservedGPRs, Label continuation);
 
 struct FlatSubstringRegisters {

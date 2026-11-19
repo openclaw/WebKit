@@ -355,7 +355,33 @@ static void writeLayoutSetsOfTypeRecords(TableEncoder& encoder, TypeRecordsBeing
         records.words[operand.word] = offsetOfTable + records.sets[operand.set].row * static_cast<uint32_t>(sizeof(LayoutSetData));
 }
 
-static Vector<uint32_t> writeTypeRecords(TablePart& part, const TypeRecordsBeingEncoded& records)
+std::optional<uint32_t> findShiftOfTypeNumbers(const TablePart& part, std::span<const uint32_t> firstWords)
+{
+    for (uint32_t shift = ProgramTables::shiftOfNearTypeNumbers; shift <= FirstTableParts::mostShiftOfTypeNumbers; ++shift) {
+        uint64_t end = FirstTableParts::startOfTypes + part.size();
+        for (size_t place = 0; place + 1 < firstWords.size(); ++place)
+            end += roundUpToMultipleOf(uint64_t { 1 } << shift, (firstWords[place + 1] - firstWords[place]) * sizeof(uint32_t));
+        if (end + (uint64_t { 1 } << shift) <= uint64_t { UINT16_MAX } << shift)
+            return shift;
+    }
+    return std::nullopt;
+}
+
+uint32_t placeTypeRecord(TablePart& part, std::span<const uint8_t> record, size_t unit)
+{
+    constexpr size_t greatestAlignment = 8;
+    static_assert(!(FirstTableParts::startOfTypes % greatestAlignment));
+    if (unit <= greatestAlignment)
+        return part.append(record, unit);
+    size_t end = FirstTableParts::startOfTypes + std::max(roundUpToMultipleOf<greatestAlignment>(part.size()), greatestAlignment);
+    if (size_t padding = roundUpToMultipleOf(unit, end) - end)
+        part.allocate(padding, greatestAlignment);
+    uint32_t offset = part.appendUnshared(record, greatestAlignment);
+    RELEASE_ASSERT(!offset || !((FirstTableParts::startOfTypes + offset) % unit));
+    return offset;
+}
+
+static Vector<uint32_t> writeTypeRecords(TablePart& part, const TypeRecordsBeingEncoded& records, uint32_t shiftOfTypeNumbers)
 {
     size_t numberOfTypes = records.firstWord.size() - 1;
     std::span<const OperandOfShapeTestInTypeRecords> operands = records.operandsOfShapeTests.span();
@@ -370,7 +396,7 @@ static Vector<uint32_t> writeTypeRecords(TablePart& part, const TypeRecordsBeing
             continue;
         }
         std::span<const uint32_t> record = records.words.span().subspan(first, end - first);
-        uint32_t offset = part.append(record);
+        uint32_t offset = placeTypeRecord(part, asBytes(record), size_t { 1 } << shiftOfTypeNumbers);
         for (; nextOperand < operands.size() && operands[nextOperand].word < end; ++nextOperand)
             part.link(offset + static_cast<uint32_t>((operands[nextOperand].word - first) * sizeof(uint32_t)));
         offsets.append(offset);
@@ -419,7 +445,13 @@ void encodeTypeTables(TableEncoder& encoder, FirstTableParts& firstParts)
 
     firstParts.shapeSetWords = placeShapeSetsOfTypeRecords(encoder, records);
     writeLayoutSetsOfTypeRecords(encoder, records);
-    firstParts.typeOffsets = writeTypeRecords(encoder.part, records);
+    std::optional<uint32_t> shift = findShiftOfTypeNumbers(encoder.part, records.firstWord.span());
+    if (!shift) {
+        encoder.build.reportLimitExceeded(LimitID::TableBytes, static_cast<uint64_t>(types.size()) << FirstTableParts::mostShiftOfTypeNumbers);
+        return;
+    }
+    firstParts.shiftOfTypeNumbers = *shift;
+    firstParts.typeOffsets = writeTypeRecords(encoder.part, records, firstParts.shiftOfTypeNumbers);
     writeIndexOfTypeRecords(encoder.part, firstParts.typeOffsets.span());
 
     encoder.part.setTable(ProgramTableIndex::typeSites, Vector<TypeSiteData>());

@@ -11,20 +11,28 @@
 #include "AOTCodeSites.h"
 #include "AOTImageForward.h"
 #include "AOTLimits.h"
+#include "AOTPrefixCode.h"
 #include "AOTSchemaPackedRecords.h"
+#include "AOTSideTableCodes.h"
 #include "AOTVector.h"
 #include "CallFrame.h"
 #include "HandlerInfo.h"
 #include "LineColumn.h"
 #include <optional>
 #include <span>
+#include <wtf/Noncopyable.h>
 
 namespace JSC { namespace AOT {
 
+class FunctionNumbers;
 class LinkedFunctions;
 struct CompiledCode;
 struct SiteDescription;
 struct SiteHandler;
+
+namespace Typed {
+class CallingConventions;
+}
 
 struct CallSiteRecord {
     CallSiteIndex callSite;
@@ -33,6 +41,7 @@ struct CallSiteRecord {
     bool isConstruct() const { return isConstructOf(kind); }
     bool isTailCall() const { return isTailCallOf(kind); }
     bool isInsideCallee() const { return isInsideCalleeOf(kind); }
+    bool isAwaited() const { return isAwaitedOf(kind); }
 
     CallSiteKind kind { CallSiteKind::Plain };
     BuiltinID calledBuiltin { };
@@ -50,7 +59,8 @@ struct InlineFrameRecord : InlineFrameRow {
 };
 
 struct UndecodedInlineFrames {
-    const uint8_t* rows { nullptr };
+    std::optional<SideTableReader> parents;
+    std::optional<SideTableReader> functions;
     uint64_t count { 0 };
 };
 
@@ -99,15 +109,22 @@ private:
 };
 
 class SiteFrames {
+    WTF_MAKE_NONCOPYABLE(SiteFrames);
 public:
     SiteFrames(const Image&, uint32_t function);
-    explicit SiteFrames(const uint8_t* callSites);
     unsigned next();
     void skip(uint64_t numberOfSites);
 
 private:
-    const uint8_t* m_inlineFrames { nullptr };
-    const uint8_t* m_sites { nullptr };
+    void startBlock(const uint8_t* begin);
+
+    std::optional<SideTableReader> m_inlineFrameParents;
+    std::optional<SideTableReader> m_sites;
+    std::optional<SiteDetailsReader> m_details;
+    const uint8_t* m_checkpoints { nullptr };
+    const uint8_t* m_firstBlock { nullptr };
+    uint64_t m_nextBlock { 0 };
+    unsigned m_siteInBlock { 0 };
     uint64_t m_remainingSuspensionSites { 0 };
     uint64_t m_remainingInlineFrames { 0 };
     uint64_t m_remainingSitesWithCode { 0 };
@@ -115,18 +132,45 @@ private:
 };
 
 inline FunctionID functionInFramesOf(BuiltinID builtin, size_t numberOfFunctions) { return FunctionID(numberOfFunctions + builtin.index()); }
-Vector<Vector<uint8_t>> encodeCallSites(const LinkedFunctions&, size_t numberOfFunctions, BuildContext&);
+
+struct CallSiteStreamHead {
+    struct Block {
+        uint32_t numberOfSymbols;
+        uint32_t offset;
+        uint32_t frame;
+    };
+
+    uint32_t numberOfHeadSymbols;
+    uint32_t numberOfParentSymbols;
+    uint32_t numberOfFunctionSymbols;
+    uint32_t numberOfBlocks;
+    uint32_t hasInlineFrames;
+};
+
+Vector<Vector<PrefixSymbol>> encodeCallSites(const LinkedFunctions&, const FunctionNumbers&, const Typed::CallingConventions&, BuildContext&);
 std::optional<uint32_t> endOfLastReturnSite(const CompiledCode&);
 
 void* resumeAddressAfterStackCheck(const void* returnAddress);
 
-struct HandlerRecord {
+class AuthenticatedReturnAddress;
+
+class HandlerRecord {
+public:
+    constexpr HandlerRecord(uint32_t codeOffset, HandlerType type)
+        : m_codeOffset(codeOffset)
+        , m_type(type)
+    {
+    }
+
     friend bool operator==(const HandlerRecord&, const HandlerRecord&) = default;
 
-    constexpr bool ignoresValue() const { return type == HandlerType::SynthesizedCatch; }
+    constexpr HandlerType type() const { return m_type; }
+    constexpr bool ignoresValue() const { return m_type == HandlerType::SynthesizedCatch; }
+    uint32_t codeOffset(const AuthenticatedReturnAddress& /* thatLedHere */) const { return m_codeOffset; }
 
-    uint32_t codeOffset;
-    HandlerType type;
+private:
+    uint32_t m_codeOffset;
+    HandlerType m_type;
 };
 
 void encodeHandlers(Vector<uint8_t>& bytes, std::span<const SiteHandler>);
@@ -134,8 +178,13 @@ std::optional<HandlerRecord> findHandler(std::span<const uint8_t> handlers, Call
 
 static constexpr LineColumn superCallOfDefaultConstructor { 1, 28 };
 
+static constexpr uint32_t firstLineOfEvaluatedStrings = 1u << 30;
+static constexpr unsigned lineInEvaluatedStringBits = 16;
+
 struct SourcePosition {
     friend bool operator==(const SourcePosition&, const SourcePosition&) = default;
+
+    SourcePosition shown() const;
 
     const LineColumn& startOfExpression() const { return constructionStart.line && !startIsForCallers && !startIsWhereWritten ? constructionStart : lineColumn; }
 
@@ -144,9 +193,22 @@ struct SourcePosition {
     LineColumn constructionStart { 0, 0 };
     bool startIsForCallers { false };
     bool startIsWhereWritten { false };
+    bool isInEvaluatedString { false };
 };
 
-static constexpr unsigned sitesBetweenPositionCheckpoints = 512;
+inline SourcePosition SourcePosition::shown() const
+{
+    if (lineColumn.line < firstLineOfEvaluatedStrings) [[likely]]
+        return *this;
+    constexpr uint32_t mask = (1u << lineInEvaluatedStringBits) - 1;
+    SourcePosition result = *this;
+    result.lineColumn.line &= mask;
+    result.constructionStart.line &= mask;
+    result.isInEvaluatedString = true;
+    return result;
+}
+
+static constexpr unsigned sitesBetweenPositionCheckpoints = 128;
 
 struct OwnPosition {
     static OwnPosition of(const SiteDescription&);
@@ -155,9 +217,7 @@ struct OwnPosition {
     uint32_t source { 0 };
 };
 
-void encodePositions(Vector<uint8_t>& stream, const SiteDescription&, const uint8_t* callSites, OwnPosition ofFunctionInFront);
-void encodePositions(Vector<uint8_t>& stream, Vector<uint8_t>& roomForPositions, const SiteDescription&, OwnPosition ofFunctionInFront);
-std::optional<SourcePosition> decodePosition(const Image&, uint32_t function, const uint8_t* entry, OwnPosition ofFunctionInFront, CallSiteIndex);
+std::optional<SourcePosition> decodePosition(const Image&, uint32_t function, const uint8_t* section, const uint8_t* entry, OwnPosition ofFunctionInFront, CallSiteIndex);
 void forgetRememberedPositions();
 
 } } // namespace JSC::AOT

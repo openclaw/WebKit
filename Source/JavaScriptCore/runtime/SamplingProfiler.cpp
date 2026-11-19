@@ -116,7 +116,7 @@ public:
         return m_depth;
     }
 
-    bool LEGACY_NODELETE wasValidWalk() const
+    NODELETE bool wasValidWalk() const
     {
         return !m_bailingOut;
     }
@@ -179,7 +179,7 @@ protected:
         m_callFrame = m_callFrame->unsafeCallerFrame(m_entryFrame);
     }
 
-    bool LEGACY_NODELETE isAtTop() const
+    NODELETE bool isAtTop() const
     {
         return !m_callFrame;
     }
@@ -210,7 +210,7 @@ protected:
         }
     }
 
-    bool LEGACY_NODELETE isValidFramePointer(void* callFrame)
+    NODELETE bool isValidFramePointer(void* callFrame)
     {
         uint8_t* fpCast = std::bit_cast<uint8_t*>(callFrame);
         for (auto& thread : m_vm.heap.machineThreads().threads(m_machineThreadsLocker)) {
@@ -289,7 +289,7 @@ public:
 
 private:
 
-    bool LEGACY_NODELETE isCFrame()
+    NODELETE bool isCFrame()
     {
         return frame()->callerFrame != m_callFrame;
     }
@@ -313,7 +313,7 @@ private:
         Base::resetAtMachineFrame();
     }
 
-    CallerFrameAndPC* LEGACY_NODELETE frame()
+    NODELETE CallerFrameAndPC* frame()
     {
         return reinterpret_cast<CallerFrameAndPC*>(m_machineFrame);
     }
@@ -331,8 +331,8 @@ public:
         , m_image(image)
         , m_stack { stackBounds }
         , m_pc(top.pc)
-        , m_callerPCOfFramelessTop(top.callerPCOfFramelessTop)
-        , m_framePointerOfFrameWithoutRecord(top.framePointer)
+        , m_framelessTopCallerPC(top.framelessTopCallerPC)
+        , m_unrecordedFramePointer(top.framePointer)
     {
     }
 
@@ -374,7 +374,7 @@ protected:
     SUPPRESS_ASAN
     void advanceToParentFrame()
     {
-        if (const void* callerPC = std::exchange(m_callerPCOfFramelessTop, nullptr)) {
+        if (const void* callerPC = std::exchange(m_framelessTopCallerPC, nullptr)) {
             m_pc = callerPC;
             m_compiledFrames.reset();
             return;
@@ -388,7 +388,7 @@ protected:
             }
             m_compiledFrames.reset();
         }
-        m_framePointerOfFrameWithoutRecord = nullptr;
+        m_unrecordedFramePointer = nullptr;
         CallFrame* calleeFrame = m_callFrame;
         EntryFrame* calleeEntryFrame = m_entryFrame;
         m_pc = removeReturnAddressSignature(reinterpret_cast<const CallerFrameAndPC*>(calleeFrame)->returnPC);
@@ -399,7 +399,7 @@ protected:
             if (auto resumedFrame = AOT::findSampledTop(m_image, { calleeEntryFrame, nullptr, nullptr, calleeEntryFrame }, m_callFrame, m_stack.bounds)) {
                 m_callFrame = resumedFrame->callFrame;
                 m_pc = resumedFrame->pc;
-                m_framePointerOfFrameWithoutRecord = resumedFrame->framePointer;
+                m_unrecordedFramePointer = resumedFrame->framePointer;
             } else
                 m_pc = nullptr;
         }
@@ -416,7 +416,7 @@ protected:
     {
         if (!isAtTop() && isValidFramePointer(m_callFrame)) {
             if (!m_compiledFrames)
-                m_compiledFrames.emplace(m_image, m_callFrame, m_pc, m_stack, m_framePointerOfFrameWithoutRecord);
+                m_compiledFrames.emplace(m_image, m_callFrame, m_pc, m_stack, m_unrecordedFramePointer);
             if (*m_compiledFrames && (**m_compiledFrames).code.runsCompiledCode())
                 return;
             m_compiledFrames.reset();
@@ -427,8 +427,8 @@ protected:
     const AOT::Image& m_image;
     AOT::SuspendedThreadStack m_stack;
     const void* m_pc;
-    const void* m_callerPCOfFramelessTop;
-    CallFrame* m_framePointerOfFrameWithoutRecord;
+    const void* m_framelessTopCallerPC;
+    CallFrame* m_unrecordedFramePointer;
     std::optional<AOT::MachineFrameIterator<AOT::SuspendedThreadStack>> m_compiledFrames;
 };
 
@@ -699,8 +699,7 @@ void SamplingProfiler::takeSample(Seconds& stackTraceProcessingTime)
             if (wasValidWalk && walkSize) {
                 if (sReportStats)
                     sNumTotalStackTraces++;
-                Vector<UnprocessedStackFrame> stackTrace;
-                stackTrace.reserveInitialCapacity(walkSize + !!shouldAppendTopFrameAsCCode);
+                Vector<UnprocessedStackFrame> stackTrace(ReserveCapacityTag { }, walkSize + !!shouldAppendTopFrameAsCCode);
                 if (shouldAppendTopFrameAsCCode)
                     stackTrace.append(UnprocessedStackFrame { machinePC });
                 stackTrace.appendRange(m_currentFrames.begin(), m_currentFrames.begin() + walkSize);
@@ -717,7 +716,7 @@ void SamplingProfiler::takeSample(Seconds& stackTraceProcessingTime)
     }
 }
 
-static ALWAYS_INLINE BytecodeIndex LEGACY_NODELETE tryGetBytecodeIndex(unsigned llintPC, CodeBlock* codeBlock)
+NODELETE static ALWAYS_INLINE BytecodeIndex tryGetBytecodeIndex(unsigned llintPC, CodeBlock* codeBlock)
 {
 #if ENABLE(DFG_JIT)
     RELEASE_ASSERT(!codeBlock->hasCodeOrigins());
@@ -1135,7 +1134,7 @@ String SamplingProfiler::StackFrame::displayName(VM& vm)
         AOT::FunctionDescription description(compiledFrame.function);
         if (description.codeType() == ModuleCode)
             return "(module)"_s;
-        return description.nameInFrames(vm);
+        return description.stackTraceName(vm);
     }
 #endif
     {

@@ -82,6 +82,8 @@ static ASCIILiteral nameInPlanText(ModuleStartOperation::Kind kind)
         return "ReturnIfLoadingStops"_s;
     case ModuleStartOperation::Kind::AbandonOnThrow:
         return "AbandonOnThrow"_s;
+    case ModuleStartOperation::Kind::ResumeLoadOnThrow:
+        return "ResumeLoadOnThrow"_s;
     case ModuleStartOperation::Kind::NeverComesBack:
         return "NeverComesBack"_s;
     }
@@ -366,7 +368,7 @@ static void printPlannedModuleStarts(IRPrinter& printer, const Plan& plan)
         ModuleID module(index);
         bool isCalled = evaluation.isCalledWhereRequired(module);
         bool isAlone = evaluation.isEvaluatedByCodeAlone(module);
-        bool recordsNothing = evaluation.recordsNothingThatIsSeen(module);
+        bool recordsNothing = evaluation.canSkipRecordRequire(module);
         if (!isCalled && !isAlone && !evaluation.startsItself(module) && !recordsNothing)
             continue;
         out.print("module "_s);

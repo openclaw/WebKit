@@ -18,24 +18,22 @@ class BodyIndex;
 class StraightEmitter;
 struct QuestionOfEntry;
 
-enum class FramesOfGenerators : bool { MayLieInHeap, AreSaved };
 Machine::ProcedureTraits machineTraitsOf(const BuildContext&, const CodeGenerationInputs&, const Code&);
 
 class FunctionCodeGenerator {
     WTF_MAKE_NONCOPYABLE(FunctionCodeGenerator);
 public:
-    FunctionCodeGenerator(const CodeGenerationWorker&, const CodeGenerationInputs&, const Code&, CodeGenerationTotals&, FramesOfGenerators = FramesOfGenerators::MayLieInHeap);
+    FunctionCodeGenerator(const CodeGenerationWorker&, const CodeGenerationInputs&, const Code&, CodeGenerationTotals&);
 
     CompiledCode run();
-    bool isToBeGeneratedAgain() const { return m_isToBeGeneratedAgain; }
     std::optional<CompiledCode> runStraight(const BodyIndex&);
-    CompiledCode runEntryWrittenByHand(std::span<const QuestionOfEntry>);
+    bool canEmitStraight(const BodyIndex&);
+    CompiledCode runEntryWrittenByHand(std::span<const QuestionOfEntry>, bool nobodyEnters);
 
 private:
     bool appendOperations();
     void appendStraightBody(StraightEmitter&);
     CompiledCode emitCode();
-    void reportFailureOfProcedure();
     bool frameFitsImage();
     COLD NEVER_INLINE void reportLinkFailure(LinkFailure);
 
@@ -43,14 +41,11 @@ private:
     const CodeGenerationInputs& m_inputs;
     const Code& m_code;
     const Statistics::CountersOfThread m_statistics;
-    CCallHelpers m_jit;
+    ImageAssembler m_jit;
     RelocationRecorder m_relocations;
     CodeRecords m_records;
     StackCheckState m_stackChecks;
     StraightEmitter* m_straightEmitter { nullptr };
-    const FramesOfGenerators m_framesOfGenerators;
-    bool m_keepsValuesInHeapFrame { false };
-    bool m_isToBeGeneratedAgain { false };
     Machine::Procedure m_procedure;
 };
 

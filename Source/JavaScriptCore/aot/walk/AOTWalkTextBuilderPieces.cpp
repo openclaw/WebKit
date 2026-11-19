@@ -23,6 +23,8 @@ namespace JSC { namespace AOT { namespace Typed {
 static constexpr uint32_t startOfRangeInTextBuilderPieces = 0;
 static constexpr uint32_t endOfRangeInTextBuilderPieces = 1;
 static constexpr int64_t decimalRadixInTextBuilderPieces = 10;
+static constexpr int64_t hexadecimalRadixInTextBuilderPieces = 16;
+static constexpr int64_t byteDigitsInTextBuilderPieces = 2;
 
 namespace {
 
@@ -55,7 +57,7 @@ static ValueID findRecordMadeToBeAppendedInTextBuilderPieces(const Walker& walke
     if (walker.isUnreachable() || !part.isValue())
         return { };
     const Code& code = walker.code();
-    ValueID made = rootOfCellInSweptCode(code, part.id());
+    ValueID made = underlyingCellOf(code, part.id());
     if (code.isConstant(made) || code.blockOf(made) != walker.currentBlock() || !code.at(made).traits().isRemovableWhenUnused())
         return { };
     return made;
@@ -72,7 +74,7 @@ static std::optional<InlineBuiltin> codeInLineOfRowCalledInTextBuilderPieces(con
 
 static ValueID rangeGivingBoundInTextBuilderPieces(const Code& code, ValueID bound, uint32_t index)
 {
-    const Operation& result = code.at(rootOfCellInSweptCode(code, bound));
+    const Operation& result = code.at(underlyingCellOf(code, bound));
     if (result.opcode != Opcode::ResultAt || result.index() != index || code.at(result.resultsOperand()).opcode != Opcode::StringRange)
         return { };
     return result.resultsOperand();
@@ -81,13 +83,13 @@ static ValueID rangeGivingBoundInTextBuilderPieces(const Code& code, ValueID bou
 static bool endIsSumWithStartInTextBuilderPieces(const Walker& walker, ValueID start, ValueID end)
 {
     const Code& code = walker.code();
-    const Operation& sum = code.at(rootOfCellInSweptCode(code, end));
+    const Operation& sum = code.at(underlyingCellOf(code, end));
     if (sum.opcode != Opcode::Add)
         return false;
-    ValueID rootOfStart = rootOfCellInSweptCode(code, start);
+    ValueID rootOfStart = underlyingCellOf(code, start);
     for (uint32_t side : { OperandIndex::Add::left, OperandIndex::Add::right }) {
         Type added = typeOfRecordInTextBuilderPieces(walker, sum.operand(1 - side));
-        if (rootOfCellInSweptCode(code, sum.operand(side)) == rootOfStart && added.isInteger() && added.integers.minimum >= 0)
+        if (underlyingCellOf(code, sum.operand(side)) == rootOfStart && added.isInteger() && added.integers.minimum >= 0)
             return true;
     }
     return false;
@@ -99,7 +101,7 @@ static bool isRangeInOrderInTextBuilderPieces(const Walker& walker, ValueID star
     if (ValueID range = rangeGivingBoundInTextBuilderPieces(code, start, startOfRangeInTextBuilderPieces)) {
         if (range == rangeGivingBoundInTextBuilderPieces(code, end, endOfRangeInTextBuilderPieces))
             return true;
-        if (rootOfCellInSweptCode(code, code.at(range).lengthOperand()) == rootOfCellInSweptCode(code, end))
+        if (underlyingCellOf(code, code.at(range).lengthOperand()) == underlyingCellOf(code, end))
             return true;
     }
     if (endIsSumWithStartInTextBuilderPieces(walker, start, end))
@@ -111,7 +113,7 @@ static bool isRangeInOrderInTextBuilderPieces(const Walker& walker, ValueID star
 
 static Reference stringCutFromInTextBuilderPieces(const Code& code, ValueID string)
 {
-    const Operation& root = code.at(rootOfCellInSweptCode(code, string));
+    const Operation& root = code.at(underlyingCellOf(code, string));
     return referenceToRecordInTextBuilderPieces(code, root.opcode == Opcode::FlattenString ? root.stringOperand() : string);
 }
 
@@ -127,7 +129,7 @@ static std::optional<RangeInTextBuilderPieces> rangeOfSubstringInTextBuilderPiec
     return RangeInTextBuilderPieces { string, referenceToRecordInTextBuilderPieces(code, cut.startOperand()), referenceToRecordInTextBuilderPieces(code, cut.endOperand()) };
 }
 
-bool appendPieceWithoutCutting(Walker& walker, TextInStringBuilder& text, Reference name, Reference part, Origin origin)
+bool appendPieceWithoutCutting(Walker& walker, StringInBuilder& text, Reference name, Reference part, Origin origin)
 {
     if (opcodesWithoutEmitter().contains(Opcode::StringBuilderAppendStringRange))
         return false;
@@ -138,7 +140,7 @@ bool appendPieceWithoutCutting(Walker& walker, TextInStringBuilder& text, Refere
     std::optional<RangeInTextBuilderPieces> range = rangeOfSubstringInTextBuilderPieces(walker, made);
     if (!range)
         return false;
-    if (rootOfCellInSweptCode(walker.code(), range->start.id()) == rootOfCellInSweptCode(walker.code(), range->end.id()))
+    if (underlyingCellOf(walker.code(), range->start.id()) == underlyingCellOf(walker.code(), range->end.id()))
         return true;
 
     Draft append(Opcode::StringBuilderAppendStringRange, origin);
@@ -184,7 +186,75 @@ static ValueID valueWhoseTextWasMadeInTextBuilderPieces(const Walker& walker, co
     return !type.isNever() && hasTextByItself(type) ? value : ValueID();
 }
 
-bool appendResultOfBuiltinStraight(Walker& walker, TextInStringBuilder& text, Reference name, Reference part, Origin origin)
+static bool isIntegerInTextBuilderPieces(const Walker& walker, ValueID value, int64_t integer)
+{
+    Type type = typeOfRecordInTextBuilderPieces(walker, value);
+    return type.isInteger() && type.integers == Range::one(integer);
+}
+
+static bool isDigitZeroInTextBuilderPieces(const Walker& walker, ValueID value)
+{
+    const Operation& record = walker.code().at(underlyingCellOf(walker.code(), value));
+    if (record.opcode != Opcode::String)
+        return false;
+    std::span<const uint8_t> characters = walker.program().strings[record.string()];
+    return characters.size() == 1 && characters[0] == '0';
+}
+
+std::optional<HexadecimalText> findHexadecimalText(const Walker& walker, Reference part)
+{
+    ValueID made = findRecordMadeToBeAppendedInTextBuilderPieces(walker, part);
+    if (!made || !isReadByNoRecordSoFar(walker, Reference::value(made)))
+        return std::nullopt;
+    const Code& code = walker.code();
+    ValueID padding;
+    if (const Operation& record = code.at(made); record.opcode == Opcode::CallInline && record.inlineBuiltin() == InlineBuiltin::StringPadStart) {
+        std::span<const ValueID> arguments = record.argumentsOperands();
+        if (!record.receiverOperand() || arguments.size() != 2 || !isIntegerInTextBuilderPieces(walker, arguments[0], byteDigitsInTextBuilderPieces) || !isDigitZeroInTextBuilderPieces(walker, arguments[1]))
+            return std::nullopt;
+        padding = made;
+        made = underlyingCellOf(code, record.receiverOperand());
+    }
+    const Operation& record = code.at(made);
+    if (code.isConstant(made) || record.opcode != Opcode::CallInline || record.inlineBuiltin() != InlineBuiltin::NumberToString || !record.receiverOperand())
+        return std::nullopt;
+    std::span<const ValueID> arguments = record.argumentsOperands();
+    if (arguments.size() != 1 || !isIntegerInTextBuilderPieces(walker, arguments[0], hexadecimalRadixInTextBuilderPieces) || !typeOfRecordInTextBuilderPieces(walker, record.receiverOperand()).isNumber())
+        return std::nullopt;
+    static constexpr OpcodeSet numberViews { Opcode::Unbox, Opcode::IntegerToNumber };
+    Reference receiver = referenceToRecordInTextBuilderPieces(code, record.receiverOperand());
+    Reference number = receiver;
+    while (number.isValue() && numberViews.contains(code.at(number.id()).opcode))
+        number = referenceToRecordInTextBuilderPieces(code, code.at(number.id()).operand(0));
+    return HexadecimalText { number, receiver, made, padding };
+}
+
+static Reference rebuildCallInTextBuilderPieces(Walker& walker, ValueID made, Reference receiver, Origin origin)
+{
+    if (walker.isUnreachable() || !receiver)
+        return { };
+    const Code& code = walker.code();
+    const Operation& call = code.at(made);
+    Vector<Reference, 2> arguments;
+    for (ValueID argument : call.argumentsOperands())
+        arguments.append(referenceToRecordInTextBuilderPieces(code, argument));
+    Draft again(Opcode::CallInline, origin);
+    walker.chooseConservativeFields(again);
+    again.setInlineBuiltin(call.inlineBuiltin());
+    again.setInlineParameters(call.inlineParameters());
+    again.setOverload(call.overload());
+    again.setReceiverOperand(receiver);
+    again.setArgumentsOperands(arguments.span());
+    return walker.build(WTF::move(again));
+}
+
+Reference buildHexadecimalTextAgain(Walker& walker, const HexadecimalText& text, Origin origin)
+{
+    Reference made = rebuildCallInTextBuilderPieces(walker, text.conversion, text.receiver, origin);
+    return text.padding ? rebuildCallInTextBuilderPieces(walker, text.padding, made, origin) : made;
+}
+
+bool appendResultOfBuiltinStraight(Walker& walker, StringInBuilder& text, Reference name, Reference part, Origin origin)
 {
     ValueID made = findRecordMadeToBeAppendedInTextBuilderPieces(walker, part);
     ValueID value = made ? valueWhoseTextWasMadeInTextBuilderPieces(walker, walker.code().at(made)) : ValueID();

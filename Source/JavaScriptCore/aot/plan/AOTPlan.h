@@ -8,6 +8,7 @@
 #if ENABLE(AOT)
 
 #include "AOTArgumentLocations.h"
+#include "AOTBitVector.h"
 #include "AOTBody.h"
 #include "AOTBodyIndex.h"
 #include "AOTBuiltinIDTypes.h"
@@ -16,6 +17,7 @@
 #include "AOTEffects.h"
 #include "AOTFacts.h"
 #include "AOTFunctionKinds.h"
+#include "AOTHeldRegExps.h"
 #include "AOTID.h"
 #include "AOTKeyOrders.h"
 #include "AOTMemoryLocation.h"
@@ -30,7 +32,6 @@
 #include <memory>
 #include <optional>
 #include <span>
-#include <wtf/BitVector.h>
 #include <wtf/FastMalloc.h>
 #include <wtf/Noncopyable.h>
 
@@ -81,8 +82,32 @@ struct GlobalNameUse {
     bool isStoredThroughBinding { false };
 };
 
+struct StoredGlobalValue {
+    PropertyKeyID key;
+    LayoutID layout;
+    FunctionID function;
+    BuiltinClassID builtinClass;
+    TypeID type;
+
+    bool isUnknown() const { return !layout && !function && !builtinClass && !type; }
+    bool isSameAs(const StoredGlobalValue& other) const { return layout == other.layout && function == other.function && builtinClass == other.builtinClass && type == other.type; }
+};
+
+struct FieldsReadByGetters {
+    struct UnderName {
+        StringID name;
+        uint64_t mask { 0 };
+    };
+
+    uint64_t maskUnder(const Program&, PropertyKeyID) const;
+
+    uint64_t maskUnderAnyName { 0 };
+    Vector<UnderName> underNames;
+};
+
 struct PlanParts {
     DeferredDefinitions deferredDefinitions;
+    HeldRegExps heldRegExps;
     PromotedEnvironments promotedEnvironments;
     ModuleEvaluationPlan moduleEvaluation;
     SlotPlan slots;
@@ -103,7 +128,10 @@ struct PlanParts {
     BitVector variablesThatRunTimeMayFill;
     BitVector functionsWhoseCallEntryWalksBody;
     BitVector globalNamesNeverStoredByName;
+    BitVector namesOfFieldsWrittenAsOneFunction;
+    FieldsReadByGetters fieldsReadByGetters;
     BitVector globalNamesNeverStoredThroughBinding;
+    Vector<StoredGlobalValue> storedGlobalValues;
 
     bool hasOneInstance { false };
     FunctionsThatEndTheirTailCalls functionsThatEndTheirTailCalls;
@@ -114,6 +142,7 @@ struct PlanParts {
 class Plan {
     WTF_DEPRECATED_MAKE_FAST_ALLOCATED(Plan);
     WTF_MAKE_NONCOPYABLE(Plan);
+    friend class FactMisstater;
 public:
     explicit Plan(PlanParts&& parts)
         : m_parts(WTF::move(parts))
@@ -121,20 +150,25 @@ public:
     }
 
     const DeferredDefinitions& deferredDefinitions() const { return m_parts.deferredDefinitions; }
+    const HeldRegExps& heldRegExps() const { return m_parts.heldRegExps; }
     const PromotedEnvironments& promotedEnvironments() const { return m_parts.promotedEnvironments; }
     const ModuleEvaluationPlan& moduleEvaluation() const { return m_parts.moduleEvaluation; }
 
     const SlotPlan& slots() const { return m_parts.slots; }
     const PlannedLayout& layout(LayoutID id) const { return slots().layout(id); }
     const PlacedSlot& slot(LayoutID id, FieldIndex field) const { return slots().slot(id, field); }
-    bool isInUse(LayoutID id) const { return !slots().isNeverAllocated(id); }
+    bool isInUse(LayoutID id) const { return slots().hasDirectInstances(id); }
+    bool isAllocatable(LayoutID id) const { return !slots().isNeverAllocated(id); }
     bool usesWideReferences() const { return m_parts.usesWideReferences; }
 
     const ShapeTable& shapes() const { return m_parts.shapes; }
     const KeyOrders& keyOrders() const { return m_parts.keyOrders; }
     const CallingConventions& conventions() const { return m_parts.conventions; }
     void setMethodTable(MethodTablePlan&& methodTable) { m_parts.conventions.setMethodTable(WTF::move(methodTable)); }
+    void setModulesThatWriteFields(ModulesThatWriteFields&& modules) { m_parts.slots.setModulesThatWriteFields(WTF::move(modules)); }
     void setParameterGuards(std::span<const ParameterGuardPlan> guards) { m_parts.conventions.setParameterGuards(guards); }
+    void setScalarizedParameters(const Program& program, ScalarizedParameters&& parameters) { m_parts.conventions.setScalarizedParameters(program, WTF::move(parameters)); }
+    void setScalarizedResults(ScalarizedResults&& results) { m_parts.conventions.setScalarizedResults(WTF::move(results)); }
     void setFunctionsThatEndTheirTailCalls(FunctionsThatEndTheirTailCalls&& functions) { m_parts.functionsThatEndTheirTailCalls = WTF::move(functions); }
     void setTailCalls(TailCallPlan&& tailCalls) { m_parts.conventions.setTailCalls(WTF::move(tailCalls)); }
     void setStackTests(StackTestPlan&& stackTests) { m_parts.conventions.setStackTests(WTF::move(stackTests)); }
@@ -184,10 +218,19 @@ public:
         return coroutine && coroutine->returned && !isNeverType(coroutine->returned) ? coroutine->returned : TypeID();
     }
     bool runTimeMayFill(VariableID id) const { return m_parts.variablesThatRunTimeMayFill.get(id.index()); }
+    bool isImmutable(const Program&, VariableID) const;
     bool genericCallEntryWalksBody(FunctionID id) const { return m_parts.functionsWhoseCallEntryWalksBody.get(id.index()); }
     void findCallEntriesThatWalkBodies(const Program&, const Facts&);
 
+    const FieldsReadByGetters& fieldsReadByGetters() const { return m_parts.fieldsReadByGetters; }
+    bool someFieldUnderNameIsWrittenAsOneFunction(PropertyKeyID key) const { return m_parts.namesOfFieldsWrittenAsOneFunction.get(key.index()); }
     GlobalNameUse globalName(PropertyKeyID key) const { return { !m_parts.globalNamesNeverStoredByName.get(key.index()), !m_parts.globalNamesNeverStoredThroughBinding.get(key.index()) }; }
+
+    const StoredGlobalValue* findStoredGlobalValue(PropertyKeyID key) const LIFETIME_BOUND
+    {
+        auto found = std::ranges::lower_bound(m_parts.storedGlobalValues, key.index(), { }, [](const StoredGlobalValue& stored) { return stored.key.index(); });
+        return found != m_parts.storedGlobalValues.end() && found->key == key ? &*found : nullptr;
+    }
 
     bool hasOneInstance() const { return m_parts.hasOneInstance; }
     bool endsItsTailCalls(FunctionID id) const { return m_parts.functionsThatEndTheirTailCalls.whateverArrives.get(id.index()); }
@@ -203,7 +246,6 @@ JS_EXPORT_PRIVATE void checkPlan(const Program&, const Facts&, const Plan&, Buil
 
 JS_EXPORT_PRIVATE Vector<CodeUnit> unitsNamedOutsideCode(const Program&, const Facts&, const Plan&);
 
-BuiltinID builtinParentNamedByClassRecord(const Program&, const Facts&, LayoutID);
 
 struct ParentInClassRecord {
     LayoutID layout;

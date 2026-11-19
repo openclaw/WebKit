@@ -833,8 +833,8 @@ public:
         friend class Encoder;
 
     public:
-        uint8_t* LEGACY_NODELETE buffer() const { return m_buffer; }
-        ptrdiff_t LEGACY_NODELETE offset() const { return m_offset; }
+        NODELETE uint8_t* buffer() const { return m_buffer; }
+        NODELETE ptrdiff_t offset() const { return m_offset; }
 
     private:
         Allocation(uint8_t* buffer, ptrdiff_t offset)
@@ -1334,14 +1334,14 @@ private:
         }
 
         // FIXME: Port call sites for span() / mutableSpan() and remove.
-        const uint8_t* LEGACY_NODELETE buffer() const { return m_buffer.span().data(); }
-        uint8_t* LEGACY_NODELETE buffer() { return m_buffer.mutableSpan().data(); }
+        NODELETE const uint8_t* buffer() const { return m_buffer.span().data(); }
+        NODELETE uint8_t* buffer() { return m_buffer.mutableSpan().data(); }
         size_t size() const { return static_cast<size_t>(m_offset); }
 
         std::span<uint8_t> mutableSpan() LIFETIME_BOUND { return m_buffer.mutableSpan().first(size()); }
         std::span<const uint8_t> span() const LIFETIME_BOUND { return m_buffer.span().first(size()); }
 
-        bool LEGACY_NODELETE getOffset(const void* address, ptrdiff_t& result) const
+        NODELETE bool getOffset(const void* address, ptrdiff_t& result) const
         {
             auto* addr = static_cast<const uint8_t*>(address);
             auto* bufferStart = buffer();
@@ -1352,7 +1352,7 @@ private:
             return false;
         }
 
-        void LEGACY_NODELETE alignEnd()
+        NODELETE void alignEnd()
         {
             ptrdiff_t size = roundUpToMultipleOf(encoderMaxAlignment, m_offset);
             if (size == m_offset)
@@ -1599,7 +1599,7 @@ public:
     {
     }
 
-    bool LEGACY_NODELETE isEmpty() const
+    NODELETE bool isEmpty() const
     {
         return m_offset == s_invalidOffset;
     }
@@ -1643,14 +1643,14 @@ public:
     }
 
 protected:
-    const uint8_t* LEGACY_NODELETE buffer() const
+    NODELETE const uint8_t* buffer() const
     {
         ASSERT(!isEmpty());
         return std::bit_cast<const uint8_t*>(this) + m_offset;
     }
 
     template<typename T>
-    const T* LEGACY_NODELETE buffer() const
+    NODELETE const T* buffer() const
     {
         ASSERT(!(std::bit_cast<uintptr_t>(buffer()) % alignof(T)));
         return std::bit_cast<const T*>(buffer());
@@ -1863,10 +1863,10 @@ public:
         return decode(decoder, unusedIsNewAllocation, std::forward<Args>(args)...);
     }
 
-    const T* LEGACY_NODELETE operator->() const { return get(); }
+    NODELETE const T* operator->() const { return get(); }
 
 private:
-    const T* LEGACY_NODELETE get() const
+    NODELETE const T* get() const
     {
         RELEASE_ASSERT(!this->isEmpty());
         return this->template buffer<T>();
@@ -1958,7 +1958,7 @@ class CachedWriteBarrier : public CachedObject<WriteBarrier<Source>> {
     friend struct CachedWriteBarrierOffsets;
 
 public:
-    bool LEGACY_NODELETE isEmpty() const { return m_ptr.isEmpty(); }
+    NODELETE bool isEmpty() const { return m_ptr.isEmpty(); }
     const CachedPtr<T, Source>& ptr() const { return m_ptr; }
 
     void encode(Encoder& encoder, const WriteBarrier<Source> src)
@@ -2379,8 +2379,8 @@ public:
     }
 
     static constexpr unsigned minimumLengthToAliasPayload = 48; // below this a copy is smaller than pinning part of a page
-    std::span<const Latin1Character> LEGACY_NODELETE span8() const LIFETIME_BOUND { return { std::bit_cast<const Latin1Character*>(tail()), m_length }; }
-    std::span<const char16_t> LEGACY_NODELETE span16() const LIFETIME_BOUND { return { std::bit_cast<const char16_t*>(tail()), m_length }; }
+    NODELETE std::span<const Latin1Character> span8() const LIFETIME_BOUND { return { std::bit_cast<const Latin1Character*>(tail()), m_length }; }
+    NODELETE std::span<const char16_t> span16() const LIFETIME_BOUND { return { std::bit_cast<const char16_t*>(tail()), m_length }; }
 
 private:
     // What is actually stored for a given string: well-known symbols are stored by their description minus "Symbol.",
@@ -2762,7 +2762,7 @@ private:
     uint32_t m_bits;
 };
 
-typedef CachedHashMap<CachedRefPtr<CachedUniquedStringImpl, UniquedStringImpl, WTF::PackedPtrTraits<UniquedStringImpl>>, CachedEntryBits<PrivateNameEntry>, IdentifierRepHash, HashTraits<RefPtr<UniquedStringImpl>>, PrivateNameEntryHashTraits> CachedPrivateNameEnvironment;
+typedef CachedHashMap<CachedRefPtr<CachedUniquedStringImpl, UniquedStringImpl, WTF::PackedPtrTraits<UniquedStringImpl>>, CachedEntryBits<PrivateNameEntry>, IdentifierRepHash, HashTraits<PackedRefPtr<UniquedStringImpl>>, PrivateNameEntryHashTraits> CachedPrivateNameEnvironment;
 
 class CachedVariableEnvironmentRareData : public CachedObject<VariableEnvironment::RareData> {
 public:
@@ -2809,7 +2809,7 @@ private:
     bool m_isEverythingCaptured;
     bool m_hasAwaitUsingDeclaration;
     uint8_t m_unused[2] { };
-    CachedInlineMap<CachedRefPtr<CachedUniquedStringImpl, UniquedStringImpl, WTF::PackedPtrTraits<UniquedStringImpl>>, CachedEntryBits<VariableEnvironmentEntry>, VariableEnvironment::inlineMapCapacity, IdentifierRepHash, HashTraits<RefPtr<UniquedStringImpl>>, VariableEnvironmentEntryHashTraits> m_map;
+    CachedInlineMap<CachedRefPtr<CachedUniquedStringImpl, UniquedStringImpl, WTF::PackedPtrTraits<UniquedStringImpl>>, CachedEntryBits<VariableEnvironmentEntry>, VariableEnvironment::inlineMapCapacity, IdentifierRepHash, HashTraits<PackedRefPtr<UniquedStringImpl>>, VariableEnvironmentEntryHashTraits> m_map;
     CachedPtr<CachedVariableEnvironmentRareData> m_rareData;
 };
 
@@ -4408,7 +4408,7 @@ enum class CachedCodeBlockTag {
     CachedBuiltinFunctionTag, // a root UnlinkedFunctionExecutable created by BuiltinExecutables (an embedder's JS builtins)
 };
 
-static CachedCodeBlockTag LEGACY_NODELETE tagFromSourceCodeType(SourceCodeType type)
+NODELETE static CachedCodeBlockTag tagFromSourceCodeType(SourceCodeType type)
 {
     switch (type) {
     case SourceCodeType::ProgramType:
@@ -4844,7 +4844,7 @@ void UnlinkedFunctionExecutable::materializeDeferredNameSlow() const
     auto* self = const_cast<UnlinkedFunctionExecutable*>(this);
     auto v = m_members.pending().record->slotsView();
     self->m_ecmaName = v.name->decode(*m_members.pending().decoder);
-    WTF::atomicStore(&self->m_nameIsDeferred, false, std::memory_order_release); // tryGetEcmaNameConcurrently()
+    WTF::atomicStore<MemoryOrder::Release>(&self->m_nameIsDeferred, false); // tryGetEcmaNameConcurrently()
     if (!v.tdz && !v.rareData && !m_scalarsAreDeferred)
         materializeDeferredMembersSlow(); // nothing else is in the record, so let go of the Decoder now
 }
@@ -5337,7 +5337,8 @@ protected:
     // 17: upstream op_iterator_close_check metadata and op_iterator_open / op_iterator_next String-register layout
     // (321765@main, 322172@main), combined with the fork's call-site and async position tables.
     // 18: upstream op_profile_control_flow loop-header metadata with the fork position tables.
-    static constexpr uint32_t cachedTypesFormatRevision = 18;
+    // 19: upstream op_call_varargs_with_spread with the fork position tables.
+    static constexpr uint32_t cachedTypesFormatRevision = 19;
     static uint32_t currentCacheVersion() { return computeJSCBytecodeCacheVersion() ^ (cachedTypesFormatRevision * 0x9E3779B9u); }
 
     GenericCacheEntry(Encoder& encoder, CachedCodeBlockTag tag)
@@ -5348,7 +5349,7 @@ protected:
         UNUSED_PARAM(encoder);
     }
 
-    CachedCodeBlockTag LEGACY_NODELETE tag() const { return m_tag; }
+    NODELETE CachedCodeBlockTag tag() const { return m_tag; }
 
     bool isUpToDate(Decoder& decoder) const
     {

@@ -17,6 +17,7 @@
 #include "AOTLinkedFunctions.h"
 #include "AOTPhaseTimes.h"
 #include "AOTPlan.h"
+#include "AOTStartOrder.h"
 #include "AOTSort.h"
 #include "AOTTableParts.h"
 #include "AOTThreads.h"
@@ -33,7 +34,7 @@ namespace JSC { namespace AOT {
 static constexpr std::array gatheredSpacesThatCountFunctions { NumberSpace::Name, NumberSpace::NameOfText };
 static_assert(std::ranges::all_of(gatheredSpacesThatCountFunctions, hasOneIDAsKey));
 
-static constexpr std::array gatheredSpacesThatKeepFirstFunction { NumberSpace::Name, NumberSpace::NameOfText, NumberSpace::AtomOfComparedText, NumberSpace::String, NumberSpace::StringCell, NumberSpace::KeyCell };
+static constexpr std::array gatheredSpacesThatKeepFirstFunction { NumberSpace::Name, NumberSpace::NameOfText, NumberSpace::String, NumberSpace::StringCell, NumberSpace::StringCharacters, NumberSpace::KeyCell };
 static_assert(std::ranges::all_of(gatheredSpacesThatKeepFirstFunction, hasOneIDAsKey));
 static_assert(std::ranges::all_of(gatheredSpacesThatCountFunctions, [](NumberSpace space) { return std::ranges::contains(gatheredSpacesThatKeepFirstFunction, space); }), "functions are counted unit by unit");
 static_assert(FunctionByModule { .position = UINT32_MAX, .function = FunctionID(0u) } < FunctionByModule { }, "a minimum over functions starts at no function");
@@ -42,9 +43,14 @@ static_assert(FunctionByModule { .module = ModuleID(0u), .position = 0, .functio
 
 static constexpr uint32_t largestGatheredID = Typed::StringID::largestIndex;
 
-FunctionByModule FunctionByModule::forFunction(const Typed::Program& program, FunctionID id)
+FunctionByModule FunctionByModule::forFunction(const Typed::Program& program, FunctionID id, std::span<const uint32_t> startRanks)
 {
     const Typed::Function& function = program.at(id);
+    if (!startRanks.empty()) {
+        if (uint32_t rank = startRanks[id.index()]; rank != noStartRank)
+            return { ModuleID(0u), rank, id };
+        return { function.module ? ModuleID(function.module.index() + 1) : ModuleID(), function.position, id };
+    }
     return { function.module, function.position, id };
 }
 
@@ -130,7 +136,7 @@ public:
             size_t end = m_chunk.wordsOf(space).size();
             if (end == (idsOfUnits.isEmpty() ? 0 : idsOfUnits.last().end))
                 continue;
-            idsOfUnits.append(GatheredIDsOfUnit { .function = FunctionByModule::forFunction(m_program, code.unit.function), .end = end, .codeRunsAtMostOnce = runsAtMostOnce(code) });
+            idsOfUnits.append(GatheredIDsOfUnit { .function = FunctionByModule::forFunction(m_program, code.unit.function, m_context.startRanks()), .end = end, .codeRunsAtMostOnce = runsAtMostOnce(code) });
         }
     }
 
@@ -196,6 +202,17 @@ private:
             addMentionsImpliedByRequest(key);
             return;
         case NumberSpace::ClassGuard:
+            if (isRowOfClassGuardCountsKey(key)) {
+                bool everySlotListsGuards = true;
+                bool hasSlots = forEachSlotInRowOfClassGuardCountsKey(key, [&](uint32_t, std::span<const uint32_t> slot) {
+                    everySlotListsGuards &= forEachGuardInSlotOfRowOfClassGuardCounts(slot, [&](std::span<const uint32_t> guard) {
+                        add(NumberSpace::ClassGuard, guard);
+                    });
+                });
+                if (!hasSlots || !everySlotListsGuards)
+                    reportMalformedMention("the row of counts of guards of classes is no row of lists of guards"_s);
+                return;
+            }
             if (isClassGuardCountKey(key)) {
                 bool listsGuards = forEachGuardInClassGuardCountKey(key, [&](std::span<const uint32_t> guard) {
                     add(NumberSpace::ClassGuard, guard);
@@ -223,9 +240,10 @@ private:
             }
             add(NumberSpace::Name, key.subspan(key.size() - 2, 1));
             return;
-        case NumberSpace::AtomOfComparedText:
         case NumberSpace::ShownString:
         case NumberSpace::AtomOfString:
+        case NumberSpace::NameHeader:
+        case NumberSpace::StringCharacters:
         case NumberSpace::Name:
         case NumberSpace::NameOfText:
         case NumberSpace::String:
@@ -244,8 +262,10 @@ private:
         case NumberSpace::RegExpLiteralCell:
         case NumberSpace::TemplateObjectCell:
         case NumberSpace::ArrayProfile:
+        case NumberSpace::ReadGroupCache:
         case NumberSpace::EnvironmentHandedBack:
         case NumberSpace::ClassRank:
+        case NumberSpace::HeirLookedAt:
         case NumberSpace::ClosureFunction:
         case NumberSpace::ClosureCell:
         case NumberSpace::Allocation:
@@ -269,6 +289,7 @@ private:
         case RequestKind::TemplateObject:
         case RequestKind::CollectionData:
         case RequestKind::FormatPattern:
+        case RequestKind::Prefetch:
             return;
         case RequestKind::DirectEval:
             addMentionsImpliedByDirectEvalRequest(request.subspan(1));
@@ -276,8 +297,21 @@ private:
         case RequestKind::Data:
             addMentionsImpliedByDataRequest(request.subspan(1));
             return;
+        case RequestKind::ImportChecks:
+            addMentionsImpliedByImportChecks(request.subspan(1));
+            return;
         }
         reportMalformedMention("the request has no kind"_s);
+    }
+
+    void addMentionsImpliedByImportChecks(std::span<const uint32_t> variablesAndFailures)
+    {
+        if (variablesAndFailures.empty() || variablesAndFailures.size() % 2) {
+            reportMalformedMention("the request for import checks does not list variables and failures"_s);
+            return;
+        }
+        for (size_t index = 0; index < variablesAndFailures.size(); index += 2)
+            add(NumberSpace::Variable, variablesAndFailures.subspan(index, 1));
     }
 
     void addMentionsImpliedByDirectEvalRequest(std::span<const uint32_t> scopeAndModule)
@@ -301,6 +335,7 @@ private:
         std::span<const uint32_t> data = dataAndEncoding.first(1);
         switch (static_cast<Typed::DataEncoding>(dataAndEncoding[1])) {
         case Typed::DataEncoding::ReadOnlyTree:
+        case Typed::DataEncoding::TreeWithOwnStorage:
             return;
         case Typed::DataEncoding::CopyOnWriteArray: {
             const auto* array = m_program.at(DataID(data[0])).root.tryAs<Typed::DataNode::Array>();
@@ -310,6 +345,11 @@ private:
                 add(NumberSpace::DataStorage, data);
             return;
         }
+        case Typed::DataEncoding::SharedObject:
+            if (!m_program.at(DataID(data[0])).root.tryAs<Typed::DataNode::Object>())
+                break;
+            add(NumberSpace::DataStorage, data);
+            return;
         case Typed::DataEncoding::Unselected:
             break;
         }

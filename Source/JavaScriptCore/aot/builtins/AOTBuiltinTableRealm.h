@@ -64,6 +64,7 @@ private:
 static_assert(sizeof(BuiltinCellKey) == 4);
 
 JS_EXPORT_PRIVATE BuiltinCellKey cellThatNamesMemberAskedByItsByte(const BuiltinTable&, BuiltinID member);
+JS_EXPORT_PRIVATE bool isMemberAskedByByteAlone(const BuiltinTable&, BuiltinID member);
 
 enum class BuiltinLookupFailure : uint8_t {
     HolderIsMissing,
@@ -105,7 +106,7 @@ public:
     virtual void willAddNameTo(BuiltinID holder) = 0;
 };
 
-JS_EXPORT_PRIVATE Ref<ImmutablePropertyNames> immutablePropertyNamesOf(VM&, BuiltinID holder, std::span<const uint32_t> constantMembers = { }, WritesToBuiltinMembers* = nullptr, std::span<const uint32_t> unlockedMembers = { }, bool reflectThrows = false, std::span<const Identifier> openedNames = { }, std::optional<std::span<const uint32_t>> namesTakenForAbsent = std::nullopt);
+JS_EXPORT_PRIVATE Ref<ImmutablePropertyNames> immutablePropertyNamesOf(VM&, BuiltinID holder, std::span<const uint32_t> constantMembers = { }, WritesToBuiltinMembers* = nullptr, std::span<const uint32_t> unlockedMembers = { }, bool reflectThrows = false, std::span<const Identifier> openedNames = { }, std::optional<std::span<const uint32_t>> namesTakenForAbsent = std::nullopt, std::span<const uint64_t> lockedAbsentNames = { });
 
 } // namespace AOT
 } // namespace JSC

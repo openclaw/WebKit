@@ -9,6 +9,7 @@
 #if ENABLE(AOT)
 
 #include "AOTIRProgram.h"
+#include "AOTInliningAcrossFiles.h"
 #include "AOTTypeArena.h"
 #include "AOTTypeRelations.h"
 #include "AOTVector.h"
@@ -151,7 +152,7 @@ static bool isRelativeToOperandsOfCall(const BuiltinTypePart& part)
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-static Vector<ClassTestedByRow, 4> classesTestedByRow(const BuiltinTable& table, const BuiltinType& tested)
+static ALWAYS_INLINE Vector<ClassTestedByRow, 4> classesTestedByRow(const BuiltinTable& table, const BuiltinType& tested)
 {
     Vector<ClassTestedByRow, 4> classes;
     for (const BuiltinTypePart& part : tested.parts) {
@@ -201,7 +202,7 @@ TypeFit BuiltinTypeFitWalk::run()
     return m_isOutside ? TypeFit::Outside : TypeFit::Unknown;
 }
 
-TypeFit fitOfPrimitiveInBuiltinType(const BuiltinType& tested, PrimitiveSet primitive, Range integers)
+ALWAYS_INLINE_INTO_OTHER_FILES TypeFit fitOfPrimitiveInBuiltinType(const BuiltinType& tested, PrimitiveSet primitive, Range integers)
 {
     auto has = [&](BuiltinPrimitive member) {
         return tested.primitives.contains(member);
@@ -343,7 +344,7 @@ TypeFit BuiltinTypeFitWalk::fitOfLayout(LayoutID layout) const
     if (isNamed || m_takesSomeOrdinaryObjects)
         return TypeFit::Unknown;
 
-    BuiltinClassID writtenBase = m_context.program.at(layout).writtenBuiltinBase;
+    BuiltinClassID writtenBase = builtinClassOfInstances(m_context.program.at(layout));
     if (!writtenBase)
         return fitOfTestedAtom(false, mayBeInsideSomeClassPart(m_reader, layout, m_classParts.span()));
     return fitOfTestedAtom(false, std::ranges::any_of(m_classes, [&](const ClassTestedByRow& tested) {
@@ -354,10 +355,11 @@ TypeFit BuiltinTypeFitWalk::fitOfLayout(LayoutID layout) const
 bool BuiltinTypeFitWalk::isWrittenBelowTestedClass(LayoutID layout) const
 {
     const Layout& record = m_context.program.at(layout);
-    if (!record.writtenBuiltinBase)
+    BuiltinClassID base = builtinClassOfInstances(record);
+    if (!base)
         return false;
     return std::ranges::any_of(m_classes, [&](const ClassTestedByRow& tested) {
-        if (tested.asksForMoreThanClass || !m_table.isSameOrSubclassOf(record.writtenBuiltinBase, tested.builtinClass))
+        if (tested.asksForMoreThanClass || !m_table.isSameOrSubclassOf(base, tested.builtinClass))
             return false;
         return !tested.pristine.isEmpty() || !record.mayBeOrdinaryObject;
     });
@@ -438,9 +440,21 @@ static FitWithoutPristineProofs fitWithoutPristineProofs(const BuiltinTypeContex
     if (!operand.isJavaScriptValue())
         return { };
 
+    static constexpr uint8_t question = static_cast<uint8_t>(AnswerKeptInArena::FitInBuiltinType);
+    static constexpr uint32_t bitOfProofNeeded = 4;
+    static constexpr uint32_t bitOfFitIfPristine = 8;
+    TypeArena& types = context.types;
+    bool isRemembered = types.keeps() == ArenaKeeps::UntilReset && types.table().isFrozen();
+    if (isRemembered) {
+        if (std::optional<uint32_t> known = types.rememberedAnswer(question, operandOrNotPassed.bits(), testedID.index()))
+            return { static_cast<TypeFit>(*known & 3), !!(*known & bitOfProofNeeded), !!(*known & bitOfFitIfPristine) };
+    }
     BuiltinTypeFitWalk walk(context, operand, tested);
     TypeFit fit = walk.run();
-    return { fit, fit == TypeFit::Inside && walk.needsPristineProof(), walk.fitsIfPristine() };
+    FitWithoutPristineProofs found { fit, fit == TypeFit::Inside && walk.needsPristineProof(), walk.fitsIfPristine() };
+    if (isRemembered)
+        types.rememberAnswer(question, operandOrNotPassed.bits(), testedID.index(), static_cast<uint32_t>(fit) | (found.needsPristineProof ? bitOfProofNeeded : 0) | (found.fitsIfPristine ? bitOfFitIfPristine : 0));
+    return found;
 }
 
 static std::optional<PristineAspectsOfOperand> pristineAspectsAskedOf(const BuiltinTypeContext& context, TypeID operandID, BuiltinTypeID testedID)

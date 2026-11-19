@@ -5,6 +5,7 @@
 
 #include "config.h"
 #include "AOTMachineEncoder.h"
+#include "AOTInliningAcrossFiles.h"
 
 #if ENABLE(AOT) && CPU(ARM64)
 
@@ -40,7 +41,7 @@ static bool isMemoryOffsetEncodableARM64(Width width, int32_t offset)
     case Width64:
         return ARM64Assembler::canEncodePImmOffset<64>(offset);
     case Width128:
-        break;
+        return ARM64Assembler::canEncodePImmOffset<128>(offset);
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
@@ -93,7 +94,7 @@ static MacroAssembler::BaseIndex indexedMemoryOperandARM64(const AddressForm& ad
 template<typename AddressType>
 static void emitMemoryLoadARM64(CCallHelpers& jit, const Operation* load, AddressType address, Reg destination)
 {
-    bool isNumber = load->type().isFloat();
+    bool isNumber = load->type().isInNumberRegister();
 
     switch (load->accessWidth()) {
     case Width8:
@@ -125,7 +126,8 @@ static void emitMemoryLoadARM64(CCallHelpers& jit, const Operation* load, Addres
         return;
 
     case Width128:
-        break;
+        jit.loadVector(address, destination.fpr());
+        return;
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
@@ -157,7 +159,8 @@ static void emitMemoryStoreARM64(CCallHelpers& jit, Width width, StoreSourceARM6
         return;
 
     case Width128:
-        break;
+        jit.storeVector(source.fpr, address);
+        return;
     }
     RELEASE_ASSERT_NOT_REACHED();
 }
@@ -245,7 +248,7 @@ static std::optional<StoreSourceARM64> tryGetStoreSourceARM64(const Operation* s
 
     switch (location.kind()) {
     case Location::Register:
-        if (value->type().isFloat())
+        if (value->type().isInNumberRegister())
             source.fpr = location.fpr();
         else
             source.gpr = location.gpr();
@@ -289,7 +292,7 @@ static bool isStorePairOffsetEncodableARM64(Width width, bool storesNumbers, int
     return storesNumbers ? ARM64Assembler::isValidSTPFPImm<64>(offset) : ARM64Assembler::isValidSTPImm<64>(offset);
 }
 
-void Encoder::encodeLoad(const Step& step)
+ALWAYS_INLINE_INTO_OTHER_FILES void Encoder::encodeLoad(const Step& step)
 {
     ASSERT(step.kind == StepKind::Execute);
     const Operation* load = step.operation;
@@ -298,7 +301,7 @@ void Encoder::encodeLoad(const Step& step)
 
     RELEASE_ASSERT(step.destination.isRegister());
     Reg destination = step.destination.reg();
-    ASSERT(destination.isFPR() == load->type().isFloat());
+    ASSERT(destination.isFPR() == load->type().isInNumberRegister());
 
     LeafCursor leaves(step);
     AddressForm address = resolveAddress(load, leaves);
@@ -323,13 +326,13 @@ void Encoder::encodeLoad(const Step& step)
         recordTrappingAccess(load, address, instruction);
 }
 
-void Encoder::encodeStore(const Step& step)
+ALWAYS_INLINE_INTO_OTHER_FILES void Encoder::encodeStore(const Step& step)
 {
     ASSERT(step.kind == StepKind::Execute);
     const Operation* store = step.operation;
     ASSERT(isStore(store->opcode()));
     ASSERT(store->opcode() == Store || store->child(0)->type() == Int32);
-    ASSERT(!m_liveness.isFused(store->child(0)));
+    ASSERT(!m_liveness.isFused(store->child(0)) || store->child(0)->opcode() == Trunc || namesWord(store->child(0)));
     Width width = store->accessWidth();
 
     LeafCursor leaves(step);
@@ -372,7 +375,7 @@ bool Encoder::tryEncodePairOfStores(const Step& first, const Step& second)
     ASSERT(firstStore->opcode() == Store && secondStore->opcode() == Store);
 
     Width width = firstStore->accessWidth();
-    if (secondStore->accessWidth() != width)
+    if (secondStore->accessWidth() != width || width == Width128)
         return false;
     if (memoryAccessMayFaultARM64(*this, firstStore) || memoryAccessMayFaultARM64(*this, secondStore))
         return false;

@@ -8,6 +8,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBitVector.h"
 #include "AOTBodyIndex.h"
 #include "AOTHeldOperands.h"
 #include "AOTIRProgram.h"
@@ -17,7 +18,6 @@
 #include "AOTThreads.h"
 #include "AOTType.h"
 #include <algorithm>
-#include <wtf/BitVector.h>
 #include <wtf/Lock.h>
 
 namespace JSC { namespace AOT { namespace Typed {
@@ -28,7 +28,7 @@ static constexpr unsigned maxNamesInLinkCallbacks = 8;
 
 static bool handsOnInLinkCallbacks(Opcode opcode, uint32_t operandIndex)
 {
-    return !operandIndex && inputOperationsThatHandOn.contains(opcode);
+    return !operandIndex && inputPassThroughOpcodes.contains(opcode);
 }
 
 static bool firstMentionSuitsCallbackInLinkCallbacks(const BodyIndex& index, ValueID value)
@@ -43,7 +43,7 @@ static bool firstMentionSuitsCallbackInLinkCallbacks(const BodyIndex& index, Val
             return true;
         if (looksInLinkCallbacks.contains(opcode))
             return true;
-        if (!inputOperationsThatHandOn.contains(opcode) || taker.operand(0) != value)
+        if (!inputPassThroughOpcodes.contains(opcode) || taker.operand(0) != value)
             return false;
         value = user->value;
     }
@@ -80,9 +80,9 @@ struct MentionsInLinkCallbacks {
 static FunctionID functionOfVariableThatIsCalledInLinkCallbacks(const BodyReadInLinkCallbacks& body, const BodyValue& call)
 {
     const BodyIndex& index = body.index;
-    ValueID read = index.valueBehindCasts(call.calleeOperand());
+    ValueID read = index.stripCasts(call.calleeOperand());
     if (!index.isParameter(read) && index.opcodeOf(read) == Opcode::CheckInitialized)
-        read = index.valueBehindCasts(index.value(read).valueOperand());
+        read = index.stripCasts(index.value(read).valueOperand());
     if (index.isParameter(read) || index.opcodeOf(read) != Opcode::GetModuleVariable)
         return { };
     VariableID variable = index.value(read).variable();
@@ -129,7 +129,7 @@ static bool listPlacesThatTakeCaptureInLinkCallbacks(const BodyReadInLinkCallbac
 
     ValueID name = closure.id();
     ValueID taker = index.onlyUsingValue(name);
-    while (taker && inputOperationsThatHandOn.contains(index.opcodeOf(taker)) && index.value(taker).operand(0) == name) {
+    while (taker && inputPassThroughOpcodes.contains(index.opcodeOf(taker)) && index.value(taker).operand(0) == name) {
         name = taker;
         taker = index.onlyUsingValue(name);
     }
@@ -150,6 +150,14 @@ static bool listPlacesThatTakeCaptureInLinkCallbacks(const BodyReadInLinkCallbac
     placesHandedTo.append(*placeOfClosure);
     placesHandedTo.append(body.tables.function(made).firstParameter + capture);
     return true;
+}
+
+static bool isHeldAgainstBuiltinInLinkCallbacks(const BodyIndex& index, const BodyValue& comparison, uint32_t operandIndex)
+{
+    if (comparison.opcode() != Opcode::StrictEq)
+        return false;
+    ValueID other = comparison.operand(operandIndex ? 0 : 1);
+    return other && !index.isParameter(other) && index.opcodeOf(other) == Opcode::Builtin;
 }
 
 static bool isOnlyCalledInLinkCallbacks(const BodyReadInLinkCallbacks& body, ValueID parameter, MentionsInLinkCallbacks& found)
@@ -207,7 +215,7 @@ static bool isOnlyCalledInLinkCallbacks(const BodyReadInLinkCallbacks& body, Val
                     doesMore |= !listPlacesThatTakeCaptureInLinkCallbacks(body, value, operandIndex, found.placesHandedTo);
                 } else if (handsOnInLinkCallbacks(opcode, operandIndex))
                     handsOn = true;
-                else if (!looksInLinkCallbacks.contains(opcode))
+                else if (!looksInLinkCallbacks.contains(opcode) && !isHeldAgainstBuiltinInLinkCallbacks(index, value, operandIndex))
                     doesMore = true;
             });
             if (handsOn)
@@ -260,7 +268,7 @@ static FunctionID functionThatTakesAtInLinkCallbacks(const LinkTables& tables, u
     return FunctionID(static_cast<uint32_t>(behind - tables.functions.begin()) - 1);
 }
 
-void findParametersThatAreOnlyCalled(const Program& program, const BodyIndexTable& bodies, const ThinSummaries& summaries, const ParallelLoops& loops, Mechanisms mechanisms, bool takesCalleesToKeepNothing, LinkTables& tables)
+void findParametersThatAreOnlyCalled(const Program& program, const BodyIndexTable& bodies, const ThinSummaries& summaries, const ParallelLoops& loops, Mechanisms mechanisms, bool shouldAssumeCalleesRetainNothing, LinkTables& tables)
 {
     if (!mechanisms.contains(Mechanism::CellsInFrames))
         return;
@@ -282,7 +290,7 @@ void findParametersThatAreOnlyCalled(const Program& program, const BodyIndexTabl
     auto judgeEntryParameter = [&](FunctionID id, const BodyIndex& index, unsigned entryParameter, Vector<HandingOnInLinkCallbacks>& handingsFound) {
         uint32_t place = tables.function(id).firstParameter + entryParameter;
         MentionsInLinkCallbacks mentions;
-        if (!isOnlyCalledInLinkCallbacks({ program, tables, index }, index.block(entryBlock).parameter(entryParameter), mentions) && !takesCalleesToKeepNothing)
+        if (!isOnlyCalledInLinkCallbacks({ program, tables, index }, index.block(entryBlock).parameter(entryParameter), mentions) && !shouldAssumeCalleesRetainNothing)
             return;
         LinkedParameter& arriving = tables.parameters[place];
         arriving.isOnlyCalled = true;
@@ -311,7 +319,7 @@ void findParametersThatAreOnlyCalled(const Program& program, const BodyIndexTabl
             if (entryParameter >= linked.numberOfParameters || entryParameter >= entry.numberOfParameters())
                 return;
             const LinkedParameter& arriving = tables.parameters[linked.firstParameter + entryParameter];
-            if (!mayBeFunction(arriving.proven) && !mayBeFunction(arriving.expected))
+            if (!mayBeFunction(arriving.proven) && !mayBeFunction(arriving.writtenOrSeenToArrive()))
                 continue;
             judgeEntryParameter(id, *index, entryParameter, handingsOfRange);
         }
@@ -378,8 +386,8 @@ void carryExpectationOfThisIntoCaptures(const Program& program, const BodyIndexT
         std::optional<unsigned> ownThis = summary.sitesThatHandOverCaptures.isEmpty() ? std::nullopt : program.at(maker).thisParameterIndex();
         if (!ownThis || *ownThis >= tables.function(maker).numberOfParameters)
             continue;
-        LinkedParameter arriving = tables.parametersOf(maker)[*ownThis];
-        const BodyIndex* index = arriving.expected && arriving.expectedIsDeclared ? bodies.find(maker) : nullptr;
+        TypeID written = tables.parametersOf(maker)[*ownThis].written;
+        const BodyIndex* index = written ? bodies.find(maker) : nullptr;
         if (!index || !index->numberOfBlocks())
             continue;
         ValueID held = index->block(entryBlock).parameter(*ownThis);
@@ -393,11 +401,11 @@ void carryExpectationOfThisIntoCaptures(const Program& program, const BodyIndexT
             std::span<const ValueID> operands = value.as<Opcode::NewClosure>().capturesOperands();
             size_t numberOfCaptures = std::min<size_t>({ operands.size(), program.at(made).captures.size(), tables.function(made).numberOfParameters });
             for (size_t capture = 0; capture < numberOfCaptures; ++capture) {
-                if (!operands[capture] || index->valueBehindCasts(operands[capture]) != held)
+                if (!operands[capture] || index->stripCasts(operands[capture]) != held)
                     continue;
                 LinkedParameter& captured = tables.parameters[tables.function(made).firstParameter + capture];
-                captured.expected = arriving.expected;
-                captured.expectedIsDeclared = true;
+                captured.written = written;
+                captured.seenToArrive = { };
             }
         }
     }
@@ -426,7 +434,7 @@ static ValueID valueBehindWhatHandsOnInLinkLooks(const BodyIndex& index, ValueID
 {
     while (!index.isParameter(id)) {
         BodyValue definition = index.value(id);
-        if (!inputOperationsThatHandOn.contains(definition.opcode()) || !definition.operand(0))
+        if (!inputPassThroughOpcodes.contains(definition.opcode()) || !definition.operand(0))
             break;
         id = definition.operand(0);
     }
@@ -470,7 +478,7 @@ static bool isOnlyLookedAtInLinkLooks(const Program& program, const LinkTables& 
                         placesHandedTo.append(*place);
                     else
                         doesMore = true;
-                } else if (!operandIndex && inputOperationsThatHandOn.contains(opcode))
+                } else if (!operandIndex && inputPassThroughOpcodes.contains(opcode))
                     handsOn = true;
                 else
                     doesMore = true;
@@ -510,7 +518,7 @@ static bool isOnlyLookedAtInLinkLooks(const Program& program, const LinkTables& 
     return !doesMore && !mentionsNotSeen;
 }
 
-void findParametersThatAreOnlyLookedAt(const Program& program, const BodyIndexTable& bodies, const ThinSummaries& summaries, Mechanisms mechanisms, bool takesCalleesToKeepNothing, LinkTables& tables)
+void findParametersThatAreOnlyLookedAt(const Program& program, const BodyIndexTable& bodies, const ThinSummaries& summaries, Mechanisms mechanisms, bool shouldAssumeCalleesRetainNothing, LinkTables& tables)
 {
     if (!mechanisms.contains(Mechanism::CellsInFrames))
         return;
@@ -572,7 +580,7 @@ void findParametersThatAreOnlyLookedAt(const Program& program, const BodyIndexTa
             continue;
 
         Vector<uint32_t, 4> placesHandedTo;
-        if (!takesCalleesToKeepNothing && !isOnlyLookedAtInLinkLooks(program, tables, *index, index->block(entryBlock).parameter(entryParameter), placesHandedTo))
+        if (!shouldAssumeCalleesRetainNothing && !isOnlyLookedAtInLinkLooks(program, tables, *index, index->block(entryBlock).parameter(entryParameter), placesHandedTo))
             continue;
         tables.parameters[place].isOnlyLookedAt = true;
         for (uint32_t to : placesHandedTo) {

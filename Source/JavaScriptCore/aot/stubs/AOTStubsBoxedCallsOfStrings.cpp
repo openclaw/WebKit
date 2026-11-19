@@ -8,6 +8,7 @@
 
 #if ENABLE(AOT)
 
+#include "AOTBuiltinCells.h"
 #include "AOTConvention.h"
 #include "AOTInstance.h"
 #include "AOTStubAssembler.h"
@@ -44,8 +45,12 @@ static void checkRealmOfCalleeOfString(StubAssembler& jit, GPRReg scratch, JumpL
     StubFamily family = jit.key().family();
     if (family == StubFamily::CallMethodOfBuiltinClass || family == StubFamily::TryCallMethodOfBuiltinClass || family == StubFamily::CallMethodOfBuiltinClassWithSharedPattern || family == StubFamily::CallMethodThatMayBeUnread)
         return;
+    JumpList isOfThisInstance;
+    if (jit.key().family() == StubFamily::CallBoxedBuiltin)
+        isOfThisInstance.append(jit.branch64(CCallHelpers::Below, calleeGPR, TrustedImm32(limitOfNumbersOfBuiltinCells)));
     jit.loadPtr(Address(calleeGPR, JSCallee::offsetOfScopeChain()), scratch);
     callsHostFunction.append(jit.branchPtr(CCallHelpers::NotEqual, scratch, Address(instanceGPR, AOT_INSTANCE_OFFSET(globalObject))));
+    isOfThisInstance.link(&jit);
 }
 
 void emitStringCodeUnitAt(StubAssembler& jit, GPRReg scratch, JumpList& callsHostFunction)
@@ -61,15 +66,42 @@ void emitStringCodeUnitAt(StubAssembler& jit, GPRReg scratch, JumpList& callsHos
     RELEASE_ASSERT(noOverlap(impl, unit, trail, calleeGPR, thisGPR, instanceGPR, argumentGPR(0)));
 
     callsHostFunction.append(jit.branchIfNotInt32(argumentGPR(0)));
+    Label hasString = jit.label();
     jit.loadPtr(Address(thisGPR, JSString::offsetOfValue()), impl);
-    callsHostFunction.append(jit.branchIfRopeStringImpl(impl));
-    Jump isOutside = jit.branch32(CCallHelpers::AboveOrEqual, argumentGPR(0), Address(impl, StringImpl::lengthMemoryOffset()));
+    Jump isRope = jit.branchIfRopeStringImpl(impl);
+    JumpList isOutside;
+    JumpList isNotSubstring;
+    isOutside.append(jit.branch32(CCallHelpers::AboveOrEqual, argumentGPR(0), Address(impl, StringImpl::lengthMemoryOffset())));
     jit.zeroExtend32ToWord(argumentGPR(0), unit);
     Jump is16Bit = jit.branchTest32(CCallHelpers::Zero, Address(impl, StringImpl::flagsOffset()), TrustedImm32(StringImpl::flagIs8Bit()));
     jit.loadPtr(Address(impl, StringImpl::dataOffset()), impl);
     jit.load8(BaseIndex(impl, unit, CCallHelpers::TimesOne), unit);
+    Label boxesUnit = jit.label();
     boxInt32(jit, unit, jit.result());
     jit.returnToCaller();
+
+    isRope.link(&jit);
+    loadSubstringCharacters(jit, thisGPR, impl, trail, unit, isNotSubstring);
+    isOutside.append(jit.branch32(CCallHelpers::AboveOrEqual, argumentGPR(0), unit));
+    jit.zeroExtend32ToWord(argumentGPR(0), unit);
+    Jump pieceIs16Bit = jit.branchTest32(CCallHelpers::Zero, Address(impl, StringImpl::flagsOffset()), TrustedImm32(StringImpl::flagIs8Bit()));
+    jit.load8(BaseIndex(trail, unit, CCallHelpers::TimesOne), unit);
+    jit.jump().linkTo(boxesUnit, &jit);
+    pieceIs16Bit.link(&jit);
+    Jump hasSubstringPair;
+    if (readsCodePoint) {
+        const GPRReg unitsLeft = impl;
+        jit.load32(Address(thisGPR, JSRopeString::offsetOfLength()), unitsLeft);
+        jit.sub32(unit, unitsLeft);
+        jit.getEffectiveAddress(BaseIndex(trail, unit, CCallHelpers::TimesTwo), trail);
+        jit.load16(Address(trail), unit);
+        jit.branch32(CCallHelpers::Equal, unitsLeft, TrustedImm32(1)).linkTo(boxesUnit, &jit);
+        jit.load16(Address(trail, sizeof(char16_t)), trail);
+        hasSubstringPair = jit.jump();
+    } else {
+        jit.load16(BaseIndex(trail, unit, CCallHelpers::TimesTwo), unit);
+        jit.jump().linkTo(boxesUnit, &jit);
+    }
 
     isOutside.link(&jit);
     jit.move(TrustedImm64(readsCodePoint ? JSValue::ValueUndefined : JSValue::encode(jsNaN())), jit.result());
@@ -83,6 +115,7 @@ void emitStringCodeUnitAt(StubAssembler& jit, GPRReg scratch, JumpList& callsHos
         jit.loadPtr(Address(impl, StringImpl::dataOffset()), impl);
         jit.load16(BaseIndex(impl, trail, CCallHelpers::TimesTwo), trail);
         jit.load16(BaseIndex(impl, unit, CCallHelpers::TimesTwo), unit);
+        hasSubstringPair.link(&jit);
         jit.move(unit, impl);
         jit.and32(TrustedImm32(surrogateMask), impl);
         isOneUnit.append(jit.branch32(CCallHelpers::NotEqual, impl, TrustedImm32(leadSurrogate)));
@@ -100,6 +133,26 @@ void emitStringCodeUnitAt(StubAssembler& jit, GPRReg scratch, JumpList& callsHos
     isOneUnit.link(&jit);
     boxInt32(jit, unit, jit.result());
     jit.returnToCaller();
+
+    isNotSubstring.link(&jit);
+    flattenSubject(jit, thisGPR, { thisGPR, argumentGPR(0) }, hasString);
+}
+
+void emitStringLocaleCompare(StubAssembler& jit, GPRReg scratch, JumpList& callsHostFunction)
+{
+    const LocaleCompareRegisters registers {
+        thisGPR, argumentGPR(0), jit.reuseScratch(StubRegister::A1), jit.reuseScratch(StubRegister::A2), jit.reuseScratch(StubRegister::A3), scratch,
+        jit.allocateScratch(StubRegister::T11), jit.allocateScratch(StubRegister::T13)
+    };
+    RELEASE_ASSERT(noOverlap(registers.left, registers.right, registers.leftCharacters, registers.rightCharacters, registers.remaining, registers.leftUnit, registers.rightUnit, registers.weights, calleeGPR, instanceGPR));
+    checkRealmOfCalleeOfString(jit, scratch, callsHostFunction);
+    callsHostFunction.append(jit.branchIfNotCell(argumentGPR(0)));
+    callsHostFunction.append(jit.branchIfNotType(argumentGPR(0), StringType));
+    auto returnOrder = [&](int32_t order) {
+        jit.move(TrustedImm64(JSValue::encode(jsNumber(order))), jit.result());
+        jit.returnToCaller();
+    };
+    emitLocaleCompareOfASCII(jit, registers, CollatorCheck::ByRealm, ScopedLambda<void(int32_t)>(returnOrder), callsHostFunction);
 }
 
 void emitStringCharacterAt(StubAssembler& jit, GPRReg scratch, JumpList& callsHostFunction)
@@ -172,6 +225,19 @@ void emitStringPiece(StubAssembler& jit, GPRReg scratch, JumpList& callsHostFunc
     };
     jit.loadPtr(Address(thisGPR, JSString::offsetOfValue()), length);
     loadStringLength(jit, thisGPR, length, length);
+    if (!takesLength) {
+        JumpList isClamped;
+        if (count == 2) {
+            jit.zeroExtend32ToWord(argumentGPR(1), end);
+            isClamped.append(jit.branch32(CCallHelpers::Above, end, length));
+        } else
+            jit.move(length, end);
+        jit.zeroExtend32ToWord(argumentGPR(0), start);
+        isClamped.append(jit.branch32(CCallHelpers::Above, start, end));
+        jit.move(thisGPR, string);
+        jit.jumpToStub(substring());
+        isClamped.link(&jit);
+    }
     if (count != 2)
         jit.move(length, end);
     else if (!takesLength)

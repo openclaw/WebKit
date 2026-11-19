@@ -976,7 +976,7 @@ template<typename Adaptor> inline bool JSGenericTypedArrayView<Adaptor>::canAcce
 
 template<typename Adaptor> inline Structure* JSGenericTypedArrayView<Adaptor>::createStructure(VM& vm, JSGlobalObject* globalObject, JSValue prototype)
 {
-    return Structure::create(vm, globalObject, prototype, TypeInfo(typeForTypedArrayType(Adaptor::typeValue), StructureFlags), info(), NonArray);
+    return Structure::create(vm, globalObject, prototype, TypeInfo(typeForTypedArrayType(Adaptor::typeValue), StructureFlags), info(), NonArray | MayHaveIndexedAccessors);
 }
 
 template<typename Adaptor> template<typename, SubspaceAccess access>
@@ -1335,7 +1335,7 @@ inline bool JSGenericTypedArrayView<Adaptor>::radixSortWithCounters(std::span<El
 
 template<typename PassedAdaptor> inline Structure* JSGenericResizableOrGrowableSharedTypedArrayView<PassedAdaptor>::createStructure(VM& vm, JSGlobalObject* globalObject, JSValue prototype)
 {
-    return Structure::create(vm, globalObject, prototype, TypeInfo(typeForTypedArrayType(Base::Adaptor::typeValue), StructureFlags), info(), NonArray);
+    return Structure::create(vm, globalObject, prototype, TypeInfo(typeForTypedArrayType(Base::Adaptor::typeValue), StructureFlags), info(), NonArray | MayHaveIndexedAccessors);
 }
 
 template<typename PassedAdaptor> inline bool JSGenericResizableOrGrowableSharedTypedArrayView<PassedAdaptor>::preventExtensions(JSObject* cell, JSGlobalObject* globalObject)

@@ -4,25 +4,37 @@
  */
 
 #include "config.h"
+#include "AOTDoubleStringCache.h"
 #include "AOTSchemaRuntimeOperations.h"
 
 #if ENABLE(AOT)
 
+#include "AOTAtomListTable.h"
 #include "AOTBuiltinOperationSupport.h"
 #include "AOTCaseConversions.h"
 #include "AOTGrowingText.h"
+#include "AOTHeapCacheRegistry.h"
 #include "AOTImage.h"
 #include "AOTImageText.h"
 #include "AOTInstance.h"
+#include "AOTJSONTextWriter.h"
 #include "AOTLimits.h"
+#include "AOTNarrowCopy.h"
+#include "AOTObject.h"
 #include "AOTOperationArguments.h"
 #include "AOTOperationData.h"
 #include "AOTOperationScope.h"
 #include "AOTPropertyCachesStringKeys.h"
+#include "AOTQuotedStringCache.h"
+#include "AOTRopeCharacters.h"
+#include "AOTRuntimeReporter.h"
 #include "AOTSlotRepresentation.h"
 #include "AOTState.h"
+#include "AOTStringSwitchTable.h"
 #include "AOTUnwinding.h"
 #include "AOTVector.h"
+#include "CPUFeatureSet.h"
+#include "GCDeferralContextInlines.h"
 #include "IntlCollator.h"
 #include "IntlObject.h"
 #include "InterpreterInlines.h"
@@ -34,6 +46,7 @@
 #include "NumberPrototype.h"
 #include "NumericStrings.h"
 #include "StringConstructor.h"
+#include "StringObject.h"
 #include "StringPrototype.h"
 #include "StringPrototypeInlines.h"
 #include "StringSplitCacheInlines.h"
@@ -53,6 +66,9 @@
 #include <wtf/text/IntegerToStringConversion.h>
 #include <wtf/text/StringBuilderJSON.h>
 #include <wtf/text/StringCommon.h>
+#if CPU(X86_64)
+#include <immintrin.h>
+#endif
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
@@ -63,9 +79,9 @@ static_assert(static_cast<int32_t>(notFound) == -1, "compiled code takes the low
 static constexpr size_t maxRegisterStringLength = defaultLimitValue(LimitID::MaxRegisterStringLength, hostArchitecture());
 static_assert(maxRegisterStringLength == sizeof(uint64_t));
 
-static StringView textOf(uint32_t text)
+static ALWAYS_INLINE StringView textOf(uint32_t text)
 {
-    return Image::current()->text().view(StringID(text));
+    return Image::current()->text().viewInline(StringID(text));
 }
 
 template<typename CharacterType>
@@ -74,12 +90,61 @@ static ALWAYS_INLINE bool canRepresent(uint32_t character)
     return !(character >> (8 * sizeof(CharacterType)));
 }
 
+static constexpr uint32_t maxLatin1Character = 0xff;
+
+static NEVER_INLINE size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES findLatin1CharacterFarFromStart(const Latin1Character* characters, uint32_t length, uint32_t character, uint32_t start)
+{
+    return WTF::find(unsafeMakeSpan(characters, length), static_cast<Latin1Character>(character), start);
+}
+
+static ALWAYS_INLINE size_t findLatin1Character(const Latin1Character* characters, size_t length, Latin1Character character, size_t start)
+{
+    static_assert(std::endian::native == std::endian::little);
+    constexpr size_t stride = SIMD::stride<uint8_t>;
+    constexpr size_t stridesSearchedHere = 8;
+    const uint8_t* bytes = byteCast<uint8_t>(characters);
+    if (start >= length)
+        return notFound;
+    size_t i = start;
+    if (length - i >= stride) {
+        auto sought = SIMD::splat<uint8_t>(character);
+        size_t lastStride = length - stride;
+        for (size_t end = i + stridesSearchedHere * stride; i <= lastStride; i += stride) {
+            if (i >= end) [[unlikely]]
+                return findLatin1CharacterFarFromStart(characters, length, character, i);
+            if (auto found = SIMD::findFirstNonZeroIndex(SIMD::equal(SIMD::load(bytes + i), sought)))
+                return i + *found;
+        }
+        if (i == length)
+            return notFound;
+        auto found = SIMD::findFirstNonZeroIndex(SIMD::equal(SIMD::load(bytes + lastStride), sought));
+        return found ? lastStride + *found : notFound;
+    }
+    if (length - i >= sizeof(uint64_t)) {
+        constexpr uint64_t lowBits = 0x0101010101010101ULL;
+        for (size_t place : { i, length - sizeof(uint64_t) }) {
+            uint64_t differences = WTF::unalignedLoad<uint64_t>(bytes + place) ^ lowBits * character;
+            if (uint64_t found = (differences - lowBits) & ~differences & lowBits << 7)
+                return place + std::countr_zero(found) / 8;
+        }
+        return notFound;
+    }
+    for (; i < length; ++i) {
+        if (bytes[i] == character)
+            return i;
+    }
+    return notFound;
+}
+
 template<typename CharacterType>
 static ALWAYS_INLINE size_t findCharacter(const CharacterType* characters, uint32_t length, uint32_t character, uint32_t start)
 {
     if (!canRepresent<CharacterType>(character))
         return notFound;
-    return WTF::find(unsafeMakeSpan(characters, length), static_cast<CharacterType>(character), start);
+    if constexpr (std::is_same_v<CharacterType, Latin1Character>)
+        return findLatin1Character(characters, length, static_cast<Latin1Character>(character), start);
+    else
+        return WTF::find(unsafeMakeSpan(characters, length), static_cast<CharacterType>(character), start);
 }
 
 template<typename CharacterType>
@@ -88,6 +153,163 @@ static ALWAYS_INLINE size_t reverseFindCharacter(const CharacterType* characters
     if (position < 0 || !length || !canRepresent<CharacterType>(character))
         return notFound;
     return WTF::reverseFind(unsafeMakeSpan(characters, length), static_cast<CharacterType>(character), std::min<unsigned>(position, length - 1));
+}
+
+constexpr uint32_t longestTextComparedAtEveryPlace = 32;
+constexpr uint32_t charactersComparedWithoutCount = 16;
+
+template<typename CharacterType>
+class TextReadBackwards {
+public:
+    TextReadBackwards(const CharacterType* characters, size_t length)
+        : m_last(characters + length - 1)
+    {
+    }
+
+    CharacterType operator[](size_t index) const { return *(m_last - index); }
+
+private:
+    const CharacterType* m_last;
+};
+
+template<typename Sought>
+static intptr_t lastOfLeftPart(Sought sought, intptr_t length, bool greaterComesFirst, intptr_t& period)
+{
+    intptr_t last = -1;
+    intptr_t candidate = 0;
+    intptr_t offset = 1;
+    period = 1;
+    while (candidate + offset < length) {
+        auto ofCandidate = sought[candidate + offset];
+        auto ofBest = sought[last + offset];
+        if (ofCandidate == ofBest) {
+            if (offset != period)
+                ++offset;
+            else {
+                candidate += period;
+                offset = 1;
+            }
+        } else if (greaterComesFirst ? ofCandidate > ofBest : ofCandidate < ofBest) {
+            candidate += offset;
+            offset = 1;
+            period = candidate - last;
+        } else {
+            last = candidate++;
+            offset = 1;
+            period = 1;
+        }
+    }
+    return last;
+}
+
+template<typename Text, typename Sought>
+static size_t findInLinearTime(Text text, size_t length, Sought sought, size_t soughtLength, size_t start)
+{
+    const intptr_t end = soughtLength;
+    intptr_t periodOfOne;
+    intptr_t periodOfOther;
+    intptr_t one = lastOfLeftPart(sought, end, false, periodOfOne);
+    intptr_t other = lastOfLeftPart(sought, end, true, periodOfOther);
+    const intptr_t lastOfLeft = std::max(one, other);
+    intptr_t period = one > other ? periodOfOne : periodOfOther;
+
+    bool leftPartComesAgain = true;
+    for (intptr_t i = 0; i <= lastOfLeft && leftPartComesAgain; ++i)
+        leftPartComesAgain = sought[i] == sought[i + period];
+    if (!leftPartComesAgain)
+        period = std::max(lastOfLeft + 1, end - lastOfLeft - 1) + 1;
+
+    const intptr_t lastPlace = length - soughtLength;
+    intptr_t lastKnownToAgree = -1;
+    for (intptr_t place = start; place <= lastPlace;) {
+        intptr_t i = std::max(lastOfLeft, lastKnownToAgree) + 1;
+        while (i < end && sought[i] == text[place + i])
+            ++i;
+        if (i < end) {
+            place += i - lastOfLeft;
+            lastKnownToAgree = -1;
+            continue;
+        }
+        i = lastOfLeft;
+        while (i > lastKnownToAgree && sought[i] == text[place + i])
+            --i;
+        if (i <= lastKnownToAgree)
+            return place;
+        place += period;
+        if (leftPartComesAgain)
+            lastKnownToAgree = end - period - 1;
+    }
+    return notFound;
+}
+
+template<typename CharacterType, typename OtherCharacterType>
+static ALWAYS_INLINE size_t findWhereStringMayStart(std::span<const CharacterType> starts, const OtherCharacterType* other, uint32_t otherLength, size_t i)
+{
+    CharacterType first = other[0];
+    if constexpr (std::is_same_v<CharacterType, Latin1Character>) {
+        constexpr size_t stride = SIMD::stride<uint8_t>;
+        const uint8_t* firsts = byteCast<uint8_t>(starts.data());
+        const uint8_t* lasts = firsts + otherLength - 1;
+        auto firstOfText = SIMD::splat<uint8_t>(first);
+        auto lastOfText = SIMD::splat<uint8_t>(other[otherLength - 1]);
+        for (; i + stride <= starts.size(); i += stride) {
+            if (auto found = SIMD::findFirstNonZeroIndex(SIMD::bitAnd(SIMD::equal(SIMD::load(firsts + i), firstOfText), SIMD::equal(SIMD::load(lasts + i), lastOfText))))
+                return i + *found;
+        }
+        while (i < starts.size() && starts[i] != first)
+            ++i;
+        return i < starts.size() ? i : notFound;
+    } else
+        return WTF::find(starts, first, i);
+}
+
+template<typename CharacterType, typename OtherCharacterType>
+static ALWAYS_INLINE bool longStringStandsAt(const CharacterType* place, const OtherCharacterType* other, uint32_t otherLength, bool& wasComparedFar)
+{
+    wasComparedFar = WTF::equal(place, unsafeMakeSpan(other, charactersComparedWithoutCount));
+    return wasComparedFar && WTF::equal(place + charactersComparedWithoutCount, unsafeMakeSpan(other + charactersComparedWithoutCount, otherLength - charactersComparedWithoutCount));
+}
+
+template<typename CharacterType, typename OtherCharacterType>
+static NEVER_INLINE size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES findLongString(const CharacterType* characters, uint32_t length, const OtherCharacterType* other, uint32_t otherLength, uint32_t start)
+{
+    auto starts = unsafeMakeSpan(characters, length - otherLength + 1);
+    uint64_t comparedInVain = 0;
+    for (size_t i = start;; ++i) {
+        i = findWhereStringMayStart(starts, other, otherLength, i);
+        bool wasComparedFar = false;
+        if (i == notFound || longStringStandsAt(characters + i, other, otherLength, wasComparedFar))
+            return i;
+        if (!wasComparedFar)
+            continue;
+        comparedInVain += otherLength;
+        if (comparedInVain > 2 * (i - start) + 4 * static_cast<uint64_t>(otherLength))
+            return findInLinearTime(characters, length, other, otherLength, i + 1);
+    }
+}
+
+template<typename CharacterType, typename OtherCharacterType>
+static NEVER_INLINE size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES reverseFindLongString(const CharacterType* characters, uint32_t length, const OtherCharacterType* other, uint32_t otherLength, int32_t position)
+{
+    size_t start = std::min<size_t>(std::max(position, 0), length - otherLength);
+    auto starts = unsafeMakeSpan(characters, start + 1);
+    uint64_t comparedInVain = 0;
+    for (size_t i = start;; --i) {
+        i = WTF::reverseFind(starts, static_cast<CharacterType>(other[0]), i);
+        bool wasComparedFar = false;
+        if (i == notFound || longStringStandsAt(characters + i, other, otherLength, wasComparedFar))
+            return i;
+        if (!i)
+            return notFound;
+        if (!wasComparedFar)
+            continue;
+        comparedInVain += otherLength;
+        if (comparedInVain > 2 * (start - i) + 4 * static_cast<uint64_t>(otherLength)) {
+            size_t end = i - 1 + otherLength;
+            size_t fromEnd = findInLinearTime(TextReadBackwards(characters, end), end, TextReadBackwards(other, otherLength), otherLength, 0);
+            return fromEnd == notFound ? notFound : end - otherLength - fromEnd;
+        }
+    }
 }
 
 template<typename CharacterType>
@@ -99,6 +321,8 @@ static ALWAYS_INLINE size_t findString(const CharacterType* characters, uint32_t
         return start;
     if (otherLength > length - start)
         return notFound;
+    if (otherLength > longestTextComparedAtEveryPlace)
+        return findLongString(characters, length, other, otherLength, start);
     CharacterType first = other[0];
     auto rest = unsafeMakeSpan(other + 1, otherLength - 1);
     auto starts = unsafeMakeSpan(characters, length - otherLength + 1);
@@ -134,15 +358,16 @@ static ALWAYS_INLINE size_t findString(const CharacterType* characters, uint32_t
     }
 }
 
-template<typename CharacterType>
-static ALWAYS_INLINE size_t reverseFindString(const CharacterType* characters, uint32_t length, const CharacterType* other, uint32_t otherLength, int32_t position)
+static ALWAYS_INLINE size_t reverseFindString(const Latin1Character* characters, uint32_t length, const Latin1Character* other, uint32_t otherLength, int32_t position)
 {
     if (otherLength > length)
         return notFound;
+    if (otherLength > longestTextComparedAtEveryPlace)
+        return reverseFindLongString(characters, length, other, otherLength, position);
     unsigned start = std::min<unsigned>(std::max(position, 0), length - otherLength);
     if (!otherLength)
         return start;
-    CharacterType first = other[0];
+    Latin1Character first = other[0];
     auto rest = unsafeMakeSpan(other + 1, otherLength - 1);
     for (size_t i = start;; --i) {
         if (characters[i] == first && WTF::equal(characters + i + 1, rest))
@@ -152,9 +377,176 @@ static ALWAYS_INLINE size_t reverseFindString(const CharacterType* characters, u
     }
 }
 
-extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringFindCharacter8(const Latin1Character* characters, uint32_t length, uint32_t character, uint32_t start)
+static NEVER_INLINE size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES reverseFindCharacterFarFromStart(const Latin1Character* characters, uint32_t length, Latin1Character character, int32_t position)
+{
+    return reverseFindCharacter(characters, length, character, position);
+}
+
+static ALWAYS_INLINE size_t reverseFindStringOrCharacter(const Latin1Character* characters, uint32_t length, const Latin1Character* other, uint32_t otherLength, int32_t position)
+{
+    constexpr int32_t leastPlacesSearchedByVectors = 32;
+    if (otherLength == 1 && position >= leastPlacesSearchedByVectors && length > leastPlacesSearchedByVectors)
+        return reverseFindCharacterFarFromStart(characters, length, other[0], position);
+    return reverseFindString(characters, length, other, otherLength, position);
+}
+
+template<typename OtherCharacterType>
+static ALWAYS_INLINE size_t reverseFindString(const char16_t* characters, uint32_t length, const OtherCharacterType* other, uint32_t otherLength, int32_t position)
+{
+    if (otherLength > length)
+        return notFound;
+    if (otherLength > longestTextComparedAtEveryPlace)
+        return reverseFindLongString(characters, length, other, otherLength, position);
+    unsigned start = std::min<unsigned>(std::max(position, 0), length - otherLength);
+    if (!otherLength)
+        return start;
+    char16_t first = other[0];
+    auto rest = unsafeMakeSpan(other + 1, otherLength - 1);
+    auto starts = unsafeMakeSpan(characters, start + 1);
+    for (size_t i = start;; --i) {
+        i = WTF::reverseFind(starts, first, i);
+        if (i == notFound || WTF::equal(characters + i + 1, rest))
+            return i;
+        if (!i)
+            return notFound;
+    }
+}
+
+NEVER_INLINE size_t countCharacter(std::span<const Latin1Character> source, Latin1Character character)
+{
+    constexpr size_t stride = SIMD::stride<uint8_t>;
+    constexpr size_t stridesPerStep = 4;
+    constexpr size_t maxStepsSummed = 255;
+    const uint8_t* characters = byteCast<uint8_t>(source.data());
+    const auto sought = SIMD::splat<uint8_t>(byteCast<uint8_t>(character));
+    size_t count = 0;
+    size_t start = 0;
+    while (start + stride * stridesPerStep <= source.size()) {
+        std::array<decltype(SIMD::splat<uint8_t>(0)), stridesPerStep> sums { SIMD::splat<uint8_t>(0), SIMD::splat<uint8_t>(0), SIMD::splat<uint8_t>(0), SIMD::splat<uint8_t>(0) };
+        for (size_t steps = 0; steps < maxStepsSummed && start + stride * stridesPerStep <= source.size(); ++steps, start += stride * stridesPerStep) {
+            sums[0] = SIMD::sub(sums[0], SIMD::equal(SIMD::load(characters + start), sought));
+            sums[1] = SIMD::sub(sums[1], SIMD::equal(SIMD::load(characters + start + stride), sought));
+            sums[2] = SIMD::sub(sums[2], SIMD::equal(SIMD::load(characters + start + 2 * stride), sought));
+            sums[3] = SIMD::sub(sums[3], SIMD::equal(SIMD::load(characters + start + 3 * stride), sought));
+        }
+        count += SIMD::sum(sums[0]) + SIMD::sum(sums[1]) + SIMD::sum(sums[2]) + SIMD::sum(sums[3]);
+    }
+    for (; start < source.size(); ++start)
+        count += source[start] == character;
+    return count;
+}
+
+template<typename CharacterType>
+static ALWAYS_INLINE size_t findSeparators(const CharacterType* characters, uint32_t length, uint32_t separator, uint32_t countAndWhetherAllAreCounted, uint32_t* bounds)
+{
+    uint32_t count = countAndWhetherAllAreCounted & 0x7fffffff;
+    uint32_t numberOfPieces = 0;
+    uint32_t start = 0;
+    while (numberOfPieces < count) {
+        size_t found = findCharacter(characters, length, separator, start);
+        bounds[2 * numberOfPieces] = start;
+        bounds[2 * numberOfPieces + 1] = found == notFound ? length : static_cast<uint32_t>(found);
+        ++numberOfPieces;
+        if (found == notFound) {
+            for (uint32_t absent = 2 * numberOfPieces; absent < 2 * count; ++absent)
+                bounds[absent] = UINT32_MAX;
+            return numberOfPieces;
+        }
+        start = static_cast<uint32_t>(found) + 1;
+    }
+    if (!(countAndWhetherAllAreCounted >> 31))
+        return numberOfPieces;
+    size_t behind = 1;
+    if (canRepresent<CharacterType>(separator)) {
+        constexpr uint32_t minCharactersCountedByVectors = 64;
+        if constexpr (std::is_same_v<CharacterType, Latin1Character>) {
+            if (length - start >= minCharactersCountedByVectors)
+                return numberOfPieces + behind + countCharacter(unsafeMakeSpan(characters, length).subspan(start), static_cast<Latin1Character>(separator));
+        }
+        for (uint32_t position = start; position < length; ++position)
+            behind += characters[position] == static_cast<CharacterType>(separator);
+    }
+    return numberOfPieces + behind;
+}
+
+extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringFindSeparators8(const Latin1Character* characters, uint32_t length, uint32_t separator, uint32_t countAndWhetherAllAreCounted, uint32_t* bounds)
+{
+    return findSeparators(characters, length, separator, countAndWhetherAllAreCounted, bounds);
+}
+
+extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringFindSeparators16(const char16_t* characters, uint32_t length, uint32_t separator, uint32_t countAndWhetherAllAreCounted, uint32_t* bounds)
+{
+    return findSeparators(characters, length, separator, countAndWhetherAllAreCounted, bounds);
+}
+
+template<typename CharacterType>
+static ALWAYS_INLINE size_t findLongSeparators(const CharacterType* characters, uint32_t length, uint32_t text, uint32_t countAndWhetherAllAreCounted, uint32_t* bounds)
+{
+    StringView subject { std::span { characters, length } };
+    StringView separator = textOf(text);
+    uint32_t count = countAndWhetherAllAreCounted & 0x7fffffff;
+    bool allAreCounted = countAndWhetherAllAreCounted >> 31;
+    uint32_t numberOfPieces = 0;
+    size_t start = 0;
+    for (size_t found = 0; found != notFound && (numberOfPieces < count || allAreCounted); ++numberOfPieces) {
+        found = subject.find(separator, start);
+        if (numberOfPieces < count) {
+            bounds[2 * numberOfPieces] = static_cast<uint32_t>(start);
+            bounds[2 * numberOfPieces + 1] = found == notFound ? length : static_cast<uint32_t>(found);
+        }
+        start = found + separator.length();
+    }
+    for (uint32_t absent = 2 * numberOfPieces; absent < 2 * count; ++absent)
+        bounds[absent] = UINT32_MAX;
+    return numberOfPieces;
+}
+
+extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringFindLongSeparators8(const Latin1Character* characters, uint32_t length, uint32_t text, uint32_t countAndWhetherAllAreCounted, uint32_t* bounds)
+{
+    return findLongSeparators(characters, length, text, countAndWhetherAllAreCounted, bounds);
+}
+
+extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringFindLongSeparators16(const char16_t* characters, uint32_t length, uint32_t text, uint32_t countAndWhetherAllAreCounted, uint32_t* bounds)
+{
+    return findLongSeparators(characters, length, text, countAndWhetherAllAreCounted, bounds);
+}
+
+static constexpr uint32_t latin1Stride = SIMD::stride<uint8_t>;
+
+static ALWAYS_INLINE auto compareLatin1Stride(const Latin1Character* characters, uint32_t character)
+{
+    return SIMD::equal(SIMD::load(byteCast<uint8_t>(characters)), SIMD::splat<uint8_t>(static_cast<uint8_t>(character)));
+}
+
+static NEVER_INLINE size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES findCharacter8WithinStride(const Latin1Character* characters, uint32_t length, uint32_t character, uint32_t start)
 {
     return findCharacter(characters, length, character, start);
+}
+
+static NEVER_INLINE size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES findCharacter8AfterFirstStride(const Latin1Character* characters, uint32_t length, uint32_t character, uint32_t start)
+{
+    constexpr uint32_t stridesSearchedHere = 8;
+    uint32_t lastStride = length - latin1Stride;
+    uint32_t i = start + latin1Stride;
+    for (uint32_t strides = 0; i <= lastStride; i += latin1Stride) {
+        if (++strides > stridesSearchedHere) [[unlikely]]
+            return findLatin1CharacterFarFromStart(characters, length, character, i);
+        if (auto found = SIMD::findFirstNonZeroIndex(compareLatin1Stride(characters + i, character)))
+            return static_cast<size_t>(i) + *found;
+    }
+    if (i == length)
+        return notFound;
+    auto found = SIMD::findFirstNonZeroIndex(compareLatin1Stride(characters + lastStride, character));
+    return found ? static_cast<size_t>(lastStride) + *found : notFound;
+}
+
+extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringFindCharacter8(const Latin1Character* characters, uint32_t length, uint32_t character, uint32_t start)
+{
+    if (start >= length || length - start < latin1Stride || character > maxLatin1Character) [[unlikely]]
+        [[clang::musttail]] return findCharacter8WithinStride(characters, length, character, start);
+    if (auto found = SIMD::findFirstNonZeroIndex(compareLatin1Stride(characters + start, character)))
+        return static_cast<size_t>(start) + *found;
+    [[clang::musttail]] return findCharacter8AfterFirstStride(characters, length, character, start);
 }
 
 extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringFindCharacter16(const char16_t* characters, uint32_t length, uint32_t character, uint32_t start)
@@ -162,9 +554,59 @@ extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringFindCharac
     return findCharacter(characters, length, character, start);
 }
 
+static NEVER_INLINE size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES reverseFindCharacter8WithinStride(const Latin1Character* characters, uint32_t length, uint32_t character, int32_t position)
+{
+    static_assert(std::endian::native == std::endian::little);
+    constexpr uint64_t lowBits = 0x0101010101010101ULL;
+    constexpr uint64_t otherBits = 0x7f * lowBits;
+    constexpr uint32_t wordSize = sizeof(uint64_t);
+    if (position < 0 || character > maxLatin1Character)
+        return notFound;
+    uint32_t end = static_cast<uint32_t>(position) < length ? static_cast<uint32_t>(position) + 1 : length;
+    if (end >= wordSize) {
+        for (uint32_t place : { end - wordSize, 0u }) {
+            uint64_t differences = WTF::unalignedLoad<uint64_t>(characters + place) ^ lowBits * character;
+            if (uint64_t found = ~(((differences & otherBits) + otherBits) | differences | otherBits))
+                return static_cast<size_t>(place) + 7 - std::countl_zero(found) / 8;
+        }
+        return notFound;
+    }
+    while (end--) {
+        if (characters[end] == character)
+            return end;
+    }
+    return notFound;
+}
+
+static ALWAYS_INLINE uint32_t endOfReverseSearch(uint32_t length, int32_t position)
+{
+    return static_cast<uint32_t>(position) < length ? static_cast<uint32_t>(position) + 1 : length;
+}
+
+static NEVER_INLINE size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES reverseFindCharacter8BeforeLastStride(const Latin1Character* characters, uint32_t length, uint32_t character, int32_t position)
+{
+    constexpr uint32_t stridesSearchedHere = 8;
+    uint32_t end = endOfReverseSearch(length, position) - latin1Stride;
+    for (uint32_t strides = 0; end >= latin1Stride; end -= latin1Stride) {
+        if (++strides > stridesSearchedHere) [[unlikely]]
+            return WTF::reverseFind(unsafeMakeSpan(characters, end), static_cast<Latin1Character>(character), end - 1);
+        if (auto found = SIMD::findLastNonZeroIndex(compareLatin1Stride(characters + end - latin1Stride, character)))
+            return static_cast<size_t>(end - latin1Stride) + *found;
+    }
+    if (!end)
+        return notFound;
+    auto found = SIMD::findLastNonZeroIndex(compareLatin1Stride(characters, character));
+    return found ? static_cast<size_t>(*found) : notFound;
+}
+
 extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringReverseFindCharacter8(const Latin1Character* characters, uint32_t length, uint32_t character, int32_t position)
 {
-    return reverseFindCharacter(characters, length, character, position);
+    uint32_t end = endOfReverseSearch(length, position);
+    if (position < 0 || end < latin1Stride || character > maxLatin1Character) [[unlikely]]
+        [[clang::musttail]] return reverseFindCharacter8WithinStride(characters, length, character, position);
+    if (auto found = SIMD::findLastNonZeroIndex(compareLatin1Stride(characters + end - latin1Stride, character)))
+        return static_cast<size_t>(end - latin1Stride) + *found;
+    [[clang::musttail]] return reverseFindCharacter8BeforeLastStride(characters, length, character, position);
 }
 
 extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringReverseFindCharacter16(const char16_t* characters, uint32_t length, uint32_t character, int32_t position)
@@ -172,9 +614,62 @@ extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringReverseFin
     return reverseFindCharacter(characters, length, character, position);
 }
 
+#if CPU(X86_64)
+__attribute__((target("avx2"))) static NEVER_INLINE size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES findStringWithAVX2(const Latin1Character* characters, uint32_t length, const Latin1Character* other, uint32_t otherLength, uint32_t start)
+{
+    const size_t numberOfStarts = length - otherLength + 1;
+    const uint8_t* firsts = byteCast<uint8_t>(characters);
+    const uint8_t* lasts = firsts + otherLength - 1;
+    const __m256i first = _mm256_set1_epi8(static_cast<char>(other[0]));
+    const __m256i last = _mm256_set1_epi8(static_cast<char>(other[otherLength - 1]));
+    auto rest = unsafeMakeSpan(other + 1, otherLength - 1);
+    uint64_t comparedInVain = 0;
+    size_t place = start;
+    for (; place + 64 <= numberOfStarts; place += 64) {
+        auto* ofFirsts = reinterpret_cast<const __m256i*>(firsts + place);
+        auto* ofLasts = reinterpret_cast<const __m256i*>(lasts + place);
+        __m256i low = _mm256_and_si256(_mm256_cmpeq_epi8(_mm256_loadu_si256(ofFirsts), first), _mm256_cmpeq_epi8(_mm256_loadu_si256(ofLasts), last));
+        __m256i high = _mm256_and_si256(_mm256_cmpeq_epi8(_mm256_loadu_si256(ofFirsts + 1), first), _mm256_cmpeq_epi8(_mm256_loadu_si256(ofLasts + 1), last));
+        __m256i any = _mm256_or_si256(low, high);
+        if (_mm256_testz_si256(any, any)) [[likely]]
+            continue;
+        uint64_t candidates = static_cast<uint32_t>(_mm256_movemask_epi8(low)) | static_cast<uint64_t>(static_cast<uint32_t>(_mm256_movemask_epi8(high))) << 32;
+        for (; candidates; candidates &= candidates - 1) {
+            size_t candidate = place + std::countr_zero(candidates);
+            if (otherLength <= longestTextComparedAtEveryPlace) {
+                if (WTF::equal(characters + candidate + 1, rest))
+                    return candidate;
+                continue;
+            }
+            bool wasComparedFar = false;
+            if (longStringStandsAt(characters + candidate, other, otherLength, wasComparedFar))
+                return candidate;
+            if (!wasComparedFar)
+                continue;
+            comparedInVain += otherLength;
+            if (comparedInVain > 2 * (candidate - start) + 4 * static_cast<uint64_t>(otherLength))
+                return findInLinearTime(characters, length, other, otherLength, candidate + 1);
+        }
+    }
+    return findString(characters, length, other, otherLength, static_cast<uint32_t>(place));
+}
+#endif
+
 extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringFind8(const Latin1Character* characters, uint32_t length, const Latin1Character* other, uint32_t otherLength, uint32_t start)
 {
+#if CPU(X86_64)
+    constexpr uint32_t leastPlacesOfVectors = 256;
+    if (otherLength && start < length && length - start >= static_cast<uint64_t>(otherLength) + leastPlacesOfVectors && CPUFeatureSet::host().contains(CPUFeature::AVX2))
+        return findStringWithAVX2(characters, length, other, otherLength, start);
+#endif
     return findString(characters, length, other, otherLength, start);
+}
+
+static ALWAYS_INLINE size_t findText(VM& vm, StringView subject, StringView sought, unsigned start)
+{
+    if (subject.is8Bit() && sought.is8Bit()) [[likely]]
+        return operationAOTStringFind8(subject.span8().data(), subject.length(), sought.span8().data(), sought.length(), start);
+    return subject.find(vm.adaptiveStringSearcherTables(), sought, start);
 }
 
 extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringFind16(const char16_t* characters, uint32_t length, const char16_t* other, uint32_t otherLength, uint32_t start)
@@ -184,7 +679,7 @@ extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringFind16(con
 
 extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringReverseFind8(const Latin1Character* characters, uint32_t length, const Latin1Character* other, uint32_t otherLength, int32_t position)
 {
-    return reverseFindString(characters, length, other, otherLength, position);
+    return reverseFindStringOrCharacter(characters, length, other, otherLength, position);
 }
 
 extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringReverseFind16(const char16_t* characters, uint32_t length, const char16_t* other, uint32_t otherLength, int32_t position)
@@ -192,12 +687,37 @@ extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringReverseFin
     return reverseFindString(characters, length, other, otherLength, position);
 }
 
+static ALWAYS_INLINE bool blockIsASCII(const Latin1Character* block)
+{
+    auto word = [&](size_t index) ALWAYS_INLINE_LAMBDA {
+        return WTF::unalignedLoad<uint64_t>(block + index * sizeof(uint64_t));
+    };
+    return !((word(0) | word(1) | word(2) | word(3) | word(4) | word(5) | word(6) | word(7)) & 0x8080808080808080ULL);
+}
+
 extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTStringUTF8Length8(const Latin1Character* characters, uint32_t length)
 {
     static_assert(std::endian::native == std::endian::little);
     constexpr uint64_t highBits = 0x8080808080808080ULL;
+    constexpr uint32_t blockLength = 8 * sizeof(uint64_t);
     size_t result = length;
     uint32_t i = 0;
+    if (length >= blockLength) {
+        uint32_t lastBlock = length - blockLength;
+        while (true) {
+            while (i <= lastBlock && blockIsASCII(characters + i))
+                i += blockLength;
+            if (i > lastBlock)
+                break;
+#if COMPILER(CLANG)
+#pragma clang loop unroll(disable)
+#endif
+            for (uint32_t end = i + blockLength; i < end; i += sizeof(uint64_t))
+                result += std::popcount(WTF::unalignedLoad<uint64_t>(characters + i) & highBits);
+        }
+        if (i == length || blockIsASCII(characters + lastBlock))
+            return result;
+    }
     for (; i + sizeof(uint64_t) <= length; i += sizeof(uint64_t))
         result += std::popcount(WTF::unalignedLoad<uint64_t>(characters + i) & highBits);
     uint32_t rest = length - i;
@@ -253,6 +773,13 @@ extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTFindKeptStringOf
     }));
 }
 
+extern "C" size_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTNarrowSubject(void* instance, const char16_t* characters, uint32_t length)
+{
+    std::span<Latin1Character> subject = static_cast<Instance*>(instance)->vm->aotState().narrowSubject();
+    ASSERT(length <= subject.size());
+    return tryCopyAsLatin1({ characters, length }, subject.data()) ? std::bit_cast<size_t>(subject.data()) : 0;
+}
+
 JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTStringFindLiteral8, size_t, (Instance*, const Latin1Character* characters, uint32_t length, uint32_t text, uint32_t start))
 {
     StringView other = textOf(text);
@@ -266,7 +793,20 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTStringReverseFindLiteral8, size_t,
     StringView other = textOf(text);
     if (!other.is8Bit()) [[unlikely]]
         return StringView(std::span { characters, length }).reverseFind(other, std::max(position, 0));
-    return operationAOTStringReverseFind8(characters, length, other.span8().data(), other.length(), position);
+    return reverseFindString(characters, length, other.span8().data(), other.length(), position);
+}
+
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTStringFindLiteral16, size_t, (Instance*, const char16_t* characters, uint32_t length, uint32_t text, uint32_t start))
+{
+    return StringView(std::span { characters, length }).find(textOf(text), start);
+}
+
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTStringReverseFindLiteral16, size_t, (Instance*, const char16_t* characters, uint32_t length, uint32_t text, int32_t position))
+{
+    StringView other = textOf(text);
+    if (!other.is8Bit()) [[unlikely]]
+        return StringView(std::span { characters, length }).reverseFind(other, std::max(position, 0));
+    return reverseFindString(characters, length, other.span8().data(), other.length(), position);
 }
 
 JSC_DEFINE_JIT_OPERATION(operationAOTConcat, JSCell*, (Instance* instance, JSCell* left, JSCell* right))
@@ -275,6 +815,79 @@ JSC_DEFINE_JIT_OPERATION(operationAOTConcat, JSCell*, (Instance* instance, JSCel
     JSString* leftString = cellArgument<JSString>(left, Entry::operationAOTConcat);
     JSString* rightString = cellArgument<JSString>(right, Entry::operationAOTConcat);
     OPERATION_RETURN(scope, joinTexts(globalObject, *instance, leftString, rightString));
+}
+
+static JSString* tryJoinShortStringsAndInteger(VM& vm, JSString* head, JSString* middle, int32_t integer, JSString* tail)
+{
+    constexpr int32_t limitOfKeptIntegers = 1024;
+    constexpr unsigned maxLengthOfPart = 48;
+    if (integer >= 0 && integer < limitOfKeptIntegers)
+        return nullptr;
+    auto charactersOf = [](JSString* string) -> std::optional<std::span<const Latin1Character>> {
+        if (!string)
+            return std::span<const Latin1Character> { };
+        const StringImpl* impl = string->tryGetValueImpl();
+        if (!impl || !impl->is8Bit() || impl->length() > maxLengthOfPart)
+            return std::nullopt;
+        return impl->span8();
+    };
+    auto front = charactersOf(head);
+    auto center = charactersOf(middle);
+    auto back = charactersOf(tail);
+    if (!front || !center || !back)
+        return nullptr;
+    std::array<Latin1Character, maxJSONIntegerLength> buffer;
+    std::span<const Latin1Character> digits { buffer.data(), static_cast<size_t>(appendJSONInteger(buffer.data(), integer) - buffer.data()) };
+    size_t length = front->size() + center->size() + digits.size() + back->size();
+    if (length < 2)
+        return nullptr;
+    std::span<Latin1Character> characters;
+    RefPtr<StringImpl> impl = StringImpl::tryCreateUninitialized(length, characters);
+    if (!impl) [[unlikely]]
+        return nullptr;
+    for (std::span<const Latin1Character> part : { *front, *center, digits, *back }) {
+        memcpySpan(characters, part);
+        characters = characters.subspan(part.size());
+    }
+    return jsNontrivialString(vm, String(impl.releaseNonNull()));
+}
+
+JSC_DEFINE_JIT_OPERATION(operationAOTConcatenateStringsAndInteger, JSCell*, (Instance* instance, JSCell* first, JSCell* second, uint64_t bits))
+{
+    AOT_OPERATION_BEGIN(instance, Entry::operationAOTConcatenateStringsAndInteger);
+    JSString* head = cellArgument<JSString>(first, Entry::operationAOTConcatenateStringsAndInteger);
+    JSString* middle = cellArgument<JSString>(second, Entry::operationAOTConcatenateStringsAndInteger);
+    int32_t integer = static_cast<int32_t>(bits);
+    if (JSString* joined = tryJoinShortStringsAndInteger(vm, head, middle, integer, nullptr)) [[likely]]
+        OPERATION_RETURN(scope, joined);
+    JSString* text = instance->state->stringKeys->textOfInt32(vm, integer);
+    if (head->isRope() && head->length() >= minLengthOfGrowingText) {
+        JSString* pieces[] { middle, text };
+        if (JSString* grown = tryAppendToGrowingText(*instance, head, pieces))
+            OPERATION_RETURN(scope, grown);
+    }
+    OPERATION_RETURN(scope, jsString(globalObject, head, middle, text));
+}
+
+JSC_DEFINE_JIT_OPERATION(operationAOTConcatenateInteger, JSCell*, (Instance* instance, JSCell* first, uint64_t bits, JSCell* last))
+{
+    AOT_OPERATION_BEGIN(instance, Entry::operationAOTConcatenateInteger);
+    JSString* head = first ? cellArgument<JSString>(first, Entry::operationAOTConcatenateInteger) : nullptr;
+    JSString* tail = last ? cellArgument<JSString>(last, Entry::operationAOTConcatenateInteger) : nullptr;
+    int32_t integer = static_cast<int32_t>(bits);
+    if (JSString* joined = tryJoinShortStringsAndInteger(vm, head, nullptr, integer, tail)) [[likely]]
+        OPERATION_RETURN(scope, joined);
+    JSString* text = instance->state->stringKeys->textOfInt32(vm, integer);
+    if (!head)
+        OPERATION_RETURN(scope, jsString(globalObject, text, tail));
+    if (head->isRope() && head->length() >= minLengthOfGrowingText) {
+        JSString* pieces[] { text, tail };
+        if (JSString* grown = tryAppendToGrowingText(*instance, head, std::span(pieces).first(tail ? 2 : 1)))
+            OPERATION_RETURN(scope, grown);
+    }
+    if (!tail)
+        OPERATION_RETURN(scope, jsString(globalObject, head, text));
+    OPERATION_RETURN(scope, jsString(globalObject, head, text, tail));
 }
 
 JSC_DEFINE_JIT_OPERATION(operationAOTConcatThree, JSCell*, (Instance* instance, JSCell* first, JSCell* second, JSCell* third))
@@ -295,18 +908,130 @@ JSC_DEFINE_JIT_OPERATION(operationAOTSubstring, JSCell*, (Instance* instance, JS
 {
     AOT_OPERATION_BEGIN(instance, Entry::operationAOTSubstring);
     leaveCellsForRopes(instance);
-    OPERATION_RETURN(scope, jsSubstring(globalObject, cellArgument<JSString>(string, Entry::operationAOTSubstring), from, to - from));
+    JSString* base = cellArgument<JSString>(string, Entry::operationAOTSubstring);
+    OPERATION_RETURN(scope, jsSubstring(globalObject, base, from, to - from));
+}
+
+const Latin1Character* tryWriteRope(const JSString* rope, Latin1Character* to, const Latin1Character* endOfRoom)
+{
+    constexpr size_t maxPendingParts = 32;
+    std::array<const JSString*, maxPendingParts> pendingParts;
+    size_t numberOfPendingParts = 0;
+    const Latin1Character* const end = to + rope->length();
+    const JSString* current = rope;
+    while (true) {
+        unsigned length;
+        if (const Latin1Character* characters = latin1CharactersInPlace(current, length)) {
+            if (length > static_cast<size_t>(end - to)) [[unlikely]]
+                return nullptr;
+            copyIntoRoom(characters, length, to, endOfRoom - to);
+            to += length;
+            if (!numberOfPendingParts)
+                break;
+            current = pendingParts[--numberOfPendingParts];
+            continue;
+        }
+        if (!current->isRope() || current->isSubstring() || numberOfPendingParts + 2 > maxPendingParts) [[unlikely]]
+            return nullptr;
+        auto [first, second, third] = fibersOf(uncheckedDowncast<JSRopeString>(current));
+        for (const JSString* part : { third, second }) {
+            pendingParts[numberOfPendingParts] = part;
+            numberOfPendingParts += !!part;
+        }
+        current = first;
+    }
+    RELEASE_ASSERT(to == end);
+    return to;
+}
+
+static ALWAYS_INLINE bool tryResolveShortRope(VM& vm, JSRopeString* rope)
+{
+    constexpr unsigned maxLength = 1024;
+    if (rope->isSubstring() || !rope->is8Bit() || rope->length() > maxLength)
+        return false;
+    std::span<Latin1Character> characters;
+    RefPtr<StringImpl> impl = StringImpl::tryCreateUninitialized(rope->length(), characters);
+    if (!impl || !tryWriteRope(rope, characters.data(), std::to_address(characters.end()))) [[unlikely]]
+        return false;
+    size_t costOfCharacters = impl->cost();
+    StringImpl& resolved = *impl;
+    rope->resolveBySharing(resolved);
+    vm.heap.reportExtraMemoryAllocated(rope, costOfCharacters);
+    return true;
+}
+
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTStringCodeUnitAt, size_t, (Instance*, JSCell* cell, uint32_t index))
+{
+    auto* string = cellArgument<JSString>(cell, Entry::operationAOTStringCodeUnitAt);
+    if (string->isRope()) {
+        DeferGCForAWhile deferGC(string->vm());
+        uncheckedDowncast<JSRopeString>(string)->resolveRope(nullptr);
+    }
+    const JSString* part = string;
+    while (part->isRope()) {
+        const auto* rope = uncheckedDowncast<JSRopeString>(part);
+        if (rope->isSubstring()) {
+            index += rope->substringOffset();
+            part = rope->substringBase();
+            continue;
+        }
+        for (const JSString* fiber : fibersOf(rope)) {
+            part = fiber;
+            if (index < fiber->length())
+                break;
+            index -= fiber->length();
+        }
+    }
+    return part->tryGetValueImpl()->at(index);
+}
+
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTTryResolveRope, size_t, (Instance* instance, JSCell* cell))
+{
+    JSString* string = cellArgument<JSString>(cell, Entry::operationAOTTryResolveRope);
+    if (!string->isRope())
+        return true;
+    VM& vm = string->vm();
+    DeferGCForAWhile deferGC(vm);
+    auto* rope = uncheckedDowncast<JSRopeString>(string);
+    bool mayGrow = rope->length() >= minLengthOfGrowingText;
+    if (mayGrow && (tryResolveLongText(*instance, rope) || tryResolveInGrowingBuffer(*instance, rope)))
+        return true;
+    if (!tryResolveShortRope(vm, rope) && !rope->tryResolveFlatLatin1Parts(vm))
+        rope->resolveRope(nullptr);
+    if (string->isRope())
+        return false;
+    if (mayGrow)
+        noteResolvedText(*instance, string);
+    return true;
 }
 
 JSC_DEFINE_JIT_OPERATION(operationAOTFlatten, void*, (Instance* instance, JSCell* string))
 {
     AOT_OPERATION_BEGIN(instance, Entry::operationAOTFlatten);
     JSString* cell = cellArgument<JSString>(string, Entry::operationAOTFlatten);
-    if (cell->isRope() && uncheckedDowncast<JSRopeString>(cell)->tryResolveFlatLatin1Parts(vm))
-        OPERATION_RETURN(scope, cell->tryGetValueImpl());
+    bool mayGrow = false;
+    if (cell->isRope()) {
+        auto* rope = uncheckedDowncast<JSRopeString>(cell);
+        mayGrow = rope->length() >= minLengthOfGrowingText;
+        if (mayGrow && (tryResolveLongText(*instance, rope) || tryResolveInGrowingBuffer(*instance, rope)))
+            OPERATION_RETURN(scope, cell->tryGetValueImpl());
+        if (tryResolveShortRope(vm, rope) || rope->tryResolveFlatLatin1Parts(vm)) {
+            if (mayGrow)
+                noteResolvedText(*instance, cell);
+            OPERATION_RETURN(scope, cell->tryGetValueImpl());
+        }
+    }
     auto value = cell->value(globalObject);
     OPERATION_RETURN_IF_EXCEPTION(scope, nullptr);
+    if (mayGrow)
+        noteResolvedText(*instance, cell);
     OPERATION_RETURN(scope, value->impl());
+}
+
+static ALWAYS_INLINE void resolveRopeForReading(VM& vm, JSString* string)
+{
+    if (string->isNonSubstringRope())
+        tryResolveShortRope(vm, uncheckedDowncast<JSRopeString>(string));
 }
 
 JSC_DEFINE_JIT_OPERATION(operationAOTCompareStrings, size_t, (Instance* instance, JSCell* left, JSCell* right))
@@ -314,11 +1039,13 @@ JSC_DEFINE_JIT_OPERATION(operationAOTCompareStrings, size_t, (Instance* instance
     AOT_OPERATION_BEGIN(instance, Entry::operationAOTCompareStrings);
     JSString* leftString = cellArgument<JSString>(left, Entry::operationAOTCompareStrings);
     JSString* rightString = cellArgument<JSString>(right, Entry::operationAOTCompareStrings);
-    auto first = leftString->value(globalObject);
+    resolveRopeForReading(vm, leftString);
+    resolveRopeForReading(vm, rightString);
+    auto first = leftString->view(globalObject);
     OPERATION_RETURN_IF_EXCEPTION(scope, 0);
-    auto second = rightString->value(globalObject);
+    auto second = rightString->view(globalObject);
     OPERATION_RETURN_IF_EXCEPTION(scope, 0);
-    auto order = codePointCompare(StringView { first.data }, StringView { second.data });
+    auto order = codePointCompare(first.data, second.data);
     OPERATION_RETURN(scope, static_cast<size_t>(static_cast<int64_t>(order < 0 ? -1 : order > 0 ? 1 : 0)));
 }
 
@@ -335,6 +1062,15 @@ static thread_local std::array<const JSString*, 4> ropesComparedInPieces;
 static bool isAskedAboutForTheFirstTime(const JSString* rope)
 {
     return rope->isNonSubstringRope() && std::exchange(ropesComparedInPieces[(std::bit_cast<uintptr_t>(rope) / sizeof(JSRopeString)) % ropesComparedInPieces.size()], rope) != rope;
+}
+
+static void resolveComparedRope(JSString* string)
+{
+    auto* rope = uncheckedDowncast<JSRopeString>(string);
+    VM& vm = rope->vm();
+    DeferGCForAWhile deferGC(vm);
+    if (!tryResolveShortRope(vm, rope) && !rope->tryResolveFlatLatin1Parts(vm))
+        rope->resolveRope(nullptr);
 }
 
 static bool standsAt(JSGlobalObject* globalObject, JSString* base, JSString* argument, unsigned position)
@@ -369,16 +1105,42 @@ static NEVER_INLINE OperationReturnType<size_t> JIT_OPERATION_ATTRIBUTES stringH
     OPERATION_RETURN(scope, standsAt(globalObject, base, argument, position));
 }
 
+static ALWAYS_INLINE std::optional<StringView> tryGetFlatView(const JSString* string)
+{
+    if (const StringImpl* whole = string->tryGetValueImpl()) [[likely]]
+        return StringView(*whole);
+    if (!string->isSubstring())
+        return std::nullopt;
+    auto* piece = uncheckedDowncast<JSRopeString>(string);
+    return StringView(*piece->substringBase()->tryGetValueImpl()).substring(piece->substringOffset(), piece->length());
+}
+
+static ALWAYS_INLINE bool areFlatAndNoWiderThanSubject(const std::optional<StringView>& base, const std::optional<StringView>& argument)
+{
+    return base && argument && (argument->is8Bit() || !base->is8Bit());
+}
+
+static ALWAYS_INLINE bool flatStringHasAt(StringView base, StringView argument, unsigned position)
+{
+    if (!argument.is8Bit())
+        return WTF::equal(base.span16().data() + position, argument.span16());
+    if (base.is8Bit())
+        return WTF::equal(base.span8().data() + position, argument.span8());
+    return WTF::equal(base.span16().data() + position, argument.span8());
+}
+
 JSC_DEFINE_JIT_OPERATION(operationAOTStringHasAt, size_t, (Instance* instance, JSCell* string, JSCell* other, int32_t position))
 {
-    const StringImpl* base = uncheckedDowncast<JSString>(string)->tryGetValueImpl();
-    const StringImpl* argument = uncheckedDowncast<JSString>(other)->tryGetValueImpl();
-    if (base && argument && base->is8Bit() && argument->is8Bit()) [[likely]] {
-        unsigned length = base->length();
-        unsigned otherLength = argument->length();
-        if (position < 0 || otherLength > length || static_cast<unsigned>(position) > length - otherLength)
-            return { false, nullptr };
-        return { WTF::equal(base->span8().data() + position, argument->span8()), nullptr };
+    {
+        std::optional<StringView> base = tryGetFlatView(uncheckedDowncast<JSString>(string));
+        std::optional<StringView> argument = tryGetFlatView(uncheckedDowncast<JSString>(other));
+        if (areFlatAndNoWiderThanSubject(base, argument)) [[likely]] {
+            unsigned length = base->length();
+            unsigned otherLength = argument->length();
+            if (position < 0 || otherLength > length || static_cast<unsigned>(position) > length - otherLength)
+                return { false, nullptr };
+            return { flatStringHasAt(*base, *argument, position), nullptr };
+        }
     }
     [[clang::musttail]] return stringHasAtGeneric(instance, string, other, position);
 }
@@ -391,6 +1153,8 @@ static ALWAYS_INLINE size_t findNarrowStringInWideOne(const char16_t* characters
         return start;
     if (otherLength > length - start)
         return notFound;
+    if (otherLength > longestTextComparedAtEveryPlace)
+        return findLongString(characters, length, other, otherLength, start);
     auto starts = unsafeMakeSpan(characters, length - otherLength + 1);
     for (size_t i = start;; ++i) {
         i = WTF::find(starts, static_cast<char16_t>(other[0]), i);
@@ -401,8 +1165,8 @@ static ALWAYS_INLINE size_t findNarrowStringInWideOne(const char16_t* characters
 
 static ALWAYS_INLINE std::optional<size_t> tryFindInFlatString(JSCell* string, JSCell* other, uint32_t start)
 {
-    const StringImpl* base = uncheckedDowncast<JSString>(string)->tryGetValueImpl();
-    const StringImpl* argument = uncheckedDowncast<JSString>(other)->tryGetValueImpl();
+    std::optional<StringView> base = tryGetFlatView(uncheckedDowncast<JSString>(string));
+    std::optional<StringView> argument = tryGetFlatView(uncheckedDowncast<JSString>(other));
     if (!base || !argument) [[unlikely]]
         return std::nullopt;
     unsigned length = base->length();
@@ -438,9 +1202,10 @@ static NEVER_INLINE OperationReturnType<size_t> JIT_OPERATION_ATTRIBUTES stringI
         if (auto found = base->tryFindOneChar(globalObject, otherCharacters[0], position))
             OPERATION_RETURN(scope, *found == notFound ? none : *found);
     }
+    resolveRopeForReading(vm, base);
     auto characters = base->view(globalObject);
     OPERATION_RETURN_IF_EXCEPTION(scope, 0);
-    size_t found = characters->find(vm.adaptiveStringSearcherTables(), otherCharacters, position);
+    size_t found = findText(vm, characters, otherCharacters, position);
     OPERATION_RETURN(scope, found == notFound ? none : found);
 }
 
@@ -461,9 +1226,10 @@ static NEVER_INLINE OperationReturnType<EncodedJSValue> JIT_OPERATION_ATTRIBUTES
         OPERATION_RETURN(scope, JSValue::encode(jsBoolean(false)));
     auto otherCharacters = argument->view(globalObject);
     OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
+    resolveRopeForReading(vm, base);
     auto characters = base->view(globalObject);
     OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
-    OPERATION_RETURN(scope, JSValue::encode(jsBoolean(characters->find(vm.adaptiveStringSearcherTables(), otherCharacters, 0) != notFound)));
+    OPERATION_RETURN(scope, JSValue::encode(jsBoolean(findText(vm, characters, otherCharacters, 0) != notFound)));
 }
 
 JSC_DEFINE_JIT_OPERATION(operationAOTStringIncludes, EncodedJSValue, (Instance* instance, JSCell* string, JSCell* other))
@@ -487,12 +1253,14 @@ static NEVER_INLINE OperationReturnType<EncodedJSValue> JIT_OPERATION_ATTRIBUTES
 
 JSC_DEFINE_JIT_OPERATION(operationAOTStringEndsWith, EncodedJSValue, (Instance* instance, JSCell* string, JSCell* other))
 {
-    const StringImpl* base = uncheckedDowncast<JSString>(string)->tryGetValueImpl();
-    const StringImpl* argument = uncheckedDowncast<JSString>(other)->tryGetValueImpl();
-    if (base && argument && base->is8Bit() && argument->is8Bit()) [[likely]] {
-        unsigned length = base->length();
-        unsigned otherLength = argument->length();
-        return { JSValue::encode(jsBoolean(otherLength <= length && WTF::equal(base->span8().data() + (length - otherLength), argument->span8()))), nullptr };
+    {
+        std::optional<StringView> base = tryGetFlatView(uncheckedDowncast<JSString>(string));
+        std::optional<StringView> argument = tryGetFlatView(uncheckedDowncast<JSString>(other));
+        if (areFlatAndNoWiderThanSubject(base, argument)) [[likely]] {
+            unsigned length = base->length();
+            unsigned otherLength = argument->length();
+            return { JSValue::encode(jsBoolean(otherLength <= length && flatStringHasAt(*base, *argument, length - otherLength))), nullptr };
+        }
     }
     [[clang::musttail]] return stringEndsWithGeneric(instance, string, other);
 }
@@ -522,13 +1290,25 @@ static NEVER_INLINE OperationReturnType<size_t> JIT_OPERATION_ATTRIBUTES stringL
     OPERATION_RETURN(scope, characters->reverseFind(otherCharacters, start));
 }
 
+static NEVER_INLINE OperationReturnType<size_t> JIT_OPERATION_ATTRIBUTES stringLastIndexOfInWideText(Instance* instance, JSCell* cell, JSCell* otherCell, int32_t position)
+{
+    const StringImpl* base = uncheckedDowncast<JSString>(cell)->tryGetValueImpl();
+    const StringImpl* argument = uncheckedDowncast<JSString>(otherCell)->tryGetValueImpl();
+    if (base && argument && !base->is8Bit()) {
+        if (argument->is8Bit())
+            return { reverseFindString(base->span16().data(), base->length(), argument->span8().data(), argument->length(), position), nullptr };
+        return { reverseFindString(base->span16().data(), base->length(), argument->span16().data(), argument->length(), position), nullptr };
+    }
+    [[clang::musttail]] return stringLastIndexOfGeneric(instance, cell, otherCell, position);
+}
+
 JSC_DEFINE_JIT_OPERATION(operationAOTStringLastIndexOf, size_t, (Instance* instance, JSCell* cell, JSCell* otherCell, int32_t position))
 {
     const StringImpl* base = uncheckedDowncast<JSString>(cell)->tryGetValueImpl();
     const StringImpl* argument = uncheckedDowncast<JSString>(otherCell)->tryGetValueImpl();
     if (base && argument && base->is8Bit() && argument->is8Bit()) [[likely]]
-        return { reverseFindString(base->span8().data(), base->length(), argument->span8().data(), argument->length(), position), nullptr };
-    [[clang::musttail]] return stringLastIndexOfGeneric(instance, cell, otherCell, position);
+        return { reverseFindStringOrCharacter(base->span8().data(), base->length(), argument->span8().data(), argument->length(), position), nullptr };
+    [[clang::musttail]] return stringLastIndexOfInWideText(instance, cell, otherCell, position);
 }
 
 JSC_DEFINE_JIT_OPERATION(operationAOTStringIndexOfLiteral, size_t, (Instance* instance, JSCell* string, uint32_t text, int32_t fromIndex))
@@ -543,12 +1323,13 @@ JSC_DEFINE_JIT_OPERATION(operationAOTStringIndexOfLiteral, size_t, (Instance* in
         if (auto found = base->tryFindOneChar(globalObject, other[0], position))
             OPERATION_RETURN(scope, *found);
     }
+    resolveRopeForReading(vm, base);
     auto characters = base->view(globalObject);
     OPERATION_RETURN_IF_EXCEPTION(scope, 0);
-    OPERATION_RETURN(scope, characters->find(vm.adaptiveStringSearcherTables(), other, position));
+    OPERATION_RETURN(scope, findText(vm, characters, other, position));
 }
 
-JSC_DEFINE_JIT_OPERATION(operationAOTStringIndexOfCharacter, size_t, (Instance* instance, JSCell* string, uint32_t character, int32_t fromIndex))
+static NEVER_INLINE OperationReturnType<size_t> JIT_OPERATION_ATTRIBUTES stringIndexOfCharacterGeneric(Instance* instance, JSCell* string, uint32_t character, int32_t fromIndex)
 {
     AOT_OPERATION_BEGIN(instance, Entry::operationAOTStringIndexOfCharacter);
     JSString* base = cellArgument<JSString>(string, Entry::operationAOTStringIndexOfCharacter);
@@ -559,9 +1340,28 @@ JSC_DEFINE_JIT_OPERATION(operationAOTStringIndexOfCharacter, size_t, (Instance* 
         if (auto found = base->tryFindOneChar(globalObject, static_cast<char16_t>(character), position))
             OPERATION_RETURN(scope, *found);
     }
+    resolveRopeForReading(vm, base);
     auto characters = base->view(globalObject);
     OPERATION_RETURN_IF_EXCEPTION(scope, 0);
     OPERATION_RETURN(scope, characters->find(static_cast<char16_t>(character), position));
+}
+
+JSC_DEFINE_JIT_OPERATION(operationAOTStringIndexOfCharacter, size_t, (Instance* instance, JSCell* string, uint32_t character, int32_t fromIndex))
+{
+    constexpr unsigned maxCharactersSearchedOneByOne = 16;
+    if (std::optional<StringView> base = tryGetFlatView(uncheckedDowncast<JSString>(string)); base && base->is8Bit()) [[likely]] {
+        unsigned position = fromIndex;
+        unsigned length = base->length();
+        const Latin1Character* characters = base->span8().data();
+        if (length > position && length - position > maxCharactersSearchedOneByOne)
+            return { findCharacter(characters, length, character, position), nullptr };
+        for (; position < length; ++position) {
+            if (characters[position] == character)
+                return { position, nullptr };
+        }
+        return { notFound, nullptr };
+    }
+    [[clang::musttail]] return stringIndexOfCharacterGeneric(instance, string, character, fromIndex);
 }
 
 static NEVER_INLINE OperationReturnType<size_t> JIT_OPERATION_ATTRIBUTES stringLastIndexOfLiteralGeneric(Instance* instance, JSCell* cell, uint32_t text, int32_t position)
@@ -587,6 +1387,16 @@ static NEVER_INLINE OperationReturnType<size_t> JIT_OPERATION_ATTRIBUTES stringL
     OPERATION_RETURN(scope, characters->reverseFind(other, start));
 }
 
+static NEVER_INLINE OperationReturnType<size_t> JIT_OPERATION_ATTRIBUTES stringLastIndexOfLiteralInWideText(Instance* instance, JSCell* cell, uint32_t text, int32_t position)
+{
+    if (const StringImpl* impl = uncheckedDowncast<JSString>(cell)->tryGetValueImpl(); impl && !impl->is8Bit()) {
+        StringView other = textOf(text);
+        if (other.is8Bit()) [[likely]]
+            return { reverseFindString(impl->span16().data(), impl->length(), other.span8().data(), other.length(), position), nullptr };
+    }
+    [[clang::musttail]] return stringLastIndexOfLiteralGeneric(instance, cell, text, position);
+}
+
 JSC_DEFINE_JIT_OPERATION(operationAOTStringLastIndexOfLiteral, size_t, (Instance* instance, JSCell* cell, uint32_t text, int32_t position))
 {
     if (const StringImpl* impl = uncheckedDowncast<JSString>(cell)->tryGetValueImpl(); position <= 0 && impl && impl->is8Bit()) {
@@ -597,7 +1407,7 @@ JSC_DEFINE_JIT_OPERATION(operationAOTStringLastIndexOfLiteral, size_t, (Instance
             return { WTF::equal(impl->span8().data(), other.span8()) ? 0 : notFound, nullptr };
         }
     }
-    [[clang::musttail]] return stringLastIndexOfLiteralGeneric(instance, cell, text, position);
+    [[clang::musttail]] return stringLastIndexOfLiteralInWideText(instance, cell, text, position);
 }
 
 JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTStringEqualsLiteralInRegister, size_t, (Instance*, JSCell* cell, uint64_t text))
@@ -632,7 +1442,13 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTNarrowCharactersOfString, size_t, 
     if (length > answer.characters.size())
         return reinterpret_cast<size_t>(&answer);
     if (string->is8Bit()) {
-        string->resolveToBuffer(std::span { byteCast<Latin1Character>(answer.characters.data()), length });
+        std::span<Latin1Character> characters { byteCast<Latin1Character>(answer.characters.data()), length };
+        if (string->isNonSubstringRope())
+            resolveComparedRope(string);
+        if (!string->isRope())
+            memcpySpan(characters, string->tryGetValueImpl()->span8());
+        else
+            string->resolveToBuffer(characters);
         return reinterpret_cast<size_t>(&answer);
     }
     std::array<char16_t, std::tuple_size_v<decltype(answer.characters)>> units;
@@ -647,10 +1463,8 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTNarrowCharactersOfString, size_t, 
     return reinterpret_cast<size_t>(&answer);
 }
 
-JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTStringEqualsLiteral, size_t, (Instance*, JSCell* cell, uint32_t text))
+static bool stringEqualsText(JSString* string, StringView expected)
 {
-    auto* string = cellArgument<JSString>(cell, Entry::operationAOTStringEqualsLiteral);
-    StringView expected = textOf(text);
     if (string->length() != expected.length())
         return false;
     if (!string->isRope())
@@ -663,6 +1477,43 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTStringEqualsLiteral, size_t, (Inst
     Vector<char16_t, 64> characters(expected.length());
     string->resolveToBuffer(characters.mutableSpan());
     return StringView { characters.span() } == expected;
+}
+
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTStringSwitchCase, size_t, (Instance*, JSCell* cell, void* table))
+{
+    auto* string = cellArgument<JSString>(cell, Entry::operationAOTStringSwitchCase);
+    const auto* bytes = static_cast<const uint8_t*>(table);
+    const unsigned length = string->length();
+    if (length > StringSwitchTable::maxLength)
+        return *bytes;
+    std::array<Latin1Character, StringSwitchTable::maxLength> characters;
+    auto narrow = std::span { characters }.first(length);
+    if (string->is8Bit()) {
+        if (string->isNonSubstringRope())
+            resolveComparedRope(string);
+        string->resolveToBuffer(narrow);
+        return StringSwitchTable::indexOf(bytes, asBytes(narrow));
+    }
+    std::array<char16_t, StringSwitchTable::maxLength> units;
+    auto wide = std::span { units }.first(length);
+    string->resolveToBuffer(wide);
+    for (unsigned i = 0; i < length; ++i) {
+        if (!WTF::isLatin1(wide[i]))
+            return *bytes;
+        narrow[i] = static_cast<Latin1Character>(wide[i]);
+    }
+    return StringSwitchTable::indexOf(bytes, asBytes(narrow));
+}
+
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTStringEqualsLiteral, size_t, (Instance*, JSCell* cell, uint32_t text))
+{
+    return stringEqualsText(cellArgument<JSString>(cell, Entry::operationAOTStringEqualsLiteral), textOf(text));
+}
+
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTStringEqualsCharacters, size_t, (Instance*, JSCell* cell, uint64_t placeAndLength))
+{
+    auto characters = Image::current()->text().charactersAt(static_cast<uint32_t>(placeAndLength), static_cast<uint32_t>(placeAndLength >> 32));
+    return stringEqualsText(cellArgument<JSString>(cell, Entry::operationAOTStringEqualsCharacters), StringView(characters));
 }
 
 JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTIntToString, JSCell*, (Instance* instance, uint64_t bits))
@@ -687,10 +1538,70 @@ JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTDoubleToString, JSCell*, (Instance
     OPERATION_RETURN(scope, vm.numericStrings.addJSString(vm, value));
 }
 
-JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTCharToString, JSCell*, (Instance* instance, uint32_t character))
+static ALWAYS_INLINE JSString* findStringOfWideCharacter(Instance& instance, char16_t character)
+{
+    const WideCharacterStrings& kept = instance.state->wideCharacterStrings;
+    unsigned place = character % WideCharacterStrings::size;
+    return kept.characters[place] == character ? kept.strings[place] : nullptr;
+}
+
+JSString* stringOfCharacter(Instance& instance, char16_t character)
+{
+    VM& vm = *instance.vm;
+    if (character <= maxSingleCharacterString)
+        return vm.smallStrings.singleCharacterString(static_cast<unsigned char>(character));
+    if (JSString* kept = findStringOfWideCharacter(instance, character))
+        return kept;
+    JSString* made = jsSingleCharacterString(vm, character);
+    WideCharacterStrings& strings = instance.state->wideCharacterStrings;
+    unsigned place = character % WideCharacterStrings::size;
+    strings.strings[place] = made;
+    strings.characters[place] = character;
+    return made;
+}
+
+static NEVER_INLINE JSCell* JIT_OPERATION_ATTRIBUTES makeStringOfCharacter(Instance* instance, uint32_t character)
 {
     AOT_OPERATION_BEGIN(instance, Entry::operationAOTCharToString);
-    OPERATION_RETURN(scope, jsSingleCharacterString(vm, static_cast<char16_t>(character)));
+    OPERATION_RETURN(scope, stringOfCharacter(*instance, static_cast<char16_t>(character)));
+}
+
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTCharToString, JSCell*, (Instance* instance, uint32_t character))
+{
+    if (character > maxSingleCharacterString) {
+        if (JSString* kept = findStringOfWideCharacter(*instance, static_cast<char16_t>(character)))
+            return kept;
+    }
+    AOT_MUST_TAIL_CALL return makeStringOfCharacter(instance, character);
+}
+
+template<typename CharacterType>
+static JSString* stringOfPackedCodeUnits(VM& vm, uint64_t codeUnits, uint32_t count)
+{
+    std::span<CharacterType> characters;
+    Ref impl = StringImpl::createUninitialized(count, characters);
+    for (CharacterType& character : characters) {
+        character = static_cast<CharacterType>(codeUnits);
+        codeUnits >>= Limits::bitsOfCodeUnit;
+    }
+    return jsNontrivialString(vm, String { WTF::move(impl) });
+}
+
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTStringOfCodeUnits, JSCell*, (Instance* instance, uint64_t codeUnits, uint32_t count))
+{
+    AOT_OPERATION_BEGIN(instance, Entry::operationAOTStringOfCodeUnits);
+    RELEASE_ASSERT(count > 1 && count <= Limits::maxPackedCodeUnits);
+    constexpr uint64_t bitsOutsideLatin1 = 0xff00'ff00'ff00'ff00;
+    if (codeUnits & bitsOutsideLatin1)
+        OPERATION_RETURN(scope, stringOfPackedCodeUnits<char16_t>(vm, codeUnits, count));
+    OPERATION_RETURN(scope, stringOfPackedCodeUnits<Latin1Character>(vm, codeUnits, count));
+}
+
+static NEVER_INLINE OperationReturnType<EncodedJSValue> JIT_OPERATION_ATTRIBUTES stringOfCompiledObject(Instance* instance, EncodedJSValue encodedObject)
+{
+    AOT_OPERATION_BEGIN(instance, Entry::operationAOTStringOfAnyValue);
+    UNUSED_PARAM(globalObject);
+    OPERATION_RETURN(scope, JSValue::encode(toStringOfCompiledObject(instance, *uncheckedDowncast<Object>(JSValue::decode(encodedObject).asCell()))));
 }
 
 JSC_DEFINE_JIT_OPERATION(operationAOTStringOfAnyValue, EncodedJSValue, (Instance* instance, EncodedJSValue encodedValue))
@@ -698,14 +1609,31 @@ JSC_DEFINE_JIT_OPERATION(operationAOTStringOfAnyValue, EncodedJSValue, (Instance
     JSValue value = JSValue::decode(encodedValue);
     if (value.isString()) [[likely]]
         return { encodedValue, nullptr };
+    if (value.isCell() && value.asCell()->type() == CompiledObjectType)
+        AOT_MUST_TAIL_CALL return stringOfCompiledObject(instance, encodedValue);
     AOT_OPERATION_BEGIN(instance, Entry::operationAOTStringOfAnyValue);
     if (isJSArray(value)) {
-        JSString* joined = tryConvertListToString(globalObject, asArray(value));
+        JSString* joined = tryConvertListToString(instance, globalObject, asArray(value));
         OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
         if (joined)
             OPERATION_RETURN(scope, JSValue::encode(joined));
     }
-    OPERATION_RETURN(scope, JSValue::encode(stringConstructor(globalObject, value)));
+    if (value.isCell() && isCompiledCalleeType(value.asCell()->type())) {
+        value = textIfFunction(globalObject, value);
+        OPERATION_RETURN_IF_EXCEPTION(scope, encodedJSValue());
+    }
+    if (value.isObject())
+        OPERATION_RETURN(scope, JSValue::encode(value.toString(globalObject)));
+    JSString* string = stringConstructor(globalObject, value);
+    if (value.isDouble())
+        DoubleStringCache::ensure(*instance->state).remember(encodedValue, string);
+    OPERATION_RETURN(scope, JSValue::encode(string));
+}
+
+JSC_DEFINE_NOEXCEPT_JIT_OPERATION(operationAOTNewStringObject, JSCell*, (Instance* instance, EncodedJSValue string))
+{
+    AOT_OPERATION_BEGIN(instance, Entry::operationAOTNewStringObject);
+    OPERATION_RETURN(scope, StringObject::create(vm, globalObject->stringObjectStructure(), asString(JSValue::decode(string))));
 }
 
 static ALWAYS_INLINE std::tuple<unsigned, unsigned> computeTrimOffsets(StringView view, TrimmedEnds ends)
@@ -738,16 +1666,47 @@ JSC_DEFINE_JIT_OPERATION(operationAOTStringTrim, JSCell*, (Instance* instance, J
     OPERATION_RETURN(scope, jsSubstring(globalObject, string, left, right - left));
 }
 
+static void keepTextInCellOfResolvedRope(VM& vm, JSString* string)
+{
+    static_assert(sizeof(JSRopeString) == 32 && JSRopeString::offsetOfLength() == 16 && JSRopeString::offsetOfFiber2() == 24);
+    if (string->isRope() || vm.heap.mutatorShouldBeFenced())
+        return;
+    const StringImpl* text = string->getValueImpl();
+    if (!text->is8Bit() || !text->length() || text->length() > TextInCell::maxLength)
+        return;
+    uint64_t word = 0;
+    for (Latin1Character character : text->span8()) {
+        if (!isASCIIDigit(character) && !isASCIILower(character))
+            return;
+        word = word << 8 | character;
+    }
+    word <<= 8 * (TextInCell::maxLength - text->length());
+    uint8_t* bytes = std::bit_cast<uint8_t*>(string);
+    WTF::unalignedStore<uint64_t>(bytes + JSRopeString::offsetOfFiber2(), word);
+    bytes[JSCell::typeInfoFlagsOffset()] |= TextInCell::flag;
+}
+
 JSC_DEFINE_JIT_OPERATION(operationAOTStringLocaleCompare, size_t, (Instance* instance, JSCell* cell, JSCell* other))
 {
     AOT_OPERATION_BEGIN(instance, Entry::operationAOTStringLocaleCompare);
-    auto characters = cellArgument<JSString>(cell, Entry::operationAOTStringLocaleCompare)->view(globalObject);
+    JSString* string = cellArgument<JSString>(cell, Entry::operationAOTStringLocaleCompare);
+    JSString* otherString = cellArgument<JSString>(other, Entry::operationAOTStringLocaleCompare);
+    bool wasRope = string->isRope();
+    bool otherWasRope = otherString->isRope();
+    auto characters = string->view(globalObject);
     OPERATION_RETURN_IF_EXCEPTION(scope, 0);
-    auto otherCharacters = cellArgument<JSString>(other, Entry::operationAOTStringLocaleCompare)->view(globalObject);
+    auto otherCharacters = otherString->view(globalObject);
     OPERATION_RETURN_IF_EXCEPTION(scope, 0);
-    if (globalObject->canDoASCIIUCADUCETLocaleCompare() && characters->is8Bit() && otherCharacters->is8Bit()) {
-        if (auto result = compareASCIIWithUCADUCET(characters->span8(), otherCharacters->span8()))
-            OPERATION_RETURN(scope, static_cast<size_t>(static_cast<int32_t>(*result)));
+    if (globalObject->canDoASCIIUCADUCETLocaleCompare()) {
+        instance->defaultCollator.knownLevel1Weights = ducetLevel1Weights;
+        if (wasRope)
+            keepTextInCellOfResolvedRope(vm, string);
+        if (otherWasRope)
+            keepTextInCellOfResolvedRope(vm, otherString);
+        if (characters->is8Bit() && otherCharacters->is8Bit()) {
+            if (auto result = compareASCIIWithUCADUCET(characters->span8(), otherCharacters->span8()))
+                OPERATION_RETURN(scope, static_cast<size_t>(static_cast<int32_t>(*result)));
+        }
     }
     if (!ensureCollationIsAvailable(globalObject)) [[unlikely]]
         OPERATION_RETURN(scope, 0);
@@ -787,6 +1746,45 @@ static ALWAYS_INLINE Latin1Character convertLatin1Character(Latin1Character char
     return static_cast<Latin1Character>(letterCase == LetterCase::Lower ? character + 0x20 : character - 0x20);
 }
 
+struct EndsOfShortText {
+    static ALWAYS_INLINE EndsOfShortText load(const uint8_t* from, size_t size)
+    {
+        if (size >= 8)
+            return { WTF::unalignedLoad<uint64_t>(from), WTF::unalignedLoad<uint64_t>(from + size - 8) };
+        if (size >= 4)
+            return { WTF::unalignedLoad<uint32_t>(from), WTF::unalignedLoad<uint32_t>(from + size - 4) };
+        return { WTF::unalignedLoad<uint16_t>(from), WTF::unalignedLoad<uint16_t>(from + size - 2) };
+    }
+    ALWAYS_INLINE void store(uint8_t* to, size_t size) const
+    {
+        if (size >= 8) {
+            WTF::unalignedStore<uint64_t>(to, first);
+            WTF::unalignedStore<uint64_t>(to + size - 8, last);
+        } else if (size >= 4) {
+            WTF::unalignedStore<uint32_t>(to, static_cast<uint32_t>(first));
+            WTF::unalignedStore<uint32_t>(to + size - 4, static_cast<uint32_t>(last));
+        } else {
+            WTF::unalignedStore<uint16_t>(to, static_cast<uint16_t>(first));
+            WTF::unalignedStore<uint16_t>(to + size - 2, static_cast<uint16_t>(last));
+        }
+    }
+    bool isASCII() const { return !((first | last) & 0x8080808080808080ull); }
+    friend bool operator==(const EndsOfShortText&, const EndsOfShortText&) = default;
+
+    uint64_t first;
+    uint64_t last;
+};
+
+template<LetterCase letterCase>
+static ALWAYS_INLINE uint64_t convertASCIIBytes(uint64_t bytes)
+{
+    constexpr uint64_t ones = 0x0101010101010101ull;
+    constexpr uint64_t firstLetter = letterCase == LetterCase::Lower ? 'A' : 'a';
+    uint64_t atLeastFirst = bytes + ones * (0x80 - firstLetter);
+    uint64_t aboveLast = bytes + ones * (0x80 - firstLetter - 26);
+    return bytes ^ ((atLeastFirst & ~aboveLast & ones * 0x80) >> 2);
+}
+
 template<LetterCase letterCase>
 static ALWAYS_INLINE JSString* convertCase(JSGlobalObject* globalObject, VM& vm, State& state, JSString* string)
 {
@@ -800,92 +1798,117 @@ static ALWAYS_INLINE JSString* convertCase(JSGlobalObject* globalObject, VM& vm,
         auto view = string->view(globalObject);
         RETURN_IF_EXCEPTION(scope, nullptr);
         auto tryConvertLatin1 = [&](auto span) ALWAYS_INLINE_LAMBDA -> JSString* {
-            auto* characters = span.data();
+            const uint8_t* characters = byteCast<uint8_t>(span.data());
             size_t length = span.size();
-            unsigned isNotASCII = 0;
-            unsigned changes = 0;
             constexpr size_t stride = SIMD::stride<uint8_t>;
-            size_t lengthInStrides = length - length % stride;
-            if (lengthInStrides) {
-                auto seen = SIMD::splat<uint8_t>(0);
-                auto changed = SIMD::splat<uint8_t>(0);
-                for (size_t i = 0; i < lengthInStrides; i += stride) {
-                    auto loaded = SIMD::load(byteCast<uint8_t>(characters) + i);
-                    seen = SIMD::bitOr(seen, loaded);
-                    changed = SIMD::bitOr(changed, asciiLettersOfOtherCase<letterCase>(loaded));
+            if (!length)
+                return string;
+            if (length == 1) {
+                if (!isASCII(characters[0]) && letterCase == LetterCase::Upper)
+                    return nullptr;
+                Latin1Character converted = convertLatin1Character<letterCase>(characters[0]);
+                return converted == characters[0] ? string : vm.smallStrings.singleCharacterString(converted);
+            }
+            auto make = [&](auto&& writeTo) ALWAYS_INLINE_LAMBDA -> JSString* {
+                if (length <= CaseConversions::maxLengthOfRememberedString) {
+                    std::array<Latin1Character, CaseConversions::maxLengthOfRememberedString> converted;
+                    writeTo(byteCast<uint8_t>(converted.data()));
+                    CaseConversions& conversions = CaseConversions::ensure(state);
+                    JSString* result = conversions.convertedString(vm, std::span<const Latin1Character> { converted }.first(length));
+                    conversions.remember(string, rememberedCase, result);
+                    return result;
                 }
-                isNotASCII = SIMD::isNonZero(SIMD::bitAnd(seen, SIMD::splat<uint8_t>(0x80)));
-                changes = SIMD::isNonZero(changed);
+                std::span<Latin1Character> buffer;
+                Ref impl = StringImpl::createUninitialized(length, buffer);
+                writeTo(byteCast<uint8_t>(buffer.data()));
+                return jsString(vm, String { WTF::move(impl) });
+            };
+            if (length < stride) {
+                EndsOfShortText ends = EndsOfShortText::load(characters, length);
+                if (ends.isASCII()) [[likely]] {
+                    EndsOfShortText converted { convertASCIIBytes<letterCase>(ends.first), convertASCIIBytes<letterCase>(ends.last) };
+                    if (converted == ends)
+                        return string;
+                    return make([&](uint8_t* to) ALWAYS_INLINE_LAMBDA {
+                        converted.store(to, length);
+                    });
+                }
+                if (letterCase == LetterCase::Upper)
+                    return nullptr;
+                bool changes = false;
+                for (size_t i = 0; i < length; ++i)
+                    changes |= isLetterOfOtherCase<letterCase>(characters[i]);
+                if (!changes)
+                    return string;
+                return make([&](uint8_t* to) ALWAYS_INLINE_LAMBDA {
+                    for (size_t i = 0; i < length; ++i)
+                        to[i] = convertLatin1Character<letterCase>(characters[i]);
+                });
             }
-            for (size_t i = lengthInStrides; i < length; ++i) {
-                isNotASCII |= characters[i] & ~0x7f;
-                changes |= isLetterOfOtherCase<letterCase>(characters[i]);
-            }
+            auto forEachStride = [&](auto&& take) ALWAYS_INLINE_LAMBDA {
+                size_t offset = 0;
+                for (; offset + stride <= length; offset += stride)
+                    take(offset);
+                if (offset < length)
+                    take(length - stride);
+            };
+            auto seen = SIMD::splat<uint8_t>(0);
+            auto changed = SIMD::splat<uint8_t>(0);
+            forEachStride([&](size_t offset) ALWAYS_INLINE_LAMBDA {
+                auto loaded = SIMD::load(characters + offset);
+                seen = SIMD::bitOr(seen, loaded);
+                changed = SIMD::bitOr(changed, asciiLettersOfOtherCase<letterCase>(loaded));
+            });
+            bool isNotASCII = SIMD::isNonZero(SIMD::bitAnd(seen, SIMD::splat<uint8_t>(0x80)));
             if (isNotASCII && letterCase == LetterCase::Upper)
                 return nullptr;
-            if (isNotASCII && !changes) {
-                auto changed = SIMD::splat<uint8_t>(0);
-                for (size_t i = 0; i < lengthInStrides; i += stride)
-                    changed = SIMD::bitOr(changed, accentedCapitals(SIMD::load(byteCast<uint8_t>(characters) + i)));
-                changes = SIMD::isNonZero(changed);
-            }
-            if (!changes)
-                return string;
-            if (length == 1)
-                return vm.smallStrings.singleCharacterString(convertLatin1Character<letterCase>(characters[0]));
-            if (length <= CaseConversions::maxLengthOfRememberedString) {
-                std::array<Latin1Character, CaseConversions::maxLengthOfRememberedString> converted;
-                for (size_t i = 0; i < length; ++i)
-                    converted[i] = convertLatin1Character<letterCase>(characters[i]);
-                CaseConversions& conversions = CaseConversions::ensure(state);
-                JSString* result = conversions.convertedString(vm, std::span<const Latin1Character> { converted }.first(length));
-                conversions.remember(string, rememberedCase, result);
-                return result;
-            }
-            std::span<Latin1Character> buffer;
-            Ref impl = StringImpl::createUninitialized(length, buffer);
-            Latin1Character* converted = buffer.data();
-            auto convertStrides = [&](auto lettersOfOtherCase) ALWAYS_INLINE_LAMBDA {
-                for (size_t i = 0; i < lengthInStrides; i += stride) {
-                    auto loaded = SIMD::load(byteCast<uint8_t>(characters) + i);
-                    auto difference = SIMD::bitAnd(lettersOfOtherCase(loaded), SIMD::splat<uint8_t>(0x20));
-                    SIMD::store(letterCase == LetterCase::Lower ? SIMD::bitOr(loaded, difference) : SIMD::sub(loaded, difference), byteCast<uint8_t>(converted) + i);
-                }
-            };
             if (isNotASCII) {
-                convertStrides([](auto loaded) ALWAYS_INLINE_LAMBDA {
-                    return SIMD::bitOr(asciiLettersOfOtherCase<letterCase>(loaded), accentedCapitals(loaded));
-                });
-            } else {
-                convertStrides([](auto loaded) ALWAYS_INLINE_LAMBDA {
-                    return asciiLettersOfOtherCase<letterCase>(loaded);
+                forEachStride([&](size_t offset) ALWAYS_INLINE_LAMBDA {
+                    changed = SIMD::bitOr(changed, accentedCapitals(SIMD::load(characters + offset)));
                 });
             }
-            for (size_t i = lengthInStrides; i < length; ++i)
-                converted[i] = convertLatin1Character<letterCase>(characters[i]);
-            return jsString(vm, String { WTF::move(impl) });
+            if (!SIMD::isNonZero(changed))
+                return string;
+            return make([&](uint8_t* to) ALWAYS_INLINE_LAMBDA {
+                forEachStride([&](size_t offset) ALWAYS_INLINE_LAMBDA {
+                    auto loaded = SIMD::load(characters + offset);
+                    auto letters = asciiLettersOfOtherCase<letterCase>(loaded);
+                    if (isNotASCII)
+                        letters = SIMD::bitOr(letters, accentedCapitals(loaded));
+                    auto difference = SIMD::bitAnd(letters, SIMD::splat<uint8_t>(0x20));
+                    SIMD::store(letterCase == LetterCase::Lower ? SIMD::bitOr(loaded, difference) : SIMD::sub(loaded, difference), to + offset);
+                });
+            });
         };
-        if (JSString* converted = view->is8Bit() ? tryConvertLatin1(view->span8()) : nullptr)
-            return converted;
+        std::array<Latin1Character, CaseConversions::maxLengthOfRememberedString> narrowed;
+        if (std::optional characters = latin1CharactersOf(view, narrowed)) {
+            if (JSString* converted = tryConvertLatin1(*characters))
+                return converted;
+        }
     }
     auto characters = string->value(globalObject);
     RETURN_IF_EXCEPTION(scope, nullptr);
     String converted = letterCase == LetterCase::Lower ? characters->convertToLowercaseWithoutLocale() : characters->convertToUppercaseWithoutLocale();
-    if (converted.impl() == characters->impl())
-        return string;
-    return jsString(vm, WTF::move(converted));
+    JSString* result = converted.impl() == characters->impl() ? string : jsString(vm, WTF::move(converted));
+    if (characters->length() > CaseConversions::maxLengthOfRememberedString)
+        CaseConversions::ensure(state).remember(string, rememberedCase, result);
+    return result;
 }
 
 JSC_DEFINE_JIT_OPERATION(operationAOTStringToLowerCase, JSCell*, (Instance* instance, JSCell* cell))
 {
     AOT_OPERATION_BEGIN(instance, Entry::operationAOTStringToLowerCase);
-    OPERATION_RETURN(scope, convertCase<LetterCase::Lower>(globalObject, vm, *instance->state, cellArgument<JSString>(cell, Entry::operationAOTStringToLowerCase)));
+    JSString* string = cellArgument<JSString>(cell, Entry::operationAOTStringToLowerCase);
+    resolveRopeForReading(vm, string);
+    OPERATION_RETURN(scope, convertCase<LetterCase::Lower>(globalObject, vm, *instance->state, string));
 }
 
 JSC_DEFINE_JIT_OPERATION(operationAOTStringToUpperCase, JSCell*, (Instance* instance, JSCell* cell))
 {
     AOT_OPERATION_BEGIN(instance, Entry::operationAOTStringToUpperCase);
-    OPERATION_RETURN(scope, convertCase<LetterCase::Upper>(globalObject, vm, *instance->state, cellArgument<JSString>(cell, Entry::operationAOTStringToUpperCase)));
+    JSString* string = cellArgument<JSString>(cell, Entry::operationAOTStringToUpperCase);
+    resolveRopeForReading(vm, string);
+    OPERATION_RETURN(scope, convertCase<LetterCase::Upper>(globalObject, vm, *instance->state, string));
 }
 
 template<typename CharacterType>
@@ -1132,7 +2155,7 @@ static JSString* tryReplaceAllWithPlainText(JSGlobalObject* globalObject, VM& vm
     RETURN_IF_EXCEPTION(scope, nullptr);
     unsigned matchLength = sought.length();
     auto findFrom = [&](unsigned start) ALWAYS_INLINE_LAMBDA {
-        return matchLength == 1 ? subject->find(sought[0], start) : subject->find(vm.adaptiveStringSearcherTables(), sought, start);
+        return matchLength == 1 ? subject->find(sought[0], start) : findText(vm, subject, sought, start);
     };
     size_t found = findFrom(0);
     if (found == notFound)
@@ -1164,6 +2187,31 @@ static ALWAYS_INLINE std::optional<std::span<const Latin1Character>> tryGetLatin
     if (!whole || !whole->is8Bit())
         return std::nullopt;
     return whole->span8().subspan(piece->substringOffset(), piece->length());
+}
+
+extern "C" int64_t AOT_PRESERVE_MOST_LEAF_ATTRIBUTES operationAOTCompareStringsInPlace(JSCell* first, JSCell* second)
+{
+    auto firstCharacters = tryGetLatin1Characters(uncheckedDowncast<JSString>(first));
+    auto secondCharacters = tryGetLatin1Characters(uncheckedDowncast<JSString>(second));
+    if (!firstCharacters || !secondCharacters)
+        return cannotCompareInline;
+    const Latin1Character* left = firstCharacters->data();
+    const Latin1Character* right = secondCharacters->data();
+    size_t commonLength = std::min(firstCharacters->size(), secondCharacters->size());
+    size_t index = 0;
+    for (; commonLength - index >= sizeof(uint64_t); index += sizeof(uint64_t)) {
+        uint64_t leftWord = WTF::unalignedLoad<uint64_t>(left + index);
+        uint64_t rightWord = WTF::unalignedLoad<uint64_t>(right + index);
+        if (leftWord != rightWord)
+            return std::byteswap(leftWord) < std::byteswap(rightWord) ? -1 : 1;
+    }
+    for (; index < commonLength; ++index) {
+        if (left[index] != right[index])
+            return left[index] < right[index] ? -1 : 1;
+    }
+    if (firstCharacters->size() == secondCharacters->size())
+        return 0;
+    return firstCharacters->size() < secondCharacters->size() ? -1 : 1;
 }
 
 static ALWAYS_INLINE bool containsShortText(std::span<const Latin1Character> characters, std::span<const Latin1Character> sought)
@@ -1208,20 +2256,84 @@ JSC_DEFINE_JIT_OPERATION(operationAOTStringReplaceAllString, JSCell*, (Instance*
     [[clang::musttail]] return replaceAllOfText(instance, stringCell, searchCell, replacementCell);
 }
 
+static constexpr size_t minWordsOfAtomList = 8;
+
+static void fillAtomListTable(JSCellButterfly* butterfly, unsigned length)
+{
+    auto elements = butterfly->toButterfly()->contiguous().data();
+    auto impl = [&](unsigned index) {
+        return asString(elements[index].get())->getValueImpl();
+    };
+    for (unsigned index = 0; index < length; ++index) {
+        if (!impl(index)->is8Bit())
+            return;
+    }
+    std::span<uint8_t> slots { reinterpret_cast<uint8_t*>(elements + length), AtomListTable::numberOfSlots };
+    zeroSpan(slots);
+    for (unsigned index = 0; index < length; ++index) {
+        unsigned slot = AtomListTable::hash(impl(index)->span8());
+        while (slots[slot] && impl(slots[slot] - 1) != impl(index))
+            ++slot;
+        if (!slots[slot])
+            slots[slot] = static_cast<uint8_t>(index + 1);
+    }
+    butterfly->setPerCellBit(true);
+}
+
+static JSArray* tryCreateAtomList(JSGlobalObject* globalObject, VM& vm, StringView subject, std::span<const unsigned> ends, unsigned separatorLength)
+{
+    if (ends.size() < minWordsOfAtomList || ends.size() > AtomListTable::maxWords || !subject.is8Bit())
+        return nullptr;
+    unsigned length = static_cast<unsigned>(ends.size());
+    unsigned start = 0;
+    for (unsigned end : ends) {
+        if (start >= end || !isASCIIAlpha(subject[start]))
+            return nullptr;
+        start = end + separatorLength;
+    }
+    auto* butterfly = JSCellButterfly::tryCreate(vm, vm.cellButterflyOnlyAtomStringsStructure.get(), length + AtomListTable::sizeInElements);
+    if (!butterfly) [[unlikely]]
+        return nullptr;
+    EnsureStillAliveScope butterflyScope(butterfly);
+    butterfly->toButterfly()->setPublicLength(length);
+    butterfly->toButterfly()->setVectorLength(length);
+    start = 0;
+    for (unsigned index = 0; index < length; ++index) {
+        auto word = Identifier::fromString(vm, subject.span8().subspan(start, ends[index] - start));
+        DeferGC deferGC(vm);
+        butterfly->setIndex(vm, index, vm.atomStringToJSStringMap.ensureValue(word.impl(), [&] {
+            return jsString(vm, word.string());
+        }));
+        start = ends[index] + separatorLength;
+    }
+    fillAtomListTable(butterfly, length);
+    return JSArray::createWithButterfly(vm, nullptr, globalObject->originalArrayStructureForIndexingType(CopyOnWriteArrayWithContiguous), butterfly->toButterfly());
+}
+
 static JSArray* trySplitAtPlainText(JSGlobalObject* globalObject, VM& vm, JSString* string, JSString* separator, uint32_t limit)
 {
     auto scope = DECLARE_THROW_SCOPE(vm);
     StringImpl* separatorImpl = separator->tryGetValueImpl();
     if (!separatorImpl || !separatorImpl->length() || !limit || !string->is8Bit() || globalObject->isHavingABadTime())
         return nullptr;
+    bool subjectIsLiteral = false;
+    bool entersCache = false;
     if (StringImpl* impl = string->tryGetValueImpl(); StringSplitCache::canBeKey(impl)) {
         bool canBeCached = limit == std::numeric_limits<uint32_t>::max() && StringSplitCache::canBeKey(separatorImpl);
         if (auto* cache = canBeCached ? vm.stringSplitCache() : nullptr) {
-            if (auto* butterfly = cache->getForKeys(impl, separatorImpl))
+            if (auto* butterfly = cache->getForKeys(impl, separatorImpl)) {
+                StringSplitCache::noteHitOfImageString();
                 return JSArray::createWithButterfly(vm, nullptr, globalObject->originalArrayStructureForIndexingType(CopyOnWriteArrayWithContiguous), butterfly->toButterfly());
+            }
         }
-        if (impl->isAtom() || (canBeCached && StringSplitCache::isWorthCaching(*impl)))
+        entersCache = canBeCached && StringSplitCache::isWorthCaching(*impl);
+        if (entersCache && !impl->isAtom() && !StringSplitCache::hasRoomForImageString()) {
+            countEvent(vm, RuntimeCounterID::ImageStringsKeptOutOfSplitCache);
+            entersCache = false;
+        }
+        if (impl->isAtom() && !entersCache)
             return nullptr;
+        subjectIsLiteral = canBeCached;
     }
 
     Vector<unsigned, 16> ends;
@@ -1232,7 +2344,14 @@ static JSArray* trySplitAtPlainText(JSGlobalObject* globalObject, VM& vm, JSStri
         StringView sought { *separatorImpl };
         size_t found;
         unsigned position = 0;
-        while ((found = separatorLength == 1 ? subject->find(sought[0], position) : subject->find(vm.adaptiveStringSearcherTables(), sought, position)) != notFound) {
+        auto findSeparator = [&]() ALWAYS_INLINE_LAMBDA -> size_t {
+            if (separatorLength != 1)
+                return findText(vm, subject, sought, position);
+            if (!subject->is8Bit())
+                return subject->find(sought[0], position);
+            return findCharacter(subject->span8().data(), subject->length(), sought[0], position);
+        };
+        while ((found = findSeparator()) != notFound) {
             ends.append(static_cast<unsigned>(found));
             if (ends.size() == limit)
                 break;
@@ -1243,16 +2362,17 @@ static JSArray* trySplitAtPlainText(JSGlobalObject* globalObject, VM& vm, JSStri
     }
     if (ends.size() >= MIN_SPARSE_ARRAY_INDEX)
         return nullptr;
+    if (subjectIsLiteral) {
+        StringImpl* impl = string->tryGetValueImpl();
+        if (JSArray* list = tryCreateAtomList(globalObject, vm, *impl, ends.span(), separatorLength)) {
+            if (entersCache)
+                vm.ensureStringSplitCache().setForString(impl, separatorImpl, JSCellButterfly::fromButterfly(list->butterfly()));
+            return list;
+        }
+        if (entersCache)
+            return nullptr;
+    }
 
-    JSArray* result = JSArray::tryCreate(vm, globalObject->originalArrayStructureForIndexingType(ArrayWithContiguous), ends.size());
-    if (!result) [[unlikely]] {
-        throwOutOfMemoryError(globalObject, scope);
-        return nullptr;
-    }
-    if (ends.size() == 1 && ends[0] == string->length()) {
-        result->butterfly()->contiguous().at(result, 0).set(vm, result, string);
-        return result;
-    }
     JSString* base = string;
     unsigned start = 0;
     if (string->isSubstring()) {
@@ -1260,12 +2380,27 @@ static JSArray* trySplitAtPlainText(JSGlobalObject* globalObject, VM& vm, JSStri
         base = rope->substringBase();
         start = rope->substringOffset();
     }
-    unsigned offsetInBase = start;
-    for (unsigned i = 0; i < ends.size(); ++i) {
-        unsigned end = offsetInBase + ends[i];
-        result->butterfly()->contiguous().at(result, i).set(vm, result, jsSubstringOfResolved(vm, base, start, end - start));
-        start = end + separatorLength;
+    Structure* structure = globalObject->originalArrayStructureForIndexingType(ArrayWithContiguous);
+    JSArray* result;
+    {
+        GCDeferralContext deferralContext(vm);
+        ObjectInitializationScope initializationScope(vm);
+        result = JSArray::tryCreateUninitializedRestricted(initializationScope, &deferralContext, structure, ends.size());
+        if (result) [[likely]] {
+            if (ends.size() == 1 && ends[0] == string->length())
+                result->butterfly()->contiguous().at(result, 0).setWithoutWriteBarrier(string);
+            else {
+                unsigned offsetInBase = start;
+                for (unsigned i = 0; i < ends.size(); ++i) {
+                    unsigned end = offsetInBase + ends[i];
+                    result->butterfly()->contiguous().at(result, i).setWithoutWriteBarrier(jsSubstringOfResolved(vm, &deferralContext, base, start, end - start));
+                    start = end + separatorLength;
+                }
+            }
+        }
     }
+    if (!result) [[unlikely]]
+        throwOutOfMemoryError(globalObject, scope);
     return result;
 }
 
@@ -1280,46 +2415,110 @@ JSC_DEFINE_JIT_OPERATION(operationAOTStringSplitString, JSCell*, (Instance* inst
     OPERATION_RETURN(scope, stringSplitFast(globalObject, string, separator, limit));
 }
 
+JSC_DEFINE_JIT_OPERATION(operationAOTStringSplitWithOwnStorage, JSCell*, (Instance* instance, JSCell* stringCell, JSCell* separatorCell, uint32_t limit))
+{
+    constexpr Entry entry = Entry::operationAOTStringSplitWithOwnStorage;
+    AOT_OPERATION_BEGIN(instance, entry);
+    JSString* string = cellArgument<JSString>(stringCell, entry);
+    JSString* separator = cellArgument<JSString>(separatorCell, entry);
+    JSCell* shared = trySplitAtPlainText(globalObject, vm, string, separator, limit);
+    OPERATION_RETURN_IF_EXCEPTION(scope, nullptr);
+    if (!shared) {
+        shared = stringSplitFast(globalObject, string, separator, limit);
+        OPERATION_RETURN_IF_EXCEPTION(scope, nullptr);
+    }
+    auto* array = uncheckedDowncast<JSArray>(shared);
+    if (array->indexingMode() != CopyOnWriteArrayWithContiguous)
+        OPERATION_RETURN(scope, array);
+    unsigned length = array->length();
+    ObjectInitializationScope initializationScope(vm);
+    JSArray* result = JSArray::tryCreateUninitializedRestricted(initializationScope, globalObject->arrayStructureForIndexingTypeDuringAllocation(ArrayWithContiguous), length);
+    if (!result) [[unlikely]]
+        OPERATION_RETURN(scope, array);
+    memcpy(result->butterfly()->indexingPayload<EncodedJSValue>(), array->butterfly()->indexingPayload<EncodedJSValue>(), length * sizeof(EncodedJSValue));
+    OPERATION_RETURN(scope, result);
+}
+
 struct ShortKeyCharacters {
     std::span<const Latin1Character> span() const LIFETIME_BOUND { return std::span { characters }.first(length); }
 
-    std::array<Latin1Character, StringKeyCache::maxCachedKeyLength> characters;
+    std::array<Latin1Character, StringKeyCache::maxCachedKeyLength + maxJSONIntegerLength> characters;
     size_t length { 0 };
     bool hasRopePart { false };
+    bool mayBeIndex { true };
 };
 static_assert(StringKeyCache::maxCachedKeyLength >= StringKeyCache::minReadableBytes);
 
+static ALWAYS_INLINE bool isRepeatedSubstringKey(JSString* rope)
+{
+    uint8_t& word = *(std::bit_cast<uint8_t*>(rope) + JSString::offsetOfValue());
+    if (!(word & JSRopeString::isSubstringInPointer))
+        return false;
+    if (word & UsesOfSubstringAsKey::two)
+        return true;
+    word += UsesOfSubstringAsKey::one;
+    return false;
+}
+
 static ALWAYS_INLINE bool tryWriteShortKey(std::span<const EncodedJSValue> primitives, ShortKeyCharacters& key)
 {
-    size_t length = 0;
+    constexpr size_t mostCharactersCopiedByWords = 16;
+    Latin1Character* cursor = key.characters.data();
+    Latin1Character* const limit = cursor + StringKeyCache::maxCachedKeyLength;
     for (EncodedJSValue encoded : primitives) {
         JSValue primitive = JSValue::decode(encoded);
-        std::span<Latin1Character> room = std::span { key.characters }.subspan(length);
         if (primitive.isString()) {
             JSString* string = asString(primitive);
-            uint32_t partLength = string->length();
-            if (partLength > room.size() || !string->is8Bit())
+            size_t size = string->length();
+            if (size > static_cast<size_t>(limit - cursor) || !string->is8Bit())
                 return false;
-            if (const StringImpl* impl = string->tryGetValueImpl()) [[likely]]
-                memcpySpan(room, impl->span8());
-            else {
-                string->resolveToBuffer(room.first(partLength));
-                key.hasRopePart = true;
+            if (const StringImpl* impl = string->tryGetValueImpl()) [[likely]] {
+                std::span<const Latin1Character> from = impl->span8();
+                if (size > mostCharactersCopiedByWords) [[unlikely]]
+                    memcpy(cursor, from.data(), size);
+                else
+                    copyShortString(from, cursor);
+                key.mayBeIndex &= !size || isASCIIDigit(from.back());
+            } else {
+                string->resolveToBuffer(std::span<Latin1Character> { cursor, size });
+                key.hasRopePart |= !isRepeatedSubstringKey(string);
             }
-            length += partLength;
+            cursor += size;
             continue;
         }
         std::optional<int32_t> integer = primitive.tryGetAsInt32();
         if (!integer)
             return false;
-        unsigned partLength = lengthOfIntegerAsString(*integer);
-        if (partLength > room.size())
+        cursor = appendJSONInteger(cursor, *integer);
+        if (cursor > limit)
             return false;
-        writeIntegerToBuffer(*integer, room.first(partLength));
-        length += partLength;
     }
-    key.length = length;
+    key.length = cursor - key.characters.data();
     return true;
+}
+
+static ALWAYS_INLINE bool tryJoinFewCharacters(std::span<const EncodedJSValue> primitives, StringKeyCache::FewCharacters& joined)
+{
+    bool mayBeIndex = true;
+    for (EncodedJSValue encoded : primitives) {
+        JSValue primitive = JSValue::decode(encoded);
+        if (primitive.isInt32()) {
+            if (!joined.tryAppendInteger(static_cast<uint32_t>(primitive.asInt32())))
+                return false;
+            continue;
+        }
+        if (!primitive.isString()) {
+            std::optional<int32_t> integer = primitive.tryGetAsInt32();
+            if (!integer || !joined.tryAppendInteger(static_cast<uint32_t>(*integer)))
+                return false;
+            continue;
+        }
+        const StringImpl* impl = asString(primitive)->tryGetValueImpl();
+        if (!impl || !impl->is8Bit() || !joined.tryAppend(impl->span8()))
+            return false;
+        mayBeIndex &= !impl->length() || isASCIIDigit(impl->span8().back());
+    }
+    return joined.length >= 2 && (!mayBeIndex || joined.length > StringKeyCache::maxIndexLength);
 }
 
 static ALWAYS_INLINE JSValue onlyKeyPartWithCharacters(VM& vm, std::span<const EncodedJSValue> primitives)
@@ -1371,9 +2570,71 @@ static JSString* tryConcatenateShortStringKey(VM& vm, Instance& instance, std::s
     return string;
 }
 
+static JSString* tryJoinShortPrimitives(VM& vm, std::span<const EncodedJSValue> primitives)
+{
+    static constexpr size_t maxLengthOfPart = 48;
+    static constexpr size_t maxLength = 256;
+    std::array<Latin1Character, maxLength + maxLengthOfPart> characters;
+    Latin1Character* cursor = characters.data();
+    Latin1Character* const limit = cursor + maxLength;
+    bool hasRope = false;
+    for (EncodedJSValue encoded : primitives) {
+        JSValue primitive = JSValue::decode(encoded);
+        if (primitive.isInt32())
+            cursor = appendJSONInteger(cursor, primitive.asInt32());
+        else {
+            JSString* string = primitive.isString() ? asString(primitive) : nullptr;
+            if (!string || !string->is8Bit() || string->length() > maxLengthOfPart)
+                return nullptr;
+            size_t length = string->length();
+            const StringImpl* impl = string->tryGetValueImpl();
+            if (!impl) {
+                if (!tryWriteRope(string, cursor, cursor + length))
+                    return nullptr;
+                hasRope = true;
+            } else if (length <= 16)
+                copyShortString(impl->span8(), cursor);
+            else
+                memcpy(cursor, impl->span8().data(), length);
+            cursor += length;
+        }
+        if (cursor > limit)
+            return nullptr;
+    }
+    if (hasRope)
+        countEvent(vm, RuntimeCounterID::RopesJoinedWithIntegers);
+    std::span<const Latin1Character> text { characters.data(), cursor };
+    if (text.size() < 2)
+        return nullptr;
+    std::span<Latin1Character> copied;
+    RefPtr<StringImpl> impl = StringImpl::tryCreateUninitialized(text.size(), copied);
+    if (!impl) [[unlikely]]
+        return nullptr;
+    memcpySpan(copied, text);
+    return jsNontrivialString(vm, String(impl.releaseNonNull()));
+}
+
+JSC_DEFINE_JIT_OPERATION(operationAOTConcatenateIntegersAroundString, JSCell*, (Instance* instance, uint64_t firstBits, JSCell* middle, uint64_t lastBits))
+{
+    AOT_OPERATION_BEGIN(instance, Entry::operationAOTConcatenateIntegersAroundString);
+    JSString* string = cellArgument<JSString>(middle, Entry::operationAOTConcatenateIntegersAroundString);
+    int32_t first = static_cast<int32_t>(firstBits);
+    int32_t last = static_cast<int32_t>(lastBits);
+    EncodedJSValue primitives[] { JSValue::encode(jsNumber(first)), JSValue::encode(string), JSValue::encode(jsNumber(last)) };
+    if (JSString* joined = tryJoinShortPrimitives(vm, primitives)) [[likely]]
+        OPERATION_RETURN(scope, joined);
+    JSString* head = instance->state->stringKeys->textOfInt32(vm, first);
+    JSString* tail = instance->state->stringKeys->textOfInt32(vm, last);
+    OPERATION_RETURN(scope, jsString(globalObject, head, string, tail));
+}
+
 static JSString* concatenatePrimitives(JSGlobalObject* globalObject, Instance& instance, std::span<const EncodedJSValue> primitives, UseOfJoinedText use)
 {
     VM& vm = globalObject->vm();
+    if (use == UseOfJoinedText::Unknown) {
+        if (JSString* joined = tryJoinShortPrimitives(vm, primitives))
+            return joined;
+    }
     if (use != UseOfJoinedText::Unknown) {
         if (JSString* key = tryConcatenateShortStringKey(vm, instance, primitives))
             return key;
@@ -1444,16 +2705,45 @@ static bool textsSurelyFitInOneString(std::span<const EncodedJSValue> primitives
     return length <= JSString::MaxLength;
 }
 
+static ALWAYS_INLINE bool isTooLongForStringKey(std::span<const EncodedJSValue> primitives)
+{
+    uint64_t length = 0;
+    for (EncodedJSValue primitive : primitives) {
+        if (JSValue value = JSValue::decode(primitive); value.isString())
+            length += asString(value)->length();
+    }
+    return length > StringKeyCache::maxCachedKeyLength;
+}
+
 static NEVER_INLINE OperationReturnType<JSCell*> JIT_OPERATION_ATTRIBUTES concatenateShortStringKey(Instance* instance, uint32_t count, const EncodedJSValue* parts, uint32_t isLikelyKey)
 {
-    ShortKeyCharacters characters;
+    if (isTooLongForStringKey(unsafeMakeSpan(parts, count))) [[unlikely]]
+        AOT_MUST_TAIL_CALL return concatenateByContents(instance, count, parts, static_cast<uint32_t>(UseOfJoinedText::Unknown));
     StringKeyCache& keys = *instance->state->stringKeys;
+    StringKeyCache::FewCharacters joined;
+    if (tryJoinFewCharacters(unsafeMakeSpan(parts, count), joined)) [[likely]] {
+        unsigned hash = joined.hash();
+        if (JSString* key = keys.tryFindCachedKey(joined, hash)) [[likely]] {
+            if (keys.lastLookupByParts().countAndKinds)
+                keys.cacheKeyByParts(keys.lastLookupByParts(), key);
+            return { key, nullptr };
+        }
+        auto text = joined.text();
+        std::span<const Latin1Character> characters = std::span { text }.first(joined.length);
+        ASSERT(hash == RapidHash::computeHashAndMaskTop8Bits<Latin1Character>(characters));
+        AOT_OPERATION_BEGIN(instance, Entry::operationAOTConcatenate);
+        if (JSString* made = keys.makeKey(vm, characters, hash, keys.lastLookupByParts(), useOfJoinedTextOf(isLikelyKey) == UseOfJoinedText::LikelyName)) [[likely]]
+            return { made, nullptr };
+        throwOutOfMemoryError(globalObject, scope);
+        OPERATION_RETURN(scope, static_cast<JSCell*>(nullptr));
+    }
+    ShortKeyCharacters characters;
     if (tryWriteShortKey(unsafeMakeSpan(parts, count), characters) && characters.length >= 2) [[likely]] {
         if (characters.hasRopePart)
             keys.lastLookupByParts().countAndKinds = 0;
         JSString* key;
         unsigned hash;
-        switch (keys.findKeyForText(characters.span(), key, hash)) {
+        switch (keys.findKeyForText(characters.span(), key, hash, characters.mayBeIndex)) {
         case StringKeyCache::Lookup::Found:
             if (keys.lastLookupByParts().countAndKinds)
                 keys.cacheKeyByParts(keys.lastLookupByParts(), key);
@@ -1518,8 +2808,16 @@ JSC_DEFINE_JIT_OPERATION(operationAOTConcatenate, JSCell*, (Instance* instance, 
     AOT_MUST_TAIL_CALL return concatenateShortStringKey(instance, count, parts, isLikelyKey);
 }
 
+static NEVER_INLINE OperationReturnType<JSCell*> JIT_OPERATION_ATTRIBUTES makeTextOfIntegerInFrontOfNothing(Instance* instance, uint32_t, const EncodedJSValue* parts, uint32_t)
+{
+    AOT_OPERATION_BEGIN(instance, Entry::operationAOTConcatenate);
+    OPERATION_RETURN(scope, static_cast<JSCell*>(instance->state->stringKeys->textOfInt32(vm, JSValue::decode(parts[0]).asInt32())));
+}
+
 JSC_DEFINE_JIT_OPERATION(operationAOTConcatenatePair, JSCell*, (Instance* instance, uint32_t isLikelyKey, const EncodedJSValue* parts, uint32_t))
 {
+    if (JSValue first = JSValue::decode(parts[0]); first.isInt32() && first.asInt32() >= 0 && parts[1] == JSValue::encode(instance->vm->smallStrings.emptyString()))
+        AOT_MUST_TAIL_CALL return makeTextOfIntegerInFrontOfNothing(instance, isLikelyKey, parts, 0);
     instance->state->stringKeys->lastLookupByParts().takePair(parts[0], parts[1]);
     AOT_MUST_TAIL_CALL return concatenateShortStringKey(instance, 2, parts, isLikelyKey);
 }
@@ -1604,28 +2902,6 @@ static ALWAYS_INLINE bool shortStringNeedsEscapeInJSON(std::span<const Latin1Cha
     return found;
 }
 
-static ALWAYS_INLINE void copyShortString(std::span<const Latin1Character> characters, Latin1Character* to)
-{
-    const Latin1Character* from = characters.data();
-    size_t size = characters.size();
-    if (size >= 8) {
-        uint64_t first = WTF::unalignedLoad<uint64_t>(from);
-        uint64_t last = WTF::unalignedLoad<uint64_t>(from + size - 8);
-        WTF::unalignedStore<uint64_t>(to, first);
-        WTF::unalignedStore<uint64_t>(to + size - 8, last);
-        return;
-    }
-    if (size >= 4) {
-        uint32_t first = WTF::unalignedLoad<uint32_t>(from);
-        uint32_t last = WTF::unalignedLoad<uint32_t>(from + size - 4);
-        WTF::unalignedStore<uint32_t>(to, first);
-        WTF::unalignedStore<uint32_t>(to + size - 4, last);
-        return;
-    }
-    for (size_t i = 0; i < size; ++i)
-        to[i] = from[i];
-}
-
 template<typename CharacterType>
 static ALWAYS_INLINE JSString* quoteStringWithEscapesIn(VM& vm, std::span<CharacterType> text, std::span<const CharacterType> characters)
 {
@@ -1662,7 +2938,26 @@ static NEVER_INLINE JSString* quoteStringInEngine(JSGlobalObject* globalObject, 
     return jsString(vm, WTF::move(text));
 }
 
-static JSString* quoteString(JSGlobalObject* globalObject, JSString* string)
+QuotedStringCache& QuotedStringCache::ensure(State& state)
+{
+    if (QuotedStringCache* cache = state.instance.realm.quotedStringCache) [[likely]]
+        return *cache;
+    QuotedStringCache* cache = state.tableArena.allocate<QuotedStringCache>(1);
+    cache->cageBase = state.instance.vm->heap.cage().base();
+    state.caches->addClearedEachCollection("quoted strings"_s, asMutableByteSpan(std::span { cache->entries }));
+    state.instance.realm.quotedStringCache = cache;
+    return *cache;
+}
+
+void QuotedStringCache::remember(const StringImpl& text, const JSString* quoted)
+{
+    if (std::bit_cast<uintptr_t>(quoted) - cageBase >= MarkedBlockCage::maxSize)
+        return;
+    unsigned hash = text.existingHash();
+    entries[hash % numberOfEntries] = static_cast<uint64_t>(hash) << 32 | MarkedBlockCage::encode(cageBase, quoted);
+}
+
+static JSString* quoteString(JSGlobalObject* globalObject, State& state, JSString* string)
 {
     VM& vm = globalObject->vm();
     auto scope = DECLARE_THROW_SCOPE(vm);
@@ -1689,7 +2984,10 @@ static JSString* quoteString(JSGlobalObject* globalObject, JSString* string)
             if (!hasEscapes) [[likely]] {
                 quoted.front() = '"';
                 quoted.back() = '"';
-                return jsNontrivialString(vm, String { impl.releaseNonNull() });
+                JSString* result = jsNontrivialString(vm, String { impl.releaseNonNull() });
+                if (const StringImpl* text = string->tryGetValueImpl(); text && QuotedStringCache::canRemember(*text))
+                    QuotedStringCache::ensure(state).remember(*text, result);
+                return result;
             }
             if (characters.size() <= maxLengthOfStringEscapedHere) {
                 if (JSString* text = tryQuoteStringWithEscapes(vm, characters)) [[likely]]
@@ -1703,13 +3001,13 @@ static JSString* quoteString(JSGlobalObject* globalObject, JSString* string)
     RELEASE_AND_RETURN(scope, quoteStringInEngine(globalObject, string));
 }
 
-JSC_DEFINE_JIT_OPERATION(operationAOTJSONStringifyPrimitive, JSCell*, (Instance* instance, EncodedJSValue encodedValue))
+static NEVER_INLINE OperationReturnType<JSCell*> JIT_OPERATION_ATTRIBUTES stringifyPrimitive(Instance* instance, EncodedJSValue encodedValue)
 {
     constexpr Entry entry = Entry::operationAOTJSONStringifyPrimitive;
     AOT_OPERATION_BEGIN(instance, entry);
     JSValue value = JSValue::decode(encodedValue);
     if (value.isCell())
-        OPERATION_RETURN(scope, quoteString(globalObject, cellArgument<JSString>(value.asCell(), entry)));
+        OPERATION_RETURN(scope, quoteString(globalObject, *instance->state, cellArgument<JSString>(value.asCell(), entry)));
     if (value.isNumber())
         OPERATION_RETURN(scope, numberToJSONText(vm, value));
     if (value.isBoolean())
@@ -1717,6 +3015,19 @@ JSC_DEFINE_JIT_OPERATION(operationAOTJSONStringifyPrimitive, JSCell*, (Instance*
     if (!value.isNull()) [[unlikely]]
         crashOnWrongOperand(entry);
     OPERATION_RETURN(scope, vm.smallStrings.nullString());
+}
+
+JSC_DEFINE_JIT_OPERATION(operationAOTJSONStringifyPrimitive, JSCell*, (Instance* instance, EncodedJSValue encodedValue))
+{
+    if (const QuotedStringCache* cache = instance->realm.quotedStringCache; cache && JSValue::decode(encodedValue).isString()) {
+        const StringImpl* text = asString(JSValue::decode(encodedValue))->tryGetValueImpl();
+        if (JSString* quoted = text && QuotedStringCache::canRemember(*text) ? cache->tryFind(*text) : nullptr) {
+            if (instance->vm->aotState().counts) [[unlikely]]
+                countEvent(*instance->vm, RuntimeCounterID::QuotedStringCacheHits);
+            return { quoted, nullptr };
+        }
+    }
+    [[clang::musttail]] return stringifyPrimitive(instance, encodedValue);
 }
 
 } } // namespace JSC::AOT

@@ -12,6 +12,7 @@
 #include "AOTProgramTables.h"
 #include "AOTVector.h"
 #include "RememberedSlot.h"
+#include <wtf/HashSet.h>
 #include <wtf/Noncopyable.h>
 #include <wtf/TZoneMalloc.h>
 
@@ -35,6 +36,21 @@ public:
     explicit ProgramStatics(State&);
 
     void putBack(uint32_t offset, uint32_t size);
+    void clearCaches();
+
+    struct VariableWithViewMirror {
+        void refresh();
+        static void refreshViewsOfOneBuffer(std::span<VariableWithViewMirror>);
+
+        EncodedJSValue variable;
+        void* vector;
+        uint64_t length;
+        uint64_t lengthOfBuffer;
+    };
+    std::span<VariableWithViewMirror> viewMirrorVariables(const StaticsRange&);
+    void refreshViewMirrors();
+    void didWriteVariable(uint32_t offset);
+    void didMoveStorageOf(JSCell* view);
     void didStoreRootInStatics(uint32_t offset) { m_slots.record(m_instance.statics() + offset); }
     void setCell(uint32_t offset, JSCell* cell) { at<RememberedSlot<JSCell*>>(offset).set(m_slots, cell); }
 
@@ -48,11 +64,15 @@ public:
     static JSValue readVariableWithoutAllocating(const Instance&, SlotData);
     static bool isVariableEmpty(const Instance&, SlotData);
     static void writeVariable(Instance&, SlotData, JSValue);
+    static void writeNamespace(Instance& instance, SlotData slot, JSValue value) { write(instance, slot, value); }
+    static void emptyVariableWhoseValueHasMoved(Instance&, SlotData);
 
     template<typename Visitor> void visitRoots(Visitor&);
 
     void willAnalyzeHeap(VM&);
     JSCell* environmentOfModuleThatDefines(uint32_t closureNumber) const;
+    JSCell* environmentOfModule(uint32_t module) const;
+    void analyzeVariableOfModule(JSCell* standIn, JSCell* held, UniquedStringImpl* name, HeapAnalyzer&) const;
     JSCell* scopeInHeapSnapshotOf(JSCell* closure) const;
     void analyzeVariablesOfModule(JSCell* standIn, uint32_t module, HeapAnalyzer&) const;
 
@@ -77,6 +97,7 @@ private:
 
         VM* vm { nullptr };
         Vector<std::pair<JSCell*, JSCell*>> list;
+        mutable UncheckedKeyHashSet<std::tuple<JSCell*, JSCell*, UniquedStringImpl*>> variablesShown;
     };
     ScopesOfClosures m_scopesOfClosures;
 };

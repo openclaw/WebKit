@@ -17,6 +17,7 @@
 #include "AOTMechanisms.h"
 #include "AOTPlan.h"
 #include "AOTStubCatalog.h"
+#include "AOTTypeOrigins.h"
 #include <memory>
 #include <span>
 #include <wtf/StdLibExtras.h>
@@ -45,7 +46,13 @@ struct PreparedProgram {
     CheckOfPlan checkOfPlan { CheckOfPlan::InFrontOfCompile };
     void (*changePlan)(Typed::Plan&) { nullptr };
     Typed::Mechanisms mechanisms { Typed::allMechanisms };
+    bool isVerifiedByCaller { false };
 };
+
+inline bool willVerifyCode(const PreparedProgram& prepared, const BuildContext& build)
+{
+    return prepared.isVerifiedByCaller || Typed::walkOptionsOf(build).verifiesCode;
+}
 
 JS_EXPORT_PRIVATE bool prepareProgram(PreparedProgram&, BuildContext&);
 
@@ -67,6 +74,14 @@ inline std::unique_ptr<const Typed::CompileInputs> createCompileInputs(const Pre
     });
 }
 
+template<typename Switches>
+Typed::Mechanisms withoutMechanismsThatOptionsWithhold(Typed::Mechanisms mechanisms, Switches testing)
+{
+    if (AOT::hasFlag(testing, Wire::TestingSwitch::DisableFrameCells))
+        mechanisms.remove(Typed::Mechanism::CellsInFrames);
+    return mechanisms;
+}
+
 JS_EXPORT_PRIVATE std::unique_ptr<CompileOutput> compileProgramWithMechanisms(std::span<const uint8_t> program, const Wire::CompileOptions&, Typed::Mechanisms);
 JS_EXPORT_PRIVATE std::unique_ptr<CompileOutput> compileParsedProgramWithMechanisms(std::unique_ptr<Typed::Program>, BuildContext&, Typed::Mechanisms);
 JS_EXPORT_PRIVATE std::unique_ptr<CompileOutput> compileParsedProgramWithChangedPlan(std::unique_ptr<Typed::Program>, BuildContext&, void (*changePlan)(Typed::Plan&), Typed::Mechanisms);
@@ -77,7 +92,7 @@ void writeFactSections(const Typed::Program&, const Typed::Facts&, CompileOutput
 void writeFeatureSection(const Typed::Facts&, const BuiltImage*, CompileOutput&);
 void writeObfuscatedSiteSection(const Typed::Program&, const BuiltImage&, BuildContext&, CompileOutput&);
 
-void writeExplainSections(const Typed::Program&, std::span<const Typed::WalkNotes>, BuildContext&, CompileOutput&);
+void writeExplainSections(const Typed::Program&, std::span<const Typed::WalkNotes>, const Typed::TypeOrigins*, BuildContext&, CompileOutput&);
 
 void writeCodeReportSections(const Typed::Program&, const BuiltImage&, BuildContext&, CompileOutput&);
 

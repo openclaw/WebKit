@@ -166,6 +166,31 @@ bool Allocator::registerFileIsConsistent() const
 }
 #endif
 
+uint32_t Allocator::findReadOutsideUnlikelyRegions(const Operation* value, Position position) const
+{
+    if (m_numbersOfListsOutsideRareRegions.isEmpty())
+        m_numbersOfListsOutsideRareRegions.fill(m_arena, m_order.mostOperations(), 0);
+    uint32_t& numberOfList = m_numbersOfListsOutsideRareRegions[value->index()];
+    if (!numberOfList) {
+        size_t numberOfReads = 0;
+        for (uint32_t read = m_liveness.of(value).firstUse; read; read = m_liveness.use(read).next)
+            numberOfReads += !m_liveness.isUseInRareRegion(read);
+        std::span<uint32_t> reads = m_arena.createSpan<uint32_t>(numberOfReads);
+        size_t next = 0;
+        for (uint32_t read = m_liveness.of(value).firstUse; read; read = m_liveness.use(read).next) {
+            if (!m_liveness.isUseInRareRegion(read))
+                reads[next++] = read;
+        }
+        m_listsOutsideRareRegions.append(m_arena, reads);
+        numberOfList = m_listsOutsideRareRegions.size();
+    }
+    std::span<const uint32_t> list = m_listsOutsideRareRegions[numberOfList - 1];
+    auto found = std::ranges::lower_bound(list, position, { }, [&](uint32_t read) {
+        return m_liveness.use(read).position;
+    });
+    return found == list.end() ? 0 : *found;
+}
+
 uint32_t Allocator::findReadFromInList(const Operation* value, Position position) const
 {
     if (m_numbersOfListsOfReads.isEmpty())
@@ -196,7 +221,7 @@ void Allocator::bindRegisterThatIsBound(Reg reg, Operation* value)
     if (previous == value)
         return;
     if (isLiveBehind(previous, m_position) && registerFileHoldsOnlyCopy(*this, reg))
-        m_proc.fail(FailureKind::RegisterLacksItsValue, previous);
+        m_proc.fail(FailureKind::WrongValueInRegister, previous);
     unbind(reg);
     bind(reg, value);
 }
@@ -300,7 +325,7 @@ Reg Allocator::bringIntoRegister(Operation* value, RegisterMask allowed, Reg pre
             appendRegisterFileTransfer(*this, StepKind::Reload, value, Location::reg(destination), memory);
             noteFrameUse();
         } else
-            m_proc.fail(FailureKind::RegisterLacksItsValue, value);
+            m_proc.fail(FailureKind::WrongValueInRegister, value);
     }
 
     bind(destination, value);
@@ -309,20 +334,34 @@ Reg Allocator::bringIntoRegister(Operation* value, RegisterMask allowed, Reg pre
 
 SpillIndex Allocator::markSpilled(Operation* value)
 {
-    if (m_isAheadOfFramedPart && isInRareRegion() && isStoredAtHeadsOfFramedPart(value)) {
-        m_allocation.m_needsFrameAheadOfFramedPart = true;
-        m_allocation.m_needsFrameOutsideRareRegions = true;
+    if (m_isOutsideFramedPart && isStoredAtHeadsOfFramedPart(value)) {
+        const ValueFacts& factsOfValue = m_valueFacts[value->index()];
+        if (isInRareRegion() || hasImplicitReader(factsOfValue)) {
+            m_allocation.m_needsFrameAheadOfFramedPart = true;
+            m_allocation.m_needsFrameOutsideRareRegions = true;
+        }
     }
     SpillIndex spill = m_allocation.m_spillOfValue[value->index()];
     if (spill != noSpill)
         return spill;
 
     const ValueFacts& facts = m_valueFacts[value->index()];
+    if (value->opcode() == Phi && facts.definition != noPosition) {
+        if (SpillIndex shared = findSpillOfDeadSource(value); shared != noSpill) {
+            SpillFacts& range = m_allocation.m_spills[shared];
+            range.isSharedByPhis = true;
+            range.end = facts.lastUse == noPosition ? facts.definition : std::max(facts.definition, facts.lastUse);
+            phisInSpill(shared).append(m_arena, value);
+            m_allocation.m_spillOfValue[value->index()] = shared;
+            stateOf(value).saveInRareRegion = noSpill;
+            return shared;
+        }
+    }
     SpillFacts spillFacts;
     spillFacts.value = value;
 
     if (value->hasNoPosition() || facts.definition == noPosition || !value->type().isNumeric()) [[unlikely]] {
-        m_proc.fail(FailureKind::SpillSlotLacksItsValue, value);
+        m_proc.fail(FailureKind::WrongValueInSpillSlot, value);
         spillFacts.begin = m_position;
         spillFacts.end = m_position;
     } else {
@@ -344,16 +383,6 @@ SpillIndex Allocator::markSpilled(Operation* value)
     m_allocation.m_spillOfValue[value->index()] = spill;
     stateOf(value).saveInRareRegion = noSpill;
     return spill;
-}
-
-SpillIndex Allocator::addSpill(const SpillFacts& facts)
-{
-    ASSERT(facts.value);
-    ASSERT(facts.begin != noPosition && facts.begin <= facts.end);
-    ASSERT(facts.width == Width32 || facts.width == Width64);
-    SpillIndex index = m_allocation.m_spills.size();
-    m_allocation.m_spills.append(m_arena, facts);
-    return index;
 }
 
 } } } // namespace JSC::AOT::Machine
